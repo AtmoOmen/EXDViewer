@@ -166,29 +166,29 @@ impl App {
             )
             .show(ctx, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
-                    ui.menu_button("App", |ui| {
-                        if ui.button("Configure").clicked() {
+                    ui.menu_button("程序", |ui| {
+                        if ui.button("配置").clicked() {
                             self.navigate("/");
                             ui.close();
                         }
-                        if !super::IS_WEB && ui.button("Quit").clicked() {
+                        if !super::IS_WEB && ui.button("退出").clicked() {
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             ui.close();
                         }
                     });
 
-                    ui.menu_button("Go", |ui| {
-                        if shortcut::button(ui, "Go to Row…", GOTO_ROW).clicked() {
+                    ui.menu_button("跳转", |ui| {
+                        if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
                             self.goto_window = Some(goto::GoToWindow::to_row());
                             ui.close();
                         }
-                        if shortcut::button(ui, "Go to Sheet…", GOTO_SHEET).clicked() {
+                        if shortcut::button(ui, "跳转到表…", GOTO_SHEET).clicked() {
                             self.goto_window = Some(goto::GoToWindow::to_sheet());
                             ui.close();
                         }
                     });
 
-                    ui.menu_button("Language", |ui| {
+                    ui.menu_button("语言", |ui| {
                         let mut saved_lang = LANGUAGE.get(ctx);
                         for lang in Language::iter() {
                             if lang != Language::None
@@ -202,8 +202,8 @@ impl App {
                         }
                     });
 
-                    ui.menu_button("View", |ui| {
-                        ui.menu_button("Color Theme", |ui| {
+                    ui.menu_button("视图", |ui| {
+                        ui.menu_button("颜色主题", |ui| {
                             let mut color_theme = COLOR_THEME.get(ui.ctx());
                             for theme in ColorTheme::themes() {
                                 if ui
@@ -225,7 +225,7 @@ impl App {
                             }
                         });
 
-                        ui.menu_button("Code Theme", |ui| {
+                        ui.menu_button("代码主题", |ui| {
                             let mut theme = CODE_SYNTAX_THEME.get(ui.ctx());
 
                             for (id, name) in CodeTheme::themes() {
@@ -238,24 +238,24 @@ impl App {
                             }
                         });
 
-                        ui.menu_button("Sort Columns by", |ui| {
+                        ui.menu_button("列排序", |ui| {
                             let mut sorted_by_offset = SORTED_BY_OFFSET.get(ctx);
-                            let r = ui.selectable_value(&mut sorted_by_offset, true, "Offset");
+                            let r = ui.selectable_value(&mut sorted_by_offset, true, "按偏移排序");
                             let r =
-                                r.union(ui.selectable_value(&mut sorted_by_offset, false, "Index"));
+                                r.union(ui.selectable_value(&mut sorted_by_offset, false, "按索引排序"));
                             if r.changed() {
                                 ui.close();
                                 SORTED_BY_OFFSET.set(ctx, sorted_by_offset);
                             }
                         });
 
-                        ui.menu_button("Text Wrapping", |ui| {
+                        ui.menu_button("文本换行", |ui| {
                             let r = opt_slider(
                                 ui,
                                 TEXT_WRAP_WIDTH.get(ctx).map(|e| e.into()),
                                 50..=1000,
-                                "Max Width",
-                                "No Wrap",
+                                "最大宽度",
+                                "不换行",
                                 "px",
                             );
 
@@ -263,8 +263,8 @@ impl App {
                                 ui,
                                 TEXT_MAX_LINES.get(ctx).map(|e| e.into()),
                                 1..=20,
-                                "Max Lines",
-                                "No Limit",
+                                "最大行数",
+                                "无限制",
                                 "",
                             );
 
@@ -287,30 +287,17 @@ impl App {
                             }
 
                             let mut use_scroll = TEXT_USE_SCROLL.get(ctx);
-                            ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
-                                ui.style_mut().spacing.item_spacing.x /= 2.0;
-                                ui.set_max_width(
-                                    ui.spacing().slider_width + ui.spacing().interact_size.x,
-                                );
-                                ui.label("Show ");
-                                if ui
-                                    .selectable_label(
-                                        use_scroll,
-                                        if use_scroll { "Scrollbar" } else { "Tooltip" },
-                                    )
-                                    .clicked()
-                                {
-                                    use_scroll = !use_scroll;
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut use_scroll, "文本溢出时显示滚动条").changed() {
                                     TEXT_USE_SCROLL.set(ctx, use_scroll);
                                 }
-                                ui.label(" on overflow");
-                            })
+                            });
                         });
 
                         {
                             let mut solid_scrollbar = SOLID_SCROLLBAR.get(ctx);
                             if ui
-                                .checkbox(&mut solid_scrollbar, "Solid Scrollbar")
+                                .checkbox(&mut solid_scrollbar, "自动隐藏滚动条")
                                 .changed()
                             {
                                 SOLID_SCROLLBAR.set(ctx, solid_scrollbar);
@@ -327,7 +314,7 @@ impl App {
 
                         {
                             let mut always_hires = ALWAYS_HIRES.get(ctx);
-                            if ui.checkbox(&mut always_hires, "HD Icons").changed() {
+                            if ui.checkbox(&mut always_hires, "高清图标").changed() {
                                 ALWAYS_HIRES.set(ctx, always_hires);
                                 ui.close();
                             }
@@ -336,7 +323,7 @@ impl App {
                         {
                             let mut evaluate_strings = EVALUATE_STRINGS.get(ctx);
                             if ui
-                                .checkbox(&mut evaluate_strings, "Evaluate SeStrings")
+                                .checkbox(&mut evaluate_strings, "处理 SeString")
                                 .changed()
                             {
                                 EVALUATE_STRINGS.set(ctx, evaluate_strings);
@@ -352,7 +339,7 @@ impl App {
                         {
                             let mut display_field_shown = DISPLAY_FIELD_SHOWN.get(ctx);
                             if ui
-                                .checkbox(&mut display_field_shown, "Use Display Fields")
+                                .checkbox(&mut display_field_shown, "使用显示字段")
                                 .changed()
                             {
                                 DISPLAY_FIELD_SHOWN.set(ctx, display_field_shown);
@@ -362,7 +349,7 @@ impl App {
 
                         {
                             let mut logger_shown = LOGGER_SHOWN.get(ctx);
-                            if ui.checkbox(&mut logger_shown, "Show Log Window").changed() {
+                            if ui.checkbox(&mut logger_shown, "显示日志窗口").changed() {
                                 LOGGER_SHOWN.set(ctx, logger_shown);
                             }
                         }
@@ -376,7 +363,7 @@ impl App {
     fn draw_logger(&mut self, ctx: &egui::Context) {
         let logger_shown = LOGGER_SHOWN.get(ctx);
         let mut logger_shown_toggle = logger_shown;
-        egui::Window::new("Log")
+        egui::Window::new("日志")
             .open(&mut logger_shown_toggle)
             .show(ctx, |ui| {
                 egui_logger::logger_ui().show(ui);
@@ -397,7 +384,7 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
                         CollapsibleSidePanel::draw_arrow(ui, "sheet_list");
-                        ui.vertical_centered_justified(|ui| ui.heading("Sheets"));
+                        ui.vertical_centered_justified(|ui| ui.heading("表格"));
                     });
                 });
                 ui.add_space(4.0);
@@ -405,7 +392,7 @@ impl App {
                     let mut sheets_filter = SHEETS_FILTER.get(ctx);
                     let resp = ui
                         .add_enabled(!sheets_filter.is_empty(), Button::new("↩"))
-                        .on_hover_text("Clear");
+                        .on_hover_text("清空");
                     if resp.clicked() {
                         sheets_filter.clear();
                         SHEETS_FILTER.set(ctx, sheets_filter.clone());
@@ -414,7 +401,7 @@ impl App {
                     let mut misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
                     if ui
                         .toggle_value(&mut misc_sheets_shown, "🗄")
-                        .on_hover_text("Show Miscellaneous Sheets")
+                        .on_hover_text("显示杂项表格")
                         .changed()
                     {
                         MISC_SHEETS_SHOWN.set(ctx, misc_sheets_shown);
@@ -423,7 +410,7 @@ impl App {
                     if ui
                         .add_sized(
                             Vec2::new(ui.available_width(), 0.0),
-                            TextEdit::singleline(&mut sheets_filter).hint_text("Filter"),
+                            TextEdit::singleline(&mut sheets_filter).hint_text("筛选"),
                         )
                         .changed()
                     {
@@ -440,20 +427,16 @@ impl App {
                         ui.horizontal_centered(|ui| {
                             let modified_schemas = self.get_modified_schemas();
                             if !modified_schemas.is_empty() {
-                                ui.label(format!(
-                                    "{} modified schema{}",
-                                    modified_schemas.len(),
-                                    if modified_schemas.len() > 1 { "s" } else { "" }
-                                ))
+                                ui.label(format!("已修改 {} 个表定义", modified_schemas.len()))
                                 .on_hover_text(
                                     modified_schemas.iter().map(|(name, _)| name).join("\n"),
                                 );
                                 let resp = ui
                                     .with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.button(if modified_schemas.len() > 1 {
-                                            "Save All"
+                                            "全部保存"
                                         } else {
-                                            "Save"
+                                            "保存"
                                         })
                                     })
                                     .inner;
@@ -509,7 +492,7 @@ impl App {
                                     sheet.as_str(),
                                 )
                                 .ui(ui)
-                                .on_hover_text(format!("{sheet}\nId: {id}"));
+                                .on_hover_text(format!("{sheet}\nID: {id}"));
                                 if resp.clicked() {
                                     current_sheet = Some(sheet.clone());
                                     SELECTED_SHEET.set(ctx, current_sheet.clone());
@@ -631,34 +614,34 @@ impl App {
 
                 let (table, editor) = match combined_result {
                     None if schema_loading && sheet_loading => {
-                        ui.label("Loading sheet and schema...");
+                        ui.label("正在载入表格和表定义…");
                         return;
                     }
                     None if schema_loading => {
-                        ui.label("Loading schema...");
+                        ui.label("正在载入表定义…");
                         return;
                     }
                     None if sheet_loading => {
-                        ui.label("Loading sheet...");
+                        ui.label("正在载入表格…");
                         return;
                     }
                     None => {
-                        ui.label("Preparing sheet and schema...");
+                        ui.label("正在准备表格和表定义…");
                         return;
                     }
                     Some((Err(err), Err(err2))) => {
-                        ui.label("Failed to load sheet and schema");
+                        ui.label("加载表格与表定义失败");
                         ui.label(err.to_string());
                         ui.label(err2.to_string());
                         return;
                     }
                     Some((Err(err), _)) => {
-                        ui.label("Failed to load sheet");
+                        ui.label("加载表格失败");
                         ui.label(err.to_string());
                         return;
                     }
                     Some((_, Err(err))) => {
-                        ui.label("Failed to load schema");
+                        ui.label("加载表定义失败");
                         ui.label(err.to_string());
                         return;
                     }
@@ -701,12 +684,17 @@ impl App {
                                 if resp.changed() {
                                     changed = true;
                                 }
-                                resp.on_hover_text(value.to_string());
+                                let label = match value {
+                                    FilterInputType::Equals => "等于",
+                                    FilterInputType::Contains => "包含",
+                                    FilterInputType::Complex => "复杂筛选",
+                                };
+                                resp.on_hover_text(label);
                             }
                             changed
                         });
 
-                        button_resp.on_hover_text(format!("Filter Type:\n{filter_type}"));
+                        button_resp.on_hover_text(format!("筛选类型：\n{filter_type}"));
 
                         let mut filter_dirty = menu_resp.is_some_and(|m| m.inner);
 
@@ -718,11 +706,11 @@ impl App {
 
                             let mut is_dirty = ui
                                 .toggle_value(&mut case_insensitive, "🔡")
-                                .on_hover_text("Case Insensitive")
+                                .on_hover_text("不区分大小写")
                                 .changed();
                             is_dirty |= ui
                                 .toggle_value(&mut use_display_field, "📝")
-                                .on_hover_text("Use Display Field")
+                                .on_hover_text("使用显示字段")
                                 .changed();
 
                             if is_dirty {
@@ -748,8 +736,8 @@ impl App {
                             ui.add_enabled_ui(!is_miscellaneous, |ui| {
                                 let mut visible = SCHEMA_EDITOR_VISIBLE.get(ui.ctx());
                                 let resp = ui
-                                    .toggle_value(&mut visible, "Edit Schema")
-                                    .on_hover_text("Edit the schema for this sheet");
+                                    .toggle_value(&mut visible, "编辑表定义")
+                                    .on_hover_text("编辑当前表格的表定义");
                                 if resp.changed() {
                                     SCHEMA_EDITOR_VISIBLE.set(ui.ctx(), visible);
                                 }
@@ -760,7 +748,7 @@ impl App {
                             let filter_resp = ui.add_sized(
                                 Vec2::new(ui.available_width(), 0.0),
                                 TextEdit::singleline(&mut filter_text)
-                                    .hint_text("Filter")
+                                    .hint_text("筛选")
                                     .background_color(if filter_error.is_some() {
                                         ui.visuals()
                                             .text_edit_bg_color()
@@ -841,7 +829,7 @@ impl App {
             ui.ctx(),
             path.query_pairs().contains_key("redirect"),
         ));
-        RouteResponse::Title("Setup".to_string())
+        RouteResponse::Title("设置".to_string())
     }
 
     fn draw_setup(&mut self, ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) {
@@ -882,7 +870,7 @@ impl App {
         if let Some(sheet) = &SELECTED_SHEET.get(ui.ctx()) {
             return RouteResponse::Redirect(format!("/sheet/{sheet}").into());
         }
-        RouteResponse::Title("Sheet List".to_string())
+        RouteResponse::Title("表格列表".to_string())
     }
 
     fn on_named_sheet(
@@ -994,7 +982,7 @@ impl App {
 
             self.save_promise = Some(TrackedPromise::spawn_local(async move {
                 let mut dialog = rfd::AsyncFileDialog::new()
-                    .set_title("Save Schemas As")
+                    .set_title("导出所有表定义")
                     .set_file_name("schemas.zip");
                 if let Some(start_dir) = start_dir {
                     dialog = dialog.set_directory(start_dir);
@@ -1091,7 +1079,7 @@ fn add_links(ui: &mut egui::Ui) {
     ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
         ui.add(
             egui::Hyperlink::from_label_and_url(
-                "Contibute to EXDSchema",
+                format!("{} EXDSchema", egui::special_emojis::GITHUB),
                 "https://github.com/xivdev/EXDSchema",
             )
             .open_in_new_tab(true),
@@ -1099,7 +1087,7 @@ fn add_links(ui: &mut egui::Ui) {
         ui.label("/");
         ui.add(
             egui::Hyperlink::from_label_and_url(
-                format!("Star me on {}", egui::special_emojis::GITHUB),
+                format!("{} EXDViewer", egui::special_emojis::GITHUB),
                 "https://github.com/WorkingRobot/EXDViewer",
             )
             .open_in_new_tab(true),
@@ -1110,12 +1098,12 @@ fn add_links(ui: &mut egui::Ui) {
 
 fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
     ui.spacing_mut().item_spacing.x = 0.0;
-    ui.label("Powered by ");
+    ui.label("由 ");
     ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-    ui.label(" and ");
+    ui.label(" 与 ");
     ui.hyperlink_to(
         "eframe",
         "https://github.com/emilk/egui/tree/master/crates/eframe",
     );
-    ui.label(".");
+    ui.label(" 驱动");
 }

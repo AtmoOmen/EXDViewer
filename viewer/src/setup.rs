@@ -99,7 +99,7 @@ impl SetupWindow {
 
         let show_inner = |ui: &mut egui::Ui| {
             ui.vertical_centered(|ui| {
-                ui.heading("Setup");
+                ui.heading("设置");
             });
             ui.separator();
 
@@ -111,7 +111,7 @@ impl SetupWindow {
                 Some(Err(promise)) => {
                     self.setup_promise = Some(promise);
                     enabled = false;
-                    ui.label("Loading...");
+                    ui.label("正在载入...");
                 }
                 Some(Ok(Ok(backend))) => {
                     return Some(backend);
@@ -126,14 +126,14 @@ impl SetupWindow {
             if let Some(err) = &self.display_error {
                 ui.label(err.to_string());
             } else {
-                ui.label("Please select the location of the game files and schema.");
+                ui.label("请先选择游戏文件与表定义的位置");
             }
 
             let is_go_clicked = ui
                 .add_enabled_ui(enabled, |ui| {
                     Frame::group(ui.style()).show(ui, |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.heading("Location");
+                            ui.heading("位置");
                         });
 
                         ui.horizontal(|ui| {
@@ -142,7 +142,7 @@ impl SetupWindow {
                                 if radio(
                                     col_0,
                                     matches!(self.location, InstallLocation::Sqpack(_)),
-                                    "Local",
+                                    "本地",
                                 ) {
                                     self.location = InstallLocation::Sqpack(
                                         std::env::current_dir()
@@ -155,15 +155,15 @@ impl SetupWindow {
                                 if radio(
                                     col_0,
                                     matches!(self.location, InstallLocation::Worker(_)),
-                                    "Local",
+                                    "本地",
                                 ) {
                                     self.location =
-                                        InstallLocation::Worker("Select folder".to_string());
+                                        InstallLocation::Worker("选择文件夹".to_string());
                                 }
                                 if radio(
                                     col_1,
                                     matches!(self.location, InstallLocation::Web(_, _)),
-                                    "Web",
+                                    "网络",
                                 ) {
                                     self.location =
                                         InstallLocation::Web(DEFAULT_API_URL.to_string(), None);
@@ -175,9 +175,9 @@ impl SetupWindow {
                             #[cfg(not(target_arch = "wasm32"))]
                             InstallLocation::Sqpack(path) => {
                                 ui.horizontal(|ui| {
-                                    ui.label("Path:");
+                                    ui.label("路径:");
                                     ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                                        if ui.button("Browse").clicked()
+                                        if ui.button("浏览").clicked()
                                             && let Some(picked_path) = rfd::FileDialog::new()
                                                 .pick_folder()
                                                 .and_then(|d| d.to_str().map(|s| s.to_owned()))
@@ -201,11 +201,11 @@ impl SetupWindow {
                                     draw_unsupported_directory_picker(ui);
                                 } else {
                                     ui.horizontal(|ui| {
-                                        ui.label("Name:");
+                                        ui.label("名称:");
                                         ui.with_layout(
                                             Layout::right_to_left(egui::Align::Min),
                                             |ui| {
-                                                if ui.button("Browse").clicked() {
+                                                if ui.button("浏览").clicked() {
                                                     self.location_promises.open_folder_picker(
                                                         FileSystemPermissionMode::Read,
                                                         WorkerFileProvider::add_folder,
@@ -221,16 +221,16 @@ impl SetupWindow {
                                                                 WorkerFileProvider::folders,
                                                             ) {
                                                             None => {
-                                                                ui.label("Retrieving...");
+                                                                ui.label("正在获取...");
                                                             }
                                                             Some(Err(e)) => {
                                                                 ui.label(format!(
-                                                                    "An error occured: {e}"
+                                                                    "发生错误: {e}"
                                                                 ));
                                                             }
                                                             Some(Ok(entries)) => {
                                                                 if entries.is_empty() {
-                                                                    ui.label("None");
+                                                                    ui.label("无");
                                                                 } else {
                                                                     for entry in entries {
                                                                         ui.selectable_value(
@@ -251,7 +251,7 @@ impl SetupWindow {
 
                             InstallLocation::Web(url, version) => {
                                 ui.horizontal(|ui| {
-                                    ui.label("URL:");
+                                    ui.label("链接:");
                                     ui.add(
                                         TextEdit::singleline(url)
                                             .desired_width(ui.available_width()),
@@ -276,7 +276,7 @@ impl SetupWindow {
                                 }
 
                                 ui.horizontal(|ui| {
-                                    ui.label("Version:");
+                                    ui.label("版本:");
 
                                     if let Some((_, promise)) = &mut self.web_version_promise {
                                         if let Some(versions) = promise.get_mut(|r| match r {
@@ -293,7 +293,7 @@ impl SetupWindow {
                                             if let Some(versions) = versions {
                                                 egui::ComboBox::from_id_salt("setup_version")
                                                     .selected_text(version.as_ref().map_or_else(
-                                                        || format!("Latest ({})", versions.latest),
+                                                        || format!("最新 ({})", versions.latest),
                                                         |v| v.to_string(),
                                                     ))
                                                     .width(ui.available_width())
@@ -301,7 +301,7 @@ impl SetupWindow {
                                                         ui.selectable_value(
                                                             version,
                                                             None,
-                                                            format!("Latest ({})", versions.latest),
+                                                            format!("最新 ({})", versions.latest),
                                                         );
                                                         for entry in &versions.versions {
                                                             ui.selectable_value(
@@ -312,13 +312,13 @@ impl SetupWindow {
                                                         }
                                                     });
                                             } else {
-                                                ui.label("Failed to load versions");
+                                                ui.label("加载版本失败");
                                             }
                                         } else {
-                                            ui.label("Loading versions...");
+                                            ui.label("正在加载版本...");
                                         }
                                     } else {
-                                        ui.label("No versions available");
+                                        ui.label("暂无可用版本");
                                     }
                                 });
                             }
@@ -327,7 +327,7 @@ impl SetupWindow {
 
                     Frame::group(ui.style()).show(ui, |ui| {
                         ui.vertical_centered(|ui| {
-                            ui.heading("Schema");
+                            ui.heading("表定义");
                         });
                         ui.horizontal(|ui| {
                             ui.columns_const(|[col_0, col_1, col_2]| {
@@ -335,7 +335,7 @@ impl SetupWindow {
                                 if radio(
                                     col_0,
                                     matches!(self.schema, SchemaLocation::Local(_)),
-                                    "Local",
+                                    "本地",
                                 ) {
                                     self.schema = SchemaLocation::Local(
                                         std::env::current_dir()
@@ -348,10 +348,10 @@ impl SetupWindow {
                                 if radio(
                                     col_0,
                                     matches!(self.schema, SchemaLocation::Worker(_)),
-                                    "Local",
+                                    "本地",
                                 ) {
                                     self.schema =
-                                        SchemaLocation::Worker("Select folder".to_string());
+                                        SchemaLocation::Worker("选择文件夹".to_string());
                                 }
                                 if radio(
                                     col_1,
@@ -367,7 +367,7 @@ impl SetupWindow {
                                 if radio(
                                     col_2,
                                     matches!(self.schema, SchemaLocation::Web(_)),
-                                    "Web",
+                                    "网络",
                                 ) {
                                     self.schema =
                                         SchemaLocation::Web(super::DEFAULT_SCHEMA_URL.to_string());
@@ -379,9 +379,9 @@ impl SetupWindow {
                             #[cfg(not(target_arch = "wasm32"))]
                             SchemaLocation::Local(path) => {
                                 ui.horizontal(|ui| {
-                                    ui.label("Path:");
+                                    ui.label("路径:");
                                     ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                                        if ui.button("Browse").clicked()
+                                        if ui.button("浏览").clicked()
                                             && let Some(picked_path) = rfd::FileDialog::new()
                                                 .pick_folder()
                                                 .and_then(|d| d.to_str().map(|s| s.to_owned()))
@@ -406,11 +406,11 @@ impl SetupWindow {
                                     draw_unsupported_directory_picker(ui);
                                 } else {
                                     ui.horizontal(|ui| {
-                                        ui.label("Name:");
+                                        ui.label("名称:");
                                         ui.with_layout(
                                             Layout::right_to_left(egui::Align::Min),
                                             |ui| {
-                                                if ui.button("Browse").clicked() {
+                                                if ui.button("浏览").clicked() {
                                                     self.schema_promises.open_folder_picker(
                                                         FileSystemPermissionMode::Readwrite,
                                                         WorkerProvider::add_folder,
@@ -424,16 +424,16 @@ impl SetupWindow {
                                                             WorkerProvider::folders,
                                                         ) {
                                                             None => {
-                                                                ui.label("Retrieving...");
+                                                                ui.label("正在获取...");
                                                             }
                                                             Some(Err(e)) => {
                                                                 ui.label(format!(
-                                                                    "An error occured: {e}"
+                                                                    "发生错误: {e}"
                                                                 ));
                                                             }
                                                             Some(Ok(entries)) => {
                                                                 if entries.is_empty() {
-                                                                    ui.label("None");
+                                                                    ui.label("无");
                                                                 } else {
                                                                     for entry in entries {
                                                                         ui.selectable_value(
@@ -460,14 +460,14 @@ impl SetupWindow {
                                 ui.horizontal(|ui| {
                                     ui.columns_const(|[col_owner, col_repo]| {
                                         col_owner.horizontal(|ui| {
-                                            ui.label("Owner:");
+                                            ui.label("所有者:");
                                             ui.add(
                                                 TextEdit::singleline(owner)
                                                     .desired_width(ui.available_width()),
                                             );
                                         });
                                         col_repo.horizontal(|ui| {
-                                            ui.label("Repo:");
+                                            ui.label("仓库:");
                                             ui.add(
                                                 TextEdit::singleline(repo)
                                                     .desired_width(ui.available_width()),
@@ -508,7 +508,7 @@ impl SetupWindow {
                                 }
 
                                 ui.horizontal(|ui| {
-                                    ui.label("Version:");
+                                    ui.label("版本:");
 
                                     if let Some((_, promise)) = &mut self.github_branch_promise {
                                         if let Some(branches) = promise.get_mut(|r| match r {
@@ -595,20 +595,20 @@ impl SetupWindow {
                                                     }
                                                 });
                                             } else {
-                                                ui.label("Failed to load versions");
+                                                ui.label("加载版本失败");
                                             }
                                         } else {
-                                            ui.label("Loading versions...");
+                                            ui.label("正在加载版本...");
                                         }
                                     } else {
-                                        ui.label("No versions available");
+                                        ui.label("暂无可用版本");
                                     }
                                 });
                             }
 
                             SchemaLocation::Web(url) => {
                                 ui.horizontal(|ui| {
-                                    ui.label("URL:");
+                                    ui.label("链接:");
                                     ui.add(
                                         TextEdit::singleline(url)
                                             .desired_width(ui.available_width()),
@@ -621,7 +621,7 @@ impl SetupWindow {
                     ui.add_enabled_ui(self.can_go(), |ui| {
                         ui.add_sized(
                             Vec2::new(ui.available_size_before_wrap().x, 0.0),
-                            egui::Button::new("Go"),
+                            egui::Button::new("开始"),
                         )
                         .clicked()
                     })
@@ -721,8 +721,8 @@ static IS_DIRECTORY_PICKER_SUPPORTED: std::sync::LazyLock<bool> =
 
 #[cfg(target_arch = "wasm32")]
 fn draw_unsupported_directory_picker(ui: &mut egui::Ui) {
-    static TITLE: &str = "Your browser does not support the File System Access API.";
-    static LINK_DESC: &str = "At the moment, only Chromium-based browsers support it.";
+    static TITLE: &str = "当前浏览器不支持 File System Access API";
+    static LINK_DESC: &str = "目前仅基于 Chromium 的浏览器支持";
     static LINK: &str = "https://developer.mozilla.org/en-US/docs/Web/API/File_System_Access_API#browser_compatibility";
 
     ui.vertical_centered(|ui| {

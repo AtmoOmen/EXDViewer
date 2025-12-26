@@ -118,7 +118,7 @@ fn main() {
                 }
                 Err(e) => {
                     loading_text.set_inner_html(
-                        "<p> The app has crashed. See the developer console for details. </p>",
+                        "<p> 应用已崩溃 请查看开发者控制台获取详情 </p>",
                     );
                     panic!("Failed to start eframe: {e:?}");
                 }

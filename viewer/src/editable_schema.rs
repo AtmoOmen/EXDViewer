@@ -92,7 +92,7 @@ impl EditableSchema {
         let mut is_shown_toggle = is_shown;
 
         let window_margin = ui.style().spacing.window_margin;
-        egui::Window::new("Schema Editor")
+        egui::Window::new("表定义编辑器")
             .open(&mut is_shown_toggle)
             .frame(Frame::window(ui.style()).inner_margin(Margin {
                 top: window_margin.top,
@@ -132,15 +132,15 @@ impl EditableSchema {
                         );
 
                         MenuBar::new().ui(ui, |ui| {
-                            ui.menu_button("File", |ui| {
+                            ui.menu_button("文件", |ui| {
                                 ui.add_enabled_ui(self.is_modified(), |ui| {
-                                    if shortcut::button(ui, "Revert", SCHEMA_REVERT).clicked() {
+                                    if shortcut::button(ui, "恢复", SCHEMA_REVERT).clicked() {
                                         self.command_revert();
                                         response.mark_changed();
                                         ui.close();
                                     }
                                 });
-                                if shortcut::button(ui, "Clear", SCHEMA_CLEAR).clicked() {
+                                if shortcut::button(ui, "清空", SCHEMA_CLEAR).clicked() {
                                     self.command_clear();
                                     response.mark_changed();
                                     ui.close();
@@ -148,21 +148,21 @@ impl EditableSchema {
                                 ui.add_enabled_ui(
                                     self.is_modified() && provider.can_save_schemas(),
                                     |ui| {
-                                        if shortcut::button(ui, "Save", SCHEMA_SAVE).clicked() {
+                                        if shortcut::button(ui, "保存", SCHEMA_SAVE).clicked() {
                                             self.command_save(provider);
                                             ui.close();
                                         }
                                     },
                                 );
-                                if shortcut::button(ui, "Save As", SCHEMA_SAVE_AS).clicked() {
+                                if shortcut::button(ui, "另存为", SCHEMA_SAVE_AS).clicked() {
                                     self.command_save_as(provider);
                                     ui.close();
                                 }
                             });
 
-                            ui.menu_button("View", |ui| {
+                            ui.menu_button("视图", |ui| {
                                 let mut word_wrap = SCHEMA_EDITOR_WORD_WRAP.get(ui.ctx());
-                                if ui.toggle_value(&mut word_wrap, "Word Wrap").changed() {
+                                if ui.toggle_value(&mut word_wrap, "自动换行").changed() {
                                     SCHEMA_EDITOR_WORD_WRAP.set(ui.ctx(), word_wrap);
                                     ui.close();
                                 }
@@ -173,7 +173,7 @@ impl EditableSchema {
                                 |ui| {
                                     let mut errors_visible =
                                         SCHEMA_EDITOR_ERRORS_SHOWN.get(ui.ctx());
-                                    let resp = ui.toggle_value(&mut errors_visible, "Show Errors");
+                                    let resp = ui.toggle_value(&mut errors_visible, "显示错误");
                                     if resp.changed() {
                                         SCHEMA_EDITOR_ERRORS_SHOWN.set(ui.ctx(), errors_visible);
                                     }
@@ -200,7 +200,7 @@ impl EditableSchema {
                                                 _ => "/",
                                             };
                                             ui.label(
-                                                RichText::new(format!("At {location}")).strong(),
+                                                RichText::new(format!("位置 {location}")).strong(),
                                             );
                                             ui.indent(location, |ui| {
                                                 for error in errors {
@@ -220,13 +220,9 @@ impl EditableSchema {
                 TopBottomPanel::bottom("status-panel").show_inside(ui, |ui| {
                     MenuBar::new().ui(ui, |ui| {
                         let validation_text: String = match &self.schema {
-                            Ok(Ok(_)) => "Valid Schema".into(),
-                            Ok(Err(e)) => format!(
-                                "Invalid Schema ({} error{})",
-                                e.len(),
-                                if e.len() != 1 { "s" } else { "" }
-                            ),
-                            Err(_) => "Invalid Schema (Error when validating)".into(),
+                            Ok(Ok(_)) => "表定义有效".into(),
+                            Ok(Err(e)) => format!("表定义无效 ({} 个错误)", e.len()),
+                            Err(_) => "表定义无效 (校验时发生错误)".into(),
                         };
                         ui.label(validation_text);
                         ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
@@ -236,11 +232,7 @@ impl EditableSchema {
 
                             let mut add_separator = false;
                             if let Some(cursor) = cursor {
-                                ui.label(format!(
-                                    "Ln {}, Col {}",
-                                    cursor.row + 1,
-                                    cursor.column + 1
-                                ));
+                                ui.label(format!("行 {}, 列 {}", cursor.row + 1, cursor.column + 1));
                                 add_separator = true;
                             }
 
@@ -248,7 +240,7 @@ impl EditableSchema {
                                 if add_separator {
                                     ui.separator();
                                 }
-                                ui.label("Modified");
+                                ui.label("已修改");
                             }
                         });
                     });
@@ -339,9 +331,7 @@ impl EditableSchema {
                                     let mut state = ret.state.clone();
                                     state.cursor.set_char_range(range);
                                     state.store(ui.ctx(), schema_editor_id);
-                                    ui.ctx().request_discard(
-                                        "Tab characters in schema editor was replaced with spaces",
-                                    );
+                                    ui.ctx().request_discard("编辑器中的 Tab 已替换为空格");
                                 }
                             }
                             ret.response
@@ -396,7 +386,7 @@ impl EditableSchema {
         self.save_as_promise
             .set(Some(TrackedPromise::spawn_local(async move {
                 let mut dialog = rfd::AsyncFileDialog::new()
-                    .set_title("Save Schema As")
+                    .set_title("另存为表定义")
                     .set_file_name(format!("{sheet_name}.yml"));
                 if let Some(start_dir) = start_dir {
                     dialog = dialog.set_directory(start_dir);

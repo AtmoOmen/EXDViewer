@@ -23,14 +23,14 @@ pub struct GoToWindow {
 impl GoToWindow {
     pub fn to_sheet() -> Self {
         Self {
-            hint: "Sheet:Row.Subrow".to_string(),
+            hint: "表格:行.子行".to_string(),
             ..Default::default()
         }
     }
 
     pub fn to_row() -> Self {
         Self {
-            hint: "Row.Subrow".to_string(),
+            hint: "行.子行".to_string(),
             ..Default::default()
         }
     }
@@ -46,7 +46,7 @@ impl GoToWindow {
             .order(egui::Order::Middle)
             .show(ctx, |ui| {
                 Frame::window(ui.style()).show(ui, |ui| {
-                    ui.heading("Go To…");
+                    ui.heading("跳转到…");
                     ui.separator();
 
                     // Thank you to https://github.com/JakeHandsome/egui_autocomplete/blob/master/src/lib.rs
@@ -158,9 +158,9 @@ impl GoToWindow {
                         if let Some((row_id, subrow_id)) = match_location.as_ref() {
                             ui.label(
                                 RichText::new(format!(
-                                    "Row {row_id}{}",
+                                    "行 {row_id}{}",
                                     if let Some(subrow_id) = subrow_id {
-                                        format!(", Subrow {subrow_id}")
+                                        format!(", 子行 {subrow_id}")
                                     } else {
                                         String::new()
                                     }
@@ -171,7 +171,7 @@ impl GoToWindow {
 
                         if let Some(sheets) = match_sheets.as_ref() {
                             if sheets.is_empty() {
-                                ui.label(RichText::new("No matching sheets").weak());
+                                ui.label(RichText::new("没有匹配的表格").weak());
                             } else {
                                 for (i, sheet_name) in
                                     sheets.iter().take(MAX_SUGGESTIONS).enumerate()
@@ -264,11 +264,11 @@ impl GoToWindow {
             if !sheet_pattern.is_empty() {
                 let sheets = Self::match_sheet(sheet_pattern, sheet_matcher, sheet_list);
                 let location = Self::match_location(row_pattern)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid row"))?;
+                    .ok_or_else(|| anyhow::anyhow!("无效的行"))?;
                 Ok(EitherOrBoth::Both(sheets, location))
             } else {
                 let location = Self::match_location(row_pattern)
-                    .ok_or_else(|| anyhow::anyhow!("Invalid row"))?;
+                    .ok_or_else(|| anyhow::anyhow!("无效的行"))?;
                 Ok(EitherOrBoth::Right(location))
             }
         } else {

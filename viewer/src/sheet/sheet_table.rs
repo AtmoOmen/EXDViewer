@@ -179,7 +179,7 @@ impl SheetTable {
                             ui.add(egui::Image::new(icon).fit_to_exact_size(ui.available_size()))
                         }
                         ManagedIcon::Failed(e) => {
-                            ui.label("Failed to load icon").on_hover_text(e.to_string())
+                            ui.label("加载图标失败").on_hover_text(e.to_string())
                         }
                         ManagedIcon::Loading => {
                             let (rect, _) =
@@ -196,7 +196,7 @@ impl SheetTable {
                             )
                             .inner
                         }
-                        ManagedIcon::NotLoaded => ui.label("Icon not loaded"),
+                        ManagedIcon::NotLoaded => ui.label("图标未加载"),
                     }
                 });
             if resp.should_close() {
@@ -634,19 +634,19 @@ impl TableDelegate for SheetTable {
                                 ui.style_mut().interaction.selectable_labels = false;
                                 if is_display_column {
                                     ui.label(RichText::new("★").heading().color(Color32::GOLD))
-                                        .on_hover_text("Display Field");
+                                        .on_hover_text("显示字段");
                                 }
                                 if let Some(comment) = schema_column.comment() {
                                     ui.label(
                                         RichText::new("🔖").heading().color(Color32::LIGHT_BLUE),
                                     )
-                                    .on_hover_text(format!("Comment: {comment}"));
+                                    .on_hover_text(format!("注释: {comment}"));
                                 }
                             });
                         }
                     });
                 } else {
-                    ui.centered_and_justified(|ui| ui.heading("Row"));
+                    ui.centered_and_justified(|ui| ui.heading("行"));
                 }
             });
     }
@@ -711,10 +711,10 @@ impl TableDelegate for SheetTable {
                             |ui| {
                                 if let Some(subrow_id) = subrow_id {
                                     ui.label(format!("{row_id}.{subrow_id}"))
-                                        .on_hover_text(format!("Row {row_id}, Subrow {subrow_id}"))
+                                        .on_hover_text(format!("行 {row_id}, 子行 {subrow_id}"))
                                 } else {
                                     ui.label(row_id.to_string())
-                                        .on_hover_text(format!("Row {row_id}"))
+                                        .on_hover_text(format!("行 {row_id}"))
                                 }
                             },
                         )

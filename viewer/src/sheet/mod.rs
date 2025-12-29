@@ -99,15 +99,15 @@ fn string_label_wrapped(ui: &mut egui::Ui, value: &SeStr) -> Response {
         .inner;
 
     resp.context_menu(|ui| {
-        if ui.button("Copy").clicked() {
+        if ui.button("复制").clicked() {
             ui.ctx().copy_text(text.into());
             ui.close();
         }
-        if ui.button("Copy Raw (base64)").clicked() {
+        if ui.button("复制原始数据 (Base64)").clicked() {
             ui.ctx().copy_text(BASE64_STANDARD.encode(value.as_bytes()));
             ui.close();
         }
-        if ui.button("Copy Raw (hex)").clicked() {
+        if ui.button("复制原始数据 (HEX)").clicked() {
             ui.ctx().copy_text(
                 value
                     .as_bytes()

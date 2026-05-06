@@ -78,6 +78,44 @@ pub enum CellValue {
 }
 
 impl CellValue {
+    pub fn coerce_filter_integers(&self) -> Vec<i128> {
+        let mut values = Vec::new();
+        self.push_filter_integers(&mut values);
+        values
+    }
+
+    fn push_filter_integers(&self, values: &mut Vec<i128>) {
+        if let CellValue::ValidLink { row_id, value, .. } = self {
+            values.push(i128::from(*row_id));
+            if let Some(value) = value {
+                value.push_filter_integers(values);
+            }
+            return;
+        }
+
+        if let Some(value) = self.coerce_integer() {
+            values.push(value);
+        }
+    }
+
+    pub fn coerce_filter_strings(&self) -> Vec<CompactString> {
+        let mut values = Vec::new();
+        self.push_filter_strings(&mut values);
+        values
+    }
+
+    fn push_filter_strings(&self, values: &mut Vec<CompactString>) {
+        if let CellValue::ValidLink { row_id, value, .. } = self {
+            values.push(row_id.to_compact_string());
+            if let Some(value) = value {
+                value.push_filter_strings(values);
+            }
+            return;
+        }
+
+        values.push(self.coerce_string());
+    }
+
     pub fn coerce_integer(&self) -> Option<i128> {
         match self {
             CellValue::String(s) => s

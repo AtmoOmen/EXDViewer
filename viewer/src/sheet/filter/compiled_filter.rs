@@ -29,6 +29,7 @@ impl std::hash::Hash for CompiledComplexFilter {
 #[derive(Debug, Clone)]
 pub enum CompiledFilterKey {
     RowId,
+    RowIdOrColumn(Rc<Vec<(SchemaColumn, SheetColumnDefinition)>>),
     Column(Rc<Vec<(SchemaColumn, SheetColumnDefinition)>>, bool),
 }
 
@@ -36,6 +37,7 @@ impl CompiledFilterKey {
     pub fn is_strict(&self) -> bool {
         match self {
             CompiledFilterKey::RowId => true,
+            CompiledFilterKey::RowIdOrColumn(_) => false,
             CompiledFilterKey::Column(_, is_strict) => *is_strict,
         }
     }

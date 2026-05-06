@@ -80,7 +80,7 @@ impl FilterCache {
                 0,
                 FilterValue::Equals(Either::Left(filter.into())),
             ),
-            lookup: vec![CompiledFilterKey::Column(self.columns(), false)],
+            lookup: self.compile_simple_lookup(),
             has_fuzzy: false,
         }
     }
@@ -88,9 +88,13 @@ impl FilterCache {
     fn compile_contains(&self, filter: impl Into<String>) -> CompiledComplexFilter {
         CompiledComplexFilter {
             filter: CompiledFilterPart::KeyEquals(0, FilterValue::Contains(filter.into())),
-            lookup: vec![CompiledFilterKey::Column(self.columns(), false)],
+            lookup: self.compile_simple_lookup(),
             has_fuzzy: false,
         }
+    }
+
+    fn compile_simple_lookup(&self) -> Vec<CompiledFilterKey> {
+        vec![CompiledFilterKey::RowIdOrColumn(self.columns())]
     }
 
     fn compile_complex(&self, filter: &ComplexFilter) -> anyhow::Result<CompiledComplexFilter> {
@@ -181,7 +185,7 @@ impl FilterCache {
             FilterValue::Equals(Either::Left(v)) => {
                 filter_string(cell, v, options.case_insensitive, |a, b| a == b)
             }
-            FilterValue::Equals(Either::Right(v)) => cell.coerce_integer() == Some(*v),
+            FilterValue::Equals(Either::Right(v)) => cell.coerce_filter_integers().contains(v),
             FilterValue::StartsWith(v) => {
                 filter_string(cell, v, options.case_insensitive, |a, b| a.starts_with(b))
             }
@@ -191,10 +195,16 @@ impl FilterCache {
             FilterValue::Contains(v) => {
                 filter_string(cell, v, options.case_insensitive, |a, b| a.contains(b))
             }
-            FilterValue::Fuzzy(v) => self.matcher.score_one(v, &cell.coerce_string()).is_some(),
-            FilterValue::Wildcard(v) => v.matches(&cell.coerce_string()),
-            FilterValue::Regex(v) => v.is_match(&cell.coerce_string()),
-            FilterValue::Range(v) => cell.coerce_integer().is_some_and(|i| v.contains(i)),
+            FilterValue::Fuzzy(v) => cell
+                .coerce_filter_strings()
+                .iter()
+                .any(|s| self.matcher.score_one(v, s).is_some()),
+            FilterValue::Wildcard(v) => cell.coerce_filter_strings().iter().any(|s| v.matches(s)),
+            FilterValue::Regex(v) => cell.coerce_filter_strings().iter().any(|s| v.is_match(s)),
+            FilterValue::Range(v) => cell
+                .coerce_filter_integers()
+                .into_iter()
+                .any(|i| v.contains(i)),
         }
     }
 
@@ -206,7 +216,10 @@ impl FilterCache {
         options: MatchOptions,
     ) -> Option<NonZeroU32> {
         if let FilterValue::Fuzzy(v) = value {
-            self.matcher.score_one(v, &cell.coerce_string())
+            cell.coerce_filter_strings()
+                .iter()
+                .filter_map(|s| self.matcher.score_one(v, s))
+                .max()
         } else {
             self.match_cell(cell, value, options)
                 .then_some(NonZeroU32::new(1).unwrap())
@@ -219,12 +232,41 @@ fn filter_string(
     cell: &CellValue,
     b: &str,
     case_insensitive: bool,
-    f: impl FnOnce(&str, &str) -> bool,
+    f: impl Fn(&str, &str) -> bool,
 ) -> bool {
-    let a = cell.coerce_string();
     if case_insensitive {
-        f(&a.to_lowercase(), &b.to_lowercase())
+        let b = b.to_lowercase();
+        cell.coerce_filter_strings()
+            .iter()
+            .any(|a| f(&a.to_lowercase(), &b))
     } else {
-        f(&a, b)
+        cell.coerce_filter_strings().iter().any(|a| f(a, b))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use compact_str::CompactString;
+
+    use crate::sheet::cell::CellValue;
+
+    #[test]
+    fn link_filter_values_include_row_id_and_display_field() {
+        let value = CellValue::ValidLink {
+            sheet_name: CompactString::const_new("Item"),
+            row_id: 42,
+            value: Some(Box::new(CellValue::String(
+                CompactString::const_new("Bronze Sword").into(),
+            ))),
+        };
+
+        assert!(value.coerce_filter_integers().contains(&42));
+        assert_eq!(
+            value.coerce_filter_strings(),
+            vec![
+                CompactString::const_new("42"),
+                CompactString::const_new("Bronze Sword")
+            ]
+        );
     }
 }

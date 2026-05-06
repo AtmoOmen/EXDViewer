@@ -297,6 +297,14 @@ impl TableContext {
         move |key: &CompiledFilterKey, resolve_display_field: bool| -> KeyCellIter<'a> {
             match key {
                 CompiledFilterKey::RowId => KeyCellIter::row_id(row_id, subrow_id),
+                CompiledFilterKey::RowIdOrColumn(indices) => KeyCellIter::row_id_or_column(
+                    self,
+                    row_id,
+                    subrow_id,
+                    *row,
+                    indices.clone(),
+                    resolve_display_field,
+                ),
                 CompiledFilterKey::Column(indices, _) => {
                     KeyCellIter::column(self, *row, indices.clone(), resolve_display_field)
                 }

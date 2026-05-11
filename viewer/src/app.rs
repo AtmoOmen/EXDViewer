@@ -42,6 +42,12 @@ use crate::{
     },
 };
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::mcp::{McpBridge, McpBridgeState, McpHandle};
+
 type CachedSheetEntry = (
     Language, // language
     String,   // sheet name
@@ -66,6 +72,12 @@ pub struct App {
     sheet_filter_data: LruCache<(String, bool), Rc<Vec<(String, i32)>>>,
     save_promise: Option<TrackedPromise<()>>,
     goto_window: Option<goto::GoToWindow>,
+    #[cfg(not(target_arch = "wasm32"))]
+    mcp_bridge: Option<Arc<McpBridge>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    mcp_bridge_state: Option<McpBridgeState>,
+    #[cfg(not(target_arch = "wasm32"))]
+    mcp_handle: Option<McpHandle>,
 }
 
 fn create_router(ctx: egui::Context) -> Result<Router<App>> {
@@ -834,6 +846,15 @@ impl App {
 
     fn draw_setup(&mut self, ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) {
         if let Some((backend, config)) = self.setup_window.as_mut().unwrap().draw(ui.ctx()) {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                use std::sync::mpsc;
+                let (tx, rx) = mpsc::sync_channel(256);
+                let bridge = Arc::new(McpBridge { sender: tx });
+                self.mcp_handle = Some(crate::mcp::start(bridge.sender.clone(), config.clone()));
+                self.mcp_bridge = Some(bridge);
+                self.mcp_bridge_state = Some(McpBridgeState::new(rx));
+            }
             self.backend = Some(backend);
             self.sheet_data.clear();
             self.schema_data.clear();
@@ -1017,41 +1038,46 @@ impl App {
             sheet_filter_data: LruCache::new(NonZero::new(8).unwrap()),
             save_promise: None,
             goto_window: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            mcp_bridge: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            mcp_bridge_state: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            mcp_handle: None,
         }
     }
 
     fn setup_fonts(ctx: &egui::Context) {
+        let families = vec![
+            InsertFontFamily {
+                family: FontFamily::Proportional,
+                priority: FontPriority::Lowest,
+            },
+            InsertFontFamily {
+                family: FontFamily::Monospace,
+                priority: FontPriority::Lowest,
+            },
+        ];
+
         ctx.add_font(FontInsert::new(
             "NotoSans-SC",
             FontData::from_static(include_bytes!("../assets/NotoSansSC-Medium.ttf")),
-            vec![InsertFontFamily {
-                family: FontFamily::Proportional,
-                priority: FontPriority::Lowest,
-            }],
+            families.clone(),
         ));
         ctx.add_font(FontInsert::new(
             "NotoSans-JP",
             FontData::from_static(include_bytes!("../assets/NotoSansJP-Medium.ttf")),
-            vec![InsertFontFamily {
-                family: FontFamily::Proportional,
-                priority: FontPriority::Lowest,
-            }],
+            families.clone(),
         ));
         ctx.add_font(FontInsert::new(
             "NotoSans-KR",
             FontData::from_static(include_bytes!("../assets/NotoSansKR-Medium.ttf")),
-            vec![InsertFontFamily {
-                family: FontFamily::Proportional,
-                priority: FontPriority::Lowest,
-            }],
+            families.clone(),
         ));
         ctx.add_font(FontInsert::new(
             "FFXIV-PrivateUseIcons",
             FontData::from_static(include_bytes!("../assets/FFXIV_Lodestone_SSF.ttf")),
-            vec![InsertFontFamily {
-                family: FontFamily::Proportional,
-                priority: FontPriority::Lowest,
-            }],
+            families,
         ));
     }
 
@@ -1072,6 +1098,13 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.draw(ctx);
         tick_promises(ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some(state), Some(backend)) =
+            (&mut self.mcp_bridge_state, &self.backend)
+        {
+            state.language = LANGUAGE.get(ctx);
+            state.tick(backend);
+        }
     }
 }
 

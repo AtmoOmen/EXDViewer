@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{
     excel::{boxed::BoxedExcelProvider, web::WebFileProvider},
@@ -8,7 +8,7 @@ use crate::{
 };
 
 #[derive(Clone)]
-pub struct Backend(Rc<BackendImpl>);
+pub struct Backend(Arc<BackendImpl>);
 
 struct BackendImpl {
     excel_provider: BoxedExcelProvider,
@@ -72,7 +72,7 @@ impl Backend {
             })
         };
         let (excel, schema) = futures_util::try_join!(excel, schema)?;
-        Ok(Self(Rc::new(BackendImpl {
+        Ok(Self(Arc::new(BackendImpl {
             excel_provider: excel,
             schema_provider: schema,
         })))

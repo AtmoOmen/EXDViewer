@@ -26,6 +26,8 @@ mod backend;
 mod editable_schema;
 mod excel;
 mod goto;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod mcp;
 mod router;
 mod schema;
 mod settings;

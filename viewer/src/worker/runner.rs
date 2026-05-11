@@ -13,6 +13,4 @@ fn main() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn main() {
-    compile_error!("This runner is only for wasm32");
-}
+fn main() {}

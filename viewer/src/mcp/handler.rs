@@ -1,5 +1,9 @@
-use std::sync::{Arc, mpsc, Mutex};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
+use ironworks::excel::Language;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{
@@ -9,10 +13,11 @@ use rmcp::{
     model::*,
     tool, tool_handler, tool_router,
 };
+use tokio::sync::oneshot;
 
 use crate::settings::BackendConfig;
 
-use super::{McpRequest, McpResponse};
+use super::{McpChannel, McpRequest, McpResponse};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ListSheetsParams {
@@ -103,43 +108,56 @@ pub struct ResolveDisplayFieldParams {
     pub subrow_id: Option<u16>,
 }
 
-type McpChannel = mpsc::SyncSender<(McpRequest, mpsc::SyncSender<McpResponse>)>;
-
 #[derive(Clone)]
 pub struct McpHandler {
     request_tx: McpChannel,
     config: Arc<Mutex<BackendConfig>>,
+    language: Language,
     tool_router: ToolRouter<Self>,
 }
 
 impl McpHandler {
-    pub fn new(request_tx: McpChannel, config: BackendConfig) -> Self {
+    pub fn new(request_tx: McpChannel, config: BackendConfig, language: Language) -> Self {
         Self {
             request_tx,
             config: Arc::new(Mutex::new(config)),
+            language,
             tool_router: Self::tool_router(),
         }
     }
 
-    async fn delegate(&self, request: McpRequest) -> Result<String, McpError> {
+    fn light_timeout() -> Duration {
+        Duration::from_secs(12)
+    }
+
+    fn medium_timeout() -> Duration {
+        Duration::from_secs(20)
+    }
+
+    fn heavy_timeout() -> Duration {
+        Duration::from_secs(45)
+    }
+
+    async fn call(&self, request: McpRequest, timeout: Duration) -> Result<String, McpError> {
         let request_name = format!("{request:?}");
-        log::info!("MCP 委托请求: {request_name}");
+        log::info!("MCP 请求: {request_name}");
 
         let tx = self.request_tx.clone();
-        let response = tokio::time::timeout(std::time::Duration::from_secs(10), tokio::task::spawn_blocking(move || {
-            let (resp_tx, resp_rx) = mpsc::sync_channel(1);
-            let _ = tx.send((request, resp_tx));
-            resp_rx.recv()
-        }))
+        let response = tokio::time::timeout(timeout, async move {
+            let (resp_tx, resp_rx) = oneshot::channel();
+            tx.send((request, resp_tx))
+                .map_err(|e| McpError::internal_error(format!("MCP 请求发送失败: {e}"), None))?;
+            resp_rx
+                .await
+                .map_err(|e| McpError::internal_error(format!("MCP 响应接收失败: {e}"), None))
+        })
         .await
-        .map_err(|_| McpError::internal_error("MCP 请求超时", None))?
-        .map_err(|e| McpError::internal_error(format!("{e}"), None))?
-        .map_err(|e| McpError::internal_error(format!("channel recv: {e}"), None))?;
+        .map_err(|_| McpError::internal_error("MCP 请求超时", None))??;
 
-        log::info!("MCP 收到响应: {request_name}");
+        log::info!("MCP 响应完成: {request_name}");
         match response {
-            McpResponse::Success(s) => Ok(s),
-            McpResponse::Error(e) => Err(McpError::internal_error(e, None)),
+            McpResponse::Success(text) => Ok(text),
+            McpResponse::Error(error) => Err(McpError::internal_error(error, None)),
         }
     }
 }
@@ -152,12 +170,15 @@ impl McpHandler {
         Parameters(params): Parameters<ListSheetsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::ListSheets {
-                query: params.query,
-                include_misc: params.include_misc.unwrap_or(false),
-                offset: params.offset.unwrap_or(0),
-                limit: params.limit.unwrap_or(100),
-            })
+            .call(
+                McpRequest::ListSheets {
+                    query: params.query,
+                    include_misc: params.include_misc.unwrap_or(false),
+                    offset: params.offset.unwrap_or(0),
+                    limit: params.limit.unwrap_or(100),
+                },
+                Self::light_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -168,9 +189,10 @@ impl McpHandler {
         Parameters(params): Parameters<GetSheetInfoParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetSheetInfo {
-                name: params.name,
-            })
+            .call(
+                McpRequest::GetSheetInfo { name: params.name },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -181,9 +203,10 @@ impl McpHandler {
         Parameters(params): Parameters<SheetNameParam>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetSheetSchema {
-                name: params.name,
-            })
+            .call(
+                McpRequest::GetSheetSchema { name: params.name },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -194,16 +217,20 @@ impl McpHandler {
         Parameters(params): Parameters<SheetNameParam>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetSchemaRaw {
-                name: params.name,
-            })
+            .call(
+                McpRequest::GetSchemaRaw { name: params.name },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
     #[tool(description = "获取当前加载的游戏数据源和模式数据源信息")]
     async fn get_game_version(&self) -> Result<CallToolResult, McpError> {
-        let config = self.config.lock().map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+        let config = self
+            .config
+            .lock()
+            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
 
         let version_info = match &config.location {
             crate::settings::InstallLocation::Web(_, version) => serde_json::json!({
@@ -258,9 +285,12 @@ impl McpHandler {
         Parameters(params): Parameters<ValidateFilterParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::ValidateFilter {
-                expression: params.expression,
-            })
+            .call(
+                McpRequest::ValidateFilter {
+                    expression: params.expression,
+                },
+                Self::light_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -271,9 +301,10 @@ impl McpHandler {
         Parameters(params): Parameters<SaveSchemaParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::ValidateSchema {
-                text: params.text,
-            })
+            .call(
+                McpRequest::ValidateSchema { text: params.text },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -284,9 +315,12 @@ impl McpHandler {
         Parameters(params): Parameters<GetIconUrlParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetIconUrl {
-                icon_id: params.icon_id,
-            })
+            .call(
+                McpRequest::GetIconUrl {
+                    icon_id: params.icon_id,
+                },
+                Self::light_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -297,9 +331,12 @@ impl McpHandler {
         Parameters(params): Parameters<DecomposeModelIdParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::DecomposeModelId {
-                model_id: params.model_id,
-            })
+            .call(
+                McpRequest::DecomposeModelId {
+                    model_id: params.model_id,
+                },
+                Self::light_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -310,9 +347,12 @@ impl McpHandler {
         Parameters(params): Parameters<SearchSheetsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::SearchSheets {
-                query: params.query,
-            })
+            .call(
+                McpRequest::SearchSheets {
+                    query: params.query,
+                },
+                Self::light_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -323,11 +363,14 @@ impl McpHandler {
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::SearchCells {
-                name: params.name,
-                query: params.query.unwrap_or_default(),
-                max_results: params.max_results.unwrap_or(50),
-            })
+            .call(
+                McpRequest::SearchCells {
+                    name: params.name,
+                    query: params.query.unwrap_or_default(),
+                    max_results: params.max_results.unwrap_or(50),
+                },
+                Self::heavy_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -338,12 +381,15 @@ impl McpHandler {
         Parameters(params): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::QueryRows {
-                name: params.name,
-                filter: params.filter,
-                offset: params.offset.unwrap_or(0),
-                limit: params.limit.unwrap_or(50),
-            })
+            .call(
+                McpRequest::QueryRows {
+                    name: params.name,
+                    filter: params.filter,
+                    offset: params.offset.unwrap_or(0),
+                    limit: params.limit.unwrap_or(50),
+                },
+                Self::heavy_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -354,12 +400,15 @@ impl McpHandler {
         Parameters(params): Parameters<GetRowParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetRow {
-                name: params.name,
-                row_id: params.row_id.unwrap_or(0),
-                subrow_id: params.subrow_id.unwrap_or(0),
-                search_name: params.search_name,
-            })
+            .call(
+                McpRequest::GetRow {
+                    name: params.name,
+                    row_id: params.row_id.unwrap_or(0),
+                    subrow_id: params.subrow_id.unwrap_or(0),
+                    search_name: params.search_name,
+                },
+                Self::heavy_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -370,9 +419,10 @@ impl McpHandler {
         Parameters(params): Parameters<SheetNameParam>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetSheetRelations {
-                name: params.name,
-            })
+            .call(
+                McpRequest::GetSheetRelations { name: params.name },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -383,9 +433,12 @@ impl McpHandler {
         Parameters(params): Parameters<GetReferencingSheetsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::GetReferencingSheets {
-                target_sheet: params.target_sheet,
-            })
+            .call(
+                McpRequest::GetReferencingSheets {
+                    target_sheet: params.target_sheet,
+                },
+                Self::heavy_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -396,11 +449,14 @@ impl McpHandler {
         Parameters(params): Parameters<FollowLinkParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::FollowLink {
-                name: params.name,
-                row_id: params.row_id,
-                column_index: params.column_index.unwrap_or(0),
-            })
+            .call(
+                McpRequest::FollowLink {
+                    name: params.name,
+                    row_id: params.row_id,
+                    column_index: params.column_index.unwrap_or(0),
+                },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -411,12 +467,15 @@ impl McpHandler {
         Parameters(params): Parameters<DecodeSeStringParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::DecodeSeString {
-                name: params.name,
-                row_id: params.row_id,
-                subrow_id: params.subrow_id.unwrap_or(0),
-                column_index: params.column_index.unwrap_or(0),
-            })
+            .call(
+                McpRequest::DecodeSeString {
+                    name: params.name,
+                    row_id: params.row_id,
+                    subrow_id: params.subrow_id.unwrap_or(0),
+                    column_index: params.column_index.unwrap_or(0),
+                },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -427,10 +486,13 @@ impl McpHandler {
         Parameters(params): Parameters<SaveSchemaParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::SaveSchema {
-                name: params.name,
-                text: params.text,
-            })
+            .call(
+                McpRequest::SaveSchema {
+                    name: params.name,
+                    text: params.text,
+                },
+                Self::heavy_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -441,11 +503,14 @@ impl McpHandler {
         Parameters(params): Parameters<ResolveDisplayFieldParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
-            .delegate(McpRequest::ResolveDisplayField {
-                name: params.name,
-                row_id: params.row_id,
-                subrow_id: params.subrow_id.unwrap_or(0),
-            })
+            .call(
+                McpRequest::ResolveDisplayField {
+                    name: params.name,
+                    row_id: params.row_id,
+                    subrow_id: params.subrow_id.unwrap_or(0),
+                },
+                Self::medium_timeout(),
+            )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }

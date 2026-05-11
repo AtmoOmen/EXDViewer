@@ -1,9 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
 use async_channel::Sender;
-use tokio::{
-    runtime::Handle, select, sync::oneshot, task::JoinHandle
-};
+use tokio::{runtime::Handle, select, sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use xiv_core::file::version::GameVersion;
 
@@ -107,10 +105,9 @@ impl MessageQueue {
             })
             .collect::<Vec<_>>();
 
-        this.0.threads
-            .set(
-                threads,
-            )
+        this.0
+            .threads
+            .set(threads)
             .map_err(|_| anyhow::anyhow!("Failed to initialize message queue threads"))?;
 
         Ok(this)
@@ -118,10 +115,14 @@ impl MessageQueue {
 
     pub async fn versions(&self) -> Option<VersionInfo> {
         let (tx, rx) = oneshot::channel();
-        self.0.tx.send(Request {
-            data: RequestData::Versions,
-            tx,
-        }).await.expect("Failed to send request to message queue");
+        self.0
+            .tx
+            .send(Request {
+                data: RequestData::Versions,
+                tx,
+            })
+            .await
+            .expect("Failed to send request to message queue");
 
         match rx.await {
             Ok(Response::Versions(info)) => info,
@@ -129,12 +130,20 @@ impl MessageQueue {
         }
     }
 
-    pub async fn get_file(&self, version: Option<GameVersion>, path: String) -> Result<Arc<Vec<u8>>, ironworks::Error> {
+    pub async fn get_file(
+        &self,
+        version: Option<GameVersion>,
+        path: String,
+    ) -> Result<Arc<Vec<u8>>, ironworks::Error> {
         let (tx, rx) = oneshot::channel();
-        self.0.tx.send(Request {
-            data: RequestData::GetFile(version, path),
-            tx,
-        }).await.expect("Failed to send request to message queue");
+        self.0
+            .tx
+            .send(Request {
+                data: RequestData::GetFile(version, path),
+                tx,
+            })
+            .await
+            .expect("Failed to send request to message queue");
 
         match rx.await {
             Ok(Response::GetFile(result)) => result,

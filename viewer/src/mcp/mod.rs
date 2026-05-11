@@ -1,19 +1,32 @@
-use std::{cell::RefCell, num::NonZeroUsize, sync::mpsc, time::Duration};
+use std::{
+    cell::RefCell,
+    num::{NonZeroU32, NonZeroUsize},
+    str::FromStr,
+    sync::mpsc,
+    time::Duration,
+};
 
+use crate::schema::Schema as ExdSchema;
 use crate::{
     backend::Backend,
-    excel::provider::{ExcelHeader, ExcelProvider, ExcelSheet},
+    excel::{
+        base::BaseSheet,
+        provider::{ExcelHeader, ExcelProvider, ExcelSheet},
+    },
     schema::provider::SchemaProvider,
     settings::BackendConfig,
+    sheet::{ComplexFilter, FilterInput, GlobalContext, MatchOptions, TableContext},
+    utils::IconManager,
 };
-use crate::schema::Schema as ExdSchema;
+use handler::McpHandler;
 use ironworks::excel::Language;
 use jsonschema::output::{ErrorDescription, OutputUnit};
-use handler::McpHandler;
 use lru::LruCache;
 use tokio::sync::oneshot;
 
 mod handler;
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Debug)]
 pub enum McpRequest {
@@ -181,7 +194,11 @@ async fn load_schema_snapshot(backend: &Backend, name: &str) -> anyhow::Result<S
             errors
                 .iter()
                 .map(|error: &OutputUnit<ErrorDescription>| {
-                    format!("{} at {}", error.error_description(), error.instance_location())
+                    format!(
+                        "{} at {}",
+                        error.error_description(),
+                        error.instance_location()
+                    )
                 })
                 .collect(),
         ),
@@ -236,6 +253,101 @@ async fn build_schema_context(backend: &Backend, name: &str) -> SchemaContext {
     }
 }
 
+async fn build_table_context(
+    backend: &Backend,
+    name: &str,
+    sheet: BaseSheet,
+    lang: Language,
+) -> anyhow::Result<TableContext> {
+    let schema = match load_schema_snapshot(backend, name).await {
+        Ok(snapshot) => snapshot.parsed_schema().cloned(),
+        Err(_) => None,
+    };
+
+    let global = GlobalContext::new(
+        egui::Context::default(),
+        backend.clone(),
+        lang,
+        IconManager::new(),
+    );
+    Ok(TableContext::new(global, sheet, schema.as_ref()))
+}
+
+fn filter_match_options() -> MatchOptions {
+    MatchOptions {
+        case_insensitive: true,
+        use_display_field: true,
+    }
+}
+
+fn row_locations(sheet: &impl ExcelSheet) -> Vec<(u32, Option<u16>)> {
+    if sheet.has_subrows() {
+        sheet
+            .get_subrow_ids()
+            .map(|(row_id, subrow_id)| (row_id, Some(subrow_id)))
+            .collect()
+    } else {
+        sheet.get_row_ids().map(|row_id| (row_id, None)).collect()
+    }
+}
+
+fn build_row_fields(
+    columns: &[ironworks::file::exh::ColumnDefinition],
+    row: &crate::excel::provider::ExcelRow<'_>,
+    ctx: &SchemaContext,
+) -> serde_json::Map<String, serde_json::Value> {
+    let display_idx = ctx.display_field.as_ref().and_then(|display_field| {
+        ctx.column_names
+            .iter()
+            .position(|(name, _)| name == display_field)
+    });
+
+    let mut fields = serde_json::Map::new();
+    for (i, col_def) in columns.iter().enumerate() {
+        let off = u32::from(col_def.offset());
+        let col_name = ctx
+            .column_names
+            .get(i)
+            .map_or_else(|| format!("col_{off}"), |(name, _)| name.clone());
+        let col_type = ctx
+            .column_names
+            .get(i)
+            .map_or("unknown", |(_, type_name)| type_name.as_str());
+        let value = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
+            row.read_string(off).map_or(serde_json::json!(null), |s| {
+                serde_json::json!(s.to_string())
+            })
+        } else {
+            row.read::<u32>(off)
+                .map_or(serde_json::json!(null), |v| serde_json::json!(v))
+        };
+
+        let mut field = serde_json::Map::new();
+        field.insert("name".into(), serde_json::json!(col_name));
+        field.insert("type".into(), serde_json::json!(col_type));
+        field.insert("value".into(), value);
+        if Some(i) == display_idx {
+            field.insert("is_display".into(), serde_json::json!(true));
+        }
+        fields.insert(format!("f_{i}"), serde_json::Value::Object(field));
+    }
+    fields
+}
+
+fn build_row_object(
+    columns: &[ironworks::file::exh::ColumnDefinition],
+    row: &crate::excel::provider::ExcelRow<'_>,
+    ctx: &SchemaContext,
+    row_id: u32,
+    subrow_id: Option<u16>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut row_obj = serde_json::Map::new();
+    row_obj.insert("row_id".into(), serde_json::json!(row_id));
+    row_obj.insert("subrow_id".into(), serde_json::json!(subrow_id));
+    row_obj.extend(build_row_fields(columns, row, ctx));
+    row_obj
+}
+
 fn process_list_sheets(
     backend: &Backend,
     query: Option<&str>,
@@ -286,13 +398,16 @@ fn process_search_sheets(backend: &Backend, query: &str) -> String {
 }
 
 fn process_validate_filter(expression: &str) -> String {
-    use std::str::FromStr;
     use crate::sheet::ComplexFilter;
+    use std::str::FromStr;
     match ComplexFilter::from_str(expression) {
-        Ok(f) => serde_json::json!({"valid": true, "expression": expression, "ast": format!("{f:?}")})
-            .to_string(),
-        Err(e) => serde_json::json!({"valid": false, "expression": expression, "error": e})
-            .to_string(),
+        Ok(f) => {
+            serde_json::json!({"valid": true, "expression": expression, "ast": format!("{f:?}")})
+                .to_string()
+        }
+        Err(e) => {
+            serde_json::json!({"valid": false, "expression": expression, "error": e}).to_string()
+        }
     }
 }
 
@@ -439,7 +554,8 @@ async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -
                 for field in &schema.fields {
                     if let Some(ref field_rels) = field.relations {
                         if field_rels.contains_key(target_sheet) {
-                            ref_info.push(serde_json::json!({"field": field.name, "type": "direct"}));
+                            ref_info
+                                .push(serde_json::json!({"field": field.name, "type": "direct"}));
                         }
                     }
                 }
@@ -449,7 +565,8 @@ async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -
                     }
                 }
                 if !ref_info.is_empty() {
-                    references.push(serde_json::json!({"sheet": sheet_name, "references": ref_info}));
+                    references
+                        .push(serde_json::json!({"sheet": sheet_name, "references": ref_info}));
                 }
             }
         }
@@ -468,14 +585,12 @@ async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -
 async fn process_query_rows(
     backend: &Backend,
     name: &str,
-    _filter: Option<&str>,
+    filter: Option<&str>,
     offset: usize,
     limit: usize,
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
-    let ctx = build_schema_context(backend, name).await;
-
     let header = match excel.get_header(name).await {
         Ok(h) => h,
         Err(e) => return McpResponse::Error(format!("{e}")),
@@ -484,50 +599,136 @@ async fn process_query_rows(
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
+    let ctx = build_schema_context(backend, name).await;
+    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
+        Ok(ctx) => ctx,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
 
     let columns = header.columns();
-    let total = sheet.row_count() as usize;
-    let mut rows: Vec<serde_json::Value> = Vec::new();
-    let display_idx = ctx.display_field.as_ref()
-        .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df));
-
-    for (row_id_idx, row_id) in sheet.get_row_ids().enumerate() {
-        if row_id_idx < offset {
-            continue;
-        }
-        if rows.len() >= limit.min(200) {
-            break;
-        }
-        if let Ok(row) = sheet.get_row(row_id) {
-            let mut row_obj = serde_json::Map::new();
-            row_obj.insert("row_id".into(), serde_json::json!(row_id));
-            for (i, col_def) in columns.iter().enumerate() {
-                let off = u32::from(col_def.offset());
-                let col_name = ctx.column_names.get(i).map_or_else(
-                    || format!("col_{off}"), |(n, _)| n.clone(),
-                );
-                let val = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
-                    row.read_string(off).map_or(serde_json::json!(null), |s| serde_json::json!(s.to_string()))
-                } else {
-                    row.read::<u32>(off).map_or(serde_json::json!(null), |v| serde_json::json!(v))
-                };
-                let mut f = serde_json::Map::new();
-                f.insert("name".into(), serde_json::json!(col_name));
-                f.insert("value".into(), val);
-                if Some(i) == display_idx {
-                    f.insert("is_display".into(), serde_json::json!(true));
+    let row_locations = row_locations(&sheet);
+    let total_rows = row_locations.len();
+    let page_limit = limit.min(200);
+    let compiled_filter = match filter {
+        Some(text) if !text.trim().is_empty() => {
+            let parsed = match ComplexFilter::from_str(text) {
+                Ok(filter) => FilterInput::Complex(filter),
+                Err(e) => {
+                    return McpResponse::Error(format!(
+                        "筛选表达式无效: {e}。先用 validate_filter 检查语法"
+                    ));
                 }
-                row_obj.insert(format!("f_{i}"), serde_json::Value::Object(f));
+            };
+            match table_context.compile_filter(&parsed, filter_match_options()) {
+                Ok(filter) => Some(filter),
+                Err(e) => return McpResponse::Error(format!("{e}")),
             }
+        }
+        _ => None,
+    };
+
+    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let matched_rows;
+
+    if let Some(compiled_filter) = compiled_filter.as_ref() {
+        let fuzzy = compiled_filter.input().is_some_and(|input| input.has_fuzzy);
+        let mut matched: Vec<(
+            usize,
+            Option<NonZeroU32>,
+            serde_json::Map<String, serde_json::Value>,
+        )> = Vec::new();
+
+        for (sequence, (row_id, subrow_id)) in row_locations.into_iter().enumerate() {
+            let row = match subrow_id {
+                Some(subrow_id) => match sheet.get_subrow(row_id, subrow_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                },
+                None => match sheet.get_row(row_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                },
+            };
+
+            let (is_match, _in_progress) =
+                match table_context.filter_row(row_id, subrow_id, &row, compiled_filter) {
+                    Ok(result) => result,
+                    Err(e) => return McpResponse::Error(format!("{e}")),
+                };
+            if !is_match {
+                continue;
+            }
+
+            let score = if fuzzy {
+                match table_context.score_row(row_id, subrow_id, &row, compiled_filter) {
+                    Ok((score, _)) => score,
+                    Err(e) => return McpResponse::Error(format!("{e}")),
+                }
+            } else {
+                None
+            };
+
+            let mut row_obj = build_row_object(&columns, &row, &ctx, row_id, subrow_id);
+            row_obj.insert("row_index".into(), serde_json::json!(sequence));
+            if let Some(score) = score {
+                row_obj.insert("match_score".into(), serde_json::json!(score.get()));
+            }
+            matched.push((sequence, score, row_obj));
+        }
+
+        matched_rows = matched.len();
+        if fuzzy {
+            matched.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        }
+
+        rows.extend(
+            matched
+                .into_iter()
+                .skip(offset)
+                .take(page_limit)
+                .map(|(_, _, row)| serde_json::Value::Object(row)),
+        );
+    } else {
+        matched_rows = total_rows;
+        for (sequence, (row_id, subrow_id)) in row_locations.into_iter().enumerate() {
+            if sequence < offset {
+                continue;
+            }
+            if rows.len() >= page_limit {
+                break;
+            }
+
+            let row = match subrow_id {
+                Some(subrow_id) => match sheet.get_subrow(row_id, subrow_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                },
+                None => match sheet.get_row(row_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                },
+            };
+
+            let mut row_obj = build_row_object(&columns, &row, &ctx, row_id, subrow_id);
+            row_obj.insert("row_index".into(), serde_json::json!(sequence));
             rows.push(serde_json::Value::Object(row_obj));
         }
     }
 
-    McpResponse::Success(serde_json::json!({
-        "sheet": name, "language": format!("{lang:?}"),
-        "total_rows": total, "offset": offset, "limit": limit,
-        "display_field": ctx.display_field, "rows": rows
-    }).to_string())
+    McpResponse::Success(
+        serde_json::json!({
+            "sheet": name,
+            "language": format!("{lang:?}"),
+            "filter": filter,
+            "offset": offset,
+            "limit": page_limit,
+            "total_rows": total_rows,
+            "matched_rows": matched_rows,
+            "display_field": ctx.display_field,
+            "rows": rows
+        })
+        .to_string(),
+    )
 }
 
 async fn process_get_row(
@@ -551,28 +752,36 @@ async fn process_get_row(
 
     let (target_row_id, target_subrow_id) = if let Some(search) = search_name {
         let search_lower = search.to_lowercase();
-        let display_idx = ctx.display_field.as_ref()
+        let columns = header.columns();
+        let display_idx = ctx
+            .display_field
+            .as_ref()
             .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df))
             .unwrap_or(0);
-        let columns = header.columns();
         let col_def = &columns[display_idx.min(columns.len().saturating_sub(1))];
         let mut found = None;
-        for rid in sheet.get_row_ids() {
-            if let Ok(r) = sheet.get_row(rid) {
-                if col_def.kind() == ironworks::file::exh::ColumnKind::String {
-                    if let Ok(s) = r.read_string(u32::from(col_def.offset())) {
-                        if s.to_string().to_lowercase().contains(&search_lower) {
-                            found = Some((rid, 0u16));
-                            break;
-                        }
+        for (rid, sid) in row_locations(&sheet) {
+            let row = match sid {
+                Some(subrow_id) => match sheet.get_subrow(rid, subrow_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                },
+                None => match sheet.get_row(rid) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                },
+            };
+            if col_def.kind() == ironworks::file::exh::ColumnKind::String {
+                if let Ok(s) = row.read_string(u32::from(col_def.offset())) {
+                    if s.to_string().to_lowercase().contains(&search_lower) {
+                        found = Some((rid, sid.unwrap_or(0)));
+                        break;
                     }
-                } else {
-                    if let Ok(v) = r.read::<u32>(u32::from(col_def.offset())) {
-                        if v.to_string().to_lowercase().contains(&search_lower) {
-                            found = Some((rid, 0u16));
-                            break;
-                        }
-                    }
+                }
+            } else if let Ok(v) = row.read::<u32>(u32::from(col_def.offset())) {
+                if v.to_string().to_lowercase().contains(&search_lower) {
+                    found = Some((rid, sid.unwrap_or(0)));
+                    break;
                 }
             }
         }
@@ -589,35 +798,19 @@ async fn process_get_row(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
     let columns = header.columns();
-    let mut fields = serde_json::Map::new();
-    let display_idx = ctx.display_field.as_ref()
-        .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df));
+    let fields = build_row_fields(&columns, &row, &ctx);
 
-    for (i, col_def) in columns.iter().enumerate() {
-        let off = u32::from(col_def.offset());
-        let col_name = ctx.column_names.get(i).map_or_else(
-            || format!("col_{off}"), |(n, _)| n.clone(),
-        );
-        let col_type = ctx.column_names.get(i).map_or("unknown", |(_, t)| t);
-        let val = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
-            row.read_string(off).map_or(serde_json::json!(null), |s| serde_json::json!(s.to_string()))
-        } else {
-            row.read::<u32>(off).map_or(serde_json::json!(null), |v| serde_json::json!(v))
-        };
-        let mut f = serde_json::Map::new();
-        f.insert("name".into(), serde_json::json!(col_name));
-        f.insert("type".into(), serde_json::json!(col_type));
-        f.insert("value".into(), val);
-        if Some(i) == display_idx {
-            f.insert("is_display".into(), serde_json::json!(true));
-        }
-        fields.insert(format!("f_{i}"), serde_json::Value::Object(f));
-    }
-
-    McpResponse::Success(serde_json::json!({
-        "sheet": name, "row_id": target_row_id, "subrow_id": target_subrow_id,
-        "display_field": ctx.display_field, "field_count": columns.len(), "fields": fields
-    }).to_string())
+    McpResponse::Success(
+        serde_json::json!({
+            "sheet": name,
+            "row_id": target_row_id,
+            "subrow_id": target_subrow_id,
+            "display_field": ctx.display_field,
+            "field_count": columns.len(),
+            "fields": fields
+        })
+        .to_string(),
+    )
 }
 
 async fn process_search_cells(
@@ -628,6 +821,7 @@ async fn process_search_cells(
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
+    let ctx = build_schema_context(backend, name).await;
 
     let header = match excel.get_header(name).await {
         Ok(h) => h,
@@ -641,27 +835,53 @@ async fn process_search_cells(
     let column_defs = header.columns();
     let ql = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
+    let row_locations = row_locations(&sheet);
+    let scanned_rows = row_locations.len();
+    let display_idx = ctx
+        .display_field
+        .as_ref()
+        .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df));
 
-    for row_id in sheet.get_row_ids() {
+    for (row_id, subrow_id) in row_locations {
         if results.len() >= max_results {
             break;
         }
-        if let Ok(row) = sheet.get_row(row_id) {
-            for col_def in column_defs {
-                if results.len() >= max_results {
-                    break;
-                }
-                if col_def.kind() != ironworks::file::exh::ColumnKind::String {
-                    continue;
-                }
-                if let Ok(s) = row.read_string(u32::from(col_def.offset())) {
-                    if s.to_string().to_lowercase().contains(&ql) {
-                        results.push(serde_json::json!({
-                            "row_id": row_id,
-                            "column_offset": col_def.offset(),
-                            "value": s.to_string()
-                        }));
+        let row = match subrow_id {
+            Some(subrow_id) => match sheet.get_subrow(row_id, subrow_id) {
+                Ok(row) => row,
+                Err(_) => continue,
+            },
+            None => match sheet.get_row(row_id) {
+                Ok(row) => row,
+                Err(_) => continue,
+            },
+        };
+
+        for (i, col_def) in column_defs.iter().enumerate() {
+            if results.len() >= max_results {
+                break;
+            }
+            if col_def.kind() != ironworks::file::exh::ColumnKind::String {
+                continue;
+            }
+            if let Ok(s) = row.read_string(u32::from(col_def.offset())) {
+                let value = s.to_string();
+                if value.to_lowercase().contains(&ql) {
+                    let col_name = ctx
+                        .column_names
+                        .get(i)
+                        .map_or_else(|| format!("col_{}", col_def.offset()), |(n, _)| n.clone());
+                    let mut item = serde_json::Map::new();
+                    item.insert("row_id".into(), serde_json::json!(row_id));
+                    item.insert("subrow_id".into(), serde_json::json!(subrow_id));
+                    item.insert("column_index".into(), serde_json::json!(i));
+                    item.insert("column_offset".into(), serde_json::json!(col_def.offset()));
+                    item.insert("column_name".into(), serde_json::json!(col_name));
+                    item.insert("value".into(), serde_json::json!(value));
+                    if Some(i) == display_idx {
+                        item.insert("is_display".into(), serde_json::json!(true));
                     }
+                    results.push(serde_json::Value::Object(item));
                 }
             }
         }
@@ -673,6 +893,7 @@ async fn process_search_cells(
             "query": query,
             "language": format!("{lang:?}"),
             "count": results.len(),
+            "scanned_rows": scanned_rows,
             "truncated": results.len() >= max_results,
             "matches": results
         })
@@ -692,10 +913,7 @@ async fn process_follow_link(
         Ok(h) => h,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let sheet = match excel
-        .get_sheet(name, lang)
-        .await
-    {
+    let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
@@ -737,10 +955,7 @@ async fn process_decode_se_string(
         Ok(h) => h,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let sheet = match excel
-        .get_sheet(name, lang)
-        .await
-    {
+    let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
@@ -755,7 +970,8 @@ async fn process_decode_se_string(
     if col_def.kind() != ironworks::file::exh::ColumnKind::String {
         return McpResponse::Error(format!(
             "列 {} 的类型为 {:?}，不是 String，无法解码 SeString",
-            idx, col_def.kind()
+            idx,
+            col_def.kind()
         ));
     }
     let raw = match row.read_string(u32::from(col_def.offset())) {
@@ -764,7 +980,7 @@ async fn process_decode_se_string(
     };
     let raw_bytes = raw.as_bytes().to_vec();
 
-    use base64::{Engine, prelude::BASE64_STANDARD};
+    use base64::{prelude::BASE64_STANDARD, Engine};
     let base64 = BASE64_STANDARD.encode(&raw_bytes);
     let hex = raw_bytes
         .iter()
@@ -844,7 +1060,10 @@ async fn process_resolve_display_field(
 
     let value = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
         row.read_string(u32::from(col_def.offset()))
-            .map_or(serde_json::Value::Null, |s| serde_json::json!(s.to_string()))
+            .map_or(
+                serde_json::Value::Null,
+                |s| serde_json::json!(s.to_string()),
+            )
     } else {
         row.read::<u32>(u32::from(col_def.offset()))
             .map_or(serde_json::Value::Null, |v| serde_json::json!(v))
@@ -914,20 +1133,24 @@ async fn dispatch_request(backend: &Backend, req: McpRequest, lang: Language) ->
             row_id,
             subrow_id,
             search_name,
-        } => process_get_row(backend, &name, row_id, subrow_id, search_name.as_deref(), lang).await,
+        } => {
+            process_get_row(
+                backend,
+                &name,
+                row_id,
+                subrow_id,
+                search_name.as_deref(),
+                lang,
+            )
+            .await
+        }
         McpRequest::ValidateFilter { expression } => {
             McpResponse::Success(process_validate_filter(&expression))
         }
-        McpRequest::ValidateSchema { text } => {
-            McpResponse::Success(process_validate_schema(&text))
-        }
-        McpRequest::GetIconUrl { icon_id } => {
-            McpResponse::Success(process_get_icon_url(icon_id))
-        }
+        McpRequest::ValidateSchema { text } => McpResponse::Success(process_validate_schema(&text)),
+        McpRequest::GetIconUrl { icon_id } => McpResponse::Success(process_get_icon_url(icon_id)),
         McpRequest::DecomposeModelId { model_id } => process_decompose_model_id(&model_id),
-        McpRequest::GetSheetRelations { name } => {
-            process_get_sheet_relations(backend, &name).await
-        }
+        McpRequest::GetSheetRelations { name } => process_get_sheet_relations(backend, &name).await,
         McpRequest::GetReferencingSheets { target_sheet } => {
             process_get_referencing_sheets(backend, &target_sheet).await
         }
@@ -991,14 +1214,13 @@ pub fn start(config: BackendConfig) -> McpHandle {
             };
 
             while !worker_shutdown.is_cancelled() {
-                let Ok((req, resp_tx)) =
-                    request_rx.recv_timeout(Duration::from_millis(100))
-                else {
+                let Ok((req, resp_tx)) = request_rx.recv_timeout(Duration::from_millis(100)) else {
                     continue;
                 };
 
-                let response =
-                    rt.block_on(async { dispatch_request(&backend, req, Language::ChineseSimplified).await });
+                let response = rt.block_on(async {
+                    dispatch_request(&backend, req, Language::ChineseSimplified).await
+                });
                 let _ = resp_tx.send(response);
             }
         })

@@ -5,13 +5,9 @@ use std::{
 
 use ironworks::excel::Language;
 use rmcp::{
-    ErrorData as McpError, ServerHandler,
-    handler::server::{
-        router::tool::ToolRouter,
-        wrapper::Parameters,
-    },
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router,
+    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
 };
 use tokio::sync::oneshot;
 
@@ -20,6 +16,7 @@ use crate::settings::BackendConfig;
 use super::{McpChannel, McpRequest, McpResponse};
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ListSheetsParams {
     pub query: Option<String>,
     pub include_misc: Option<bool>,
@@ -28,45 +25,69 @@ pub struct ListSheetsParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SheetNameParam {
     pub name: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ValidateFilterParams {
     pub expression: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SaveSchemaParams {
     pub name: String,
     pub text: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetReferencingSheetsParams {
     pub target_sheet: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetRowParams {
+    /// 精确表名, 不确定时先调用 search_sheets
     pub name: String,
+    /// 已知行 ID 时填写, 模糊查找请先用 query_rows 或 search_cells
     pub row_id: Option<u32>,
+    /// 子行 ID, 仅子行表需要
     pub subrow_id: Option<u16>,
+    /// 只按 display_field 做简单包含搜索, 优先用 query_rows 或 search_cells
     pub search_name: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct SearchParams {
+#[serde(deny_unknown_fields)]
+pub struct SearchCellsParams {
+    /// 精确表名, 不确定时先调用 search_sheets
     pub name: String,
-    pub query: Option<String>,
-    pub filter: Option<String>,
+    /// 必填关键词, 这是普通文本搜索, 不是筛选 DSL
+    pub query: String,
+    /// 最大返回单元格命中数, 默认 50
     pub max_results: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRowsParams {
+    /// 精确表名, 不确定时先调用 search_sheets
+    pub name: String,
+    /// 复杂筛选 DSL, 例如 `# = 42`, `Name *= "Potion"`, `Level >= 50 AND Name not *= Test`
+    pub filter: Option<String>,
+    /// 匹配结果偏移量, 默认 0
     pub offset: Option<usize>,
+    /// 返回匹配行数, 默认 50, 服务端会限制最大值
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct FollowLinkParams {
     pub name: String,
     pub row_id: u32,
@@ -74,6 +95,7 @@ pub struct FollowLinkParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DecodeSeStringParams {
     pub name: String,
     pub row_id: u32,
@@ -82,26 +104,31 @@ pub struct DecodeSeStringParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetIconUrlParams {
     pub icon_id: u32,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct DecomposeModelIdParams {
     pub model_id: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SearchSheetsParams {
     pub query: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GetSheetInfoParams {
     pub name: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ResolveDisplayFieldParams {
     pub name: String,
     pub row_id: u32,
@@ -279,7 +306,9 @@ impl McpHandler {
         )]))
     }
 
-    #[tool(description = "校验复杂筛选 DSL 表达式语法")]
+    #[tool(
+        description = "校验复杂筛选 DSL 表达式语法。构造 query_rows 的 filter 前先用它检查, 不能用于搜索数据"
+    )]
     async fn validate_filter(
         &self,
         Parameters(params): Parameters<ValidateFilterParams>,
@@ -357,16 +386,18 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "在指定表的所有行中搜索包含指定文本的单元格")]
+    #[tool(
+        description = "在指定表中搜索包含指定文本的字符串单元格。只接受 query 关键词, 不接受 filter DSL；需要行级条件筛选请用 query_rows"
+    )]
     async fn search_cells(
         &self,
-        Parameters(params): Parameters<SearchParams>,
+        Parameters(params): Parameters<SearchCellsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
                 McpRequest::SearchCells {
                     name: params.name,
-                    query: params.query.unwrap_or_default(),
+                    query: params.query,
                     max_results: params.max_results.unwrap_or(50),
                 },
                 Self::heavy_timeout(),
@@ -375,10 +406,12 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "按条件分页查询表中行数据，支持复杂筛选 DSL 表达式")]
+    #[tool(
+        description = "按行或子行分页查询表数据。需要复杂筛选 DSL 时传 filter；普通关键词搜单元格请用 search_cells；已知 row_id 请用 get_row"
+    )]
     async fn query_rows(
         &self,
-        Parameters(params): Parameters<SearchParams>,
+        Parameters(params): Parameters<QueryRowsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
@@ -394,7 +427,9 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "按表名和行 ID/子行 ID 精确获取单行，支持按显示字段值搜索")]
+    #[tool(
+        description = "按表名和行 ID/子行 ID 精确获取单行。已知 row_id 时用这个；模糊找行请先用 query_rows 或 search_cells"
+    )]
     async fn get_row(
         &self,
         Parameters(params): Parameters<GetRowParams>,
@@ -516,14 +551,17 @@ impl McpHandler {
     }
 }
 
-#[tool_handler(instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表查询、模式管理、搜索等功能")]
+#[tool_handler(
+    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表查询、模式管理、搜索和筛选功能。工具选择规则：不确定表名先用 search_sheets；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；不要把 search_cells 当 DSL 筛选使用"
+)]
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::from_build_env())
             .with_instructions(
-                "EXDViewer MCP 服务器，提供 18 个工具用于查询 FFXIV 游戏数据表。\
-                 涵盖：表列表/元信息/模式定义/行查询/跨表搜索/关系查询/SeString 解码/图标/ModelId 分解/模式编辑/筛选校验。"
+                "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表查询工具。\
+                 典型流程：search_sheets 找表 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
+                 search_cells 只做普通文本搜索, 不接收 DSL；query_rows 才处理 filter。"
                     .to_string(),
             )
     }

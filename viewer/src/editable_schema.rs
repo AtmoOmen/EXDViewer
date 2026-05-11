@@ -232,7 +232,11 @@ impl EditableSchema {
 
                             let mut add_separator = false;
                             if let Some(cursor) = cursor {
-                                ui.label(format!("行 {}, 列 {}", cursor.row + 1, cursor.column + 1));
+                                ui.label(format!(
+                                    "行 {}, 列 {}",
+                                    cursor.row + 1,
+                                    cursor.column + 1
+                                ));
                                 add_separator = true;
                             }
 

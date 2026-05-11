@@ -263,12 +263,12 @@ impl GoToWindow {
         if let Some((sheet_pattern, row_pattern)) = pattern.split_once(':') {
             if !sheet_pattern.is_empty() {
                 let sheets = Self::match_sheet(sheet_pattern, sheet_matcher, sheet_list);
-                let location = Self::match_location(row_pattern)
-                    .ok_or_else(|| anyhow::anyhow!("无效的行"))?;
+                let location =
+                    Self::match_location(row_pattern).ok_or_else(|| anyhow::anyhow!("无效的行"))?;
                 Ok(EitherOrBoth::Both(sheets, location))
             } else {
-                let location = Self::match_location(row_pattern)
-                    .ok_or_else(|| anyhow::anyhow!("无效的行"))?;
+                let location =
+                    Self::match_location(row_pattern).ok_or_else(|| anyhow::anyhow!("无效的行"))?;
                 Ok(EitherOrBoth::Right(location))
             }
         } else {

@@ -224,9 +224,7 @@ impl SetupWindow {
                                                                 ui.label("正在获取...");
                                                             }
                                                             Some(Err(e)) => {
-                                                                ui.label(format!(
-                                                                    "发生错误: {e}"
-                                                                ));
+                                                                ui.label(format!("发生错误: {e}"));
                                                             }
                                                             Some(Ok(entries)) => {
                                                                 if entries.is_empty() {
@@ -350,8 +348,7 @@ impl SetupWindow {
                                     matches!(self.schema, SchemaLocation::Worker(_)),
                                     "本地",
                                 ) {
-                                    self.schema =
-                                        SchemaLocation::Worker("选择文件夹".to_string());
+                                    self.schema = SchemaLocation::Worker("选择文件夹".to_string());
                                 }
                                 if radio(
                                     col_1,
@@ -427,9 +424,7 @@ impl SetupWindow {
                                                                 ui.label("正在获取...");
                                                             }
                                                             Some(Err(e)) => {
-                                                                ui.label(format!(
-                                                                    "发生错误: {e}"
-                                                                ));
+                                                                ui.label(format!("发生错误: {e}"));
                                                             }
                                                             Some(Ok(entries)) => {
                                                                 if entries.is_empty() {

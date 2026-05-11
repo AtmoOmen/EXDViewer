@@ -247,8 +247,11 @@ impl App {
                         ui.menu_button("列排序", |ui| {
                             let mut sorted_by_offset = SORTED_BY_OFFSET.get(ctx);
                             let r = ui.selectable_value(&mut sorted_by_offset, true, "按偏移排序");
-                            let r =
-                                r.union(ui.selectable_value(&mut sorted_by_offset, false, "按索引排序"));
+                            let r = r.union(ui.selectable_value(
+                                &mut sorted_by_offset,
+                                false,
+                                "按索引排序",
+                            ));
                             if r.changed() {
                                 ui.close();
                                 SORTED_BY_OFFSET.set(ctx, sorted_by_offset);
@@ -294,7 +297,10 @@ impl App {
 
                             let mut use_scroll = TEXT_USE_SCROLL.get(ctx);
                             ui.horizontal(|ui| {
-                                if ui.checkbox(&mut use_scroll, "文本溢出时显示滚动条").changed() {
+                                if ui
+                                    .checkbox(&mut use_scroll, "文本溢出时显示滚动条")
+                                    .changed()
+                                {
                                     TEXT_USE_SCROLL.set(ctx, use_scroll);
                                 }
                             });
@@ -434,9 +440,9 @@ impl App {
                             let modified_schemas = self.get_modified_schemas();
                             if !modified_schemas.is_empty() {
                                 ui.label(format!("已修改 {} 个表定义", modified_schemas.len()))
-                                .on_hover_text(
-                                    modified_schemas.iter().map(|(name, _)| name).join("\n"),
-                                );
+                                    .on_hover_text(
+                                        modified_schemas.iter().map(|(name, _)| name).join("\n"),
+                                    );
                                 let resp = ui
                                     .with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.button(if modified_schemas.len() > 1 {

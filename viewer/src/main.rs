@@ -117,9 +117,7 @@ fn main() {
                     loading_text.remove();
                 }
                 Err(e) => {
-                    loading_text.set_inner_html(
-                        "<p> 应用已崩溃 请查看开发者控制台获取详情 </p>",
-                    );
+                    loading_text.set_inner_html("<p> 应用已崩溃 请查看开发者控制台获取详情 </p>");
                     panic!("Failed to start eframe: {e:?}");
                 }
             }

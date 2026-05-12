@@ -9,6 +9,18 @@ use super::{
 };
 
 #[test]
+fn local_session_manager_can_disable_keep_alive_timeout() {
+    let mut session_manager =
+        rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default();
+
+    assert!(session_manager.session_config.keep_alive.is_some());
+
+    session_manager.session_config.keep_alive = None;
+
+    assert!(session_manager.session_config.keep_alive.is_none());
+}
+
+#[test]
 fn search_cells_params_reject_filter_field() {
     let err = serde_json::from_value::<SearchCellsParams>(json!({
         "name": "Item",

@@ -1272,6 +1272,8 @@ pub fn start(config: BackendConfig) -> McpHandle {
                     Language::ChineseSimplified,
                 ));
                 let ct = tokio_util::sync::CancellationToken::new();
+                let mut session_manager = rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default();
+                session_manager.session_config.keep_alive = None;
 
                 let config =
                     rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
@@ -1283,9 +1285,7 @@ pub fn start(config: BackendConfig) -> McpHandle {
                             let handler = handler.clone();
                             move || Ok(handler.as_ref().clone())
                         },
-                        std::sync::Arc::new(
-                            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
-                        ),
+                        std::sync::Arc::new(session_manager),
                         config,
                     );
 

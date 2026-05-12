@@ -1,4 +1,7 @@
+use compact_str::CompactString;
 use serde_json::json;
+
+use crate::sheet::CellValue;
 
 use super::{
     handler::{QueryRowsParams, SearchCellsParams},
@@ -42,4 +45,63 @@ fn validate_filter_rejects_invalid_dsl() {
     let value: serde_json::Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(value["valid"], false);
+}
+
+#[test]
+fn structured_string_value_includes_display_and_raw_text() {
+    let value = CellValue::String(CompactString::from("Hello").into()).to_structured_value();
+
+    assert_eq!(value["kind"], "String");
+    assert_eq!(value["display"], "Hello");
+    assert_eq!(value["raw"]["macro"], "Hello");
+    assert!(value["raw"]["bytes_base64"].is_string());
+}
+
+#[test]
+fn structured_model_id_value_exposes_parts() {
+    let value = CellValue::ModelId(either::Either::Left(0x01020304)).to_structured_value();
+
+    assert_eq!(value["kind"], "ModelId");
+    assert_eq!(value["parts"]["model"], 0x0304);
+    assert_eq!(value["parts"]["variant"], 0x02);
+    assert_eq!(value["parts"]["stain"], 0x01);
+}
+
+#[test]
+fn structured_link_value_embeds_nested_value() {
+    let value = CellValue::ValidLink {
+        sheet_name: CompactString::from("Item"),
+        row_id: 42,
+        value: Some(Box::new(CellValue::Boolean(true))),
+    }
+    .to_structured_value();
+
+    assert_eq!(value["kind"], "Link");
+    assert_eq!(value["state"], "valid");
+    assert_eq!(value["display"], "true");
+    assert_eq!(value["sheet_name"], "Item");
+    assert_eq!(value["row_id"], 42);
+    assert_eq!(value["value"]["kind"], "Boolean");
+}
+
+#[test]
+fn build_row_fields_uses_column_index_order() {
+    let fields = super::build_row_fields_from_columns(
+        Some(1),
+        vec![
+            ("First".to_string(), "Scalar".to_string()),
+            ("Second".to_string(), "Scalar".to_string()),
+            ("Third".to_string(), "Scalar".to_string()),
+        ],
+        |column_idx| Ok(CellValue::Integer((column_idx as i128) * 10)),
+    )
+    .unwrap();
+
+    assert_eq!(fields["f_0"]["name"], "First");
+    assert_eq!(fields["f_1"]["name"], "Second");
+    assert_eq!(fields["f_2"]["name"], "Third");
+    assert_eq!(fields["f_0"]["value"]["raw"], 0);
+    assert_eq!(fields["f_1"]["value"]["raw"], 10);
+    assert_eq!(fields["f_2"]["value"]["raw"], 20);
+    assert_eq!(fields["f_1"]["is_display"], true);
 }

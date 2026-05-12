@@ -11,7 +11,7 @@ mod table_context;
 use std::{fmt::Write, sync::Arc};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-pub use cell::{CellResponse, MatchOptions};
+pub use cell::{CellResponse, CellValue, MatchOptions};
 use compact_str::ToCompactString;
 use egui::{
     Align, Color32, Direction, FontSelection, Galley, Label, Layout, Response, RichText, Sense,
@@ -19,6 +19,7 @@ use egui::{
 };
 pub use filter::{ComplexFilter, FilterInput, FilterInputType};
 pub use global_context::GlobalContext;
+pub use schema_column::SchemaColumnMeta;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;
 pub use sheet_table::SheetTable;

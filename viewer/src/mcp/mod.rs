@@ -15,7 +15,15 @@ use crate::{
     },
     schema::provider::SchemaProvider,
     settings::BackendConfig,
-    sheet::{ComplexFilter, FilterInput, GlobalContext, MatchOptions, TableContext},
+    sheet::{
+        ComplexFilter,
+        FilterInput,
+        GlobalContext,
+        CellValue,
+        MatchOptions,
+        SchemaColumnMeta,
+        TableContext,
+    },
     utils::IconManager,
 };
 use handler::McpHandler;
@@ -222,6 +230,20 @@ struct SchemaContext {
     display_field: Option<String>,
 }
 
+fn schema_column_type_name(meta: &SchemaColumnMeta) -> &'static str {
+    match meta {
+        SchemaColumnMeta::Scalar => "Scalar",
+        SchemaColumnMeta::Icon => "Icon",
+        SchemaColumnMeta::ModelId => "ModelId",
+        SchemaColumnMeta::Color => "Color",
+        SchemaColumnMeta::Link(_) | SchemaColumnMeta::ConditionalLink { .. } => "Link",
+    }
+}
+
+fn cell_value_to_json(value: &CellValue) -> serde_json::Value {
+    value.to_structured_value()
+}
+
 async fn build_schema_context(backend: &Backend, name: &str) -> SchemaContext {
     match load_schema_snapshot(backend, name).await {
         Ok(snapshot) => match snapshot.parsed_schema() {
@@ -292,60 +314,60 @@ fn row_locations(sheet: &impl ExcelSheet) -> Vec<(u32, Option<u16>)> {
 }
 
 fn build_row_fields(
-    columns: &[ironworks::file::exh::ColumnDefinition],
+    table: &TableContext,
     row: &crate::excel::provider::ExcelRow<'_>,
-    ctx: &SchemaContext,
-) -> serde_json::Map<String, serde_json::Value> {
-    let display_idx = ctx.display_field.as_ref().and_then(|display_field| {
-        ctx.column_names
-            .iter()
-            .position(|(name, _)| name == display_field)
-    });
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
+    let columns = table
+        .columns()?
+        .into_iter()
+        .map(|(schema_column, _sheet_column)| {
+            (
+                schema_column.name().to_string(),
+                schema_column_type_name(schema_column.meta()).to_string(),
+            )
+        })
+        .collect();
+    build_row_fields_from_columns(table.display_column_idx(), columns, |column_idx| {
+        let cell = table.cell_by_offset(*row, column_idx as u32)?;
+        Ok(cell.read(true)?)
+    })
+}
 
+fn build_row_fields_from_columns(
+    display_idx: Option<u32>,
+    columns: Vec<(String, String)>,
+    mut read_cell: impl FnMut(usize) -> anyhow::Result<CellValue>,
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let mut fields = serde_json::Map::new();
-    for (i, col_def) in columns.iter().enumerate() {
-        let off = u32::from(col_def.offset());
-        let col_name = ctx
-            .column_names
-            .get(i)
-            .map_or_else(|| format!("col_{off}"), |(name, _)| name.clone());
-        let col_type = ctx
-            .column_names
-            .get(i)
-            .map_or("unknown", |(_, type_name)| type_name.as_str());
-        let value = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
-            row.read_string(off).map_or(serde_json::json!(null), |s| {
-                serde_json::json!(s.to_string())
-            })
-        } else {
-            row.read::<u32>(off)
-                .map_or(serde_json::json!(null), |v| serde_json::json!(v))
-        };
+    for (i, (name, type_name)) in columns.into_iter().enumerate() {
+        let cell_value = read_cell(i)?;
+        let value = cell_value_to_json(&cell_value);
 
         let mut field = serde_json::Map::new();
-        field.insert("name".into(), serde_json::json!(col_name));
-        field.insert("type".into(), serde_json::json!(col_type));
+        field.insert("name".into(), serde_json::json!(name));
+        field.insert("type".into(), serde_json::json!(type_name));
+        field.insert("kind".into(), serde_json::json!(value["kind"].as_str().unwrap_or("Unknown")));
         field.insert("value".into(), value);
-        if Some(i) == display_idx {
+        field.insert("display".into(), serde_json::json!(cell_value.display_text().to_string()));
+        if display_idx == Some(i as u32) {
             field.insert("is_display".into(), serde_json::json!(true));
         }
         fields.insert(format!("f_{i}"), serde_json::Value::Object(field));
     }
-    fields
+    Ok(fields)
 }
 
 fn build_row_object(
-    columns: &[ironworks::file::exh::ColumnDefinition],
+    table: &TableContext,
     row: &crate::excel::provider::ExcelRow<'_>,
-    ctx: &SchemaContext,
     row_id: u32,
     subrow_id: Option<u16>,
-) -> serde_json::Map<String, serde_json::Value> {
+) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let mut row_obj = serde_json::Map::new();
     row_obj.insert("row_id".into(), serde_json::json!(row_id));
     row_obj.insert("subrow_id".into(), serde_json::json!(subrow_id));
-    row_obj.extend(build_row_fields(columns, row, ctx));
-    row_obj
+    row_obj.extend(build_row_fields(table, row)?);
+    Ok(row_obj)
 }
 
 fn process_list_sheets(
@@ -591,10 +613,6 @@ async fn process_query_rows(
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
-    let header = match excel.get_header(name).await {
-        Ok(h) => h,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
@@ -605,7 +623,6 @@ async fn process_query_rows(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
-    let columns = header.columns();
     let row_locations = row_locations(&sheet);
     let total_rows = row_locations.len();
     let page_limit = limit.min(200);
@@ -668,7 +685,15 @@ async fn process_query_rows(
                 None
             };
 
-            let mut row_obj = build_row_object(&columns, &row, &ctx, row_id, subrow_id);
+            let mut row_obj = match build_row_object(
+                &table_context,
+                &row,
+                row_id,
+                subrow_id,
+            ) {
+                Ok(row_obj) => row_obj,
+                Err(e) => return McpResponse::Error(format!("{e}")),
+            };
             row_obj.insert("row_index".into(), serde_json::json!(sequence));
             if let Some(score) = score {
                 row_obj.insert("match_score".into(), serde_json::json!(score.get()));
@@ -709,7 +734,15 @@ async fn process_query_rows(
                 },
             };
 
-            let mut row_obj = build_row_object(&columns, &row, &ctx, row_id, subrow_id);
+            let mut row_obj = match build_row_object(
+                &table_context,
+                &row,
+                row_id,
+                subrow_id,
+            ) {
+                Ok(row_obj) => row_obj,
+                Err(e) => return McpResponse::Error(format!("{e}")),
+            };
             row_obj.insert("row_index".into(), serde_json::json!(sequence));
             rows.push(serde_json::Value::Object(row_obj));
         }
@@ -741,24 +774,22 @@ async fn process_get_row(
 ) -> McpResponse {
     let excel = backend.excel();
     let ctx = build_schema_context(backend, name).await;
-    let header = match excel.get_header(name).await {
-        Ok(h) => h,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
+    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
+        Ok(ctx) => ctx,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
     let (target_row_id, target_subrow_id) = if let Some(search) = search_name {
         let search_lower = search.to_lowercase();
-        let columns = header.columns();
-        let display_idx = ctx
-            .display_field
-            .as_ref()
-            .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df))
-            .unwrap_or(0);
-        let col_def = &columns[display_idx.min(columns.len().saturating_sub(1))];
+        let display_idx = table_context.display_column_idx().unwrap_or(0);
+        let (_, col_def) = match table_context.get_column_by_offset(display_idx) {
+            Ok(column) => column,
+            Err(e) => return McpResponse::Error(format!("{e}")),
+        };
         let mut found = None;
         for (rid, sid) in row_locations(&sheet) {
             let row = match sid {
@@ -797,8 +828,10 @@ async fn process_get_row(
         Ok(r) => r,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let columns = header.columns();
-    let fields = build_row_fields(&columns, &row, &ctx);
+    let fields = match build_row_fields(&table_context, &row) {
+        Ok(fields) => fields,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
 
     McpResponse::Success(
         serde_json::json!({
@@ -806,7 +839,7 @@ async fn process_get_row(
             "row_id": target_row_id,
             "subrow_id": target_subrow_id,
             "display_field": ctx.display_field,
-            "field_count": columns.len(),
+            "field_count": table_context.column_count(),
             "fields": fields
         })
         .to_string(),
@@ -821,26 +854,24 @@ async fn process_search_cells(
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
-    let ctx = build_schema_context(backend, name).await;
-
-    let header = match excel.get_header(name).await {
-        Ok(h) => h,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
+    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
+        Ok(ctx) => ctx,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
 
-    let column_defs = header.columns();
+    let column_defs = match table_context.columns() {
+        Ok(columns) => columns,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
     let ql = query.to_lowercase();
     let mut results: Vec<serde_json::Value> = Vec::new();
     let row_locations = row_locations(&sheet);
     let scanned_rows = row_locations.len();
-    let display_idx = ctx
-        .display_field
-        .as_ref()
-        .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df));
+    let display_idx = table_context.display_column_idx();
 
     for (row_id, subrow_id) in row_locations {
         if results.len() >= max_results {
@@ -857,7 +888,7 @@ async fn process_search_cells(
             },
         };
 
-        for (i, col_def) in column_defs.iter().enumerate() {
+        for (i, (_, col_def)) in column_defs.iter().enumerate() {
             if results.len() >= max_results {
                 break;
             }
@@ -867,10 +898,7 @@ async fn process_search_cells(
             if let Ok(s) = row.read_string(u32::from(col_def.offset())) {
                 let value = s.to_string();
                 if value.to_lowercase().contains(&ql) {
-                    let col_name = ctx
-                        .column_names
-                        .get(i)
-                        .map_or_else(|| format!("col_{}", col_def.offset()), |(n, _)| n.clone());
+                    let col_name = column_defs[i].0.name().to_string();
                     let mut item = serde_json::Map::new();
                     item.insert("row_id".into(), serde_json::json!(row_id));
                     item.insert("subrow_id".into(), serde_json::json!(subrow_id));
@@ -878,7 +906,7 @@ async fn process_search_cells(
                     item.insert("column_offset".into(), serde_json::json!(col_def.offset()));
                     item.insert("column_name".into(), serde_json::json!(col_name));
                     item.insert("value".into(), serde_json::json!(value));
-                    if Some(i) == display_idx {
+                    if display_idx == Some(i as u32) {
                         item.insert("is_display".into(), serde_json::json!(true));
                     }
                     results.push(serde_json::Value::Object(item));
@@ -909,12 +937,12 @@ async fn process_follow_link(
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
-    let header = match excel.get_header(name).await {
-        Ok(h) => h,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
+    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
+        Ok(ctx) => ctx,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
     let row = match sheet.get_row(row_id) {
@@ -922,9 +950,11 @@ async fn process_follow_link(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
-    let columns = header.columns();
-    let idx = column_index.min(columns.len().saturating_sub(1));
-    let col_def = &columns[idx];
+    let idx = column_index.min(table_context.column_count().saturating_sub(1));
+    let ((_, col_def), _) = match table_context.get_column_by_index(idx as u32) {
+        Ok(column) => column,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
     let link_value = match row.read::<u32>(u32::from(col_def.offset())) {
         Ok(v) => v,
         Err(e) => return McpResponse::Error(format!("{e}")),
@@ -951,12 +981,12 @@ async fn process_decode_se_string(
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
-    let header = match excel.get_header(name).await {
-        Ok(h) => h,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
+    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
+        Ok(ctx) => ctx,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
     let row = match sheet.get_subrow(row_id, subrow_id) {
@@ -964,9 +994,11 @@ async fn process_decode_se_string(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
-    let columns = header.columns();
-    let idx = column_index.min(columns.len().saturating_sub(1));
-    let col_def = &columns[idx];
+    let idx = column_index.min(table_context.column_count().saturating_sub(1));
+    let ((_, col_def), _) = match table_context.get_column_by_index(idx as u32) {
+        Ok(column) => column,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
     if col_def.kind() != ironworks::file::exh::ColumnKind::String {
         return McpResponse::Error(format!(
             "列 {} 的类型为 {:?}，不是 String，无法解码 SeString",
@@ -1013,20 +1045,16 @@ async fn process_resolve_display_field(
 ) -> McpResponse {
     let excel = backend.excel();
     let ctx = build_schema_context(backend, name).await;
-    let header = match excel.get_header(name).await {
-        Ok(h) => h,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
+    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
+        Ok(ctx) => ctx,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
 
-    let Some(display_idx) = ctx
-        .display_field
-        .as_ref()
-        .and_then(|df| ctx.column_names.iter().position(|(n, _)| n == df))
-    else {
+    let Some(display_idx) = table_context.display_column_idx() else {
         return McpResponse::Success(
             serde_json::json!({
                 "sheet": name,
@@ -1039,18 +1067,20 @@ async fn process_resolve_display_field(
         );
     };
 
-    let columns = header.columns();
-    let Some(col_def) = columns.get(display_idx) else {
-        return McpResponse::Success(
-            serde_json::json!({
-                "sheet": name,
-                "row_id": row_id,
-                "subrow_id": subrow_id,
-                "resolved": null,
-                "reason": "display field index out of bounds"
-            })
-            .to_string(),
-        );
+    let (_, col_def) = match table_context.get_column_by_offset(display_idx) {
+        Ok(column) => column,
+        Err(_) => {
+            return McpResponse::Success(
+                serde_json::json!({
+                    "sheet": name,
+                    "row_id": row_id,
+                    "subrow_id": subrow_id,
+                    "resolved": null,
+                    "reason": "display field index out of bounds"
+                })
+                .to_string(),
+            );
+        }
     };
 
     let row = match sheet.get_subrow(row_id, subrow_id) {

@@ -1,6 +1,7 @@
 use std::{borrow::Cow, rc::Rc};
 
 use anyhow::bail;
+use base64::{Engine, prelude::BASE64_STANDARD};
 use compact_str::{CompactString, ToCompactString, format_compact};
 use egui::{
     Color32, CursorIcon, Direction, InnerResponse, Layout, Sense, Vec2, Widget,
@@ -9,6 +10,7 @@ use egui::{
 use either::Either;
 use ironworks::file::exh::ColumnKind;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::{
     excel::{
@@ -78,6 +80,160 @@ pub enum CellValue {
 }
 
 impl CellValue {
+    pub fn display_text(&self) -> CompactString {
+        match self {
+            CellValue::String(s) => s.macro_string().try_to_compact_string().unwrap_or_default(),
+            CellValue::Integer(i) => i.to_compact_string(),
+            CellValue::Float(f) => f.to_compact_string(),
+            CellValue::Boolean(b) => b.to_compact_string(),
+            CellValue::Icon(id) => id.to_compact_string(),
+            CellValue::ModelId(id) => id.either(
+                |model_id| {
+                    let model = (model_id & 0xFFFF) as u16;
+                    let variant = ((model_id >> 16) & 0xFF) as u8;
+                    let stain = ((model_id >> 24) & 0xFF) as u8;
+                    format_compact!("{model}, {variant}, {stain}")
+                },
+                |weapon_id| {
+                    let skeleton = (weapon_id & 0xFFFF) as u16;
+                    let model = ((weapon_id >> 16) & 0xFFFF) as u16;
+                    let variant = ((weapon_id >> 32) & 0xFFFF) as u16;
+                    let stain = ((weapon_id >> 48) & 0xFFFF) as u16;
+                    format_compact!("{skeleton}, {model}, {variant}, {stain}")
+                },
+            ),
+            CellValue::Color(color) => HexColor::Hex8(*color).to_compact_string(),
+            CellValue::InvalidLink(id) => format_compact!("???#{id}"),
+            CellValue::InProgressLink(id) => format_compact!("...#{id}"),
+            CellValue::ValidLink { row_id, value, .. } => value
+                .as_ref()
+                .map_or_else(|| row_id.to_compact_string(), |v| v.display_text()),
+        }
+    }
+
+    pub fn to_structured_value(&self) -> serde_json::Value {
+        match self {
+            CellValue::String(s) => {
+                let macro_text = s
+                    .macro_string()
+                    .try_to_compact_string()
+                    .unwrap_or_default()
+                    .to_string();
+                let formatted_text = s
+                    .format()
+                    .try_to_compact_string()
+                    .unwrap_or_else(|_| CompactString::from(macro_text.as_str()))
+                    .to_string();
+                let raw_bytes = s.as_bytes();
+                json!({
+                    "kind": "String",
+                    "display": macro_text,
+                    "raw": {
+                        "macro": macro_text,
+                        "formatted": formatted_text,
+                        "bytes_base64": BASE64_STANDARD.encode(raw_bytes),
+                        "bytes_hex": raw_bytes
+                            .iter()
+                            .map(|b| format!("{b:02X}"))
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        "byte_count": raw_bytes.len(),
+                    }
+                })
+            }
+            CellValue::Integer(i) => json!({
+                "kind": "Integer",
+                "display": i.to_compact_string().to_string(),
+                "raw": i,
+            }),
+            CellValue::Float(f) => json!({
+                "kind": "Float",
+                "display": f.to_compact_string().to_string(),
+                "raw": f,
+            }),
+            CellValue::Boolean(b) => json!({
+                "kind": "Boolean",
+                "display": b.to_compact_string().to_string(),
+                "raw": b,
+            }),
+            CellValue::Icon(id) => json!({
+                "kind": "Icon",
+                "display": id.to_compact_string().to_string(),
+                "raw": id,
+            }),
+            CellValue::ModelId(id) => id.either(
+                |model_id| {
+                    let model = (model_id & 0xFFFF) as u16;
+                    let variant = ((model_id >> 16) & 0xFF) as u8;
+                    let stain = ((model_id >> 24) & 0xFF) as u8;
+                    json!({
+                        "kind": "ModelId",
+                        "display": format!("{model}, {variant}, {stain}"),
+                        "raw": model_id,
+                        "parts": {
+                            "model": model,
+                            "variant": variant,
+                            "stain": stain,
+                        }
+                    })
+                },
+                |weapon_id| {
+                    let skeleton = (weapon_id & 0xFFFF) as u16;
+                    let model = ((weapon_id >> 16) & 0xFFFF) as u16;
+                    let variant = ((weapon_id >> 32) & 0xFFFF) as u16;
+                    let stain = ((weapon_id >> 48) & 0xFFFF) as u16;
+                    json!({
+                        "kind": "ModelId",
+                        "display": format!("{skeleton}, {model}, {variant}, {stain}"),
+                        "raw": weapon_id,
+                        "parts": {
+                            "skeleton": skeleton,
+                            "model": model,
+                            "variant": variant,
+                            "stain": stain,
+                        }
+                    })
+                },
+            ),
+            CellValue::Color(color) => {
+                let rgba = color.to_array();
+                let raw = u32::from_le_bytes(rgba);
+                json!({
+                    "kind": "Color",
+                    "display": HexColor::Hex8(*color).to_compact_string().to_string(),
+                    "raw": raw,
+                    "rgba": rgba,
+                })
+            }
+            CellValue::InvalidLink(id) => json!({
+                "kind": "Link",
+                "state": "invalid",
+                "display": format!("???#{id}"),
+                "row_id": id,
+            }),
+            CellValue::InProgressLink(id) => json!({
+                "kind": "Link",
+                "state": "in_progress",
+                "display": format!("...#{id}"),
+                "row_id": id,
+            }),
+            CellValue::ValidLink {
+                sheet_name,
+                row_id,
+                value,
+            } => json!({
+                "kind": "Link",
+                "state": "valid",
+                "display": value
+                    .as_ref()
+                    .map_or_else(|| format!("{sheet_name}#{row_id}"), |v| v.display_text().to_string()),
+                "sheet_name": sheet_name.to_string(),
+                "row_id": row_id,
+                "value": value.as_ref().map(|v| v.to_structured_value()),
+            }),
+        }
+    }
+
     pub fn coerce_filter_integers(&self) -> Vec<i128> {
         let mut values = Vec::new();
         self.push_filter_integers(&mut values);

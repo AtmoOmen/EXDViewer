@@ -252,6 +252,17 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    #[tool(description = "检查 MCP 服务器健康状态")]
+    async fn health_check(&self) -> Result<CallToolResult, McpError> {
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "status": "ok",
+                "language": format!("{:?}", self.language),
+            })
+            .to_string(),
+        )]))
+    }
+
     #[tool(description = "获取当前加载的游戏数据源和模式数据源信息")]
     async fn get_game_version(&self) -> Result<CallToolResult, McpError> {
         let config = self

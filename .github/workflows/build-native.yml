@@ -123,14 +123,14 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force package\win-x64 | Out-Null
           Copy-Item exdviewer-win-x64\exdviewer-win-x64.exe package\win-x64\viewer.exe
-          vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-x64 -e viewer.exe -r win-x64 -c win --packTitle EXDViewer --packAuthors AtmoOmen
+          vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-x64 -e viewer.exe -r win-x64 -c win -i viewer\assets\icon.ico --packTitle EXDViewer --packAuthors AtmoOmen
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
           New-Item -ItemType Directory -Force package\win-arm64 | Out-Null
           Copy-Item exdviewer-win-arm64\exdviewer-win-arm64.exe package\win-arm64\viewer.exe
-          vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-arm64 -e viewer.exe -r win-arm64 -c win-arm64 --packTitle EXDViewer --packAuthors AtmoOmen
+          vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-arm64 -e viewer.exe -r win-arm64 -c win-arm64 -i viewer\assets\icon.ico --packTitle EXDViewer --packAuthors AtmoOmen
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }

@@ -38,6 +38,8 @@ mod setup;
 mod sheet;
 mod shortcuts;
 pub mod stopwatch;
+#[cfg(not(target_arch = "wasm32"))]
+mod update_source;
 mod utils;
 #[cfg(target_arch = "wasm32")]
 pub mod worker;
@@ -50,6 +52,7 @@ pub const APP_VERSION: &str = env!("EXDVIEWER_VERSION");
 pub const SCHEMA_REPO_URL: &str = "https://github.com/xivdev/EXDSchema";
 pub const REPO_URL: &str = "https://github.com/AtmoOmen/EXDViewer";
 pub const UPDATE_REPO_URL: &str = "https://github.com/AtmoOmen/EXDViewer";
+pub const GITHUB_MIRROR_URL: &str = "https://gh.atmoomen.top";
 pub const AUTHOR_URL: &str = "https://github.com/WorkingRobot";
 pub const KOFI_URL: &str = "https://ko-fi.com/camora";
 

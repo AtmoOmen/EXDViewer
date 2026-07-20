@@ -14,6 +14,8 @@ use ironworks::excel::Language;
 use itertools::{EitherOrBoth, Itertools};
 use lru::LruCache;
 use matchit::Params;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::mpsc::{self, Receiver, Sender};
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
@@ -48,6 +50,8 @@ use crate::{
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mcp::McpHandle;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::update_source::GithubMirrorSource;
 
 type CachedSheetEntry = (
     Language, // language
@@ -143,6 +147,33 @@ impl CjkFont {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+enum UpdateState {
+    Checking,
+    Current,
+    Downloading(i16),
+    ReadyToRestart(Box<velopack::UpdateInfo>),
+    Restarting,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum UpdateEvent {
+    Current,
+    Downloading(i16),
+    ReadyToRestart(Box<velopack::UpdateInfo>),
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl UpdateState {
+    fn apply(&mut self, event: UpdateEvent) {
+        *self = match event {
+            UpdateEvent::Current => Self::Current,
+            UpdateEvent::Downloading(progress) => Self::Downloading(progress.clamp(0, 100)),
+            UpdateEvent::ReadyToRestart(update) => Self::ReadyToRestart(update),
+        };
+    }
+}
+
 pub struct App {
     router: Rc<OnceCell<Router<Self>>>,
     icon_manager: IconManager,
@@ -159,6 +190,14 @@ pub struct App {
     goto_window: Option<goto::GoToWindow>,
     #[cfg(not(target_arch = "wasm32"))]
     mcp_handle: Option<McpHandle>,
+    #[cfg(not(target_arch = "wasm32"))]
+    update_events: Receiver<UpdateEvent>,
+    #[cfg(not(target_arch = "wasm32"))]
+    update_event_tx: Sender<UpdateEvent>,
+    #[cfg(not(target_arch = "wasm32"))]
+    update_state: UpdateState,
+    #[cfg(not(target_arch = "wasm32"))]
+    update_check_started: bool,
     about_open: bool,
     /// `None` = Latin only
     loaded_cjk: Option<CjkFont>,
@@ -186,6 +225,11 @@ impl App {
         self.router
             .get_or_init(|| create_router(ctx.clone()).unwrap());
 
+        #[cfg(not(target_arch = "wasm32"))]
+        self.start_update_check(&ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.process_update_events();
+
         if shortcut::consume(&ctx, GOTO_ROW) {
             self.goto_window = Some(goto::GoToWindow::to_row());
         }
@@ -204,6 +248,25 @@ impl App {
         CentralPanel::default().show(ui, |ui| {
             self.draw_router(ui);
         });
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start_update_check(&mut self, ctx: &egui::Context) {
+        if self.update_check_started {
+            return;
+        }
+
+        self.update_check_started = true;
+        let event_tx = self.update_event_tx.clone();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || check_for_updates(event_tx, ctx));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn process_update_events(&mut self) {
+        while let Ok(event) = self.update_events.try_recv() {
+            self.update_state.apply(event);
+        }
     }
 
     fn draw_router(&mut self, ui: &mut egui::Ui) {
@@ -294,6 +357,8 @@ impl App {
 
     fn draw_menubar(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        #[cfg(not(target_arch = "wasm32"))]
+        let update_event_tx = self.update_event_tx.clone();
         Panel::top("top_panel")
             .frame(
                 egui::Frame::side_top_panel(&ctx.global_style())
@@ -511,6 +576,15 @@ impl App {
                         }
                     });
 
+                    #[cfg(not(target_arch = "wasm32"))]
+                    add_links(
+                        ui,
+                        &mut self.about_open,
+                        &mut self.update_state,
+                        &update_event_tx,
+                        ctx,
+                    );
+                    #[cfg(target_arch = "wasm32")]
                     add_links(ui, &mut self.about_open);
                 });
             });
@@ -1298,6 +1372,9 @@ impl App {
         Self::apply_fonts(&cc.egui_ctx, None);
         Self::setup_theme(&cc.egui_ctx);
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let (update_event_tx, update_events) = mpsc::channel();
+
         Self {
             router: Rc::new(OnceCell::new()),
             icon_manager: IconManager::new(),
@@ -1314,6 +1391,14 @@ impl App {
             goto_window: None,
             #[cfg(not(target_arch = "wasm32"))]
             mcp_handle: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            update_events,
+            #[cfg(not(target_arch = "wasm32"))]
+            update_event_tx,
+            #[cfg(not(target_arch = "wasm32"))]
+            update_state: UpdateState::Checking,
+            #[cfg(not(target_arch = "wasm32"))]
+            update_check_started: false,
             about_open: false,
             loaded_cjk: None,
             #[cfg(target_arch = "wasm32")]
@@ -1417,6 +1502,189 @@ impl eframe::App for App {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn check_for_updates(event_tx: Sender<UpdateEvent>, ctx: egui::Context) {
+    let source = match GithubMirrorSource::new(crate::UPDATE_REPO_URL, crate::GITHUB_MIRROR_URL) {
+        Ok(source) => source,
+        Err(error) => {
+            log::debug!("无法初始化 GitHub 镜像更新源: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            return;
+        }
+    };
+    let manager = match velopack::UpdateManager::new(source, None, None) {
+        Ok(manager) => manager,
+        Err(error) => {
+            log::debug!("无法初始化 Velopack 更新管理器: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            return;
+        }
+    };
+
+    match manager.check_for_updates() {
+        Ok(velopack::UpdateCheck::UpdateAvailable(update)) => {
+            log::info!("发现可用更新: {}", update.TargetFullRelease.Version);
+            send_update_event(&event_tx, &ctx, UpdateEvent::Downloading(0));
+            download_update(&manager, update, event_tx, ctx);
+        }
+        Ok(velopack::UpdateCheck::RemoteIsEmpty) => {
+            log::warn!("GitHub 更新源未提供可用版本");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+        }
+        Ok(velopack::UpdateCheck::NoUpdateAvailable) => {
+            log::info!("当前已是最新版本");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+        }
+        Err(error) => {
+            log::warn!("检查更新失败: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn download_update(
+    manager: &velopack::UpdateManager,
+    update: Box<velopack::UpdateInfo>,
+    event_tx: Sender<UpdateEvent>,
+    ctx: egui::Context,
+) {
+    let (progress_tx, progress_rx) = mpsc::channel();
+    let progress_events = event_tx.clone();
+    let progress_ctx = ctx.clone();
+    let progress_thread = std::thread::spawn(move || {
+        while let Ok(progress) = progress_rx.recv() {
+            send_update_event(
+                &progress_events,
+                &progress_ctx,
+                UpdateEvent::Downloading(progress),
+            );
+        }
+    });
+
+    let result = manager.download_updates(&update, Some(progress_tx));
+    let _ = progress_thread.join();
+
+    if let Err(error) = result {
+        log::warn!("下载更新失败: {error}");
+        send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+        return;
+    }
+
+    send_update_event(&event_tx, &ctx, UpdateEvent::ReadyToRestart(update));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_update(
+    update: Box<velopack::UpdateInfo>,
+    event_tx: Sender<UpdateEvent>,
+    ctx: egui::Context,
+) {
+    let source = match GithubMirrorSource::new(crate::UPDATE_REPO_URL, crate::GITHUB_MIRROR_URL) {
+        Ok(source) => source,
+        Err(error) => {
+            log::warn!("无法初始化 GitHub 镜像更新源: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::ReadyToRestart(update));
+            return;
+        }
+    };
+    let manager = match velopack::UpdateManager::new(source, None, None) {
+        Ok(manager) => manager,
+        Err(error) => {
+            log::warn!("无法初始化 Velopack 更新管理器: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::ReadyToRestart(update));
+            return;
+        }
+    };
+
+    if let Err(error) = manager.apply_updates_and_restart(&*update) {
+        log::warn!("应用更新失败: {error}");
+        send_update_event(&event_tx, &ctx, UpdateEvent::ReadyToRestart(update));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn send_update_event(event_tx: &Sender<UpdateEvent>, ctx: &egui::Context, event: UpdateEvent) {
+    let _ = event_tx.send(event);
+    ctx.request_repaint();
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn add_links(
+    ui: &mut egui::Ui,
+    open_about: &mut bool,
+    update_state: &mut UpdateState,
+    event_tx: &Sender<UpdateEvent>,
+    ctx: &egui::Context,
+) {
+    ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
+        match update_state {
+            UpdateState::ReadyToRestart(update) => {
+                let color = ui.visuals().warn_fg_color;
+                let response = ui
+                    .add(
+                        Button::new(
+                            RichText::new(format!("EXDViewer {} 重启更新", crate::APP_VERSION))
+                                .color(color)
+                                .strong(),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text(format!(
+                        "{} 已下载，点击重启并安装",
+                        update.TargetFullRelease.Version
+                    ));
+                if response.clicked() {
+                    match std::mem::replace(update_state, UpdateState::Restarting) {
+                        UpdateState::ReadyToRestart(update) => {
+                            let event_tx = event_tx.clone();
+                            let update_ctx = ctx.clone();
+                            std::thread::spawn(move || apply_update(update, event_tx, update_ctx));
+                            ctx.request_repaint();
+                        }
+                        state => *update_state = state,
+                    }
+                }
+            }
+            UpdateState::Downloading(progress) => {
+                ui.add_enabled(
+                    false,
+                    Button::new(format!(
+                        "EXDViewer {} 正在下载 {progress}%",
+                        crate::APP_VERSION
+                    ))
+                    .frame(false),
+                );
+            }
+            UpdateState::Restarting => {
+                ui.add_enabled(
+                    false,
+                    Button::new(format!("EXDViewer {} 正在重启更新", crate::APP_VERSION))
+                        .frame(false),
+                );
+            }
+            UpdateState::Checking | UpdateState::Current => {
+                if ui
+                    .link(format!("EXDViewer {}", crate::APP_VERSION))
+                    .clicked()
+                {
+                    *open_about = true;
+                }
+            }
+        }
+        ui.label("/");
+        ui.add(
+            egui::Hyperlink::from_label_and_url(
+                format!("在 {} 上加星", egui::special_emojis::GITHUB),
+                crate::REPO_URL,
+            )
+            .open_in_new_tab(true),
+        );
+        egui::warn_if_debug_build(ui);
+    });
+}
+
+#[cfg(target_arch = "wasm32")]
 fn add_links(ui: &mut egui::Ui, open_about: &mut bool) {
     ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
         if ui

@@ -1,7 +1,7 @@
 # EXDViewer
-<img align="right" src="https://github.com/WorkingRobot/EXDViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
+<img align="right" src="https://github.com/AtmoOmen/EXDViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
 
-[![License](https://img.shields.io/github/license/WorkingRobot/EXDViewer?style=for-the-badge&)](/LICENSE)
+[![License](https://img.shields.io/github/license/AtmoOmen/EXDViewer?style=for-the-badge&)](/LICENSE)
 [![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fexd.camora.dev%2Fapi%2F4e9a232b%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
 )](https://thaliak.xiv.dev/repository/4e9a232b)
 
@@ -9,7 +9,7 @@ EXDViewer 是一个现代化、快速且易用的工具，用于浏览《最终�
 
 ## 功能特性
 
-- **Web 与原生双支持**：即刻使用 [exd.camora.dev](https://exd.camora.dev) 在线版，或下载[原生客户端](https://github.com/WorkingRobot/EXDViewer/releases)
+- **Web 与原生双支持**：即刻使用 [exd.camora.dev](https://exd.camora.dev) 在线版，或下载[原生客户端](https://github.com/AtmoOmen/EXDViewer/releases)
 - **轻松部署**：通过 Docker 自行托管 Web 实例
 - **高性能**：高效处理所有数据表，即使是 `Item`、`Action`、`Quest` 等巨型表也毫无压力
 - **EXDSchema 支持**：与 [EXDSchema](https://github.com/xivdev/EXDSchema) 深度集成，支持增强数据探索和动态在线模式编辑
@@ -23,15 +23,15 @@ EXDViewer 是一个现代化、快速且易用的工具，用于浏览《最终�
 
 ### 本地运行
 
-在 [Releases 页面](https://github.com/WorkingRobot/EXDViewer/releases) 下载对应平台的预编译二进制文件。
+在 [Releases 页面](https://github.com/AtmoOmen/EXDViewer/releases) 下载对应平台的预编译二进制文件。
 
 ### 通过 Docker 自托管
 
 使用 Docker 自行部署网站：
 
 ```bash
-docker pull ghcr.io/workingrobot/exdviewer-web:main
-docker run -p 8080:80 ghcr.io/workingrobot/exdviewer-web:main
+docker pull ghcr.io/atmoomen/exdviewer-web:main
+docker run -p 8080:80 ghcr.io/atmoomen/exdviewer-web:main
 ```
 
 然后在浏览器中打开 [http://localhost:8080](http://localhost:8080)。稍等几秒加载最新游戏版本后，在设置中将 API 地址设为 `http://localhost:8080/api`。
@@ -82,7 +82,7 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 
 1. 克隆仓库：
     ```bash
-    git clone https://github.com/WorkingRobot/EXDViewer.git
+    git clone https://github.com/AtmoOmen/EXDViewer.git
     cd EXDViewer
     ```
 
@@ -113,4 +113,4 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 
 ## 参与贡献
 
-欢迎提交贡献、Bug 报告和功能请求。请通过 [issue](https://github.com/WorkingRobot/EXDViewer/issues) 或 [pull request](https://github.com/WorkingRobot/EXDViewer/pulls) 参与。
+欢迎提交贡献、Bug 报告和功能请求。请通过 [issue](https://github.com/AtmoOmen/EXDViewer/issues) 或 [pull request](https://github.com/AtmoOmen/EXDViewer/pulls) 参与。

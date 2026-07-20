@@ -41,13 +41,13 @@ impl SetupWindow {
             .and_then(|p| Some(InstallLocation::Sqpack(p.path().to_str()?.to_owned())))
             .unwrap_or(InstallLocation::Web(
                 super::DEFAULT_API_URL.to_string(),
-                Region::Global,
+                Region::China,
                 None,
             ));
 
         #[cfg(target_arch = "wasm32")]
         let location =
-            InstallLocation::Web(super::DEFAULT_API_URL.to_string(), Region::Global, None);
+            InstallLocation::Web(super::DEFAULT_API_URL.to_string(), Region::China, None);
 
         Self {
             location,
@@ -172,7 +172,7 @@ impl SetupWindow {
                                 ) {
                                     self.location = InstallLocation::Web(
                                         DEFAULT_API_URL.to_string(),
-                                        Region::Global,
+                                        Region::China,
                                         None,
                                     );
                                 }

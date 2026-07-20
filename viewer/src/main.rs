@@ -37,6 +37,8 @@ fn main() -> eframe::Result {
     log::set_max_level(log::LevelFilter::Info);
 
     let native_options = eframe::NativeOptions {
+        #[cfg(windows)]
+        persistence_path: app_data_file(),
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([400.0, 300.0])
             .with_min_inner_size([300.0, 220.0])
@@ -51,6 +53,19 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(StartupApp::new(cc)))),
     )
+}
+
+#[cfg(windows)]
+fn app_data_file() -> Option<std::path::PathBuf> {
+    let directory = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)?
+        .join("EXDViewer")
+        .join("data");
+    if let Err(error) = std::fs::create_dir_all(&directory) {
+        log::error!("无法创建 APPDATA 配置目录 {}: {error}", directory.display());
+        return None;
+    }
+    Some(directory.join("app.ron"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]

@@ -1420,7 +1420,7 @@ impl eframe::App for App {
 fn add_links(ui: &mut egui::Ui, open_about: &mut bool) {
     ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
         if ui
-            .link(format!("EXDViewer v{}", crate::build::PKG_VERSION))
+            .link(format!("EXDViewer {}", crate::APP_VERSION))
             .clicked()
         {
             *open_about = true;

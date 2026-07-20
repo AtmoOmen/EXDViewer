@@ -28,8 +28,8 @@ pub fn draw(ctx: &egui::Context, open: &mut bool) {
                         );
                         ui.label(
                             RichText::new(format!(
-                                "v{} {}",
-                                crate::build::PKG_VERSION,
+                                "{} {}",
+                                crate::APP_VERSION,
                                 to_title_case(crate::build::BUILD_RUST_CHANNEL)
                             ))
                             .size(version_size),

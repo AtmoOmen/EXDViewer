@@ -96,7 +96,7 @@ impl FilterCache {
     }
 
     fn compile_simple_lookup(&self) -> Vec<CompiledFilterKey> {
-        vec![CompiledFilterKey::RowIdOrColumn(self.columns())]
+        vec![CompiledFilterKey::Column(self.columns(), false)]
     }
 
     fn compile_complex(&self, filter: &ComplexFilter) -> anyhow::Result<CompiledComplexFilter> {

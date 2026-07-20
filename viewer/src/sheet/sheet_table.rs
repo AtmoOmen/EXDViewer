@@ -1,5 +1,6 @@
 use egui::{
-    Align, Color32, Id, InnerResponse, Layout, Margin, Modal, RichText, Spinner, UiBuilder,
+    Align, Color32, CursorIcon, Id, InnerResponse, Label, Layout, Margin, Modal, RichText, Sense,
+    Spinner, UiBuilder,
 };
 use egui_table::TableDelegate;
 use itertools::Itertools;
@@ -48,6 +49,11 @@ struct FilterValue {
     row_offsets: Rc<RefCell<Vec<f32>>>,
 }
 
+pub enum SheetTableResponse {
+    Cell(CellResponse),
+    GoToRow,
+}
+
 pub struct SheetTable {
     context: TableContext,
     // Accumulated subrow count (row_nr), indexed by row index (not ID)
@@ -59,6 +65,7 @@ pub struct SheetTable {
     modal_image: Option<u32>,
 
     clicked_cell: Option<CellResponse>,
+    go_to_row_requested: bool,
 
     filtered_rows: RefCell<LruCache<CompiledFilterInput, FilterValue>>,
     unfiltered_row_offsets: Rc<RefCell<Vec<f32>>>,
@@ -95,6 +102,7 @@ impl SheetTable {
             row_sizes: Vec::new(),
             modal_image: None,
             clicked_cell: None,
+            go_to_row_requested: false,
             filtered_rows,
             unfiltered_row_offsets,
             last_filter: None,
@@ -114,7 +122,7 @@ impl SheetTable {
         &mut self,
         ui: &mut egui::Ui,
         scroll_to: Option<((u32, Option<u16>), u16)>,
-    ) -> CellResponse {
+    ) -> SheetTableResponse {
         self.tick_filter();
 
         let id = Id::new(self.context.sheet().name());
@@ -204,7 +212,13 @@ impl SheetTable {
             }
         }
 
-        self.clicked_cell.take().unwrap_or_default()
+        let clicked_cell = self.clicked_cell.take().unwrap_or_default();
+        if self.go_to_row_requested {
+            self.go_to_row_requested = false;
+            SheetTableResponse::GoToRow
+        } else {
+            SheetTableResponse::Cell(clicked_cell)
+        }
     }
 
     pub fn context(&self) -> &TableContext {
@@ -646,7 +660,16 @@ impl TableDelegate for SheetTable {
                         }
                     });
                 } else {
-                    ui.centered_and_justified(|ui| ui.heading("行"));
+                    let resp = ui
+                        .centered_and_justified(|ui| {
+                            ui.add(Label::new(RichText::new("行").heading()).sense(Sense::click()))
+                        })
+                        .inner
+                        .on_hover_cursor(CursorIcon::PointingHand)
+                        .on_hover_text("跳转到指定行");
+                    if resp.clicked() && !should_ignore_clicks(ui) {
+                        self.go_to_row_requested = true;
+                    }
                 }
             });
     }

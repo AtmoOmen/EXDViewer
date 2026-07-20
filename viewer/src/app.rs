@@ -40,7 +40,10 @@ use crate::{
         TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
     },
     setup::{self, SetupWindow},
-    sheet::{CellResponse, FilterInputType, GlobalContext, MatchOptions, SheetTable, TableContext},
+    sheet::{
+        CellResponse, FilterInputType, GlobalContext, MatchOptions, SheetTable, SheetTableResponse,
+        TableContext,
+    },
     shortcuts::{GOTO_ROW, GOTO_SHEET},
     utils::{
         CodeTheme, CollapsibleSidePanel, ColorTheme, ConvertiblePromise, FuzzyMatcher, IconManager,
@@ -1108,31 +1111,35 @@ impl App {
                     TEMP_HIGHLIGHTED_ROW.set(ctx, *row_pos);
                 }
 
-                let resp = table.draw(ui, scroll_to);
-                match resp {
-                    CellResponse::None => {}
-                    CellResponse::Icon(_) => {}
-                    CellResponse::Link((sheet_name, (row_id, subrow_id))) => {
-                        self.navigate(format!(
-                            "/sheet/{sheet_name}#R{row_id}{}",
-                            if let Some(subrow_id) = subrow_id {
-                                format!(".{subrow_id}")
-                            } else {
-                                String::new()
-                            }
-                        ));
+                match table.draw(ui, scroll_to) {
+                    SheetTableResponse::GoToRow => {
+                        self.goto_window = Some(goto::GoToWindow::to_row());
                     }
-                    CellResponse::Row((sheet_name, (row_id, subrow_id))) => {
-                        self.navigate_replace(format!(
-                            "/sheet/{sheet_name}#R{row_id}{}",
-                            if let Some(subrow_id) = subrow_id {
-                                format!(".{subrow_id}")
-                            } else {
-                                String::new()
-                            }
-                        ));
-                        ui.ctx().copy_text(self.router.get().unwrap().full_url());
-                    }
+                    SheetTableResponse::Cell(resp) => match resp {
+                        CellResponse::None => {}
+                        CellResponse::Icon(_) => {}
+                        CellResponse::Link((sheet_name, (row_id, subrow_id))) => {
+                            self.navigate(format!(
+                                "/sheet/{sheet_name}#R{row_id}{}",
+                                if let Some(subrow_id) = subrow_id {
+                                    format!(".{subrow_id}")
+                                } else {
+                                    String::new()
+                                }
+                            ));
+                        }
+                        CellResponse::Row((sheet_name, (row_id, subrow_id))) => {
+                            self.navigate_replace(format!(
+                                "/sheet/{sheet_name}#R{row_id}{}",
+                                if let Some(subrow_id) = subrow_id {
+                                    format!(".{subrow_id}")
+                                } else {
+                                    String::new()
+                                }
+                            ));
+                            ui.ctx().copy_text(self.router.get().unwrap().full_url());
+                        }
+                    },
                 }
             });
     }

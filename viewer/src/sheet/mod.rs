@@ -22,7 +22,7 @@ pub use global_context::GlobalContext;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;
 pub use schema_column::SchemaColumnMeta;
-pub use sheet_table::SheetTable;
+pub use sheet_table::{SheetTable, SheetTableResponse};
 pub use table_context::TableContext;
 
 use crate::{

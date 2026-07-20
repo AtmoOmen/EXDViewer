@@ -48,6 +48,7 @@ use shadow_rs::shadow;
 pub const IS_WEB: bool = cfg!(target_arch = "wasm32");
 pub const SCHEMA_REPO_URL: &str = "https://github.com/xivdev/EXDSchema";
 pub const REPO_URL: &str = "https://github.com/WorkingRobot/EXDViewer";
+pub const UPDATE_REPO_URL: &str = "https://github.com/AtmoOmen/EXDViewer";
 pub const AUTHOR_URL: &str = "https://github.com/WorkingRobot";
 pub const KOFI_URL: &str = "https://ko-fi.com/camora";
 

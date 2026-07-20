@@ -18,12 +18,16 @@ use viewer::App;
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    velopack::VelopackApp::build().run();
+
     CombinedLogger(
         env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).build(),
         egui_logger::builder().build(),
     )
     .init();
     log::set_max_level(log::LevelFilter::Info);
+
+    check_for_updates();
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -40,6 +44,40 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn check_for_updates() {
+    let source = velopack::sources::GithubSource::new(viewer::UPDATE_REPO_URL, None, false);
+    let manager = match velopack::UpdateManager::new(source, None, None) {
+        Ok(manager) => manager,
+        Err(error) => {
+            log::debug!("无法初始化 Velopack 更新管理器: {error}");
+            return;
+        }
+    };
+
+    match manager.check_for_updates() {
+        Ok(velopack::UpdateCheck::UpdateAvailable(update)) => {
+            log::info!("发现可用更新: {}", update.TargetFullRelease.Version);
+            if let Err(error) = manager.download_updates(&update, None) {
+                log::warn!("下载更新失败: {error}");
+                return;
+            }
+            if let Err(error) = manager.apply_updates_and_restart(&*update) {
+                log::warn!("应用更新失败: {error}");
+            }
+        }
+        Ok(velopack::UpdateCheck::RemoteIsEmpty) => {
+            log::warn!("GitHub 更新源未提供可用版本");
+        }
+        Ok(velopack::UpdateCheck::NoUpdateAvailable) => {
+            log::info!("当前已是最新版本");
+        }
+        Err(error) => {
+            log::warn!("检查更新失败: {error}");
+        }
+    }
 }
 
 // When compiling to web using trunk:

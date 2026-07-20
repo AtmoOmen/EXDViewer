@@ -73,8 +73,92 @@ jobs:
           path: |
             exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
-      - uses: softprops/action-gh-release@v2
-        if: github.ref_type == 'tag'
-        with:
-          files: |
-            exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+  release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'CN-')
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Native Artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Install Velopack CLI
+        shell: pwsh
+        run: |
+          dotnet tool install --global vpk --version 1.2.0
+          "$env:USERPROFILE\.dotnet\tools" >> $env:GITHUB_PATH
+
+      - name: Get Package Version
+        id: version
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^CN-', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+\.0$') {
+            throw "标签 $env:GITHUB_REF_NAME 必须使用 CN-主版本.次版本.修订版本.0 格式"
+          }
+          "version=$($version -replace '\.0$', '')" >> $env:GITHUB_OUTPUT
+
+      - name: Download Previous Velopack Packages
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = gh api "repos/$env:GITHUB_REPOSITORY/releases" --jq '[.[] | .assets[]?.name]' | ConvertFrom-Json
+          foreach ($channel in 'win', 'win-arm64') {
+            if ($assets -contains "releases.$channel.json") {
+              vpk download github --repoUrl "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" --token $env:GH_TOKEN --outputDir Releases --channel $channel
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+          }
+
+      - name: Package Velopack Updates
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package\win-x64 | Out-Null
+          Copy-Item exdviewer-win-x64\exdviewer-win-x64.exe package\win-x64\viewer.exe
+          vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-x64 -e viewer.exe -r win-x64 -c win --packTitle EXDViewer --packAuthors AtmoOmen
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          New-Item -ItemType Directory -Force package\win-arm64 | Out-Null
+          Copy-Item exdviewer-win-arm64\exdviewer-win-arm64.exe package\win-arm64\viewer.exe
+          vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-arm64 -e viewer.exe -r win-arm64 -c win-arm64 --packTitle EXDViewer --packAuthors AtmoOmen
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Publish Velopack Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          vpk upload github --repoUrl "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" --token $env:GH_TOKEN --outputDir Releases --channel win --publish --releaseName $env:GITHUB_REF_NAME --tag $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+          vpk upload github --repoUrl "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY" --token $env:GH_TOKEN --outputDir Releases --channel win-arm64 --merge --publish --releaseName $env:GITHUB_REF_NAME --tag $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Attach Native Binaries
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload $env:GITHUB_REF_NAME `
+            exdviewer-linux-x64\exdviewer-linux-x64 `
+            exdviewer-linux-arm64\exdviewer-linux-arm64 `
+            exdviewer-win-x64\exdviewer-win-x64.exe `
+            exdviewer-win-arm64\exdviewer-win-arm64.exe `
+            exdviewer-osx-x64\exdviewer-osx-x64 `
+            exdviewer-osx-arm64\exdviewer-osx-arm64

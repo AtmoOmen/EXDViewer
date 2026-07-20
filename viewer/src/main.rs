@@ -17,7 +17,10 @@ use viewer::App;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, Sender},
+    },
     time::{Duration, Instant},
 };
 
@@ -82,6 +85,7 @@ struct StartupApp {
 impl StartupApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let app = App::new(cc);
+        apply_startup_fonts(&cc.egui_ctx);
         let (event_tx, update_events) = mpsc::channel();
         let ctx = cc.egui_ctx.clone();
         std::thread::spawn(move || run_update_check(event_tx, ctx));
@@ -155,6 +159,33 @@ impl StartupApp {
             }
         });
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn apply_startup_fonts(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "FFXIV-PrivateUseIcons".to_owned(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/FFXIV_Lodestone_SSF.ttf"
+        ))),
+    );
+
+    let font_name = "NotoSans-SC".to_owned();
+    fonts.font_data.insert(
+        font_name.clone(),
+        Arc::new(egui::FontData::from_static(include_bytes!(
+            "../assets/NotoSansSC-Regular.ttf"
+        ))),
+    );
+
+    let proportional = fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default();
+    proportional.push("FFXIV-PrivateUseIcons".to_owned());
+    proportional.push(font_name);
+    ctx.set_fonts(fonts);
 }
 
 #[cfg(not(target_arch = "wasm32"))]

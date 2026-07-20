@@ -17,7 +17,7 @@ use actix_web_prom::PrometheusMetricsBuilder;
 use data::GameData;
 use prometheus::Registry;
 use shadow_rs::shadow;
-use std::{io, num::ParseIntError, sync::Arc};
+use std::{io, sync::Arc};
 use thiserror::Error;
 
 use crate::queue::MessageQueue;
@@ -34,8 +34,6 @@ pub enum ServerError {
     DotenvyError(#[from] dotenvy::Error),
     #[error("Prometheus error")]
     PrometheusError(#[from] prometheus::Error),
-    #[error("Slug conversion error")]
-    SlugConversionError(#[from] ParseIntError),
     #[error("Other error")]
     OtherError(#[from] anyhow::Error),
 }
@@ -73,7 +71,6 @@ async fn main() -> Result<(), ServerError> {
         GameData::new(
             config.cache.clone(),
             config.assets.clone(),
-            config.slug.parse()?,
             config.file_readahead,
         )
         .await?,
@@ -92,14 +89,19 @@ async fn main() -> Result<(), ServerError> {
     log::info!("Binding to {}", config.server_addr);
     let server = HttpServer::new(move || {
         App::new()
-            .wrap(Helmet::new().add(XContentTypeOptions::nosniff()))
+            .wrap(
+                Helmet::new()
+                    .add(XContentTypeOptions::nosniff())
+                    .into_middleware()
+                    .expect("valid helmet config"),
+            )
             .wrap(
                 Cors::default()
                     .allowed_origin("http://localhost:3000")
                     .allowed_origin("http://localhost:8080")
                     .allowed_origin("http://127.0.0.1:3000")
                     .allowed_origin("http://127.0.0.1:8080")
-                    .allowed_methods(vec!["GET"])
+                    .allowed_methods(vec!["GET", "POST"])
                     .allowed_headers(vec!["Content-Type"]),
             )
             .wrap(NormalizePath::new(TrailingSlash::Always))

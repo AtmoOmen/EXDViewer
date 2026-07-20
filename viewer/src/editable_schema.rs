@@ -1,5 +1,5 @@
 use crate::{
-    schema::{Schema, boxed::BoxedSchemaProvider, provider::SchemaProvider},
+    schema::{Schema, SchemaError, boxed::BoxedSchemaProvider, provider::SchemaProvider},
     settings::{
         CODE_SYNTAX_THEME, SCHEMA_EDITOR_ERRORS_SHOWN, SCHEMA_EDITOR_VISIBLE,
         SCHEMA_EDITOR_WORD_WRAP,
@@ -9,13 +9,12 @@ use crate::{
 };
 use egui::{
     CentralPanel, CornerRadius, Frame, Id, Layout, Margin, MenuBar, Response, RichText, TextBuffer,
-    TopBottomPanel, collapsing_header::CollapsingState, epaint::text::cursor::LayoutCursor,
+    collapsing_header::CollapsingState, containers::panel::Panel,
+    epaint::text::cursor::LayoutCursor,
 };
 use itertools::Itertools;
-use jsonschema::output::{ErrorDescription, OutputUnit};
 use std::{
     cell::{Cell, RefCell},
-    collections::VecDeque,
     rc::Rc,
 };
 
@@ -24,7 +23,7 @@ pub struct EditableSchema {
     original: Rc<RefCell<String>>,
     text: String,
     is_modified: Rc<Cell<bool>>,
-    schema: anyhow::Result<Result<Schema, VecDeque<OutputUnit<ErrorDescription>>>>,
+    schema: anyhow::Result<Result<Schema, Vec<SchemaError>>>,
     save_promise: Cell<Option<TrackedPromise<()>>>,
     save_as_promise: Cell<Option<TrackedPromise<()>>>,
 }
@@ -76,6 +75,27 @@ impl EditableSchema {
         self.schema.as_ref().ok().and_then(|r| r.as_ref().ok())
     }
 
+    pub fn invalid_reason(&self) -> Option<String> {
+        match &self.schema {
+            Ok(Ok(_)) => None,
+            Ok(Err(errors)) => {
+                let first = errors.first()?;
+                let at = if first.location.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (位置: {})", first.location)
+                };
+                let more = if errors.len() > 1 {
+                    format!(" (另有 {} 项)", errors.len() - 1)
+                } else {
+                    String::new()
+                };
+                Some(format!("{}{at}{more}", first.description))
+            }
+            Err(e) => Some(e.to_string()),
+        }
+    }
+
     pub fn draw(&mut self, ui: &mut egui::Ui, provider: &BoxedSchemaProvider) -> Response {
         let resp = self.draw_internal(ui, provider);
         if resp.changed() {
@@ -117,14 +137,14 @@ impl EditableSchema {
                     self.command_save_as(provider);
                 }
 
-                TopBottomPanel::top("editor-top-bar")
+                Panel::top("editor-top-bar")
                     .frame(Frame::side_top_panel(ui.style()).inner_margin(Margin {
                         top: 2,
                         bottom: window_margin.bottom,
                         left: 8,
                         right: 8,
                     }))
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         let mut error_panel_state = CollapsingState::load_with_default_open(
                             ui.ctx(),
                             Id::new("schema-editor-errors-shown"),
@@ -193,7 +213,7 @@ impl EditableSchema {
                                 .show(ui, |ui| match &self.schema {
                                     Ok(Err(errors)) => {
                                         for (location, errors) in
-                                            &errors.iter().chunk_by(|e| e.instance_location())
+                                            &errors.iter().chunk_by(|e| &e.location)
                                         {
                                             let location = match location.as_str() {
                                                 loc if !loc.is_empty() => loc,
@@ -204,7 +224,7 @@ impl EditableSchema {
                                             );
                                             ui.indent(location, |ui| {
                                                 for error in errors {
-                                                    ui.label(error.error_description().to_string());
+                                                    ui.label(error.description.clone());
                                                 }
                                             });
                                         }
@@ -217,7 +237,7 @@ impl EditableSchema {
                         });
                     });
 
-                TopBottomPanel::bottom("status-panel").show_inside(ui, |ui| {
+                Panel::bottom("status-panel").show(ui, |ui| {
                     MenuBar::new().ui(ui, |ui| {
                         let validation_text: String = match &self.schema {
                             Ok(Ok(_)) => "表定义有效".into(),
@@ -261,7 +281,7 @@ impl EditableSchema {
                                 ..Default::default()
                             }),
                     )
-                    .show_inside(ui, |ui| {
+                    .show(ui, |ui| {
                         egui::ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                             let theme = CODE_SYNTAX_THEME.get(ui.ctx());
 
@@ -321,12 +341,12 @@ impl EditableSchema {
                                     // Adjust range if needed
                                     if let Some(range) = &mut range {
                                         let char_delta = replace_with.chars().count() - 1;
-                                        if range.primary.index > tab_idx {
-                                            range.primary.index += char_delta;
+                                        if range.primary.index.0 > tab_idx {
+                                            range.primary.index.0 += char_delta;
                                             modified = true;
                                         }
-                                        if range.secondary.index > tab_idx {
-                                            range.secondary.index += char_delta;
+                                        if range.secondary.index.0 > tab_idx {
+                                            range.secondary.index.0 += char_delta;
                                             modified = true;
                                         }
                                     }
@@ -369,9 +389,9 @@ impl EditableSchema {
         self.save_promise
             .set(Some(TrackedPromise::spawn_local(async move {
                 if let Err(e) = provider.save_schema(&sheet_name, &sheet_data).await {
-                    log::error!("Failed to save schema: {e}");
+                    log::error!("保存表定义失败: {e}");
                 } else {
-                    log::info!("Schema '{sheet_name}' saved successfully");
+                    log::info!("表定义 '{sheet_name}' 已保存");
                     original.replace(sheet_data);
                     is_modified.set(false);
                 }
@@ -397,9 +417,9 @@ impl EditableSchema {
                 }
                 if let Some(file) = dialog.save_file().await {
                     if let Err(e) = file.write(sheet_data.as_bytes()).await {
-                        log::error!("Failed to save schema: {e}");
+                        log::error!("保存表定义失败: {e}");
                     } else {
-                        log::info!("Schema '{sheet_name}' saved successfully");
+                        log::info!("表定义 '{sheet_name}' 已保存");
                     }
                 }
             })));

@@ -19,9 +19,9 @@ use egui::{
 };
 pub use filter::{ComplexFilter, FilterInput, FilterInputType};
 pub use global_context::GlobalContext;
-pub use schema_column::SchemaColumnMeta;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;
+pub use schema_column::SchemaColumnMeta;
 pub use sheet_table::SheetTable;
 pub use table_context::TableContext;
 
@@ -37,7 +37,7 @@ fn copyable_label(ui: &mut egui::Ui, text: &impl ToString) -> Response {
             let text = text.to_string();
             let resp = ui.add(Label::new(&text).sense(Sense::click()));
             resp.context_menu(|ui| {
-                if ui.button("Copy").clicked() {
+                if ui.button("复制").clicked() {
                     ui.ctx().copy_text(text);
                     ui.close();
                 }

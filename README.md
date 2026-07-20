@@ -2,7 +2,7 @@
 <img align="right" src="https://github.com/WorkingRobot/EXDViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
 
 [![License](https://img.shields.io/github/license/WorkingRobot/EXDViewer?style=for-the-badge&)](/LICENSE)
-[![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fexd.camora.dev%2Fapi%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
+[![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fexd.camora.dev%2Fapi%2F4e9a232b%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
 )](https://thaliak.xiv.dev/repository/4e9a232b)
 
 EXDViewer 是一个现代化、快速且易用的工具，用于浏览《最终幻想 XIV》的 [Excel 文件](https://xiv.dev/game-data/file-formats/excel)。Excel 文件是结构化数据表格，存储各种游戏内信息，例如物品属性、NPC 数据等。
@@ -19,7 +19,7 @@ EXDViewer 是一个现代化、快速且易用的工具，用于浏览《最终�
 
 ### 在线使用
 
-访问 [exd.camora.dev](https://exd.camora.dev) 在浏览器中使用最新版本。支持加载本地游戏安装和模式文件（仅限 [Chromium 系浏览器](https://developer.mozilla.org/en-US/docs/Web/API/Window/showDirectoryPicker#browser_compatibility)）。
+访问 [exd.camora.dev](https://exd.camora.dev) 在浏览器中使用最新版本。支持加载本地游戏安装和表定义文件（仅限 [Chromium 系浏览器](https://developer.mozilla.org/en-US/docs/Web/API/Window/showDirectoryPicker#browser_compatibility)），并支持全球、韩服、国服和台服四个区域（台服尚未发布到 [Thaliak](https://thaliak.xiv.dev/)，暂不可用）。
 
 ### 本地运行
 

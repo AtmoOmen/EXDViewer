@@ -20,7 +20,7 @@ mod yield_now;
 
 pub use cache::KeyedCache;
 pub use cloneable_error::CloneableResult;
-pub use collapsible_side_panel::CollapsibleSidePanel;
+pub use collapsible_side_panel::{CollapsibleSidePanel, Side};
 pub use color_theme::ColorTheme;
 pub use convertible_promise::{ConvertiblePromise, PromiseKind};
 pub use icon_manager::{IconManager, ManagedIcon};
@@ -33,5 +33,5 @@ pub use syntax_highlighting::{CodeTheme, highlight};
 pub use tracked_promise::{TrackedPromise, tick_promises};
 pub use unsend_promise::UnsendPromise;
 pub use version::GameVersion;
-pub use webreq::{fetch_url, fetch_url_str};
+pub use webreq::{HttpResponse, fetch_url, fetch_url_str, request};
 pub use yield_now::yield_to_ui;

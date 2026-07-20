@@ -5,9 +5,10 @@ use std::{
 
 use ironworks::excel::Language;
 use rmcp::{
+    ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler,
+    tool, tool_handler, tool_router,
 };
 use tokio::sync::oneshot;
 
@@ -271,8 +272,9 @@ impl McpHandler {
             .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
 
         let version_info = match &config.location {
-            crate::settings::InstallLocation::Web(_, version) => serde_json::json!({
+            crate::settings::InstallLocation::Web(_, region, version) => serde_json::json!({
                 "source": "web",
+                "region": region.name(),
                 "version": version.as_ref().map(|v| v.to_string())
             }),
             #[cfg(not(target_arch = "wasm32"))]

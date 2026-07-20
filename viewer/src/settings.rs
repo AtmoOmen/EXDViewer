@@ -54,7 +54,9 @@ impl RetrievalMethod {
     pub fn set<K: Keyable>(self, ctx: &egui::Context, id: egui::Id, value: K) {
         match self {
             RetrievalMethod::Persisted => ctx.data_mut(|d| d.insert_persisted(id, value)),
-            RetrievalMethod::Temporary => ctx.data_mut(|d| d.insert_temp(id, value)),
+            RetrievalMethod::Temporary => ctx.data_mut(|d| {
+                d.insert_temp(id, value);
+            }),
         }
     }
 
@@ -239,6 +241,7 @@ pub const SHEET_FILTER_OPTIONS: DKey<MatchOptions> = DKey::new(
 );
 pub const SELECTED_SHEET: DKey<Option<String>> = DKey::new("selected-sheet", None);
 pub const MISC_SHEETS_SHOWN: DKey<bool> = DKey::new("misc-sheets-shown", false);
+pub const PR_CHANGED_ONLY: DKey<bool> = DKey::new("pr-changed-only", true);
 pub const SCHEMA_EDITOR_VISIBLE: DKey<bool> = DKey::new("schema-editor-visible", false);
 pub const SCHEMA_EDITOR_WORD_WRAP: DKey<bool> = DKey::new("schema-editor-word-wrap", false);
 pub const SCHEMA_EDITOR_ERRORS_SHOWN: DKey<bool> = DKey::new("schema-editor-errors-shown", false);
@@ -250,7 +253,7 @@ pub const COLOR_THEME: FKey<ColorTheme, ThemePreference> = FKey::new_with_prefli
 );
 pub const CODE_SYNTAX_THEME: FKey<CodeTheme, Arc<egui::Style>> = FKey::new_with_preflight(
     "syntax-theme",
-    |ctx| ctx.style(),
+    |ctx| ctx.global_style(),
     |_, style| CodeTheme {
         theme: if style.visuals.dark_mode {
             "base16-mocha.dark"
@@ -262,8 +265,49 @@ pub const CODE_SYNTAX_THEME: FKey<CodeTheme, Arc<egui::Style>> = FKey::new_with_
     },
 );
 
+pub const CURRENT_SHEET_LANGUAGES: TempKey<(String, Vec<Language>)> =
+    TempKey::new("current-sheet-languages");
 pub const TEMP_SCROLL_TO: TempKey<((u32, Option<u16>), u16)> = TempKey::new("temp-scroll-to");
 pub const TEMP_HIGHLIGHTED_ROW: TempKey<(u32, Option<u16>)> = TempKey::new("temp-highlighted-row");
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Region {
+    Global,
+    Korea,
+    China,
+    Taiwan,
+}
+
+impl Region {
+    pub fn slug(&self) -> Option<&'static str> {
+        match self {
+            Region::Global => Some("4e9a232b"),
+            Region::Korea => Some("de199059"),
+            Region::China => Some("c38effbc"),
+            // TODO(taiwan): Thaliak PR #102
+            Region::Taiwan => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Region::Global => "国际服 / 日服",
+            Region::Korea => "韩服",
+            Region::China => "国服",
+            Region::Taiwan => "台服",
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        self.slug().is_some()
+    }
+}
+
+impl Display for Region {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name())
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub enum InstallLocation {
@@ -271,7 +315,7 @@ pub enum InstallLocation {
     Sqpack(String),
     #[cfg(target_arch = "wasm32")]
     Worker(String),
-    Web(String, Option<GameVersion>),
+    Web(String, Region, Option<GameVersion>),
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
@@ -302,6 +346,15 @@ impl GithubSchemaLocation {
             )
         }
     }
+
+    pub fn base_branch(&self) -> String {
+        match &self.branch {
+            GithubSchemaBranch::Latest => "latest".to_string(),
+            GithubSchemaBranch::Other(name) => name.clone(),
+            GithubSchemaBranch::Version(v) => format!("ver/{}", v.0),
+            GithubSchemaBranch::PullRequest { .. } => "latest".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -322,7 +375,7 @@ pub enum GithubSchemaBranch {
 impl Display for GithubSchemaBranch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GithubSchemaBranch::Latest => write!(f, "Latest"),
+            GithubSchemaBranch::Latest => write!(f, "最新"),
             GithubSchemaBranch::Version(v) => v.0.fmt(f),
             GithubSchemaBranch::Other(name) => name.fmt(f),
             GithubSchemaBranch::PullRequest {

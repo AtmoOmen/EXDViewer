@@ -16,19 +16,13 @@ use crate::{
     schema::provider::SchemaProvider,
     settings::BackendConfig,
     sheet::{
-        ComplexFilter,
-        FilterInput,
-        GlobalContext,
-        CellValue,
-        MatchOptions,
-        SchemaColumnMeta,
+        CellValue, ComplexFilter, FilterInput, GlobalContext, MatchOptions, SchemaColumnMeta,
         TableContext,
     },
     utils::IconManager,
 };
 use handler::McpHandler;
 use ironworks::excel::Language;
-use jsonschema::output::{ErrorDescription, OutputUnit};
 use lru::LruCache;
 use tokio::sync::oneshot;
 
@@ -201,13 +195,7 @@ async fn load_schema_snapshot(backend: &Backend, name: &str) -> anyhow::Result<S
         Ok(Err(errors)) => ParsedSchema::Invalid(
             errors
                 .iter()
-                .map(|error: &OutputUnit<ErrorDescription>| {
-                    format!(
-                        "{} at {}",
-                        error.error_description(),
-                        error.instance_location()
-                    )
-                })
+                .map(|error| format!("{} at {}", error.description, error.location))
                 .collect(),
         ),
         Err(error) => ParsedSchema::Invalid(vec![format!("{error}")]),
@@ -346,9 +334,15 @@ fn build_row_fields_from_columns(
         let mut field = serde_json::Map::new();
         field.insert("name".into(), serde_json::json!(name));
         field.insert("type".into(), serde_json::json!(type_name));
-        field.insert("kind".into(), serde_json::json!(value["kind"].as_str().unwrap_or("Unknown")));
+        field.insert(
+            "kind".into(),
+            serde_json::json!(value["kind"].as_str().unwrap_or("Unknown")),
+        );
         field.insert("value".into(), value);
-        field.insert("display".into(), serde_json::json!(cell_value.display_text().to_string()));
+        field.insert(
+            "display".into(),
+            serde_json::json!(cell_value.display_text().to_string()),
+        );
         if display_idx == Some(i as u32) {
             field.insert("is_display".into(), serde_json::json!(true));
         }
@@ -438,7 +432,7 @@ fn process_validate_schema(text: &str) -> String {
     match Schema::from_str(text) {
         Ok(Ok(s)) => serde_json::json!({"valid": true, "name": s.name, "field_count": s.fields.len()})
             .to_string(),
-        Ok(Err(e)) => serde_json::json!({"valid": false, "errors": e.iter().map(|e: &OutputUnit<ErrorDescription>| format!("{} at {}", e.error_description(), e.instance_location())).collect::<Vec<_>>()})
+        Ok(Err(e)) => serde_json::json!({"valid": false, "errors": e.iter().map(|e| format!("{} at {}", e.description, e.location)).collect::<Vec<_>>()})
             .to_string(),
         Err(e) => serde_json::json!({"valid": false, "error": format!("{e}")}).to_string(),
     }
@@ -685,12 +679,7 @@ async fn process_query_rows(
                 None
             };
 
-            let mut row_obj = match build_row_object(
-                &table_context,
-                &row,
-                row_id,
-                subrow_id,
-            ) {
+            let mut row_obj = match build_row_object(&table_context, &row, row_id, subrow_id) {
                 Ok(row_obj) => row_obj,
                 Err(e) => return McpResponse::Error(format!("{e}")),
             };
@@ -734,12 +723,7 @@ async fn process_query_rows(
                 },
             };
 
-            let mut row_obj = match build_row_object(
-                &table_context,
-                &row,
-                row_id,
-                subrow_id,
-            ) {
+            let mut row_obj = match build_row_object(&table_context, &row, row_id, subrow_id) {
                 Ok(row_obj) => row_obj,
                 Err(e) => return McpResponse::Error(format!("{e}")),
             };
@@ -1012,7 +996,7 @@ async fn process_decode_se_string(
     };
     let raw_bytes = raw.as_bytes().to_vec();
 
-    use base64::{prelude::BASE64_STANDARD, Engine};
+    use base64::{Engine, prelude::BASE64_STANDARD};
     let base64 = BASE64_STANDARD.encode(&raw_bytes);
     let hex = raw_bytes
         .iter()
@@ -1090,10 +1074,9 @@ async fn process_resolve_display_field(
 
     let value = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
         row.read_string(u32::from(col_def.offset()))
-            .map_or(
-                serde_json::Value::Null,
-                |s| serde_json::json!(s.to_string()),
-            )
+            .map_or(serde_json::Value::Null, |s| {
+                serde_json::json!(s.to_string())
+            })
     } else {
         row.read::<u32>(u32::from(col_def.offset()))
             .map_or(serde_json::Value::Null, |v| serde_json::json!(v))

@@ -28,12 +28,12 @@ impl<T> Route<T> {
 
     pub fn unmatched() -> Self {
         Self::new(
-            |_, _, _, _| RouteResponse::Title("Not Found".to_string()),
+            |_, _, _, _| RouteResponse::Title("未找到页面".to_string()),
             |_, ui, _, _| {
                 ui.vertical_centered_justified(|ui| {
-                    ui.heading("Not Found");
-                    ui.label("The requested page was not found.");
-                    ui.label("Please check the URL and try again.");
+                    ui.heading("未找到页面");
+                    ui.label("请求的页面不存在");
+                    ui.label("请检查链接后重试");
                 });
             },
         )

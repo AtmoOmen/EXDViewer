@@ -747,7 +747,7 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
             )
             .inner
         }
-        ManagedIcon::Failed(_) => ui.label("Failed to load icon"),
+        ManagedIcon::Failed(_) => ui.label("图标加载失败"),
         ManagedIcon::Loading => {
             ui.with_layout(
                 Layout::centered_and_justified(Direction::LeftToRight),
@@ -760,11 +760,11 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
         }
     };
     let resp = resp.on_hover_text(format!(
-        "Id: {icon_id}\nPath: {}",
+        "ID: {icon_id}\n路径: {}",
         get_icon_path(icon_id, hires)
     ));
     resp.context_menu(|ui| {
-        if ui.button("Copy").clicked() {
+        if ui.button("复制").clicked() {
             ui.ctx().copy_text(icon_id.to_string());
             ui.close();
         }
@@ -793,7 +793,7 @@ fn draw_color(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     };
     let resp = resp.on_hover_text(hex.to_string());
     resp.context_menu(|ui| {
-        if ui.button("Copy").clicked() {
+        if ui.button("复制").clicked() {
             ui.ctx().copy_text(hex.to_string());
             ui.close();
         }

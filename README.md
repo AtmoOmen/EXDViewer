@@ -56,25 +56,28 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 
 | 工具 | 功能 |
 |---|---|
+| `health_check` | 检查 MCP 服务状态和默认语言 |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
 | `get_sheet_info` | 获取表元数据（列数、子行、语言） |
-| `get_sheet_schema` | 获取结构化模式定义 |
+| `get_sheet_schema` | 获取完整结构化模式定义，包括链接目标、条件和嵌套字段 |
 | `get_schema_raw` | 获取原始模式 YAML |
 | `get_game_version` | 获取数据与模式来源版本信息 |
 | `validate_filter` | 检查过滤 DSL 语法 |
 | `validate_schema` | 验证模式 YAML |
-| `get_icon_url` | 图标 ID 转纹理路径 |
-| `decompose_model_id` | 将 ModelId 拆解为模型/变体/染色组件 |
-| `search_sheets` | 按名称模糊搜索数据表 |
-| `search_cells` | 搜索字符串单元格（纯文本，不支持 DSL） |
-| `query_rows` | 行级分页查询，支持复杂过滤 DSL |
-| `get_row` | 按 ID 精确获取单行数据 |
-| `get_sheet_relations` | 获取表的关系映射 |
-| `get_referencing_sheets` | 查询哪些表引用了目标表 |
-| `follow_link` | 沿链接字段解析目标行数据 |
+| `get_icon_paths` | 图标 ID 转普通和高分辨率纹理路径 |
+| `decompose_model_id` | 拆解装备模型 ID 或武器模型 ID |
+| `search_cells` | 在限定列和行范围内搜索字符串单元格（纯文本，不支持 DSL） |
+| `query_rows` | 行级分页查询，支持复杂过滤 DSL、列选择和按请求语言读取 |
+| `get_row` | 按 ID 精确获取单行数据，支持列选择和详细原始数据模式 |
+| `get_sheet_relations` | 获取表的完整关系映射 |
+| `get_referencing_sheets` | 查询引用目标表的字段、链接和条件链接 |
+| `resolve_link` | 按 schema 解析链接列并返回目标行，支持条件链接和目标列选择 |
 | `decode_se_string` | 解码 SeString 单元格 |
 | `save_schema` | 保存模式 YAML |
-| `resolve_display_field` | 解析行的主显示文本 |
+
+`query_rows` 与 `get_row` 默认使用 `compact` 格式，将列定义放在响应顶层，行只返回值数组。对宽表应传入 `columns`，元素可为从 0 开始的列索引或 schema 列名。只有需要 SeString 原始字节、类型细节等信息时才传入 `format: "detailed"`
+
+带普通筛选的 `query_rows` 默认在取得当前页和下一页存在性后停止扫描，此时 `matched_rows` 为 `null`。传入 `count_total: true` 可获得精确匹配总数。链接列默认按行 ID 筛选，传入 `resolve_links: true` 才会等待并使用目标行显示字段
 
 目前 MCP 服务器仅限桌面版，WASM 平台暂不支持。
 

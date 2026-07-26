@@ -95,25 +95,3 @@ fn structured_link_value_embeds_nested_value() {
     assert_eq!(value["row_id"], 42);
     assert_eq!(value["value"]["kind"], "Boolean");
 }
-
-#[test]
-fn build_row_fields_uses_column_index_order() {
-    let fields = super::build_row_fields_from_columns(
-        Some(1),
-        vec![
-            ("First".to_string(), "Scalar".to_string()),
-            ("Second".to_string(), "Scalar".to_string()),
-            ("Third".to_string(), "Scalar".to_string()),
-        ],
-        |column_idx| Ok(CellValue::Integer((column_idx as i128) * 10)),
-    )
-    .unwrap();
-
-    assert_eq!(fields["f_0"]["name"], "First");
-    assert_eq!(fields["f_1"]["name"], "Second");
-    assert_eq!(fields["f_2"]["name"], "Third");
-    assert_eq!(fields["f_0"]["value"]["raw"], 0);
-    assert_eq!(fields["f_1"]["value"]["raw"], 10);
-    assert_eq!(fields["f_2"]["value"]["raw"], 20);
-    assert_eq!(fields["f_1"]["is_display"], true);
-}

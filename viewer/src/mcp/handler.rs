@@ -1,7 +1,4 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 
 use ironworks::excel::Language;
 use rmcp::{
@@ -14,7 +11,37 @@ use tokio::sync::oneshot;
 
 use crate::settings::BackendConfig;
 
-use super::{McpChannel, McpRequest, McpResponse};
+use super::{ColumnSelector, McpChannel, McpRequest, McpResponse, RowFormat};
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum McpLanguage {
+    None,
+    Japanese,
+    English,
+    German,
+    French,
+    ChineseSimplified,
+    ChineseTraditional,
+    Korean,
+    TaiwanChinese,
+}
+
+impl From<McpLanguage> for Language {
+    fn from(value: McpLanguage) -> Self {
+        match value {
+            McpLanguage::None => Self::None,
+            McpLanguage::Japanese => Self::Japanese,
+            McpLanguage::English => Self::English,
+            McpLanguage::German => Self::German,
+            McpLanguage::French => Self::French,
+            McpLanguage::ChineseSimplified => Self::ChineseSimplified,
+            McpLanguage::ChineseTraditional => Self::ChineseTraditional,
+            McpLanguage::Korean => Self::Korean,
+            McpLanguage::TaiwanChinese => Self::TaiwanChinese,
+        }
+    }
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -53,46 +80,74 @@ pub struct GetReferencingSheetsParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct GetRowParams {
-    /// 精确表名, 不确定时先调用 search_sheets
+    /// 精确表名, 不确定时使用 list_sheets.query
     pub name: String,
-    /// 已知行 ID 时填写, 模糊查找请先用 query_rows 或 search_cells
-    pub row_id: Option<u32>,
+    /// 行 ID
+    pub row_id: u32,
     /// 子行 ID, 仅子行表需要
     pub subrow_id: Option<u16>,
-    /// 只按 display_field 做简单包含搜索, 优先用 query_rows 或 search_cells
-    pub search_name: Option<String>,
+    /// 返回列, 可使用从 0 开始的列索引或 schema 列名, 默认返回全部列
+    pub columns: Option<Vec<ColumnSelector>>,
+    /// compact 只返回值, detailed 返回完整类型与原始数据, 默认 compact
+    pub format: Option<RowFormat>,
+    /// 数据语言, 默认 chinese_simplified
+    pub language: Option<McpLanguage>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchCellsParams {
-    /// 精确表名, 不确定时先调用 search_sheets
+    /// 精确表名, 不确定时使用 list_sheets.query
     pub name: String,
     /// 必填关键词, 这是普通文本搜索, 不是筛选 DSL
     pub query: String,
+    /// 只搜索这些列, 可使用列索引或 schema 列名, 默认搜索所有字符串列
+    pub columns: Option<Vec<ColumnSelector>>,
+    /// 从第几个物理行或子行开始扫描, 默认 0
+    pub row_offset: Option<usize>,
+    /// 最多扫描多少行, 默认不限制
+    pub max_rows: Option<usize>,
     /// 最大返回单元格命中数, 默认 50
     pub max_results: Option<usize>,
+    /// 数据语言, 默认 chinese_simplified
+    pub language: Option<McpLanguage>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRowsParams {
-    /// 精确表名, 不确定时先调用 search_sheets
+    /// 精确表名, 不确定时使用 list_sheets.query
     pub name: String,
     /// 复杂筛选 DSL, 例如 `# = 42`, `Name *= "Potion"`, `Level >= 50 AND Name not *= Test`
     pub filter: Option<String>,
+    /// 返回列, 可使用从 0 开始的列索引或 schema 列名, 默认返回全部列
+    pub columns: Option<Vec<ColumnSelector>>,
     /// 匹配结果偏移量, 默认 0
     pub offset: Option<usize>,
     /// 返回匹配行数, 默认 50, 服务端会限制最大值
     pub limit: Option<usize>,
+    /// 是否为获得精确 matched_rows 而扫描全部结果, 默认 false
+    pub count_total: Option<bool>,
+    /// 筛选链接列时是否解析目标行显示字段, 默认 false
+    pub resolve_links: Option<bool>,
+    /// compact 只返回值, detailed 返回完整类型与原始数据, 默认 compact
+    pub format: Option<RowFormat>,
+    /// 数据语言, 默认 chinese_simplified
+    pub language: Option<McpLanguage>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct FollowLinkParams {
+pub struct ResolveLinkParams {
     pub name: String,
     pub row_id: u32,
-    pub column_index: Option<usize>,
+    pub subrow_id: Option<u16>,
+    /// 链接列索引或 schema 列名
+    pub column: ColumnSelector,
+    /// 目标行返回列, 默认返回全部列
+    pub target_columns: Option<Vec<ColumnSelector>>,
+    pub format: Option<RowFormat>,
+    pub language: Option<McpLanguage>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -101,12 +156,14 @@ pub struct DecodeSeStringParams {
     pub name: String,
     pub row_id: u32,
     pub subrow_id: Option<u16>,
-    pub column_index: Option<usize>,
+    /// 字符串列索引或 schema 列名
+    pub column: ColumnSelector,
+    pub language: Option<McpLanguage>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct GetIconUrlParams {
+pub struct GetIconPathsParams {
     pub icon_id: u32,
 }
 
@@ -114,12 +171,8 @@ pub struct GetIconUrlParams {
 #[serde(deny_unknown_fields)]
 pub struct DecomposeModelIdParams {
     pub model_id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct SearchSheetsParams {
-    pub query: String,
+    /// true 按 64 位武器模型解析, false 按 32 位装备模型解析, 默认按数值宽度推断
+    pub weapon: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -128,18 +181,10 @@ pub struct GetSheetInfoParams {
     pub name: String,
 }
 
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveDisplayFieldParams {
-    pub name: String,
-    pub row_id: u32,
-    pub subrow_id: Option<u16>,
-}
-
 #[derive(Clone)]
 pub struct McpHandler {
     request_tx: McpChannel,
-    config: Arc<Mutex<BackendConfig>>,
+    config: Arc<BackendConfig>,
     language: Language,
     tool_router: ToolRouter<Self>,
 }
@@ -148,10 +193,14 @@ impl McpHandler {
     pub fn new(request_tx: McpChannel, config: BackendConfig, language: Language) -> Self {
         Self {
             request_tx,
-            config: Arc::new(Mutex::new(config)),
+            config: Arc::new(config),
             language,
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn language(&self, language: Option<McpLanguage>) -> Language {
+        language.map_or(self.language, Into::into)
     }
 
     fn light_timeout() -> Duration {
@@ -167,13 +216,14 @@ impl McpHandler {
     }
 
     async fn call(&self, request: McpRequest, timeout: Duration) -> Result<String, McpError> {
-        let request_name = format!("{request:?}");
+        let request_name = request.name();
         log::info!("MCP 请求: {request_name}");
 
         let tx = self.request_tx.clone();
         let response = tokio::time::timeout(timeout, async move {
             let (resp_tx, resp_rx) = oneshot::channel();
             tx.send((request, resp_tx))
+                .await
                 .map_err(|e| McpError::internal_error(format!("MCP 请求发送失败: {e}"), None))?;
             resp_rx
                 .await
@@ -266,10 +316,7 @@ impl McpHandler {
 
     #[tool(description = "获取当前加载的游戏数据源和模式数据源信息")]
     async fn get_game_version(&self) -> Result<CallToolResult, McpError> {
-        let config = self
-            .config
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("{e}"), None))?;
+        let config = &self.config;
 
         let version_info = match &config.location {
             crate::settings::InstallLocation::Web(_, region, version) => serde_json::json!({
@@ -326,14 +373,7 @@ impl McpHandler {
         &self,
         Parameters(params): Parameters<ValidateFilterParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::ValidateFilter {
-                    expression: params.expression,
-                },
-                Self::light_timeout(),
-            )
-            .await?;
+        let result = super::process_validate_filter(&params.expression);
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
@@ -351,51 +391,24 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "按图标 ID 获取图标纹理路径")]
-    async fn get_icon_url(
+    #[tool(description = "按图标 ID 获取普通和高分辨率纹理路径")]
+    async fn get_icon_paths(
         &self,
-        Parameters(params): Parameters<GetIconUrlParams>,
+        Parameters(params): Parameters<GetIconPathsParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::GetIconUrl {
-                    icon_id: params.icon_id,
-                },
-                Self::light_timeout(),
-            )
-            .await?;
+        let result = super::process_get_icon_paths(params.icon_id);
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "分解 ModelId 字段为模型ID、变体ID、染色ID 组件")]
+    #[tool(description = "分解 32 位装备 ModelId 或 64 位武器 ModelId 的各组件")]
     async fn decompose_model_id(
         &self,
         Parameters(params): Parameters<DecomposeModelIdParams>,
     ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::DecomposeModelId {
-                    model_id: params.model_id,
-                },
-                Self::light_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(description = "按名称模糊搜索表名")]
-    async fn search_sheets(
-        &self,
-        Parameters(params): Parameters<SearchSheetsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::SearchSheets {
-                    query: params.query,
-                },
-                Self::light_timeout(),
-            )
-            .await?;
+        let result = match super::process_decompose_model_id(&params.model_id, params.weapon) {
+            McpResponse::Success(result) => result,
+            McpResponse::Error(error) => return Err(McpError::invalid_params(error, None)),
+        };
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
@@ -411,7 +424,11 @@ impl McpHandler {
                 McpRequest::SearchCells {
                     name: params.name,
                     query: params.query,
+                    columns: params.columns,
+                    row_offset: params.row_offset.unwrap_or(0),
+                    max_rows: params.max_rows,
                     max_results: params.max_results.unwrap_or(50),
+                    language: self.language(params.language),
                 },
                 Self::heavy_timeout(),
             )
@@ -431,8 +448,13 @@ impl McpHandler {
                 McpRequest::QueryRows {
                     name: params.name,
                     filter: params.filter,
+                    columns: params.columns,
                     offset: params.offset.unwrap_or(0),
                     limit: params.limit.unwrap_or(50),
+                    count_total: params.count_total.unwrap_or(false),
+                    resolve_links: params.resolve_links.unwrap_or(false),
+                    format: params.format.unwrap_or_default(),
+                    language: self.language(params.language),
                 },
                 Self::heavy_timeout(),
             )
@@ -451,9 +473,11 @@ impl McpHandler {
             .call(
                 McpRequest::GetRow {
                     name: params.name,
-                    row_id: params.row_id.unwrap_or(0),
+                    row_id: params.row_id,
                     subrow_id: params.subrow_id.unwrap_or(0),
-                    search_name: params.search_name,
+                    columns: params.columns,
+                    format: params.format.unwrap_or_default(),
+                    language: self.language(params.language),
                 },
                 Self::heavy_timeout(),
             )
@@ -491,17 +515,21 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "沿链接字段解析目标行数据")]
-    async fn follow_link(
+    #[tool(description = "按 schema 关系解析链接列并返回目标行, 支持条件链接和目标列筛选")]
+    async fn resolve_link(
         &self,
-        Parameters(params): Parameters<FollowLinkParams>,
+        Parameters(params): Parameters<ResolveLinkParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
-                McpRequest::FollowLink {
+                McpRequest::ResolveLink {
                     name: params.name,
                     row_id: params.row_id,
-                    column_index: params.column_index.unwrap_or(0),
+                    subrow_id: params.subrow_id.unwrap_or(0),
+                    column: params.column,
+                    target_columns: params.target_columns,
+                    format: params.format.unwrap_or_default(),
+                    language: self.language(params.language),
                 },
                 Self::medium_timeout(),
             )
@@ -520,7 +548,8 @@ impl McpHandler {
                     name: params.name,
                     row_id: params.row_id,
                     subrow_id: params.subrow_id.unwrap_or(0),
-                    column_index: params.column_index.unwrap_or(0),
+                    column: params.column,
+                    language: self.language(params.language),
                 },
                 Self::medium_timeout(),
             )
@@ -544,28 +573,10 @@ impl McpHandler {
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
-
-    #[tool(description = "解析指定行在 GUI 中的主显示文本/值（根据 schema 的 display_field 定义）")]
-    async fn resolve_display_field(
-        &self,
-        Parameters(params): Parameters<ResolveDisplayFieldParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::ResolveDisplayField {
-                    name: params.name,
-                    row_id: params.row_id,
-                    subrow_id: params.subrow_id.unwrap_or(0),
-                },
-                Self::medium_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
 }
 
 #[tool_handler(
-    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表查询、模式管理、搜索和筛选功能。工具选择规则：不确定表名先用 search_sheets；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；不要把 search_cells 当 DSL 筛选使用"
+    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表查询、模式管理、搜索和筛选功能。工具选择规则：不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；宽表必须使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时才使用 detailed"
 )]
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerInfo {
@@ -573,7 +584,7 @@ impl ServerHandler for McpHandler {
             .with_server_info(rmcp::model::Implementation::from_build_env())
             .with_instructions(
                 "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表查询工具。\
-                 典型流程：search_sheets 找表 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
+                 典型流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
                  search_cells 只做普通文本搜索, 不接收 DSL；query_rows 才处理 filter。"
                     .to_string(),
             )

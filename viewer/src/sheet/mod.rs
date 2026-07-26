@@ -19,11 +19,12 @@ use egui::{
     Align, Color32, Direction, FontSelection, Galley, Label, Layout, Response, RichText, Sense,
     text::LayoutJob,
 };
-pub use filter::{ComplexFilter, FilterInput, FilterInputType};
+pub use filter::{CompiledFilterInput, ComplexFilter, FilterInput, FilterInputType};
 pub use global_context::GlobalContext;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;
-pub use schema_column::SchemaColumnMeta;
+pub use schema_column::{SchemaColumn, SchemaColumnMeta};
+pub use sheet_column::SheetColumnDefinition;
 pub use sheet_table::{SheetTable, SheetTableResponse};
 pub use table_context::TableContext;
 

@@ -21,7 +21,7 @@ use super::provider::{ExcelHeader, ExcelPage, ExcelProvider, ExcelRow, ExcelShee
 
 /// Excel provider that caches parsed sheets and headers on top of a shared
 /// [`FileProvider`].
-pub struct CachedProvider(Arc<CachedProviderImpl>);
+pub struct CachedProvider(Rc<CachedProviderImpl>);
 
 impl Clone for CachedProvider {
     fn clone(&self) -> Self {
@@ -46,7 +46,7 @@ impl CachedProvider {
             .file::<ironworks::file::exl::ExcelList>(path::exl())
             .await?
             .0;
-        Ok(Self(Arc::new(CachedProviderImpl {
+        Ok(Self(Rc::new(CachedProviderImpl {
             files,
             entries,
             cache: RefCell::new(lru::LruCache::new(size)),

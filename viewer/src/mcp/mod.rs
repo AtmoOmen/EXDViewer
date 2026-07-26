@@ -1,8 +1,8 @@
 use std::{
     cell::RefCell,
+    collections::HashMap,
     num::{NonZeroU32, NonZeroUsize},
     str::FromStr,
-    sync::mpsc,
     time::Duration,
 };
 
@@ -16,19 +16,35 @@ use crate::{
     schema::provider::SchemaProvider,
     settings::BackendConfig,
     sheet::{
-        CellValue, ComplexFilter, FilterInput, GlobalContext, MatchOptions, SchemaColumnMeta,
-        TableContext,
+        CellValue, CompiledFilterInput, ComplexFilter, FilterInput, GlobalContext, MatchOptions,
+        SchemaColumn, SchemaColumnMeta, TableContext,
     },
     utils::IconManager,
 };
+use futures_util::{StreamExt, stream};
 use handler::McpHandler;
 use ironworks::excel::Language;
 use lru::LruCache;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 mod handler;
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum ColumnSelector {
+    Index(usize),
+    Name(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RowFormat {
+    #[default]
+    Compact,
+    Detailed,
+}
 
 #[derive(Clone, Debug)]
 pub enum McpRequest {
@@ -47,37 +63,36 @@ pub enum McpRequest {
     GetSchemaRaw {
         name: String,
     },
-    SearchSheets {
-        query: String,
-    },
     SearchCells {
         name: String,
         query: String,
+        columns: Option<Vec<ColumnSelector>>,
+        row_offset: usize,
+        max_rows: Option<usize>,
         max_results: usize,
+        language: Language,
     },
     QueryRows {
         name: String,
         filter: Option<String>,
+        columns: Option<Vec<ColumnSelector>>,
         offset: usize,
         limit: usize,
+        count_total: bool,
+        resolve_links: bool,
+        format: RowFormat,
+        language: Language,
     },
     GetRow {
         name: String,
         row_id: u32,
         subrow_id: u16,
-        search_name: Option<String>,
-    },
-    ValidateFilter {
-        expression: String,
+        columns: Option<Vec<ColumnSelector>>,
+        format: RowFormat,
+        language: Language,
     },
     ValidateSchema {
         text: String,
-    },
-    GetIconUrl {
-        icon_id: u32,
-    },
-    DecomposeModelId {
-        model_id: String,
     },
     GetSheetRelations {
         name: String,
@@ -85,27 +100,46 @@ pub enum McpRequest {
     GetReferencingSheets {
         target_sheet: String,
     },
-    FollowLink {
+    ResolveLink {
         name: String,
         row_id: u32,
-        column_index: usize,
+        subrow_id: u16,
+        column: ColumnSelector,
+        target_columns: Option<Vec<ColumnSelector>>,
+        format: RowFormat,
+        language: Language,
     },
     DecodeSeString {
         name: String,
         row_id: u32,
         subrow_id: u16,
-        column_index: usize,
-    },
-    ResolveDisplayField {
-        name: String,
-        row_id: u32,
-        subrow_id: u16,
+        column: ColumnSelector,
+        language: Language,
     },
     SaveSchema {
         name: String,
         text: String,
     },
-    GetGameVersion,
+}
+
+impl McpRequest {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::ListSheets { .. } => "list_sheets",
+            Self::GetSheetInfo { .. } => "get_sheet_info",
+            Self::GetSheetSchema { .. } => "get_sheet_schema",
+            Self::GetSchemaRaw { .. } => "get_schema_raw",
+            Self::SearchCells { .. } => "search_cells",
+            Self::QueryRows { .. } => "query_rows",
+            Self::GetRow { .. } => "get_row",
+            Self::ValidateSchema { .. } => "validate_schema",
+            Self::GetSheetRelations { .. } => "get_sheet_relations",
+            Self::GetReferencingSheets { .. } => "get_referencing_sheets",
+            Self::ResolveLink { .. } => "resolve_link",
+            Self::DecodeSeString { .. } => "decode_se_string",
+            Self::SaveSchema { .. } => "save_schema",
+        }
+    }
 }
 
 pub enum McpResponse {
@@ -128,33 +162,6 @@ enum ParsedSchema {
 }
 
 impl SchemaSnapshot {
-    fn display_field_index(&self) -> Option<usize> {
-        let schema = self.parsed_schema()?;
-        schema.display_field.as_ref().and_then(|display_field| {
-            schema
-                .fields
-                .iter()
-                .position(|field| field.name.as_deref() == Some(display_field.as_str()))
-        })
-    }
-
-    fn column_names(&self) -> Vec<(String, String)> {
-        self.parsed_schema()
-            .map(|schema| {
-                schema
-                    .fields
-                    .iter()
-                    .map(|field| {
-                        (
-                            field.name.clone().unwrap_or_else(|| "?".into()),
-                            format!("{:?}", field.r#type),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     fn validation_errors(&self) -> Vec<String> {
         match &self.parsed {
             ParsedSchema::Valid(_) => Vec::new(),
@@ -172,6 +179,16 @@ impl SchemaSnapshot {
 
 thread_local! {
     static SCHEMA_CACHE: RefCell<Option<LruCache<String, SchemaSnapshot>>> = const { RefCell::new(None) };
+    static TABLE_CACHE: RefCell<Option<LruCache<(String, Language), TableContext>>> = const { RefCell::new(None) };
+    static SHEET_INDEX: RefCell<Option<Vec<SheetIndexEntry>>> = const { RefCell::new(None) };
+    static RELATION_INDEX: RefCell<Option<HashMap<String, Vec<serde_json::Value>>>> = const { RefCell::new(None) };
+}
+
+#[derive(Clone)]
+struct SheetIndexEntry {
+    name: String,
+    id: i32,
+    lowercase_name: String,
 }
 
 fn with_schema_cache<T>(func: impl FnOnce(&mut LruCache<String, SchemaSnapshot>) -> T) -> T {
@@ -211,11 +228,21 @@ fn invalidate_schema_snapshot(name: &str) {
     with_schema_cache(|cache| {
         cache.pop(name);
     });
-}
-
-struct SchemaContext {
-    column_names: Vec<(String, String)>,
-    display_field: Option<String>,
+    TABLE_CACHE.with(|cell| {
+        let mut cache_ref = cell.borrow_mut();
+        let Some(cache) = cache_ref.as_mut() else {
+            return;
+        };
+        let keys = cache
+            .iter()
+            .filter(|((sheet_name, _), _)| sheet_name == name)
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            cache.pop(&key);
+        }
+    });
+    RELATION_INDEX.with(|cache| cache.borrow_mut().take());
 }
 
 fn schema_column_type_name(meta: &SchemaColumnMeta) -> &'static str {
@@ -232,43 +259,20 @@ fn cell_value_to_json(value: &CellValue) -> serde_json::Value {
     value.to_structured_value()
 }
 
-async fn build_schema_context(backend: &Backend, name: &str) -> SchemaContext {
-    match load_schema_snapshot(backend, name).await {
-        Ok(snapshot) => match snapshot.parsed_schema() {
-            Some(schema) => {
-                let display_field = schema.display_field.clone();
-                let column_names: Vec<_> = schema
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let name = f.name.clone().unwrap_or_else(|| "?".into());
-                        let type_str = format!("{:?}", f.r#type);
-                        (name, type_str)
-                    })
-                    .collect();
-                SchemaContext {
-                    column_names,
-                    display_field,
-                }
-            }
-            None => SchemaContext {
-                column_names: Vec::new(),
-                display_field: None,
-            },
-        },
-        Err(_) => SchemaContext {
-            column_names: Vec::new(),
-            display_field: None,
-        },
-    }
-}
-
 async fn build_table_context(
     backend: &Backend,
     name: &str,
     sheet: BaseSheet,
     lang: Language,
 ) -> anyhow::Result<TableContext> {
+    let key = (name.to_owned(), lang);
+    if let Some(table) = TABLE_CACHE.with(|cell| {
+        cell.borrow_mut()
+            .as_mut()
+            .and_then(|cache| cache.get(&key).cloned())
+    }) {
+        return Ok(table);
+    }
     let schema = match load_schema_snapshot(backend, name).await {
         Ok(snapshot) => snapshot.parsed_schema().cloned(),
         Err(_) => None,
@@ -280,87 +284,232 @@ async fn build_table_context(
         lang,
         IconManager::new(),
     );
-    Ok(TableContext::new(global, sheet, schema.as_ref()))
+    let table = TableContext::new(global, sheet, schema.as_ref());
+    TABLE_CACHE.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        cache
+            .get_or_insert_with(|| LruCache::new(NonZeroUsize::new(32).unwrap()))
+            .put(key, table.clone());
+    });
+    Ok(table)
 }
 
-fn filter_match_options() -> MatchOptions {
+fn filter_match_options(resolve_links: bool) -> MatchOptions {
     MatchOptions {
         case_insensitive: true,
-        use_display_field: true,
+        use_display_field: resolve_links,
     }
 }
 
-fn row_locations(sheet: &impl ExcelSheet) -> Vec<(u32, Option<u16>)> {
+fn row_locations(sheet: &impl ExcelSheet) -> Box<dyn Iterator<Item = (u32, Option<u16>)> + '_> {
     if sheet.has_subrows() {
-        sheet
-            .get_subrow_ids()
-            .map(|(row_id, subrow_id)| (row_id, Some(subrow_id)))
-            .collect()
+        Box::new(
+            sheet
+                .get_subrow_ids()
+                .map(|(row_id, subrow_id)| (row_id, Some(subrow_id))),
+        )
     } else {
-        sheet.get_row_ids().map(|row_id| (row_id, None)).collect()
+        Box::new(sheet.get_row_ids().map(|row_id| (row_id, None)))
     }
 }
 
-fn build_row_fields(
+fn row_location_count(sheet: &impl ExcelSheet) -> usize {
+    if sheet.has_subrows() {
+        sheet.subrow_count() as usize
+    } else {
+        sheet.row_count() as usize
+    }
+}
+
+fn get_row_at(
+    sheet: &BaseSheet,
+    row_id: u32,
+    subrow_id: Option<u16>,
+) -> anyhow::Result<crate::excel::provider::ExcelRow<'_>> {
+    match subrow_id {
+        Some(subrow_id) => sheet.get_subrow(row_id, subrow_id),
+        None => sheet.get_row(row_id),
+    }
+}
+
+async fn filter_row(
     table: &TableContext,
+    row_id: u32,
+    subrow_id: Option<u16>,
     row: &crate::excel::provider::ExcelRow<'_>,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let columns = table
-        .columns()?
-        .into_iter()
-        .map(|(schema_column, _sheet_column)| {
-            (
-                schema_column.name().to_string(),
-                schema_column_type_name(schema_column.meta()).to_string(),
-            )
-        })
-        .collect();
-    build_row_fields_from_columns(table.display_column_idx(), columns, |column_idx| {
-        let cell = table.cell_by_offset(*row, column_idx as u32)?;
-        Ok(cell.read(true)?)
-    })
+    filter: &CompiledFilterInput,
+    resolve_links: bool,
+) -> anyhow::Result<bool> {
+    if !resolve_links {
+        return table
+            .filter_row(row_id, subrow_id, row, filter)
+            .map(|result| result.0);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (matched, in_progress) = table.filter_row(row_id, subrow_id, row, filter)?;
+        if !in_progress {
+            return Ok(matched);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("解析链接显示字段超时");
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
 }
 
-fn build_row_fields_from_columns(
-    display_idx: Option<u32>,
-    columns: Vec<(String, String)>,
-    mut read_cell: impl FnMut(usize) -> anyhow::Result<CellValue>,
-) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
-    let mut fields = serde_json::Map::new();
-    for (i, (name, type_name)) in columns.into_iter().enumerate() {
-        let cell_value = read_cell(i)?;
-        let value = cell_value_to_json(&cell_value);
-
-        let mut field = serde_json::Map::new();
-        field.insert("name".into(), serde_json::json!(name));
-        field.insert("type".into(), serde_json::json!(type_name));
-        field.insert(
-            "kind".into(),
-            serde_json::json!(value["kind"].as_str().unwrap_or("Unknown")),
-        );
-        field.insert("value".into(), value);
-        field.insert(
-            "display".into(),
-            serde_json::json!(cell_value.display_text().to_string()),
-        );
-        if display_idx == Some(i as u32) {
-            field.insert("is_display".into(), serde_json::json!(true));
-        }
-        fields.insert(format!("f_{i}"), serde_json::Value::Object(field));
+async fn score_row(
+    table: &TableContext,
+    row_id: u32,
+    subrow_id: Option<u16>,
+    row: &crate::excel::provider::ExcelRow<'_>,
+    filter: &CompiledFilterInput,
+    resolve_links: bool,
+) -> anyhow::Result<Option<NonZeroU32>> {
+    if !resolve_links {
+        return table
+            .score_row(row_id, subrow_id, row, filter)
+            .map(|result| result.0);
     }
-    Ok(fields)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let (score, in_progress) = table.score_row(row_id, subrow_id, row, filter)?;
+        if !in_progress {
+            return Ok(score);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("解析链接显示字段超时");
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+#[derive(Clone)]
+struct SelectedColumn {
+    index: usize,
+    schema: crate::sheet::SchemaColumn,
+    sheet: crate::sheet::SheetColumnDefinition,
+}
+
+fn select_columns(
+    table: &TableContext,
+    selectors: Option<&[ColumnSelector]>,
+) -> anyhow::Result<Vec<SelectedColumn>> {
+    let columns = table.columns()?;
+    let indices = match selectors {
+        None => (0..columns.len()).collect(),
+        Some(selectors) => {
+            let mut indices = Vec::with_capacity(selectors.len());
+            for selector in selectors {
+                let index = match selector {
+                    ColumnSelector::Index(index) => *index,
+                    ColumnSelector::Name(name) => columns
+                        .iter()
+                        .position(|(schema, _)| schema.name() == name)
+                        .ok_or_else(|| anyhow::anyhow!("未找到列 '{name}'"))?,
+                };
+                if index >= columns.len() {
+                    anyhow::bail!("列索引 {index} 越界, 当前表共有 {} 列", columns.len());
+                }
+                if !indices.contains(&index) {
+                    indices.push(index);
+                }
+            }
+            indices
+        }
+    };
+
+    Ok(indices
+        .into_iter()
+        .map(|index| {
+            let (schema, sheet) = columns[index].clone();
+            SelectedColumn {
+                index,
+                schema,
+                sheet,
+            }
+        })
+        .collect())
+}
+
+fn columns_to_json(columns: &[SelectedColumn], display_idx: Option<u32>) -> Vec<serde_json::Value> {
+    columns
+        .iter()
+        .map(|column| {
+            serde_json::json!({
+                "index": column.index,
+                "name": column.schema.name(),
+                "type": schema_column_type_name(column.schema.meta()),
+                "storage": format!("{:?}", column.sheet.kind()),
+                "offset": column.sheet.offset(),
+                "is_display": display_idx == Some(column.index as u32)
+            })
+        })
+        .collect()
+}
+
+fn compact_cell_value(value: &CellValue) -> serde_json::Value {
+    match value {
+        CellValue::String(_) => serde_json::json!(value.display_text().to_string()),
+        CellValue::Integer(value) => serde_json::json!(value),
+        CellValue::Float(value) => serde_json::json!(value),
+        CellValue::Boolean(value) => serde_json::json!(value),
+        CellValue::Icon(value) => serde_json::json!(value),
+        CellValue::ModelId(value) => value.either(
+            |value| serde_json::json!(value),
+            |value| serde_json::json!(value),
+        ),
+        CellValue::Color(value) => serde_json::json!(u32::from_le_bytes(value.to_array())),
+        CellValue::InvalidLink(value) | CellValue::InProgressLink(value) => {
+            serde_json::json!(value)
+        }
+        CellValue::ValidLink {
+            sheet_name,
+            row_id,
+            value,
+        } => serde_json::json!({
+            "sheet": sheet_name.to_string(),
+            "row_id": row_id,
+            "display": value.as_ref().map(|value| value.display_text().to_string())
+        }),
+    }
+}
+
+fn read_row_values(
+    table: &TableContext,
+    row: crate::excel::provider::ExcelRow<'_>,
+    columns: &[SelectedColumn],
+    format: RowFormat,
+) -> anyhow::Result<Vec<serde_json::Value>> {
+    columns
+        .iter()
+        .map(|column| {
+            let value = table
+                .cell_by_offset(row, column.index as u32)?
+                .read(false)?;
+            Ok(match format {
+                RowFormat::Compact => compact_cell_value(&value),
+                RowFormat::Detailed => cell_value_to_json(&value),
+            })
+        })
+        .collect()
 }
 
 fn build_row_object(
     table: &TableContext,
-    row: &crate::excel::provider::ExcelRow<'_>,
+    row: crate::excel::provider::ExcelRow<'_>,
     row_id: u32,
     subrow_id: Option<u16>,
+    columns: &[SelectedColumn],
+    format: RowFormat,
 ) -> anyhow::Result<serde_json::Map<String, serde_json::Value>> {
     let mut row_obj = serde_json::Map::new();
     row_obj.insert("row_id".into(), serde_json::json!(row_id));
     row_obj.insert("subrow_id".into(), serde_json::json!(subrow_id));
-    row_obj.extend(build_row_fields(table, row)?);
+    row_obj.insert(
+        "values".into(),
+        serde_json::Value::Array(read_row_values(table, row, columns, format)?),
+    );
     Ok(row_obj)
 }
 
@@ -371,46 +520,46 @@ fn process_list_sheets(
     offset: usize,
     limit: usize,
 ) -> String {
-    let excel = backend.excel();
-    let entries = excel.get_entries();
-    let mut sheets: Vec<(&String, &i32)> = entries
-        .iter()
-        .filter(|(_, id)| include_misc || **id >= 0)
-        .collect();
-    sheets.sort_by_key(|(name, _)| name.to_lowercase());
-
-    if let Some(q) = query {
-        let ql = q.to_lowercase();
-        sheets.retain(|(name, _)| name.to_lowercase().contains(&ql));
-    }
-    let total = sheets.len();
-    let page: Vec<serde_json::Value> = sheets
-        .iter()
-        .skip(offset)
-        .take(limit.min(500))
-        .map(|(name, id)| serde_json::json!({"name": name, "id": id}))
-        .collect();
-    serde_json::json!({"total": total, "offset": offset, "limit": limit, "sheets": page})
+    let lowercase_query = query.map(str::to_ascii_lowercase);
+    let page_limit = limit.min(500);
+    SHEET_INDEX.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let sheets = cache.get_or_insert_with(|| {
+            let mut sheets = backend
+                .excel()
+                .get_entries()
+                .iter()
+                .map(|(name, id)| SheetIndexEntry {
+                    name: name.clone(),
+                    id: *id,
+                    lowercase_name: name.to_ascii_lowercase(),
+                })
+                .collect::<Vec<_>>();
+            sheets.sort_unstable_by(|a, b| a.lowercase_name.cmp(&b.lowercase_name));
+            sheets
+        });
+        let mut filtered = sheets.iter().filter(|sheet| {
+            (include_misc || sheet.id >= 0)
+                && lowercase_query
+                    .as_ref()
+                    .is_none_or(|query| sheet.lowercase_name.contains(query))
+        });
+        let total = filtered.clone().count();
+        let page = filtered
+            .by_ref()
+            .skip(offset)
+            .take(page_limit)
+            .map(|sheet| serde_json::json!({"name": sheet.name, "id": sheet.id}))
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "total": total,
+            "offset": offset,
+            "limit": page_limit,
+            "has_more": offset.saturating_add(page.len()) < total,
+            "sheets": page
+        })
         .to_string()
-}
-
-fn process_search_sheets(backend: &Backend, query: &str) -> String {
-    let excel = backend.excel();
-    let entries = excel.get_entries();
-    let ql = query.to_lowercase();
-    let mut matches: Vec<serde_json::Value> = entries
-        .iter()
-        .filter(|(name, _)| name.to_lowercase().contains(&ql))
-        .map(|(name, id)| serde_json::json!({"name": name, "id": id}))
-        .collect();
-    matches.sort_by(|a, b| {
-        a["name"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["name"].as_str().unwrap_or(""))
-    });
-    matches.truncate(100);
-    serde_json::json!({"query": query, "count": matches.len(), "matches": matches}).to_string()
+    })
 }
 
 fn process_validate_filter(expression: &str) -> String {
@@ -438,20 +587,38 @@ fn process_validate_schema(text: &str) -> String {
     }
 }
 
-fn process_get_icon_url(icon_id: u32) -> String {
+fn process_get_icon_paths(icon_id: u32) -> String {
     let path = crate::data::get_icon_path(icon_id, false);
     let hires_path = crate::data::get_icon_path(icon_id, true);
     serde_json::json!({"icon_id": icon_id, "tex_path": path, "hires_tex_path": hires_path})
         .to_string()
 }
 
-fn process_decompose_model_id(model_id: &str) -> McpResponse {
+fn process_decompose_model_id(model_id: &str, weapon: Option<bool>) -> McpResponse {
     match model_id.parse::<u64>() {
+        Ok(value) if !weapon.unwrap_or(value > u64::from(u32::MAX)) => {
+            let Ok(value) = u32::try_from(value) else {
+                return McpResponse::Error("32 位装备 ModelId 超出范围".into());
+            };
+            McpResponse::Success(
+                serde_json::json!({
+                    "kind": "model",
+                    "raw": value,
+                    "model": (value & 0xFFFF) as u16,
+                    "variant": ((value >> 16) & 0xFF) as u8,
+                    "stain": ((value >> 24) & 0xFF) as u8
+                })
+                .to_string(),
+            )
+        }
         Ok(value) => McpResponse::Success(
             serde_json::json!({
-                "model": (value & 0x00FF_FFFF) as u32,
-                "variant": ((value >> 24) & 0x00FF) as u8,
-                "stain": ((value >> 32) & 0x00FF) as u8
+                "kind": "weapon",
+                "raw": value,
+                "skeleton": (value & 0xFFFF) as u16,
+                "model": ((value >> 16) & 0xFFFF) as u16,
+                "variant": ((value >> 32) & 0xFFFF) as u16,
+                "stain": ((value >> 48) & 0xFFFF) as u16
             })
             .to_string(),
         ),
@@ -486,26 +653,33 @@ async fn process_get_sheet_schema(backend: &Backend, name: &str) -> McpResponse 
     match load_schema_snapshot(backend, name).await {
         Ok(snapshot) => match snapshot.parsed_schema() {
             Some(schema) => {
-                let fields: Vec<serde_json::Value> = schema
-                    .fields
+                let (expanded_columns, display_column_index) =
+                    match SchemaColumn::from_schema(schema) {
+                        Ok(columns) => columns,
+                        Err(e) => return McpResponse::Error(format!("{e}")),
+                    };
+                let columns = expanded_columns
                     .iter()
-                    .map(|f| {
+                    .enumerate()
+                    .map(|(index, column)| {
                         serde_json::json!({
-                            "name": f.name,
-                            "type": format!("{:?}", f.r#type),
-                            "count": f.count,
-                            "comment": f.comment,
-                            "relations": f.relations
+                            "index": index,
+                            "name": column.name(),
+                            "type": schema_column_type_name(column.meta()),
+                            "comment": column.comment(),
+                            "is_display": display_column_index == Some(index as u32)
                         })
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
                 McpResponse::Success(
                     serde_json::json!({
                         "name": schema.name,
                         "display_field": schema.display_field,
-                        "fields": fields,
+                        "fields": schema.fields,
+                        "columns": columns,
                         "relations": schema.relations,
-                        "field_count": schema.fields.len()
+                        "field_count": schema.fields.len(),
+                        "column_count": columns.len()
                     })
                     .to_string(),
                 )
@@ -532,20 +706,67 @@ async fn process_get_schema_raw(backend: &Backend, name: &str) -> McpResponse {
     }
 }
 
+fn collect_field_references(
+    fields: &[crate::schema::Field],
+    scope: &str,
+    references: &mut Vec<serde_json::Value>,
+) {
+    for field in fields {
+        let field_name = field.name.as_deref().unwrap_or("Unk");
+        let path = if scope.is_empty() {
+            field_name.to_owned()
+        } else {
+            format!("{scope}.{field_name}")
+        };
+        if let Some(targets) = &field.targets {
+            references.extend(targets.iter().map(
+                |target| serde_json::json!({"field": path, "target": target, "type": "link"}),
+            ));
+        }
+        if let Some(condition) = &field.condition {
+            for (value, targets) in &condition.cases {
+                references.extend(targets.iter().map(|target| {
+                    serde_json::json!({
+                        "field": path,
+                        "target": target,
+                        "type": "conditional_link",
+                        "switch": condition.switch,
+                        "switch_value": value
+                    })
+                }));
+            }
+        }
+        if let Some(relations) = &field.relations {
+            references.extend(relations.keys().map(
+                |target| serde_json::json!({"field": path, "target": target, "type": "relation"}),
+            ));
+        }
+        if let Some(nested) = &field.fields {
+            collect_field_references(nested, &path, references);
+        }
+    }
+}
+
+fn schema_references(schema: &ExdSchema) -> Vec<serde_json::Value> {
+    let mut references = Vec::new();
+    collect_field_references(&schema.fields, "", &mut references);
+    if let Some(relations) = &schema.relations {
+        references.extend(
+            relations
+                .keys()
+                .map(|target| serde_json::json!({"target": target, "type": "sheet_relation"})),
+        );
+    }
+    references
+}
+
 async fn process_get_sheet_relations(backend: &Backend, name: &str) -> McpResponse {
     match load_schema_snapshot(backend, name).await {
         Ok(snapshot) => match snapshot.parsed_schema() {
-            Some(schema) => {
-                let field_rels: Vec<serde_json::Value> = schema
-                    .fields
-                    .iter()
-                    .filter(|f| f.relations.is_some())
-                    .map(|f| serde_json::json!({"field": f.name, "relations": f.relations}))
-                    .collect();
-                McpResponse::Success(
-                    serde_json::json!({"name": name, "relations": field_rels}).to_string(),
-                )
-            }
+            Some(schema) => McpResponse::Success(
+                serde_json::json!({"name": name, "relations": schema_references(schema)})
+                    .to_string(),
+            ),
             None => McpResponse::Error(format!(
                 "无法解析模式: {}",
                 snapshot.validation_errors().join("; ")
@@ -556,69 +777,103 @@ async fn process_get_sheet_relations(backend: &Backend, name: &str) -> McpRespon
 }
 
 async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -> McpResponse {
-    let excel = backend.excel();
-    let entries = excel.get_entries();
-    let mut references: Vec<serde_json::Value> = Vec::new();
+    if let Some(references) =
+        RELATION_INDEX.with(|cache| cache.borrow().as_ref()?.get(target_sheet).cloned())
+    {
+        return McpResponse::Success(
+            serde_json::json!({
+                "target_sheet": target_sheet,
+                "count": references.len(),
+                "references": references
+            })
+            .to_string(),
+        );
+    }
 
-    for (sheet_name, _) in entries.iter() {
-        if sheet_name == target_sheet {
+    let sheet_names = backend
+        .excel()
+        .get_entries()
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut schemas = stream::iter(sheet_names)
+        .map(|sheet_name| async move {
+            let schema = load_schema_snapshot(backend, &sheet_name)
+                .await
+                .ok()
+                .and_then(|snapshot| snapshot.parsed_schema().cloned());
+            (sheet_name, schema)
+        })
+        .buffer_unordered(16);
+    let mut index: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    while let Some((sheet_name, schema)) = schemas.next().await {
+        let Some(schema) = schema else {
             continue;
-        }
-        if let Ok(snapshot) = load_schema_snapshot(backend, sheet_name).await {
-            if let Some(schema) = snapshot.parsed_schema() {
-                let mut ref_info: Vec<serde_json::Value> = Vec::new();
-                for field in &schema.fields {
-                    if let Some(ref field_rels) = field.relations {
-                        if field_rels.contains_key(target_sheet) {
-                            ref_info
-                                .push(serde_json::json!({"field": field.name, "type": "direct"}));
-                        }
-                    }
-                }
-                if let Some(ref sheet_rels) = schema.relations {
-                    if sheet_rels.contains_key(target_sheet) {
-                        ref_info.push(serde_json::json!({"type": "sheet-level"}));
-                    }
-                }
-                if !ref_info.is_empty() {
-                    references
-                        .push(serde_json::json!({"sheet": sheet_name, "references": ref_info}));
-                }
-            }
+        };
+        for reference in schema_references(&schema) {
+            let Some(target) = reference["target"].as_str() else {
+                continue;
+            };
+            index
+                .entry(target.to_owned())
+                .or_default()
+                .push(serde_json::json!({"sheet": sheet_name, "reference": reference}));
         }
     }
+    for references in index.values_mut() {
+        references.sort_unstable_by(|a, b| a["sheet"].as_str().cmp(&b["sheet"].as_str()));
+    }
+    let references = index.get(target_sheet).cloned().unwrap_or_default();
+    RELATION_INDEX.with(|cache| cache.replace(Some(index)));
 
     McpResponse::Success(
         serde_json::json!({
             "target_sheet": target_sheet,
             "count": references.len(),
-            "referencing_sheets": references
+            "references": references
         })
         .to_string(),
     )
 }
 
-async fn process_query_rows(
-    backend: &Backend,
-    name: &str,
-    filter: Option<&str>,
+struct QueryRowsOptions<'a> {
+    name: &'a str,
+    filter: Option<&'a str>,
+    columns: Option<&'a [ColumnSelector]>,
     offset: usize,
     limit: usize,
-    lang: Language,
-) -> McpResponse {
+    count_total: bool,
+    resolve_links: bool,
+    format: RowFormat,
+    language: Language,
+}
+
+async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) -> McpResponse {
+    let QueryRowsOptions {
+        name,
+        filter,
+        columns: column_selectors,
+        offset,
+        limit,
+        count_total,
+        resolve_links,
+        format,
+        language: lang,
+    } = options;
     let excel = backend.excel();
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let ctx = build_schema_context(backend, name).await;
     let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
         Ok(ctx) => ctx,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-
-    let row_locations = row_locations(&sheet);
-    let total_rows = row_locations.len();
+    let columns = match select_columns(&table_context, column_selectors) {
+        Ok(columns) => columns,
+        Err(e) => return McpResponse::Error(format!("{e}")),
+    };
+    let total_rows = row_location_count(&sheet);
     let page_limit = limit.min(200);
     let compiled_filter = match filter {
         Some(text) if !text.trim().is_empty() => {
@@ -630,7 +885,7 @@ async fn process_query_rows(
                     ));
                 }
             };
-            match table_context.compile_filter(&parsed, filter_match_options()) {
+            match table_context.compile_filter(&parsed, filter_match_options(resolve_links)) {
                 Ok(filter) => Some(filter),
                 Err(e) => return McpResponse::Error(format!("{e}")),
             }
@@ -638,95 +893,151 @@ async fn process_query_rows(
         _ => None,
     };
 
-    let mut rows: Vec<serde_json::Value> = Vec::new();
+    let mut rows = Vec::with_capacity(page_limit);
     let matched_rows;
+    let has_more;
+    let mut scanned_rows = 0;
 
     if let Some(compiled_filter) = compiled_filter.as_ref() {
         let fuzzy = compiled_filter.input().is_some_and(|input| input.has_fuzzy);
-        let mut matched: Vec<(
-            usize,
-            Option<NonZeroU32>,
-            serde_json::Map<String, serde_json::Value>,
-        )> = Vec::new();
-
-        for (sequence, (row_id, subrow_id)) in row_locations.into_iter().enumerate() {
-            let row = match subrow_id {
-                Some(subrow_id) => match sheet.get_subrow(row_id, subrow_id) {
+        if fuzzy {
+            let mut matched = Vec::new();
+            for (sequence, (row_id, subrow_id)) in row_locations(&sheet).enumerate() {
+                if sequence % 256 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                scanned_rows += 1;
+                let row = match get_row_at(&sheet, row_id, subrow_id) {
                     Ok(row) => row,
                     Err(_) => continue,
-                },
-                None => match sheet.get_row(row_id) {
-                    Ok(row) => row,
-                    Err(_) => continue,
-                },
-            };
-
-            let (is_match, _in_progress) =
-                match table_context.filter_row(row_id, subrow_id, &row, compiled_filter) {
+                };
+                let is_match = match filter_row(
+                    &table_context,
+                    row_id,
+                    subrow_id,
+                    &row,
+                    compiled_filter,
+                    resolve_links,
+                )
+                .await
+                {
                     Ok(result) => result,
                     Err(e) => return McpResponse::Error(format!("{e}")),
                 };
-            if !is_match {
-                continue;
-            }
-
-            let score = if fuzzy {
-                match table_context.score_row(row_id, subrow_id, &row, compiled_filter) {
-                    Ok((score, _)) => score,
-                    Err(e) => return McpResponse::Error(format!("{e}")),
+                if !is_match {
+                    continue;
                 }
-            } else {
-                None
-            };
-
-            let mut row_obj = match build_row_object(&table_context, &row, row_id, subrow_id) {
-                Ok(row_obj) => row_obj,
-                Err(e) => return McpResponse::Error(format!("{e}")),
-            };
-            row_obj.insert("row_index".into(), serde_json::json!(sequence));
-            if let Some(score) = score {
-                row_obj.insert("match_score".into(), serde_json::json!(score.get()));
+                let score = match score_row(
+                    &table_context,
+                    row_id,
+                    subrow_id,
+                    &row,
+                    compiled_filter,
+                    resolve_links,
+                )
+                .await
+                {
+                    Ok(score) => score,
+                    Err(e) => return McpResponse::Error(format!("{e}")),
+                };
+                matched.push((sequence, row_id, subrow_id, score));
             }
-            matched.push((sequence, score, row_obj));
+            matched.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.0.cmp(&b.0)));
+            matched_rows = Some(matched.len());
+            has_more = offset.saturating_add(page_limit) < matched.len();
+            for (sequence, row_id, subrow_id, score) in
+                matched.into_iter().skip(offset).take(page_limit)
+            {
+                let row = match get_row_at(&sheet, row_id, subrow_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                };
+                let mut row_obj = match build_row_object(
+                    &table_context,
+                    row,
+                    row_id,
+                    subrow_id,
+                    &columns,
+                    format,
+                ) {
+                    Ok(row) => row,
+                    Err(e) => return McpResponse::Error(format!("{e}")),
+                };
+                row_obj.insert("row_index".into(), serde_json::json!(sequence));
+                if let Some(score) = score {
+                    row_obj.insert("match_score".into(), serde_json::json!(score.get()));
+                }
+                rows.push(serde_json::Value::Object(row_obj));
+            }
+        } else {
+            let mut match_count = 0;
+            let mut found_more = false;
+            for (sequence, (row_id, subrow_id)) in row_locations(&sheet).enumerate() {
+                if sequence % 256 == 0 {
+                    tokio::task::yield_now().await;
+                }
+                scanned_rows += 1;
+                let row = match get_row_at(&sheet, row_id, subrow_id) {
+                    Ok(row) => row,
+                    Err(_) => continue,
+                };
+                let is_match = match filter_row(
+                    &table_context,
+                    row_id,
+                    subrow_id,
+                    &row,
+                    compiled_filter,
+                    resolve_links,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(e) => return McpResponse::Error(format!("{e}")),
+                };
+                if !is_match {
+                    continue;
+                }
+                if match_count >= offset && rows.len() < page_limit {
+                    let mut row_obj = match build_row_object(
+                        &table_context,
+                        row,
+                        row_id,
+                        subrow_id,
+                        &columns,
+                        format,
+                    ) {
+                        Ok(row) => row,
+                        Err(e) => return McpResponse::Error(format!("{e}")),
+                    };
+                    row_obj.insert("row_index".into(), serde_json::json!(sequence));
+                    rows.push(serde_json::Value::Object(row_obj));
+                } else if !count_total && match_count >= offset.saturating_add(page_limit) {
+                    found_more = true;
+                    break;
+                }
+                match_count += 1;
+            }
+            has_more = found_more || offset.saturating_add(page_limit) < match_count;
+            matched_rows = (!found_more).then_some(match_count);
         }
-
-        matched_rows = matched.len();
-        if fuzzy {
-            matched.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        }
-
-        rows.extend(
-            matched
-                .into_iter()
-                .skip(offset)
-                .take(page_limit)
-                .map(|(_, _, row)| serde_json::Value::Object(row)),
-        );
     } else {
-        matched_rows = total_rows;
-        for (sequence, (row_id, subrow_id)) in row_locations.into_iter().enumerate() {
-            if sequence < offset {
-                continue;
-            }
-            if rows.len() >= page_limit {
-                break;
-            }
-
-            let row = match subrow_id {
-                Some(subrow_id) => match sheet.get_subrow(row_id, subrow_id) {
-                    Ok(row) => row,
-                    Err(_) => continue,
-                },
-                None => match sheet.get_row(row_id) {
-                    Ok(row) => row,
-                    Err(_) => continue,
-                },
+        matched_rows = Some(total_rows);
+        has_more = offset.saturating_add(page_limit) < total_rows;
+        for (sequence, (row_id, subrow_id)) in row_locations(&sheet)
+            .enumerate()
+            .skip(offset)
+            .take(page_limit)
+        {
+            scanned_rows += 1;
+            let row = match get_row_at(&sheet, row_id, subrow_id) {
+                Ok(row) => row,
+                Err(_) => continue,
             };
-
-            let mut row_obj = match build_row_object(&table_context, &row, row_id, subrow_id) {
-                Ok(row_obj) => row_obj,
-                Err(e) => return McpResponse::Error(format!("{e}")),
-            };
+            let mut row_obj =
+                match build_row_object(&table_context, row, row_id, subrow_id, &columns, format) {
+                    Ok(row_obj) => row_obj,
+                    Err(e) => return McpResponse::Error(format!("{e}")),
+                };
             row_obj.insert("row_index".into(), serde_json::json!(sequence));
             rows.push(serde_json::Value::Object(row_obj));
         }
@@ -741,7 +1052,10 @@ async fn process_query_rows(
             "limit": page_limit,
             "total_rows": total_rows,
             "matched_rows": matched_rows,
-            "display_field": ctx.display_field,
+            "has_more": has_more,
+            "scanned_rows": scanned_rows,
+            "format": match format { RowFormat::Compact => "compact", RowFormat::Detailed => "detailed" },
+            "columns": columns_to_json(&columns, table_context.display_column_idx()),
             "rows": rows
         })
         .to_string(),
@@ -753,11 +1067,11 @@ async fn process_get_row(
     name: &str,
     row_id: u32,
     subrow_id: u16,
-    search_name: Option<&str>,
+    column_selectors: Option<&[ColumnSelector]>,
+    format: RowFormat,
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
-    let ctx = build_schema_context(backend, name).await;
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
         Err(e) => return McpResponse::Error(format!("{e}")),
@@ -767,76 +1081,56 @@ async fn process_get_row(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
-    let (target_row_id, target_subrow_id) = if let Some(search) = search_name {
-        let search_lower = search.to_lowercase();
-        let display_idx = table_context.display_column_idx().unwrap_or(0);
-        let (_, col_def) = match table_context.get_column_by_offset(display_idx) {
-            Ok(column) => column,
-            Err(e) => return McpResponse::Error(format!("{e}")),
-        };
-        let mut found = None;
-        for (rid, sid) in row_locations(&sheet) {
-            let row = match sid {
-                Some(subrow_id) => match sheet.get_subrow(rid, subrow_id) {
-                    Ok(row) => row,
-                    Err(_) => continue,
-                },
-                None => match sheet.get_row(rid) {
-                    Ok(row) => row,
-                    Err(_) => continue,
-                },
-            };
-            if col_def.kind() == ironworks::file::exh::ColumnKind::String {
-                if let Ok(s) = row.read_string(u32::from(col_def.offset())) {
-                    if s.to_string().to_lowercase().contains(&search_lower) {
-                        found = Some((rid, sid.unwrap_or(0)));
-                        break;
-                    }
-                }
-            } else if let Ok(v) = row.read::<u32>(u32::from(col_def.offset())) {
-                if v.to_string().to_lowercase().contains(&search_lower) {
-                    found = Some((rid, sid.unwrap_or(0)));
-                    break;
-                }
-            }
-        }
-        match found {
-            Some(pair) => pair,
-            None => return McpResponse::Error(format!("未找到匹配 '{search}' 的行")),
-        }
-    } else {
-        (row_id, subrow_id)
+    let columns = match select_columns(&table_context, column_selectors) {
+        Ok(columns) => columns,
+        Err(e) => return McpResponse::Error(format!("{e}")),
     };
-
-    let row = match sheet.get_subrow(target_row_id, target_subrow_id) {
+    let row = match sheet.get_subrow(row_id, subrow_id) {
         Ok(r) => r,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let fields = match build_row_fields(&table_context, &row) {
-        Ok(fields) => fields,
+    let values = match read_row_values(&table_context, row, &columns, format) {
+        Ok(values) => values,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
     McpResponse::Success(
         serde_json::json!({
             "sheet": name,
-            "row_id": target_row_id,
-            "subrow_id": target_subrow_id,
-            "display_field": ctx.display_field,
-            "field_count": table_context.column_count(),
-            "fields": fields
+            "row_id": row_id,
+            "subrow_id": subrow_id,
+            "column_count": table_context.column_count(),
+            "format": match format { RowFormat::Compact => "compact", RowFormat::Detailed => "detailed" },
+            "columns": columns_to_json(&columns, table_context.display_column_idx()),
+            "values": values
         })
         .to_string(),
     )
 }
 
-async fn process_search_cells(
-    backend: &Backend,
-    name: &str,
-    query: &str,
+struct SearchCellsOptions<'a> {
+    name: &'a str,
+    query: &'a str,
+    columns: Option<&'a [ColumnSelector]>,
+    row_offset: usize,
+    max_rows: Option<usize>,
     max_results: usize,
-    lang: Language,
-) -> McpResponse {
+    language: Language,
+}
+
+async fn process_search_cells(backend: &Backend, options: SearchCellsOptions<'_>) -> McpResponse {
+    let SearchCellsOptions {
+        name,
+        query,
+        columns: column_selectors,
+        row_offset,
+        max_rows,
+        max_results,
+        language: lang,
+    } = options;
+    if query.trim().is_empty() {
+        return McpResponse::Error("query 不能为空".into());
+    }
     let excel = backend.excel();
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
@@ -847,50 +1141,56 @@ async fn process_search_cells(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
-    let column_defs = match table_context.columns() {
+    let columns = match select_columns(&table_context, column_selectors) {
         Ok(columns) => columns,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
     let ql = query.to_lowercase();
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    let row_locations = row_locations(&sheet);
-    let scanned_rows = row_locations.len();
+    let result_limit = max_results.min(500);
+    let mut results = Vec::with_capacity(result_limit);
+    let mut scanned_rows = 0;
+    let mut truncated = false;
     let display_idx = table_context.display_column_idx();
 
-    for (row_id, subrow_id) in row_locations {
-        if results.len() >= max_results {
-            break;
+    'rows: for (sequence, (row_id, subrow_id)) in row_locations(&sheet)
+        .skip(row_offset)
+        .take(max_rows.unwrap_or(usize::MAX))
+        .enumerate()
+    {
+        if sequence % 256 == 0 {
+            tokio::task::yield_now().await;
         }
-        let row = match subrow_id {
-            Some(subrow_id) => match sheet.get_subrow(row_id, subrow_id) {
-                Ok(row) => row,
-                Err(_) => continue,
-            },
-            None => match sheet.get_row(row_id) {
-                Ok(row) => row,
-                Err(_) => continue,
-            },
+        scanned_rows += 1;
+        let row = match get_row_at(&sheet, row_id, subrow_id) {
+            Ok(row) => row,
+            Err(_) => continue,
         };
 
-        for (i, (_, col_def)) in column_defs.iter().enumerate() {
-            if results.len() >= max_results {
-                break;
-            }
-            if col_def.kind() != ironworks::file::exh::ColumnKind::String {
+        for column in &columns {
+            if column.sheet.kind() != ironworks::file::exh::ColumnKind::String {
                 continue;
             }
-            if let Ok(s) = row.read_string(u32::from(col_def.offset())) {
+            if let Ok(s) = row.read_string(u32::from(column.sheet.offset())) {
                 let value = s.to_string();
                 if value.to_lowercase().contains(&ql) {
-                    let col_name = column_defs[i].0.name().to_string();
+                    if results.len() >= result_limit {
+                        truncated = true;
+                        break 'rows;
+                    }
                     let mut item = serde_json::Map::new();
                     item.insert("row_id".into(), serde_json::json!(row_id));
                     item.insert("subrow_id".into(), serde_json::json!(subrow_id));
-                    item.insert("column_index".into(), serde_json::json!(i));
-                    item.insert("column_offset".into(), serde_json::json!(col_def.offset()));
-                    item.insert("column_name".into(), serde_json::json!(col_name));
+                    item.insert("column_index".into(), serde_json::json!(column.index));
+                    item.insert(
+                        "column_offset".into(),
+                        serde_json::json!(column.sheet.offset()),
+                    );
+                    item.insert(
+                        "column_name".into(),
+                        serde_json::json!(column.schema.name()),
+                    );
                     item.insert("value".into(), serde_json::json!(value));
-                    if display_idx == Some(i as u32) {
+                    if display_idx == Some(column.index as u32) {
                         item.insert("is_display".into(), serde_json::json!(true));
                     }
                     results.push(serde_json::Value::Object(item));
@@ -906,20 +1206,36 @@ async fn process_search_cells(
             "language": format!("{lang:?}"),
             "count": results.len(),
             "scanned_rows": scanned_rows,
-            "truncated": results.len() >= max_results,
+            "row_offset": row_offset,
+            "max_rows": max_rows,
+            "limit": result_limit,
+            "truncated": truncated,
             "matches": results
         })
         .to_string(),
     )
 }
 
-async fn process_follow_link(
-    backend: &Backend,
-    name: &str,
+struct ResolveLinkOptions<'a> {
+    name: &'a str,
     row_id: u32,
-    column_index: usize,
-    lang: Language,
-) -> McpResponse {
+    subrow_id: u16,
+    column: &'a ColumnSelector,
+    target_columns: Option<&'a [ColumnSelector]>,
+    format: RowFormat,
+    language: Language,
+}
+
+async fn process_resolve_link(backend: &Backend, options: ResolveLinkOptions<'_>) -> McpResponse {
+    let ResolveLinkOptions {
+        name,
+        row_id,
+        subrow_id,
+        column: column_selector,
+        target_columns: target_column_selectors,
+        format,
+        language: lang,
+    } = options;
     let excel = backend.excel();
     let sheet = match excel.get_sheet(name, lang).await {
         Ok(s) => s,
@@ -929,31 +1245,107 @@ async fn process_follow_link(
         Ok(ctx) => ctx,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let row = match sheet.get_row(row_id) {
+    let row = match sheet.get_subrow(row_id, subrow_id) {
         Ok(r) => r,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-
-    let idx = column_index.min(table_context.column_count().saturating_sub(1));
-    let ((_, col_def), _) = match table_context.get_column_by_index(idx as u32) {
-        Ok(column) => column,
+    let source_columns =
+        match select_columns(&table_context, Some(std::slice::from_ref(column_selector))) {
+            Ok(columns) => columns,
+            Err(e) => return McpResponse::Error(format!("{e}")),
+        };
+    let source_column = &source_columns[0];
+    let link_value = match table_context
+        .cell_by_offset(row, source_column.index as u32)
+        .and_then(|cell| cell.read(false))
+        .and_then(|value| {
+            value
+                .coerce_integer()
+                .ok_or_else(|| anyhow::anyhow!("链接列无法转换为行 ID"))
+        }) {
+        Ok(value) => match u32::try_from(value) {
+            Ok(value) => value,
+            Err(e) => return McpResponse::Error(format!("链接行 ID 无效: {e}")),
+        },
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let link_value = match row.read::<u32>(u32::from(col_def.offset())) {
-        Ok(v) => v,
-        Err(e) => return McpResponse::Error(format!("{e}")),
+
+    let targets = match source_column.schema.meta() {
+        SchemaColumnMeta::Link(link) => link.targets().to_vec(),
+        SchemaColumnMeta::ConditionalLink { column_idx, links } => {
+            let switch_value = match table_context
+                .cell_by_offset(row, *column_idx)
+                .and_then(|cell| cell.read(false))
+                .and_then(|value| {
+                    value
+                        .coerce_integer()
+                        .and_then(|value| i32::try_from(value).ok())
+                        .ok_or_else(|| anyhow::anyhow!("条件链接选择值无效"))
+                }) {
+                Ok(value) => value,
+                Err(e) => return McpResponse::Error(format!("{e}")),
+            };
+            match links.get(&switch_value) {
+                Some(link) => link.targets().to_vec(),
+                None => {
+                    return McpResponse::Error(format!(
+                        "条件链接没有选择值 {switch_value} 对应的目标表"
+                    ));
+                }
+            }
+        }
+        _ => return McpResponse::Error(format!("列 '{}' 不是链接列", source_column.schema.name())),
     };
 
-    McpResponse::Success(
-        serde_json::json!({
-            "sheet": name,
-            "row_id": row_id,
-            "column_offset": col_def.offset(),
-            "column_index": idx,
-            "link_value": link_value
-        })
-        .to_string(),
-    )
+    for target_name in &targets {
+        let target_sheet = match excel.get_sheet(target_name, lang).await {
+            Ok(sheet) => sheet,
+            Err(_) => continue,
+        };
+        let target_row = match target_sheet.get_row(link_value) {
+            Ok(row) => row,
+            Err(_) => continue,
+        };
+        let target_context =
+            match build_table_context(backend, target_name, target_sheet.clone(), lang).await {
+                Ok(context) => context,
+                Err(e) => return McpResponse::Error(format!("{e}")),
+            };
+        let target_columns = match select_columns(&target_context, target_column_selectors) {
+            Ok(columns) => columns,
+            Err(e) => return McpResponse::Error(format!("{e}")),
+        };
+        let values = match read_row_values(&target_context, target_row, &target_columns, format) {
+            Ok(values) => values,
+            Err(e) => return McpResponse::Error(format!("{e}")),
+        };
+
+        return McpResponse::Success(
+            serde_json::json!({
+                "source": {
+                    "sheet": name,
+                    "row_id": row_id,
+                    "subrow_id": subrow_id,
+                    "column_index": source_column.index,
+                    "column_name": source_column.schema.name()
+                },
+                "link_row_id": link_value,
+                "target": {
+                    "sheet": target_name,
+                    "row_id": link_value,
+                    "format": match format { RowFormat::Compact => "compact", RowFormat::Detailed => "detailed" },
+                    "columns": columns_to_json(&target_columns, target_context.display_column_idx()),
+                    "values": values
+                }
+            })
+            .to_string(),
+        );
+    }
+
+    McpResponse::Error(format!(
+        "目标行 {link_value} 不存在于候选表: {}",
+        targets.join(", ")
+    ))
 }
 
 async fn process_decode_se_string(
@@ -961,7 +1353,7 @@ async fn process_decode_se_string(
     name: &str,
     row_id: u32,
     subrow_id: u16,
-    column_index: usize,
+    column_selector: &ColumnSelector,
     lang: Language,
 ) -> McpResponse {
     let excel = backend.excel();
@@ -978,26 +1370,28 @@ async fn process_decode_se_string(
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
 
-    let idx = column_index.min(table_context.column_count().saturating_sub(1));
-    let ((_, col_def), _) = match table_context.get_column_by_index(idx as u32) {
-        Ok(column) => column,
+    let columns = match select_columns(&table_context, Some(std::slice::from_ref(column_selector)))
+    {
+        Ok(columns) => columns,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    if col_def.kind() != ironworks::file::exh::ColumnKind::String {
+    let column = &columns[0];
+    if column.sheet.kind() != ironworks::file::exh::ColumnKind::String {
         return McpResponse::Error(format!(
-            "列 {} 的类型为 {:?}，不是 String，无法解码 SeString",
-            idx,
-            col_def.kind()
+            "列 {} 的类型为 {:?}, 不是 String, 无法解码 SeString",
+            column.index,
+            column.sheet.kind()
         ));
     }
-    let raw = match row.read_string(u32::from(col_def.offset())) {
-        Ok(s) => s.to_string(),
+    let value = match row.read_string(u32::from(column.sheet.offset())) {
+        Ok(value) => value,
         Err(e) => return McpResponse::Error(format!("{e}")),
     };
-    let raw_bytes = raw.as_bytes().to_vec();
+    let raw_text = value.to_string();
+    let raw_bytes = value.as_bytes();
 
     use base64::{Engine, prelude::BASE64_STANDARD};
-    let base64 = BASE64_STANDARD.encode(&raw_bytes);
+    let base64 = BASE64_STANDARD.encode(raw_bytes);
     let hex = raw_bytes
         .iter()
         .map(|b| format!("{b:02X}"))
@@ -1009,88 +1403,13 @@ async fn process_decode_se_string(
             "sheet": name,
             "row_id": row_id,
             "subrow_id": subrow_id,
-            "column_offset": col_def.offset(),
-            "column_index": idx,
-            "raw_text": raw,
+            "column_offset": column.sheet.offset(),
+            "column_index": column.index,
+            "column_name": column.schema.name(),
+            "raw_text": raw_text,
             "bytes_base64": base64,
             "bytes_hex": hex,
             "byte_count": raw_bytes.len()
-        })
-        .to_string(),
-    )
-}
-
-async fn process_resolve_display_field(
-    backend: &Backend,
-    name: &str,
-    row_id: u32,
-    subrow_id: u16,
-    lang: Language,
-) -> McpResponse {
-    let excel = backend.excel();
-    let ctx = build_schema_context(backend, name).await;
-    let sheet = match excel.get_sheet(name, lang).await {
-        Ok(s) => s,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
-        Ok(ctx) => ctx,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-
-    let Some(display_idx) = table_context.display_column_idx() else {
-        return McpResponse::Success(
-            serde_json::json!({
-                "sheet": name,
-                "row_id": row_id,
-                "subrow_id": subrow_id,
-                "resolved": null,
-                "reason": "no display field"
-            })
-            .to_string(),
-        );
-    };
-
-    let (_, col_def) = match table_context.get_column_by_offset(display_idx) {
-        Ok(column) => column,
-        Err(_) => {
-            return McpResponse::Success(
-                serde_json::json!({
-                    "sheet": name,
-                    "row_id": row_id,
-                    "subrow_id": subrow_id,
-                    "resolved": null,
-                    "reason": "display field index out of bounds"
-                })
-                .to_string(),
-            );
-        }
-    };
-
-    let row = match sheet.get_subrow(row_id, subrow_id) {
-        Ok(r) => r,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-
-    let value = if col_def.kind() == ironworks::file::exh::ColumnKind::String {
-        row.read_string(u32::from(col_def.offset()))
-            .map_or(serde_json::Value::Null, |s| {
-                serde_json::json!(s.to_string())
-            })
-    } else {
-        row.read::<u32>(u32::from(col_def.offset()))
-            .map_or(serde_json::Value::Null, |v| serde_json::json!(v))
-    };
-
-    McpResponse::Success(
-        serde_json::json!({
-            "sheet": name,
-            "row_id": row_id,
-            "subrow_id": subrow_id,
-            "column_index": display_idx,
-            "column_offset": col_def.offset(),
-            "display_field": ctx.display_field,
-            "resolved": value
         })
         .to_string(),
     )
@@ -1110,7 +1429,7 @@ async fn process_save_schema(backend: &Backend, name: &str, text: &str) -> McpRe
     }
 }
 
-async fn dispatch_request(backend: &Backend, req: McpRequest, lang: Language) -> McpResponse {
+async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
     match req {
         McpRequest::ListSheets {
             query,
@@ -1127,86 +1446,136 @@ async fn dispatch_request(backend: &Backend, req: McpRequest, lang: Language) ->
         McpRequest::GetSheetInfo { name } => process_get_sheet_info(backend, &name).await,
         McpRequest::GetSheetSchema { name } => process_get_sheet_schema(backend, &name).await,
         McpRequest::GetSchemaRaw { name } => process_get_schema_raw(backend, &name).await,
-        McpRequest::SearchSheets { query } => {
-            McpResponse::Success(process_search_sheets(backend, &query))
-        }
         McpRequest::SearchCells {
             name,
             query,
+            columns,
+            row_offset,
+            max_rows,
             max_results,
-        } => process_search_cells(backend, &name, &query, max_results, lang).await,
+            language,
+        } => {
+            process_search_cells(
+                backend,
+                SearchCellsOptions {
+                    name: &name,
+                    query: &query,
+                    columns: columns.as_deref(),
+                    row_offset,
+                    max_rows,
+                    max_results,
+                    language,
+                },
+            )
+            .await
+        }
         McpRequest::QueryRows {
             name,
             filter,
+            columns,
             offset,
             limit,
-        } => process_query_rows(backend, &name, filter.as_deref(), offset, limit, lang).await,
+            count_total,
+            resolve_links,
+            format,
+            language,
+        } => {
+            process_query_rows(
+                backend,
+                QueryRowsOptions {
+                    name: &name,
+                    filter: filter.as_deref(),
+                    columns: columns.as_deref(),
+                    offset,
+                    limit,
+                    count_total,
+                    resolve_links,
+                    format,
+                    language,
+                },
+            )
+            .await
+        }
         McpRequest::GetRow {
             name,
             row_id,
             subrow_id,
-            search_name,
+            columns,
+            format,
+            language,
         } => {
             process_get_row(
                 backend,
                 &name,
                 row_id,
                 subrow_id,
-                search_name.as_deref(),
-                lang,
+                columns.as_deref(),
+                format,
+                language,
             )
             .await
         }
-        McpRequest::ValidateFilter { expression } => {
-            McpResponse::Success(process_validate_filter(&expression))
-        }
         McpRequest::ValidateSchema { text } => McpResponse::Success(process_validate_schema(&text)),
-        McpRequest::GetIconUrl { icon_id } => McpResponse::Success(process_get_icon_url(icon_id)),
-        McpRequest::DecomposeModelId { model_id } => process_decompose_model_id(&model_id),
         McpRequest::GetSheetRelations { name } => process_get_sheet_relations(backend, &name).await,
         McpRequest::GetReferencingSheets { target_sheet } => {
             process_get_referencing_sheets(backend, &target_sheet).await
         }
-        McpRequest::FollowLink {
+        McpRequest::ResolveLink {
             name,
             row_id,
-            column_index,
-        } => process_follow_link(backend, &name, row_id, column_index, lang).await,
+            subrow_id,
+            column,
+            target_columns,
+            format,
+            language,
+        } => {
+            process_resolve_link(
+                backend,
+                ResolveLinkOptions {
+                    name: &name,
+                    row_id,
+                    subrow_id,
+                    column: &column,
+                    target_columns: target_columns.as_deref(),
+                    format,
+                    language,
+                },
+            )
+            .await
+        }
         McpRequest::DecodeSeString {
             name,
             row_id,
             subrow_id,
-            column_index,
-        } => process_decode_se_string(backend, &name, row_id, subrow_id, column_index, lang).await,
-        McpRequest::ResolveDisplayField {
-            name,
-            row_id,
-            subrow_id,
-        } => process_resolve_display_field(backend, &name, row_id, subrow_id, lang).await,
+            column,
+            language,
+        } => process_decode_se_string(backend, &name, row_id, subrow_id, &column, language).await,
         McpRequest::SaveSchema { name, text } => process_save_schema(backend, &name, &text).await,
-        McpRequest::GetGameVersion => {
-            McpResponse::Success(serde_json::json!({"source": "EXDViewer"}).to_string())
-        }
     }
 }
 
 pub struct McpHandle {
     shutdown: tokio_util::sync::CancellationToken,
-    server_join: std::thread::JoinHandle<()>,
-    worker_join: std::thread::JoinHandle<()>,
+    server_join: Option<std::thread::JoinHandle<()>>,
+    worker_join: Option<std::thread::JoinHandle<()>>,
 }
 
 impl Drop for McpHandle {
     fn drop(&mut self) {
         self.shutdown.cancel();
-        let _ = std::mem::replace(&mut self.server_join, std::thread::spawn(|| {})).join();
-        let _ = std::mem::replace(&mut self.worker_join, std::thread::spawn(|| {})).join();
+        if let Some(join) = self.server_join.take() {
+            let _ = join.join();
+        }
+        if let Some(join) = self.worker_join.take() {
+            let _ = join.join();
+        }
     }
 }
 
 pub fn start(config: BackendConfig) -> McpHandle {
     let shutdown = tokio_util::sync::CancellationToken::new();
-    let (request_tx, request_rx) = mpsc::channel::<(McpRequest, oneshot::Sender<McpResponse>)>();
+    let (request_tx, mut request_rx) =
+        mpsc::channel::<(McpRequest, oneshot::Sender<McpResponse>)>(64);
 
     let worker_shutdown = shutdown.clone();
     let worker_config = config.clone();
@@ -1226,16 +1595,29 @@ pub fn start(config: BackendConfig) -> McpHandle {
                 }
             };
 
-            while !worker_shutdown.is_cancelled() {
-                let Ok((req, resp_tx)) = request_rx.recv_timeout(Duration::from_millis(100)) else {
-                    continue;
-                };
-
-                let response = rt.block_on(async {
-                    dispatch_request(&backend, req, Language::ChineseSimplified).await
-                });
-                let _ = resp_tx.send(response);
-            }
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async move {
+                loop {
+                    tokio::select! {
+                        () = worker_shutdown.cancelled() => break,
+                        request = request_rx.recv() => {
+                            let Some((req, resp_tx)) = request else {
+                                break;
+                            };
+                            let backend = backend.clone();
+                            tokio::task::spawn_local(async move {
+                                let mut resp_tx = resp_tx;
+                                tokio::select! {
+                                    () = resp_tx.closed() => {}
+                                    response = dispatch_request(&backend, req) => {
+                                        let _ = resp_tx.send(response);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            });
         })
         .expect("Failed to spawn MCP worker thread");
 
@@ -1274,17 +1656,19 @@ pub fn start(config: BackendConfig) -> McpHandle {
 
                 let router = axum::Router::new().nest_service("/mcp", service);
 
-                let listener = tokio::net::TcpListener::bind("127.0.0.1:3001")
-                    .await
-                    .expect("Failed to bind MCP server to 127.0.0.1:3001");
+                let listener = match tokio::net::TcpListener::bind("127.0.0.1:3001").await {
+                    Ok(listener) => listener,
+                    Err(e) => {
+                        log::error!("MCP 服务器无法监听 127.0.0.1:3001: {e}");
+                        return;
+                    }
+                };
                 log::info!("MCP 服务器已启动 http://127.0.0.1:3001/mcp");
 
                 let shutdown_ct = ct.clone();
                 let server =
                     axum::serve(listener, router).with_graceful_shutdown(async move {
-                        while !server_shutdown.is_cancelled() {
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
+                        server_shutdown.cancelled().await;
                         shutdown_ct.cancel();
                     });
 
@@ -1297,7 +1681,7 @@ pub fn start(config: BackendConfig) -> McpHandle {
 
     McpHandle {
         shutdown,
-        server_join,
-        worker_join,
+        server_join: Some(server_join),
+        worker_join: Some(worker_join),
     }
 }

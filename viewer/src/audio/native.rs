@@ -1,9 +1,11 @@
+use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
 use rodio::{ChannelCount, DeviceSinkBuilder, MixerDeviceSink, SampleRate, Source};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
 
 use super::Decoded;
 
@@ -14,6 +16,7 @@ pub struct Player {
     audio: Option<Arc<Decoded>>,
     position: Arc<AtomicU64>,
     volume: f32,
+    spectrum: RefCell<SpectrumAnalyzer>,
 }
 
 impl Player {
@@ -24,6 +27,7 @@ impl Player {
             audio: None,
             position: Arc::new(AtomicU64::new(0)),
             volume: 1.0,
+            spectrum: RefCell::new(SpectrumAnalyzer::new()),
         })
     }
 
@@ -101,9 +105,16 @@ impl Player {
     /// No-op on native; on web this resumes the audio context in a user gesture.
     pub fn unlock(&self) {}
 
-    /// No spectrum analyser on the native backend; the visualizer is web-only.
     pub fn spectrum(&self, out: &mut [u8]) {
-        out.fill(0);
+        let Some(audio) = &self.audio else {
+            out.fill(0);
+            return;
+        };
+        self.spectrum.borrow_mut().analyze(
+            audio,
+            self.position.load(Ordering::Relaxed) as usize,
+            out,
+        );
     }
 
     /// No OS media controls on the native backend (souvlaki is deferred).
@@ -113,6 +124,67 @@ impl Player {
         self.sink
             .as_ref()
             .is_some_and(|sink| !sink.empty() && !sink.is_paused())
+    }
+}
+
+const SPECTRUM_SIZE: usize = 8192;
+
+struct SpectrumAnalyzer {
+    fft: Arc<dyn Fft<f32>>,
+    buffer: Vec<Complex<f32>>,
+}
+
+impl SpectrumAnalyzer {
+    fn new() -> Self {
+        let mut planner = FftPlanner::new();
+        Self {
+            fft: planner.plan_fft_forward(SPECTRUM_SIZE),
+            buffer: vec![Complex::ZERO; SPECTRUM_SIZE],
+        }
+    }
+
+    fn analyze(&mut self, audio: &Decoded, position: usize, out: &mut [u8]) {
+        let channels = usize::from(audio.channels);
+        if channels == 0 {
+            out.fill(0);
+            return;
+        }
+        let frame_count = audio.samples.len() / channels;
+        let start = position.saturating_sub(SPECTRUM_SIZE / 2);
+        let loop_region = audio
+            .loop_start
+            .zip(audio.loop_end)
+            .map(|(start, end)| (start as usize, end as usize))
+            .filter(|(start, end)| start < end);
+        for (offset, value) in self.buffer.iter_mut().enumerate() {
+            let mut frame = start + offset;
+            if let Some((loop_start, loop_end)) = loop_region
+                && frame >= loop_end
+            {
+                frame = loop_start + (frame - loop_start) % (loop_end - loop_start);
+            }
+            let sample = if frame < frame_count {
+                let sample_start = frame * channels;
+                audio.samples[sample_start..sample_start + channels]
+                    .iter()
+                    .sum::<f32>()
+                    / channels as f32
+            } else {
+                0.0
+            };
+            let window = 0.5
+                - 0.5 * (std::f32::consts::TAU * offset as f32 / (SPECTRUM_SIZE - 1) as f32).cos();
+            *value = Complex::new(sample * window, 0.0);
+        }
+
+        self.fft.process(&mut self.buffer);
+        let bin_count = out.len().min(SPECTRUM_SIZE / 2);
+        let scale = 2.0 / SPECTRUM_SIZE as f32;
+        for (output, value) in out[..bin_count].iter_mut().zip(&self.buffer[..bin_count]) {
+            let decibels = (value.norm() * scale).max(f32::MIN_POSITIVE).log10() * 20.0;
+            *output = (((decibels + 100.0) / 70.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+        }
+        out[bin_count..].fill(0);
     }
 }
 

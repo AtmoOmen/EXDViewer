@@ -5,9 +5,7 @@ use crate::{
 
 use super::{FileProvider, get_icon_path};
 use async_trait::async_trait;
-use either::Either;
 use image::RgbaImage;
-use url::Url;
 
 pub struct WorkerFileProvider(());
 
@@ -70,7 +68,7 @@ impl FileProvider for WorkerFileProvider {
         }
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<RgbaImage> {
         log::info!("WorkerFileProvider: requesting icon {icon_id}, {hires}");
         let path = get_icon_path(icon_id, hires);
         if let WorkerResponse::DataRequestTexture(result) =
@@ -83,7 +81,7 @@ impl FileProvider for WorkerFileProvider {
                         anyhow::anyhow!("WorkerFileProvider: failed to create image from data")
                     })
                 })?;
-            Ok(Either::Right(file))
+            Ok(file)
         } else {
             Err(anyhow::anyhow!(
                 "WorkerFileProvider: invalid response from worker"

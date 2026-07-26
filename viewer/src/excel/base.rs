@@ -1,6 +1,5 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use either::Either;
 use futures_util::{StreamExt, stream::FuturesOrdered};
 use image::RgbaImage;
 use intmap::IntMap;
@@ -12,7 +11,6 @@ use ironworks::{
     },
 };
 use std::{cell::RefCell, collections::HashMap, num::NonZeroUsize, ops::Range, rc::Rc, sync::Arc};
-use url::Url;
 
 use crate::data::{FileProvider, FileProviderExt};
 use crate::utils::{CloneableResult, KeyedCache, SharedFuture};
@@ -122,7 +120,7 @@ impl ExcelProvider for CachedProvider {
         &self.0.entries
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> Result<Either<Url, RgbaImage>> {
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> Result<RgbaImage> {
         self.0.files.get_icon(icon_id, hires).await
     }
 

@@ -2,7 +2,6 @@ use crate::utils::{GameVersion, fetch_url};
 
 use super::{FileProvider, get_icon_path, get_xivapi_asset_url};
 use async_trait::async_trait;
-use either::Either;
 use image::RgbaImage;
 use serde::Deserialize;
 use url::Url;
@@ -125,10 +124,11 @@ impl FileProvider for WebFileProvider {
         Ok(fetch_url(url).await?)
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<RgbaImage> {
         let path = get_icon_path(icon_id, hires);
         let url = get_xivapi_asset_url(&path, Some("png"));
-        Ok(Either::Left(url))
+        let bytes = fetch_url(url).await?;
+        Ok(image::load_from_memory(&bytes)?.into_rgba8())
     }
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>> {

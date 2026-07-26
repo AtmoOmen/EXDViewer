@@ -21,11 +21,64 @@ pub struct Decoded {
 
 /// Decode a BGM sound entry to interleaved PCM.
 pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
-    match entry.format() {
-        Codec::OggVorbis => decode_ogg(entry.data()),
-        Codec::Hca => decode_hca(entry.data()),
+    decode_data(entry.format(), entry.data())
+}
+
+pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
+    match codec {
+        Codec::OggVorbis => decode_ogg(data),
+        Codec::Hca => decode_hca(data),
         other => Err(anyhow!("unsupported audio codec {other:?}")),
     }
+}
+
+pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
+    let channels = usize::from(audio.channels);
+    if channels == 0 || !audio.samples.len().is_multiple_of(channels) {
+        return Err(anyhow!("invalid PCM channel layout"));
+    }
+
+    let data_size = audio
+        .samples
+        .len()
+        .checked_mul(2)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| anyhow!("PCM data is too large for WAV"))?;
+    let riff_size = data_size
+        .checked_add(36)
+        .ok_or_else(|| anyhow!("PCM data is too large for WAV"))?;
+    let byte_rate = audio
+        .sample_rate
+        .checked_mul(u32::from(audio.channels))
+        .and_then(|rate| rate.checked_mul(2))
+        .ok_or_else(|| anyhow!("invalid WAV byte rate"))?;
+    let block_align = audio
+        .channels
+        .checked_mul(2)
+        .ok_or_else(|| anyhow!("invalid WAV block alignment"))?;
+
+    let mut wav = Vec::with_capacity(44 + data_size as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_size.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&audio.channels.to_le_bytes());
+    wav.extend_from_slice(&audio.sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    for &sample in &audio.samples {
+        let sample = if sample <= -1.0 {
+            i16::MIN
+        } else {
+            (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+        };
+        wav.extend_from_slice(&sample.to_le_bytes());
+    }
+    Ok(wav)
 }
 
 /// OggVorbis via symphonia. Loop points come from the `LoopStart`/`LoopEnd` Vorbis comments,

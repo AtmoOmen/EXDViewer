@@ -3,9 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use egui::{
     ColorImage, ImageSource, TextureHandle, TextureOptions, load::SizedTexture, mutex::Mutex,
 };
-use either::Either;
 use image::RgbaImage;
-use url::Url;
 
 use super::{
     CloneableResult, ConvertiblePromise, PromiseKind, TrackedPromise,
@@ -13,7 +11,10 @@ use super::{
 };
 
 pub enum ManagedIcon {
-    Loaded(ImageSource<'static>),
+    Loaded {
+        source: ImageSource<'static>,
+        image: Arc<RgbaImage>,
+    },
     Failed(CloneableError),
     Loading,
     NotLoaded,
@@ -24,10 +25,10 @@ type IconEntry = (
     bool, // hires
 );
 
-type IconPromise = TrackedPromise<anyhow::Result<Either<Url, RgbaImage>>>;
+type IconPromise = TrackedPromise<anyhow::Result<RgbaImage>>;
 
 type ConvertibleIconPromise =
-    ConvertiblePromise<IconPromise, CloneableResult<ImageSource<'static>>>;
+    ConvertiblePromise<IconPromise, CloneableResult<(ImageSource<'static>, Arc<RgbaImage>)>>;
 
 #[derive(Clone, Default)]
 pub struct IconManager(Arc<Mutex<IconManagerImpl>>);
@@ -77,10 +78,10 @@ impl IconManagerImpl {
         hires: bool,
         ctx: &egui::Context,
         result: <IconPromise as PromiseKind>::Output,
-    ) -> CloneableResult<ImageSource<'static>> {
+    ) -> CloneableResult<(ImageSource<'static>, Arc<RgbaImage>)> {
         match result {
-            Ok(Either::Left(url)) => Ok(ImageSource::Uri(url.to_string().into())),
-            Ok(Either::Right(data)) => {
+            Ok(data) => {
+                let data = Arc::new(data);
                 let handle = ctx.load_texture(
                     format!("Icon {icon_id}{}", if hires { " (hr1)" } else { "" }),
                     ColorImage::from_rgba_unmultiplied(
@@ -91,7 +92,7 @@ impl IconManagerImpl {
                 );
                 let ret = SizedTexture::from_handle(&handle);
                 handles.push(handle);
-                Ok(ImageSource::Texture(ret))
+                Ok((ImageSource::Texture(ret), data))
             }
             Err(e) => {
                 log::error!("Failed to load icon: {e:?}");
@@ -131,7 +132,7 @@ impl IconManagerImpl {
             })
             .cloned();
         match ret {
-            Some(Ok(image)) => ManagedIcon::Loaded(image),
+            Some(Ok((source, image))) => ManagedIcon::Loaded { source, image },
             Some(Err(e)) => ManagedIcon::Failed(e),
             None => ManagedIcon::Loading,
         }

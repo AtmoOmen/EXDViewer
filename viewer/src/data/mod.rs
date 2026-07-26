@@ -2,7 +2,6 @@ use std::io::Cursor;
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
-use either::Either;
 use image::RgbaImage;
 use ironworks::file::File;
 use url::Url;
@@ -21,7 +20,7 @@ pub trait FileProvider {
     /// Read a file's raw bytes by path.
     async fn read(&self, path: &str) -> anyhow::Result<Vec<u8>>;
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>>;
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<RgbaImage>;
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>>;
 }

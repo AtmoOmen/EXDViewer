@@ -1,6 +1,6 @@
 use egui::{
-    Align, Color32, CursorIcon, Id, InnerResponse, Label, Layout, Margin, Modal, RichText, Sense,
-    Spinner, UiBuilder,
+    Align, Color32, ColorImage, CursorIcon, Id, InnerResponse, Label, Layout, Margin, Modal,
+    RichText, Sense, Spinner, UiBuilder,
 };
 use egui_table::TableDelegate;
 use itertools::Itertools;
@@ -28,7 +28,7 @@ use crate::{
         FILTER_CELL_READ_STOPWATCH, FILTER_KEY_STOPWATCH, FILTER_MATCH_STOPWATCH,
         FILTER_ROW_STOPWATCH, FILTER_TOTAL_STOPWATCH,
     },
-    utils::{ManagedIcon, PromiseKind, TrackedPromise, yield_to_ui},
+    utils::{ManagedIcon, PromiseKind, TrackedPromise, tex_loader, yield_to_ui},
 };
 
 use super::{cell::CellResponse, table_context::TableContext};
@@ -59,6 +59,7 @@ pub struct SheetTable {
     row_sizes: Vec<f32>,
 
     modal_image: Option<u32>,
+    image_export: Option<TrackedPromise<()>>,
 
     clicked_cell: Option<CellResponse>,
     go_to_row_requested: bool,
@@ -96,6 +97,7 @@ impl SheetTable {
             subrow_lookup,
             row_sizes: Vec::with_capacity(subrow_count),
             modal_image: None,
+            image_export: None,
             clicked_cell: None,
             go_to_row_requested: false,
             filtered_rows,
@@ -168,6 +170,11 @@ impl SheetTable {
             table.show(ui, self);
         });
 
+        self.image_export
+            .take_if(|promise| promise.try_get().is_some());
+        let exporting_image = self.image_export.is_some();
+        let mut copy_image = None;
+        let mut export_image = None;
         if let Some(icon_id) = &self.modal_image {
             let icon_id = *icon_id;
             let resp = Modal::new(Id::new("icon-modal"))
@@ -186,8 +193,31 @@ impl SheetTable {
                         )
                     });
                     match resp {
-                        ManagedIcon::Loaded(icon) => {
-                            ui.add(egui::Image::new(icon).fit_to_exact_size(ui.available_size()))
+                        ManagedIcon::Loaded { source, image } => {
+                            ui.horizontal(|ui| {
+                                if ui.button("复制图片").clicked() {
+                                    copy_image = Some(image.clone());
+                                }
+                                if ui
+                                    .add_enabled(!exporting_image, egui::Button::new("导出 PNG"))
+                                    .clicked()
+                                {
+                                    export_image = Some((icon_id, image.clone()));
+                                }
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} × {}",
+                                        image.width(),
+                                        image.height()
+                                    ))
+                                    .weak(),
+                                );
+                            });
+                            ui.add(
+                                egui::Image::new(source)
+                                    .maintain_aspect_ratio(true)
+                                    .fit_to_exact_size(ui.available_size()),
+                            )
                         }
                         ManagedIcon::Failed(e) => {
                             ui.label("加载图标失败").on_hover_text(e.to_string())
@@ -213,6 +243,38 @@ impl SheetTable {
             if resp.should_close() {
                 self.modal_image = None;
             }
+        }
+
+        if let Some(image) = copy_image {
+            ui.ctx().copy_image(ColorImage::from_rgba_unmultiplied(
+                [image.width() as usize, image.height() as usize],
+                image.as_raw(),
+            ));
+        }
+        if let Some((icon_id, image)) = export_image {
+            self.image_export = Some(TrackedPromise::spawn_local(async move {
+                let data = match tex_loader::write(image.as_ref().clone(), image::ImageFormat::Png)
+                {
+                    Ok(data) => data,
+                    Err(error) => {
+                        log::error!("PNG 编码失败: {error}");
+                        return;
+                    }
+                };
+                if let Some(file) = rfd::AsyncFileDialog::new()
+                    .set_title("导出图片")
+                    .set_file_name(format!("{icon_id}.png"))
+                    .add_filter("PNG 图片", &["png"])
+                    .save_file()
+                    .await
+                {
+                    if let Err(error) = file.write(&data).await {
+                        log::error!("写入图片失败: {error}");
+                    } else {
+                        log::info!("图片导出成功");
+                    }
+                }
+            }));
         }
 
         let clicked_cell = self.clicked_cell.take().unwrap_or_default();

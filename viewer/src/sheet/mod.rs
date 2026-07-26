@@ -12,18 +12,24 @@ mod table_context;
 use std::{cell::RefCell, fmt::Write, sync::Arc};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
-pub use cell::{CellResponse, CellValue, MatchOptions};
+#[cfg(not(target_arch = "wasm32"))]
+pub use cell::CellValue;
+pub use cell::{CellResponse, MatchOptions};
 use compact_str::ToCompactString;
 pub use csv::export_csv;
 use egui::{
     Align, Color32, Direction, FontSelection, Galley, Label, Layout, Response, RichText, Sense,
     text::LayoutJob,
 };
-pub use filter::{CompiledFilterInput, ComplexFilter, FilterInput, FilterInputType};
+#[cfg(not(target_arch = "wasm32"))]
+pub use filter::CompiledFilterInput;
+pub use filter::{ComplexFilter, FilterInput, FilterInputType};
 pub use global_context::GlobalContext;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;
+#[cfg(not(target_arch = "wasm32"))]
 pub use schema_column::{SchemaColumn, SchemaColumnMeta};
+#[cfg(not(target_arch = "wasm32"))]
 pub use sheet_column::SheetColumnDefinition;
 pub use sheet_table::{SheetTable, SheetTableResponse};
 pub use table_context::TableContext;

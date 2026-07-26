@@ -3,7 +3,6 @@ use std::{collections::HashMap, error::Error, io::Cursor};
 use anyhow::Result;
 use async_trait::async_trait;
 use binrw::{BinRead, binread, helpers::until_exclusive, meta::ReadEndian};
-use either::Either;
 use image::RgbaImage;
 use ironworks::{
     excel::Language,
@@ -11,7 +10,6 @@ use ironworks::{
     sestring::SeStr,
 };
 use num_traits::FromBytes;
-use url::Url;
 
 #[async_trait(?Send)]
 pub trait ExcelProvider {
@@ -19,7 +17,7 @@ pub trait ExcelProvider {
     type Sheet: ExcelSheet;
 
     fn get_entries(&self) -> &HashMap<String, i32>;
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> Result<Either<Url, RgbaImage>>;
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> Result<RgbaImage>;
     async fn get_sheet(&self, name: &str, language: Language) -> Result<Self::Sheet>;
     async fn get_header(&self, name: &str) -> Result<Self::Header>;
 }

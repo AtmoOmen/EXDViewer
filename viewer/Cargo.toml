@@ -92,6 +92,7 @@ tokio-util = "0.7"
 velopack = { version = "=1.2.0", features = ["public-utils"] }
 ureq = { version = "3.3", features = ["win-system-proxy"] }
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+rustfft = "6"
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -732,7 +732,7 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
         TrackedPromise::spawn_local(async move { excel.get_icon(icon_id, hires).await })
     });
     let resp = match image_source {
-        ManagedIcon::Loaded(source) => {
+        ManagedIcon::Loaded { source, .. } => {
             ui.with_layout(
                 Layout::centered_and_justified(Direction::LeftToRight),
                 |ui| {
@@ -762,15 +762,10 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
         get_icon_path(icon_id, hires)
     ));
     resp.context_menu(|ui| {
-        if ui.button("复制").clicked() {
+        if ui.button("复制 ID").clicked() {
             ui.ctx().copy_text(icon_id.to_string());
             ui.close();
         }
-        // ui.add_enabled_ui(image_source.is_some(), |ui| {
-        //     if ui.button("Save").clicked() {
-        //         image_source.unwrap().load(ctx, texture_options, size_hint)
-        //     }
-        // });
     });
     resp
 }

@@ -741,9 +741,11 @@ impl SetupWindow {
             None
         };
 
+        let modal_width = (ctx.content_rect().width() - 32.0).clamp(260.0, 800.0);
         Modal::default_area("setup-modal".into())
             .order(egui::Order::Middle)
             .show(ctx, |ui| {
+                ui.set_width(modal_width);
                 ui.scope_builder(UiBuilder::new().sense(Sense::CLICK | Sense::DRAG), |ui| {
                     egui::containers::Frame::window(ui.style())
                         .show(ui, show_inner)

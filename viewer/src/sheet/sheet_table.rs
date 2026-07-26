@@ -23,14 +23,10 @@ use crate::{
         ComplexFilter, FilterInput, FilterInputType, filter::CompiledFilterInput,
         should_ignore_clicks,
     },
-    stopwatch::{
-        Stopwatch,
-        stopwatches::{
-            FILTER_CELL_CREATE_STOPWATCH, FILTER_CELL_GRAB_STOPWATCH, FILTER_CELL_ITER_STOPWATCH,
-            FILTER_CELL_READ_STOPWATCH, FILTER_KEY_STOPWATCH, FILTER_MATCH_STOPWATCH,
-            FILTER_ROW_STOPWATCH, FILTER_TOTAL_STOPWATCH, MULTILINE_STOPWATCH,
-            MULTILINE2_STOPWATCH, MULTILINE3_STOPWATCH, MULTILINE4_STOPWATCH,
-        },
+    stopwatch::stopwatches::{
+        FILTER_CELL_CREATE_STOPWATCH, FILTER_CELL_GRAB_STOPWATCH, FILTER_CELL_ITER_STOPWATCH,
+        FILTER_CELL_READ_STOPWATCH, FILTER_KEY_STOPWATCH, FILTER_MATCH_STOPWATCH,
+        FILTER_ROW_STOPWATCH, FILTER_TOTAL_STOPWATCH,
     },
     utils::{ManagedIcon, PromiseKind, TrackedPromise, yield_to_ui},
 };
@@ -78,10 +74,9 @@ pub struct SheetTable {
 impl SheetTable {
     pub fn new(context: TableContext, ui: &mut egui::Ui) -> Self {
         let sheet = context.sheet();
+        let subrow_count = sheet.subrow_count() as usize;
 
-        let unfiltered_row_offsets = Rc::new(RefCell::new(Vec::with_capacity(
-            sheet.subrow_count() as usize,
-        )));
+        let unfiltered_row_offsets = Rc::new(RefCell::new(Vec::with_capacity(subrow_count)));
         let filtered_rows = RefCell::new(LruCache::new(NonZero::new(8).unwrap()));
 
         let subrow_lookup = if sheet.has_subrows() {
@@ -99,7 +94,7 @@ impl SheetTable {
         let mut ret = Self {
             context,
             subrow_lookup,
-            row_sizes: Vec::new(),
+            row_sizes: Vec::with_capacity(subrow_count),
             modal_image: None,
             clicked_cell: None,
             go_to_row_requested: false,
@@ -111,8 +106,6 @@ impl SheetTable {
             current_filter_cancel_token: None,
         };
 
-        ret.size_all_rows(ui);
-
         ret.update_filter(ui.ctx());
 
         ret
@@ -123,6 +116,16 @@ impl SheetTable {
         ui: &mut egui::Ui,
         scroll_to: Option<((u32, Option<u16>), u16)>,
     ) -> SheetTableResponse {
+        if !self.size_rows(ui) {
+            let progress = self.row_sizes.len() as f32 / self.context.sheet().subrow_count() as f32;
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(format!("正在计算行布局 {:.0}%", progress * 100.0));
+            });
+            ui.ctx().request_repaint();
+            return SheetTableResponse::Cell(CellResponse::None);
+        }
+
         self.tick_filter();
 
         let id = Id::new(self.context.sheet().name());
@@ -365,7 +368,7 @@ impl SheetTable {
 
                 let mut last_now = Instant::now();
                 let mut iters = 0;
-                const MAX_FRAME_TIME: Duration = Duration::from_millis(250);
+                const MAX_FRAME_TIME: Duration = Duration::from_millis(8);
 
                 for chunk in &iter.enumerate().chunks(batch_count) {
                     for (row_nr, (row_id, subrow_id, row)) in chunk {
@@ -520,27 +523,30 @@ impl SheetTable {
         }
     }
 
-    fn size_all_rows(&mut self, ui: &mut egui::Ui) {
+    fn size_rows(&mut self, ui: &mut egui::Ui) -> bool {
         let sheet = self.context.sheet();
-
-        self.row_sizes.clear();
-        self.row_sizes.reserve(sheet.subrow_count() as usize);
-        {
-            let _stop = Stopwatch::new(format!("Sizing - {}", sheet.name()));
-            let mut sizing_ui = ui.new_child(UiBuilder::new().sizing_pass());
-            for (row_id, subrow_id) in sheet.get_subrow_ids() {
-                self.row_sizes.push(self.context.size_row(
-                    sheet.get_subrow(row_id, subrow_id).unwrap(),
-                    &mut sizing_ui,
-                    (row_id, sheet.has_subrows().then_some(subrow_id)),
-                ));
-            }
-            drop(_stop);
-            MULTILINE_STOPWATCH.report();
-            MULTILINE2_STOPWATCH.report();
-            MULTILINE3_STOPWATCH.report();
-            MULTILINE4_STOPWATCH.report();
+        let row_count = sheet.subrow_count() as usize;
+        if self.row_sizes.len() == row_count {
+            return true;
         }
+
+        let started = Instant::now();
+        let mut sizing_ui = ui.new_child(UiBuilder::new().sizing_pass());
+        while self.row_sizes.len() < row_count && started.elapsed() < Duration::from_millis(8) {
+            let row_nr = self.row_sizes.len() as u64;
+            let (row_id, subrow_id) = self.get_row_id(row_nr).unwrap();
+            self.row_sizes.push(
+                self.context.size_row(
+                    sheet
+                        .get_subrow(row_id, subrow_id.unwrap_or_default())
+                        .unwrap(),
+                    &mut sizing_ui,
+                    (row_id, subrow_id),
+                ),
+            );
+        }
+
+        self.row_sizes.len() == row_count
     }
 
     fn clear_offsets(&mut self) {
@@ -552,7 +558,8 @@ impl SheetTable {
 
     pub fn invalidate_sizes(&mut self, ui: &mut egui::Ui) {
         self.clear_offsets();
-        self.size_all_rows(ui);
+        self.row_sizes.clear();
+        ui.ctx().request_repaint();
     }
 
     fn retrieve_filter(&self, ctx: &egui::Context) -> Result<Option<CompiledFilterInput>, String> {

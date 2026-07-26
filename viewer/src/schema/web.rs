@@ -3,6 +3,7 @@ use std::cmp::Reverse;
 use async_trait::async_trait;
 use itertools::Itertools;
 use serde::Deserialize;
+use url::Url;
 
 use crate::{
     settings::{GithubSchemaBranch, GithubSchemaLocation},
@@ -12,7 +13,7 @@ use crate::{
 use super::provider::SchemaProvider;
 
 pub struct WebProvider {
-    base_url: String,
+    base_urls: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -60,13 +61,17 @@ pub struct GithubPullRequestFile {
 
 impl WebProvider {
     pub fn new(base_url: String) -> Self {
-        WebProvider { base_url }
+        WebProvider {
+            base_urls: vec![base_url],
+        }
     }
 
-    pub fn new_github(location: &GithubSchemaLocation) -> Self {
-        WebProvider {
-            base_url: location.base_url(),
-        }
+    pub fn new_github(location: &GithubSchemaLocation) -> anyhow::Result<Self> {
+        let base_url = Url::parse(&location.base_url())?;
+        let urls = github_request_urls(&base_url, prefer_direct_github())?;
+        Ok(WebProvider {
+            base_urls: urls.into_iter().map(Into::into).collect(),
+        })
     }
 
     fn is_valid_github_name(name: &str) -> bool {
@@ -83,8 +88,10 @@ impl WebProvider {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
             return Err(anyhow::anyhow!("Invalid GitHub repository format"));
         }
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/branches?per_page=100");
-        let resp = fetch_url(url).await?;
+        let url = Url::parse(&format!(
+            "https://api.github.com/repos/{owner}/{repo}/branches?per_page=100"
+        ))?;
+        let resp = fetch_github_url(&url).await?;
 
         let branches: Vec<GithubBranch> = serde_json::from_slice(&resp)?;
 
@@ -115,8 +122,10 @@ impl WebProvider {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
             return Err(anyhow::anyhow!("Invalid GitHub repository format"));
         }
-        let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls?per_page=100");
-        let resp = fetch_url(url).await?;
+        let url = Url::parse(&format!(
+            "https://api.github.com/repos/{owner}/{repo}/pulls?per_page=100"
+        ))?;
+        let resp = fetch_github_url(&url).await?;
 
         let pulls: Vec<GithubPullRequest> = serde_json::from_slice(&resp)?;
 
@@ -148,10 +157,10 @@ impl WebProvider {
         let mut ret = Vec::new();
         let mut page = 1u32;
         loop {
-            let url = format!(
+            let url = Url::parse(&format!(
                 "https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files?per_page={PER_PAGE}&page={page}"
-            );
-            let resp = fetch_url(url).await?;
+            ))?;
+            let resp = fetch_github_url(&url).await?;
 
             let files: Vec<GithubPullRequestFile> = serde_json::from_slice(&resp)?;
             let count = files.len();
@@ -175,7 +184,19 @@ impl WebProvider {
 #[async_trait(?Send)]
 impl SchemaProvider for WebProvider {
     async fn get_schema_text(&self, name: &str) -> anyhow::Result<String> {
-        fetch_url_str(format!("{}/{name}.yml", self.base_url)).await
+        let mut failures = Vec::new();
+        for base_url in &self.base_urls {
+            let url = format!("{}/{name}.yml", base_url.trim_end_matches('/'));
+            match fetch_url_str(&url).await {
+                Ok(text) => return Ok(text),
+                Err(error) => {
+                    log::debug!("表定义下载失败, 正在尝试备用地址: {url}: {error}");
+                    failures.push(error.to_string());
+                }
+            }
+        }
+
+        anyhow::bail!("所有表定义地址均下载失败: {}", failures.join("; "))
     }
 
     fn can_save_schemas(&self) -> bool {
@@ -188,5 +209,52 @@ impl SchemaProvider for WebProvider {
 
     async fn save_schema(&self, _name: &str, _text: &str) -> anyhow::Result<()> {
         unreachable!("Saving schemas is not supported by this provider");
+    }
+}
+
+fn github_request_urls(remote_url: &Url, prefer_direct: bool) -> anyhow::Result<[Url; 2]> {
+    let host = remote_url
+        .host_str()
+        .ok_or_else(|| anyhow::anyhow!("GitHub URL 缺少主机名"))?;
+    if remote_url.scheme() != "https"
+        || !(host.eq_ignore_ascii_case("api.github.com")
+            || host.eq_ignore_ascii_case("raw.githubusercontent.com"))
+    {
+        anyhow::bail!("GitHub URL 不受信任")
+    }
+
+    let mut mirror_url = Url::parse(crate::GITHUB_MIRROR_URL)?;
+    mirror_url.set_path(&format!("/{host}{}", remote_url.path()));
+    mirror_url.set_query(remote_url.query());
+    if prefer_direct {
+        Ok([remote_url.clone(), mirror_url])
+    } else {
+        Ok([mirror_url, remote_url.clone()])
+    }
+}
+
+async fn fetch_github_url(remote_url: &Url) -> anyhow::Result<Vec<u8>> {
+    let mut failures = Vec::new();
+    for url in github_request_urls(remote_url, prefer_direct_github())? {
+        match fetch_url(url.as_str()).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(error) => {
+                log::debug!("GitHub 请求失败, 正在尝试备用地址: {url}: {error}");
+                failures.push(error.to_string());
+            }
+        }
+    }
+
+    anyhow::bail!("所有 GitHub 地址均请求失败: {}", failures.join("; "))
+}
+
+fn prefer_direct_github() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        ureq::Proxy::try_from_env().is_some()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
     }
 }

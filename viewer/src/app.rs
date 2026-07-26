@@ -54,7 +54,7 @@ use crate::{
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mcp::McpHandle;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::update_source::GithubMirrorSource;
+use crate::update_source::GithubUpdateSource;
 
 type CachedSheetEntry = (
     Language, // language
@@ -157,6 +157,7 @@ enum UpdateState {
     Downloading(i16),
     ReadyToRestart(Box<velopack::UpdateInfo>),
     Restarting,
+    Failed(String),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -164,6 +165,7 @@ enum UpdateEvent {
     Current,
     Downloading(i16),
     ReadyToRestart(Box<velopack::UpdateInfo>),
+    Failed(String),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -173,6 +175,7 @@ impl UpdateState {
             UpdateEvent::Current => Self::Current,
             UpdateEvent::Downloading(progress) => Self::Downloading(progress.clamp(0, 100)),
             UpdateEvent::ReadyToRestart(update) => Self::ReadyToRestart(update),
+            UpdateEvent::Failed(error) => Self::Failed(error),
         };
     }
 }
@@ -273,6 +276,10 @@ impl App {
         }
 
         self.update_check_started = true;
+        if cfg!(debug_assertions) {
+            self.update_state = UpdateState::Current;
+            return;
+        }
         let event_tx = self.update_event_tx.clone();
         let ctx = ctx.clone();
         std::thread::spawn(move || check_for_updates(event_tx, ctx));
@@ -1167,9 +1174,11 @@ impl App {
                 let resp = editor.draw(ui, backend.schema());
                 if resp.changed()
                     && let Some(schema) = editor.get_schema()
-                    && let Err(e) = table.context().set_schema(Some(schema))
                 {
-                    log::error!("设置表定义失败: {e:?}");
+                    match table.context().set_schema(Some(schema)) {
+                        Ok(()) => table.invalidate_sizes(ui),
+                        Err(error) => log::error!("设置表定义失败: {error:?}"),
+                    }
                 }
 
                 let scroll_to = TEMP_SCROLL_TO.take(ctx);
@@ -1658,19 +1667,24 @@ impl eframe::App for App {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn check_for_updates(event_tx: Sender<UpdateEvent>, ctx: egui::Context) {
-    let source = match GithubMirrorSource::new(crate::UPDATE_REPO_URL, crate::GITHUB_MIRROR_URL) {
+    let source = match GithubUpdateSource::new(crate::UPDATE_REPO_URL, crate::GITHUB_MIRROR_URL) {
         Ok(source) => source,
         Err(error) => {
-            log::debug!("无法初始化 GitHub 镜像更新源: {error}");
-            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            log::debug!("无法初始化 GitHub 更新源: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Failed(error.to_string()));
             return;
         }
     };
     let manager = match velopack::UpdateManager::new(source, None, None) {
         Ok(manager) => manager,
+        Err(velopack::Error::NotInstalled(error)) => {
+            log::debug!("当前运行方式不支持自动更新: {error}");
+            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            return;
+        }
         Err(error) => {
             log::debug!("无法初始化 Velopack 更新管理器: {error}");
-            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            send_update_event(&event_tx, &ctx, UpdateEvent::Failed(error.to_string()));
             return;
         }
     };
@@ -1683,7 +1697,11 @@ fn check_for_updates(event_tx: Sender<UpdateEvent>, ctx: egui::Context) {
         }
         Ok(velopack::UpdateCheck::RemoteIsEmpty) => {
             log::warn!("GitHub 更新源未提供可用版本");
-            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            send_update_event(
+                &event_tx,
+                &ctx,
+                UpdateEvent::Failed("更新源未提供可用版本".to_owned()),
+            );
         }
         Ok(velopack::UpdateCheck::NoUpdateAvailable) => {
             log::info!("当前已是最新版本");
@@ -1691,7 +1709,7 @@ fn check_for_updates(event_tx: Sender<UpdateEvent>, ctx: egui::Context) {
         }
         Err(error) => {
             log::warn!("检查更新失败: {error}");
-            send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+            send_update_event(&event_tx, &ctx, UpdateEvent::Failed(error.to_string()));
         }
     }
 }
@@ -1721,7 +1739,7 @@ fn download_update(
 
     if let Err(error) = result {
         log::warn!("下载更新失败: {error}");
-        send_update_event(&event_tx, &ctx, UpdateEvent::Current);
+        send_update_event(&event_tx, &ctx, UpdateEvent::Failed(error.to_string()));
         return;
     }
 
@@ -1734,10 +1752,10 @@ fn apply_update(
     event_tx: Sender<UpdateEvent>,
     ctx: egui::Context,
 ) {
-    let source = match GithubMirrorSource::new(crate::UPDATE_REPO_URL, crate::GITHUB_MIRROR_URL) {
+    let source = match GithubUpdateSource::new(crate::UPDATE_REPO_URL, crate::GITHUB_MIRROR_URL) {
         Ok(source) => source,
         Err(error) => {
-            log::warn!("无法初始化 GitHub 镜像更新源: {error}");
+            log::warn!("无法初始化 GitHub 更新源: {error}");
             send_update_event(&event_tx, &ctx, UpdateEvent::ReadyToRestart(update));
             return;
         }
@@ -1816,6 +1834,23 @@ fn add_links(
                     Button::new(format!("EXDViewer {} 正在重启更新", crate::APP_VERSION))
                         .frame(false),
                 );
+            }
+            UpdateState::Failed(error) => {
+                let response = ui
+                    .add(
+                        Button::new(
+                            RichText::new("更新失败, 点击重试").color(ui.visuals().error_fg_color),
+                        )
+                        .frame(false),
+                    )
+                    .on_hover_text(error.as_str());
+                if response.clicked() {
+                    *update_state = UpdateState::Checking;
+                    let event_tx = event_tx.clone();
+                    let update_ctx = ctx.clone();
+                    std::thread::spawn(move || check_for_updates(event_tx, update_ctx));
+                    ctx.request_repaint();
+                }
             }
             UpdateState::Checking | UpdateState::Current => {
                 if ui

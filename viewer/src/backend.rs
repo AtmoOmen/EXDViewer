@@ -73,7 +73,7 @@ impl Backend {
                 }
 
                 SchemaLocation::Github(location) => {
-                    BoxedSchemaProvider::new_web(WebProvider::new_github(&location))
+                    BoxedSchemaProvider::new_web(WebProvider::new_github(&location)?)
                 }
 
                 SchemaLocation::Web(base_url) => {

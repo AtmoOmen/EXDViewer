@@ -1,6 +1,13 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, num::NonZeroU32, rc::Rc};
+use std::{
+    borrow::Cow,
+    cell::{Cell as ValueCell, RefCell},
+    collections::HashMap,
+    num::NonZeroU32,
+    rc::Rc,
+};
 
 use anyhow::bail;
+use ironworks::file::exh::ColumnKind;
 use itertools::Itertools;
 
 use crate::{
@@ -18,7 +25,9 @@ use crate::{
 };
 
 use super::{
-    cell::Cell, global_context::GlobalContext, schema_column::SchemaColumn,
+    cell::Cell,
+    global_context::GlobalContext,
+    schema_column::{SchemaColumn, SchemaColumnMeta},
     sheet_column::SheetColumnDefinition,
 };
 
@@ -38,8 +47,10 @@ pub struct TableContextImpl {
     column_ordering: Vec<u32>,
     sheet_columns: Vec<SheetColumnDefinition>,
     schema_columns: RefCell<Vec<SchemaColumn>>,
+    sizing_columns: RefCell<Vec<u32>>,
+    has_icon_column: ValueCell<bool>,
     // Offset index of the displayField column
-    display_column_idx: std::cell::Cell<Option<u32>>,
+    display_column_idx: ValueCell<Option<u32>>,
 
     referenced_sheets: RefCell<HashMap<String, SharedConvertibleSheetPromise>>,
 
@@ -61,16 +72,20 @@ impl TableContext {
 
         let filter_cache = FilterCache::new(&schema_columns, &sheet_columns);
 
-        Self(Rc::new(TableContextImpl {
+        let context = Self(Rc::new(TableContextImpl {
             global,
             sheet,
             column_ordering,
             sheet_columns,
             schema_columns: RefCell::new(schema_columns),
-            display_column_idx: std::cell::Cell::new(display_column_idx),
+            sizing_columns: RefCell::new(Vec::new()),
+            has_icon_column: ValueCell::new(false),
+            display_column_idx: ValueCell::new(display_column_idx),
             referenced_sheets: RefCell::new(HashMap::new()),
             filter_cache,
-        }))
+        }));
+        context.update_sizing_columns();
+        context
     }
 
     pub fn sheet(&self) -> &BaseSheet {
@@ -155,6 +170,7 @@ impl TableContext {
         })?;
         self.0.schema_columns.replace(columns);
         self.0.display_column_idx.replace(display_column_idx);
+        self.update_sizing_columns();
         Ok(())
     }
 
@@ -250,11 +266,39 @@ impl TableContext {
         ui: &mut egui::Ui,
         row_location: (u32, Option<u16>),
     ) -> f32 {
-        let size = (0..self.sheet().columns().len())
-            .filter_map(|column_idx| self.cell_by_offset(row, column_idx as u32).ok())
+        let size = self
+            .0
+            .sizing_columns
+            .borrow()
+            .iter()
+            .filter_map(|column_idx| self.cell_by_offset(row, *column_idx).ok())
             .map(|c| c.size(ui, row_location))
             .reduce(f32::max);
-        size.unwrap_or_default() + 4.0
+        let minimum = if self.0.has_icon_column.get() {
+            32.0
+        } else {
+            ui.text_style_height(&egui::TextStyle::Body)
+        };
+        size.unwrap_or(minimum).max(minimum) + 4.0
+    }
+
+    fn update_sizing_columns(&self) {
+        let schema_columns = self.0.schema_columns.borrow();
+        let mut sizing_columns = self.0.sizing_columns.borrow_mut();
+        sizing_columns.clear();
+        self.0.has_icon_column.set(false);
+
+        for (index, (schema_column, sheet_column)) in
+            schema_columns.iter().zip(&self.0.sheet_columns).enumerate()
+        {
+            match schema_column.meta() {
+                SchemaColumnMeta::Scalar if sheet_column.kind() == ColumnKind::String => {
+                    sizing_columns.push(index as u32);
+                }
+                SchemaColumnMeta::Icon => self.0.has_icon_column.set(true),
+                _ => {}
+            }
+        }
     }
 
     pub fn filter_row(

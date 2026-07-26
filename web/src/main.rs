@@ -1,6 +1,7 @@
 mod blocking_stream;
 mod config;
 mod data;
+mod paths;
 mod queue;
 mod routes;
 mod smart_bufreader;
@@ -20,7 +21,7 @@ use shadow_rs::shadow;
 use std::{io, sync::Arc};
 use thiserror::Error;
 
-use crate::queue::MessageQueue;
+use crate::{paths::PathIndex, queue::MessageQueue};
 
 shadow!(build);
 
@@ -84,7 +85,8 @@ async fn main() -> Result<(), ServerError> {
                 .expect("Unknown error from prometheus builder")
         })?;
     let server_config = config.clone();
-    let server_game_data = MessageQueue::new(game_data.clone(), config.api_workers)?;
+    let path_index = Arc::new(PathIndex::new(config.path_list.clone()));
+    let server_game_data = MessageQueue::new(game_data.clone(), path_index, config.api_workers)?;
 
     log::info!("Binding to {}", config.server_addr);
     let server = HttpServer::new(move || {
@@ -97,10 +99,8 @@ async fn main() -> Result<(), ServerError> {
             )
             .wrap(
                 Cors::default()
-                    .allowed_origin("http://localhost:3000")
-                    .allowed_origin("http://localhost:8080")
-                    .allowed_origin("http://127.0.0.1:3000")
-                    .allowed_origin("http://127.0.0.1:8080")
+                    // localhost + private/loopback LAN IPs (any port) so a LAN trunk serve reaches the API.
+                    .allowed_origin_fn(|origin, _req_head| origin.to_str().is_ok_and(is_dev_origin))
                     .allowed_methods(vec!["GET", "POST"])
                     .allowed_headers(vec!["Content-Type"]),
             )
@@ -170,4 +170,41 @@ async fn main() -> Result<(), ServerError> {
     log::info!("Goodbye!");
 
     Ok(())
+}
+
+/// A CORS origin whose host is localhost or a private/loopback IPv4 address.
+fn is_dev_origin(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or_default();
+    if host == "localhost" {
+        return true;
+    }
+    matches!(
+        host.parse::<std::net::Ipv4Addr>(),
+        Ok(ip) if ip.is_private() || ip.is_loopback()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_dev_origin;
+
+    #[test]
+    fn allows_lan_and_localhost_only() {
+        assert!(is_dev_origin("https://192.168.1.217:8080"));
+        assert!(is_dev_origin("http://localhost:8080"));
+        assert!(is_dev_origin("http://127.0.0.1:3000"));
+        assert!(is_dev_origin("http://10.0.0.5:3000"));
+        assert!(is_dev_origin("https://172.20.1.1"));
+        assert!(!is_dev_origin("https://exd.camora.dev")); // same-origin, no CORS needed
+        assert!(!is_dev_origin("https://8.8.8.8"));
+        assert!(!is_dev_origin("https://172.32.0.1")); // outside 172.16-31 private range
+        assert!(!is_dev_origin("https://evil.com:8080"));
+        assert!(!is_dev_origin("ftp://192.168.1.1"));
+    }
 }

@@ -1,17 +1,25 @@
-use std::{fmt::Display, str::FromStr};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    io::Write,
+    str::FromStr,
+    sync::{Arc, LazyLock, Mutex},
+    time::{Duration, Instant},
+};
 
 use actix_web::post;
 use actix_web::{
-    HttpResponse, Result,
+    HttpRequest, HttpResponse, Result,
     body::{EitherBody, MessageBody},
     dev::{HttpServiceFactory, ServiceResponse},
     error::{ErrorBadRequest, ErrorInternalServerError},
     get,
-    http::header::ContentDisposition,
+    http::header::{self, ContentDisposition},
     middleware::{ErrorHandlerResponse, ErrorHandlers},
     web::{self, Bytes},
 };
 use actix_web_lab::header::{CacheControl, CacheDirective};
+use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use xiv_core::file::{slug::Slug, version::GameVersion};
@@ -25,7 +33,10 @@ pub fn service() -> impl HttpServiceFactory {
         .service(get_repositories)
         .service(get_versions_slug)
         .service(get_exists_slug)
+        .service(get_global_paths)
+        .service(get_paths_slug)
         .service(get_file_slug)
+        .service(get_songs)
         .wrap(
             ErrorHandlers::new()
                 .default_handler_client(|r| log_error(true, r))
@@ -108,6 +119,84 @@ async fn serve_file(
         Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
+}
+
+#[get("/paths/")]
+async fn get_global_paths(
+    data: web::Data<MessageQueue>,
+    request: HttpRequest,
+) -> Result<HttpResponse> {
+    let frame = data
+        .get_global_paths()
+        .await
+        .map_err(ErrorInternalServerError)?;
+    serve_frame(&request, frame, 60 * 60)
+}
+
+#[get("/{slug}/{version}/paths/")]
+async fn get_paths_slug(
+    data: web::Data<MessageQueue>,
+    request: HttpRequest,
+    path_info: web::Path<(Slug, QueryGameVersion)>,
+) -> Result<HttpResponse> {
+    let (slug, version) = path_info.into_inner();
+    let resolved_ver = match &version {
+        QueryGameVersion::Latest => None,
+        QueryGameVersion::Specific(version) => Some(version.clone()),
+    };
+    let max_age = if version == QueryGameVersion::Latest {
+        60 * 60
+    } else {
+        60 * 60 * 24 * 365
+    };
+    let frame = data
+        .get_presence(slug, resolved_ver)
+        .await
+        .map_err(ErrorInternalServerError)?;
+    serve_frame(&request, frame, max_age)
+}
+
+fn serve_frame(request: &HttpRequest, frame: Bytes, max_age: u32) -> Result<HttpResponse> {
+    let mut directives = vec![CacheDirective::Public, CacheDirective::MaxAge(max_age)];
+    if max_age > 60 * 60 {
+        directives.insert(1, CacheDirective::Immutable);
+    }
+
+    let mut response = HttpResponse::Ok();
+    response
+        .content_type("application/octet-stream")
+        .insert_header(CacheControl(directives))
+        .insert_header((header::VARY, "Accept-Encoding"));
+
+    if accepts(request, "zstd") {
+        return Ok(response
+            .insert_header((header::CONTENT_ENCODING, "zstd"))
+            .body(frame));
+    }
+    let body = pathlist::decompress(&frame).map_err(ErrorInternalServerError)?;
+    if accepts(request, "gzip") {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&body).map_err(ErrorInternalServerError)?;
+        let gzipped = encoder.finish().map_err(ErrorInternalServerError)?;
+        return Ok(response
+            .insert_header((header::CONTENT_ENCODING, "gzip"))
+            .body(gzipped));
+    }
+    Ok(response.body(body))
+}
+
+fn accepts(request: &HttpRequest, encoding: &str) -> bool {
+    request
+        .headers()
+        .get(header::ACCEPT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|part| {
+                let mut fields = part.split(';');
+                let name = fields.next().unwrap_or_default().trim();
+                name.eq_ignore_ascii_case(encoding) && !fields.any(|f| f.trim() == "q=0")
+            })
+        })
 }
 
 #[get("/{slug}/{version}/{path:.*}/")]
@@ -257,6 +346,105 @@ async fn post_github_oauth_token(
 
     let value: Value = response.json().await.map_err(ErrorInternalServerError)?;
     Ok(HttpResponse::Ok().json(value))
+}
+
+/// BGM song metadata proxied from OrchestrionPlugin Google Sheet, keyed by BGM row id and language.
+const SONGS_SHEET: &str = "https://docs.google.com/spreadsheets/d/1s-xJjxqp6pwS7oewNy1aOQnr3gaJbewvIBbyYchZ6No/gviz/tq?tqx=out:csv&sheet=";
+const SONG_SHEETS: [&str; 5] = ["en", "ja", "fr", "de", "zh"];
+const SONGS_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+type SongsCache = Mutex<HashMap<&'static str, (Instant, Arc<String>)>>;
+static SONGS_CACHE: LazyLock<SongsCache> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+#[get("/songs/{lang}/")]
+async fn get_songs(lang: web::Path<String>) -> Result<HttpResponse> {
+    let sheet = SONG_SHEETS
+        .into_iter()
+        .find(|&s| s == lang.as_str())
+        .unwrap_or("en");
+
+    let cached = SONGS_CACHE
+        .lock()
+        .unwrap()
+        .get(sheet)
+        .filter(|(fetched, _)| fetched.elapsed() < SONGS_TTL)
+        .map(|(_, json)| json.clone());
+
+    let json = match cached {
+        Some(json) => json,
+        None => {
+            let json = Arc::new(build_songs(sheet).await.map_err(ErrorInternalServerError)?);
+            SONGS_CACHE
+                .lock()
+                .unwrap()
+                .insert(sheet, (Instant::now(), json.clone()));
+            json
+        }
+    };
+
+    Ok(HttpResponse::Ok()
+        .insert_header(CacheControl(vec![
+            CacheDirective::Public,
+            CacheDirective::MaxAge(60 * 60 * 6),
+        ]))
+        .content_type("application/json")
+        .body(json.as_ref().clone()))
+}
+
+async fn build_songs(sheet: &str) -> anyhow::Result<String> {
+    let client = reqwest::Client::new();
+    let meta_csv = client
+        .get(format!("{SONGS_SHEET}metadata"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+    let lang_csv = client
+        .get(format!("{SONGS_SHEET}{sheet}"))
+        .send()
+        .await?
+        .error_for_status()?
+        .text()
+        .await?;
+
+    // metadata sheet: id, duration (seconds)
+    let mut durations = std::collections::HashMap::new();
+    for record in csv::Reader::from_reader(meta_csv.as_bytes()).records() {
+        let record = record?;
+        if let (Some(Ok(id)), Some(Ok(duration))) = (
+            record.get(0).map(str::parse::<u32>),
+            record.get(1).map(str::parse::<f64>),
+        ) {
+            durations.insert(id, duration.round() as u64);
+        }
+    }
+
+    // language sheet: id, title, alt title, special mode title, locations, comments
+    let mut songs = Map::new();
+    for record in csv::Reader::from_reader(lang_csv.as_bytes()).records() {
+        let record = record?;
+        let Some(Ok(id)) = record.get(0).map(str::parse::<u32>) else {
+            continue;
+        };
+        let title = record.get(1).unwrap_or("").trim();
+        if title.is_empty() || title == "None" {
+            continue;
+        }
+        let mut song = Map::new();
+        song.insert("t".into(), Value::from(title));
+        for (key, column) in [("a", 2), ("s", 3), ("l", 4), ("i", 5)] {
+            let value = record.get(column).unwrap_or("").trim();
+            if !value.is_empty() {
+                song.insert(key.into(), Value::from(value));
+            }
+        }
+        if let Some(&duration) = durations.get(&id).filter(|&&d| d > 0) {
+            song.insert("d".into(), Value::from(duration));
+        }
+        songs.insert(id.to_string(), Value::Object(song));
+    }
+
+    Ok(serde_json::to_string(&Value::Object(songs))?)
 }
 
 fn log_error<B: MessageBody + 'static>(

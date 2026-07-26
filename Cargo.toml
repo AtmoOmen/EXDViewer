@@ -1,9 +1,9 @@
 [workspace]
-members = ["viewer", "web"]
+members = ["pathlist", "viewer", "web"]
 resolver = "3"
 
 [workspace.package]
-version = "1.6.0"
+version = "1.7.0"
 authors = ["Asriel Camora <asriel@camora.dev>"]
 repository = "https://github.com/AtmoOmen/EXDViewer"
 edition = "2024"
@@ -17,3 +17,19 @@ catppuccin-egui = { git = "https://github.com/WorkingRobot/egui.git", branch = "
 [profile.release-dbg]
 inherits = "release"
 debug = true
+
+# Optimize the audio decoders in dev builds; unoptimized vorbis/HCA decode is ~30x slower.
+[profile.dev.package.symphonia]
+opt-level = 3
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-codec-vorbis]
+opt-level = 3
+[profile.dev.package.symphonia-format-ogg]
+opt-level = 3
+[profile.dev.package.symphonia-metadata]
+opt-level = 3
+[profile.dev.package.symphonia-common]
+opt-level = 3
+[profile.dev.package.cridecoder]
+opt-level = 3

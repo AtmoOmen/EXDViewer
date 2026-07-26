@@ -1,6 +1,7 @@
 mod cell;
 mod cell_iter;
 mod compact_sestring;
+mod csv;
 mod filter;
 mod global_context;
 mod schema_column;
@@ -8,11 +9,12 @@ mod sheet_column;
 mod sheet_table;
 mod table_context;
 
-use std::{fmt::Write, sync::Arc};
+use std::{cell::RefCell, fmt::Write, sync::Arc};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 pub use cell::{CellResponse, CellValue, MatchOptions};
 use compact_str::ToCompactString;
+pub use csv::export_csv;
 use egui::{
     Align, Color32, Direction, FontSelection, Galley, Label, Layout, Response, RichText, Sense,
     text::LayoutJob,
@@ -151,13 +153,11 @@ fn wrap_string_lines_galley(ui: &egui::Ui, text: String) -> (usize, Arc<Galley>)
     (galley.rows.len(), galley)
 }
 
-static mut ESTIMATE_LUT: IntMap<u32, f32> = IntMap::new();
+thread_local! {
+    static ESTIMATE_LUT: RefCell<IntMap<u32, f32>> = const { RefCell::new(IntMap::new()) };
+}
 
-// SAFETY: Only accessed from the main thread
-fn get_estimated_char_width(ui: &egui::Ui, ch: char) -> f32 {
-    #[allow(static_mut_refs)]
-    let lut = unsafe { &mut ESTIMATE_LUT };
-
+fn estimated_char_width(ui: &egui::Ui, lut: &mut IntMap<u32, f32>, ch: char) -> f32 {
     if let Some(width) = lut.get(ch.into()) {
         *width
     } else {
@@ -180,21 +180,23 @@ fn wrap_string_lines_estimate(ui: &egui::Ui, text: &str) -> usize {
         return text.lines().count();
     };
 
-    text.lines()
-        .map(|line| {
-            let mut line_count = 1;
-            let mut current_width = 0.0;
-            for char in line.chars() {
-                let char_width = get_estimated_char_width(ui, char);
-                current_width += char_width;
-                if current_width > max_width {
-                    line_count += 1;
-                    current_width = char_width;
+    ESTIMATE_LUT.with_borrow_mut(|lut| {
+        text.lines()
+            .map(|line| {
+                let mut line_count = 1;
+                let mut current_width = 0.0;
+                for char in line.chars() {
+                    let char_width = estimated_char_width(ui, lut, char);
+                    current_width += char_width;
+                    if current_width > max_width {
+                        line_count += 1;
+                        current_width = char_width;
+                    }
                 }
-            }
-            line_count
-        })
-        .sum()
+                line_count
+            })
+            .sum()
+    })
 }
 
 fn should_ignore_clicks(ui: &egui::Ui) -> bool {

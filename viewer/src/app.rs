@@ -27,7 +27,7 @@ use crate::{
         provider::{ExcelHeader, ExcelProvider},
     },
     github::CALLBACK_PATH,
-    goto,
+    goto, music,
     pr_window::{self, PrAction, PrWindow},
     router::{Router, path::Path, route::RouteResponse},
     schema::{provider::SchemaProvider, web::WebProvider},
@@ -42,7 +42,7 @@ use crate::{
     setup::{self, SetupWindow},
     sheet::{
         CellResponse, FilterInputType, GlobalContext, MatchOptions, SheetTable, SheetTableResponse,
-        TableContext,
+        TableContext, export_csv,
     },
     shortcuts::{GOTO_ROW, GOTO_SHEET},
     utils::{
@@ -189,6 +189,7 @@ pub struct App {
     sheet_filter_data: SheetFilterData,
     changed_schemas: Option<(ChangedSchemasKey, ConvertibleChangedSchemasPromise)>,
     save_promise: Option<TrackedPromise<()>>,
+    export_promise: Option<TrackedPromise<()>>,
     pr_window: PrWindow,
     goto_window: Option<goto::GoToWindow>,
     #[cfg(not(target_arch = "wasm32"))]
@@ -202,6 +203,8 @@ pub struct App {
     #[cfg(not(target_arch = "wasm32"))]
     update_check_started: bool,
     about_open: bool,
+    music: music::MusicPlayer,
+    last_system_theme: Option<egui::Theme>,
     /// `None` = Latin only
     loaded_cjk: Option<CjkFont>,
     #[cfg(target_arch = "wasm32")]
@@ -210,10 +213,12 @@ pub struct App {
 
 fn create_router(ctx: egui::Context) -> Result<Router<App>> {
     let mut builder = Router::<App>::new(ctx);
-    builder.set_title_formatter(|title| format!("EXDViewer - {title}"));
+    builder.set_title_formatter(|title| format!("{title} - EXDViewer"));
     builder.add_route("/", App::on_setup, App::draw_setup)?;
     builder.add_route("/sheet", App::on_unnamed_sheet, App::draw_unnamed_sheet)?;
     builder.add_route("/sheet/{*name}", App::on_named_sheet, App::draw_named_sheet)?;
+    builder.add_route("/music", App::on_music, App::draw_music)?;
+    builder.add_route("/music/{id}", App::on_music_track, App::draw_music)?;
     builder.add_route(
         CALLBACK_PATH,
         App::on_auth_callback,
@@ -233,10 +238,18 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         self.process_update_events();
 
-        if shortcut::consume(&ctx, GOTO_ROW) {
+        let on_music = self
+            .router
+            .get()
+            .unwrap()
+            .current_path()
+            .path()
+            .starts_with("/music");
+
+        if !on_music && shortcut::consume(&ctx, GOTO_ROW) {
             self.goto_window = Some(goto::GoToWindow::to_row());
         }
-        if shortcut::consume(&ctx, GOTO_SHEET) {
+        if !on_music && shortcut::consume(&ctx, GOTO_SHEET) {
             self.goto_window = Some(goto::GoToWindow::to_sheet());
         }
 
@@ -244,7 +257,7 @@ impl App {
         self.update_sheet_languages(&ctx);
         self.pr_window.poll(&ctx);
         about::draw(&ctx, &mut self.about_open);
-        self.draw_menubar(ui);
+        self.draw_menubar(ui, on_music);
         self.draw_logger(ui.ctx());
         self.draw_pr_window(ui.ctx());
 
@@ -358,7 +371,7 @@ impl App {
         }
     }
 
-    fn draw_menubar(&mut self, ui: &mut egui::Ui) {
+    fn draw_menubar(&mut self, ui: &mut egui::Ui, on_music: bool) {
         let ctx = &ui.ctx().clone();
         #[cfg(not(target_arch = "wasm32"))]
         let update_event_tx = self.update_event_tx.clone();
@@ -369,6 +382,9 @@ impl App {
             )
             .show(ui, |ui| {
                 egui::MenuBar::new().ui(ui, |ui| {
+                    let bar_left = ui.min_rect().left();
+                    let bar_width = ui.available_width();
+
                     ui.menu_button("程序", |ui| {
                         if ui.button("配置").clicked() {
                             self.navigate("/");
@@ -380,16 +396,18 @@ impl App {
                         }
                     });
 
-                    ui.menu_button("跳转", |ui| {
-                        if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
-                            self.goto_window = Some(goto::GoToWindow::to_row());
-                            ui.close();
-                        }
-                        if shortcut::button(ui, "跳转到表…", GOTO_SHEET).clicked() {
-                            self.goto_window = Some(goto::GoToWindow::to_sheet());
-                            ui.close();
-                        }
-                    });
+                    if !on_music {
+                        ui.menu_button("跳转", |ui| {
+                            if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
+                                self.goto_window = Some(goto::GoToWindow::to_row());
+                                ui.close();
+                            }
+                            if shortcut::button(ui, "跳转到表…", GOTO_SHEET).clicked() {
+                                self.goto_window = Some(goto::GoToWindow::to_sheet());
+                                ui.close();
+                            }
+                        });
+                    }
 
                     ui.menu_button("语言", |ui| {
                         let saved_lang = LANGUAGE.get(ctx);
@@ -578,6 +596,26 @@ impl App {
                             }
                         }
                     });
+
+                    let seg = egui::vec2(72.0, ui.spacing().interact_size.y);
+                    let switcher_w = 2.0 * seg.x + ui.spacing().item_spacing.x;
+                    let target_left = bar_left + bar_width / 2.0 - switcher_w / 2.0;
+                    let space = target_left - ui.cursor().left();
+                    if space > 0.0 {
+                        ui.add_space(space);
+                    }
+                    if ui
+                        .add_sized(seg, Button::selectable(!on_music, "数据表"))
+                        .clicked()
+                    {
+                        self.navigate("/sheet");
+                    }
+                    if ui
+                        .add_sized(seg, Button::selectable(on_music, "音乐"))
+                        .clicked()
+                    {
+                        self.navigate("/music");
+                    }
 
                     #[cfg(not(target_arch = "wasm32"))]
                     add_links(
@@ -830,6 +868,9 @@ impl App {
 
     fn draw_sheet_data(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
+        self.export_promise.take_if(|p| p.try_get().is_some());
+        let mut export_request = None;
+
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::central_panel(&ctx.global_style()).inner_margin(egui::Margin {
@@ -1064,6 +1105,31 @@ impl App {
                                 }
                             });
 
+                            let exporting = self.export_promise.is_some();
+                            if exporting {
+                                ui.spinner();
+                            }
+                            ui.add_enabled_ui(!exporting, |ui| {
+                                ui.menu_button("导出", |ui| {
+                                    if ui
+                                        .button("导出为 CSV")
+                                        .on_hover_text("链接按显示值导出")
+                                        .clicked()
+                                    {
+                                        export_request = Some((table.context().clone(), true));
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button("导出为 CSV（原始值）")
+                                        .on_hover_text("链接按原始值导出")
+                                        .clicked()
+                                    {
+                                        export_request = Some((table.context().clone(), false));
+                                        ui.close();
+                                    }
+                                });
+                            });
+
                             let filter_error = table.get_filter_error();
 
                             let filter_resp = ui.add_sized(
@@ -1142,6 +1208,10 @@ impl App {
                     },
                 }
             });
+
+        if let Some((context, resolve_display_field)) = export_request {
+            self.command_export_csv(context, resolve_display_field);
+        }
     }
 
     fn on_setup(
@@ -1275,6 +1345,41 @@ impl App {
         self.draw_sheet_data(ui);
     }
 
+    fn on_music(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        _params: &Params<'_, '_>,
+    ) -> RouteResponse {
+        if let Some(r) = self.ensure_backend(path) {
+            return r;
+        }
+        RouteResponse::Title("音乐".to_string())
+    }
+
+    fn on_music_track(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        params: &Params<'_, '_>,
+    ) -> RouteResponse {
+        if let Some(r) = self.ensure_backend(path) {
+            return r;
+        }
+        if let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) {
+            self.music.request(id);
+        }
+        RouteResponse::Title("音乐".to_string())
+    }
+
+    fn draw_music(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(row_id) = self.music.ui(ui, &backend)
+        {
+            self.navigate(format!("/music/{row_id}"));
+        }
+    }
+
     fn command_open_pr(&mut self) {
         let names: Vec<String> = self
             .get_modified_schemas()
@@ -1311,6 +1416,33 @@ impl App {
             .filter_map(|(name, schema)| schema.as_ref().ok().map(|s| (name, s)))
             .filter(|(_, schema)| schema.is_modified())
             .collect()
+    }
+
+    fn command_export_csv(&mut self, context: TableContext, resolve_display_field: bool) {
+        let file_name = format!("{}.csv", context.sheet().name().replace('/', "_"));
+
+        self.export_promise = Some(TrackedPromise::spawn_local(async move {
+            let data = match export_csv(context, resolve_display_field).await {
+                Ok(data) => data,
+                Err(e) => {
+                    log::error!("导出 CSV 失败: {e:?}");
+                    return;
+                }
+            };
+
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("导出 CSV")
+                .set_file_name(file_name)
+                .save_file()
+                .await
+            {
+                if let Err(e) = file.write(&data).await {
+                    log::error!("写入 CSV 失败: {e}");
+                } else {
+                    log::info!("CSV 导出成功");
+                }
+            }
+        }));
     }
 
     fn command_save_all_schemas(&mut self) {
@@ -1394,6 +1526,7 @@ impl App {
             sheet_filter_data: LruCache::new(NonZero::new(8).unwrap()),
             changed_schemas: None,
             save_promise: None,
+            export_promise: None,
             pr_window: PrWindow::default(),
             goto_window: None,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1407,6 +1540,8 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             update_check_started: false,
             about_open: false,
+            music: music::MusicPlayer::default(),
+            last_system_theme: None,
             loaded_cjk: None,
             #[cfg(target_arch = "wasm32")]
             font_promise: None,
@@ -1500,10 +1635,22 @@ impl App {
             };
         });
     }
+
+    fn follow_system_theme(&mut self, ctx: &egui::Context) {
+        if COLOR_THEME.get(ctx) != ColorTheme::System {
+            return;
+        }
+        let system = ctx.system_theme();
+        if system != self.last_system_theme {
+            self.last_system_theme = system;
+            ColorTheme::System.apply(ctx);
+        }
+    }
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.follow_system_theme(ui.ctx());
         self.draw(ui);
         tick_promises(ui.ctx());
     }

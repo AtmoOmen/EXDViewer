@@ -239,6 +239,7 @@ pub const SHEET_FILTER_OPTIONS: DKey<MatchOptions> = DKey::new(
         use_display_field: true,
     },
 );
+pub const FILTER_GUIDE_VISIBLE: DKey<bool> = DKey::new("filter-guide-visible", false);
 pub const SELECTED_SHEET: DKey<Option<String>> = DKey::new("selected-sheet", None);
 pub const MISC_SHEETS_SHOWN: DKey<bool> = DKey::new("misc-sheets-shown", false);
 pub const PR_CHANGED_ONLY: DKey<bool> = DKey::new("pr-changed-only", true);
@@ -279,13 +280,14 @@ pub enum Region {
 }
 
 impl Region {
-    pub fn slug(&self) -> Option<&'static str> {
+    /// The API's key for this region. Replaces the old hardcoded repository slugs: the server
+    /// resolves a region to its repositories, so the client no longer has to know their ids.
+    pub fn api_name(&self) -> &'static str {
         match self {
-            Region::Global => Some("4e9a232b"),
-            Region::Korea => Some("de199059"),
-            Region::China => Some("c38effbc"),
-            // TODO(taiwan): Thaliak PR #102
-            Region::Taiwan => None,
+            Region::Global => "global",
+            Region::Korea => "korea",
+            Region::China => "china",
+            Region::Taiwan => "taiwan",
         }
     }
 
@@ -298,8 +300,10 @@ impl Region {
         }
     }
 
-    pub fn is_available(&self) -> bool {
-        self.slug().is_some()
+    /// Whether the backend actually serves this region. Answered by `/api/regions/` rather than by
+    /// a table baked into the binary, so a newly supported region needs no client release.
+    pub fn is_available(&self, served: Option<&[String]>) -> bool {
+        served.is_none_or(|regions| regions.iter().any(|r| r == self.api_name()))
     }
 }
 

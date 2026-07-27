@@ -42,11 +42,8 @@ impl Backend {
                 }
 
                 InstallLocation::Web(base_url, region, version) => {
-                    let Some(slug) = region.slug() else {
-                        anyhow::bail!("区域 {} 暂不可用", region.name());
-                    };
                     let files: Rc<dyn FileProvider> =
-                        Rc::new(WebFileProvider::new(&base_url, slug, version).await?);
+                        Rc::new(WebFileProvider::new(&base_url, region.api_name(), version).await?);
                     (files, 256)
                 }
             };

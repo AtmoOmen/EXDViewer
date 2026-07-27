@@ -2,6 +2,7 @@ use std::io::Cursor;
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
+use either::Either;
 use image::RgbaImage;
 use ironworks::file::File;
 use url::Url;
@@ -20,9 +21,29 @@ pub trait FileProvider {
     /// Read a file's raw bytes by path.
     async fn read(&self, path: &str) -> anyhow::Result<Vec<u8>>;
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<RgbaImage>;
+    /// Read a file the game records only as a hash. Unnamed files have no path, so this is the
+    /// only way to reach them; it is a web-API concept and the local providers refuse it.
+    async fn read_by_hash(
+        &self,
+        repository: u8,
+        category: u8,
+        hash: u64,
+        split: bool,
+    ) -> anyhow::Result<Vec<u8>>;
+
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>>;
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>>;
+}
+
+pub async fn resolve_icon(icon: Either<Url, RgbaImage>) -> anyhow::Result<RgbaImage> {
+    match icon {
+        Either::Left(url) => {
+            let bytes = crate::utils::fetch_url(url).await?;
+            Ok(image::load_from_memory(&bytes)?.into_rgba8())
+        }
+        Either::Right(image) => Ok(image),
+    }
 }
 
 /// Typed reads layered on [`FileProvider`]. Blanket-implemented for every

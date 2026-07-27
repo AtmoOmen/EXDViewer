@@ -2,12 +2,14 @@ use crate::utils::tex_loader;
 
 use super::{FileProvider, get_icon_path};
 use async_trait::async_trait;
+use either::Either;
 use image::RgbaImage;
 use ironworks::{
     Ironworks,
     sqpack::{Install, SqPack},
 };
 use std::{path::PathBuf, str::FromStr};
+use url::Url;
 
 pub struct SqpackFileProvider(Ironworks<SqPack<Install>>);
 
@@ -26,10 +28,22 @@ impl FileProvider for SqpackFileProvider {
         Ok(self.0.file::<Vec<u8>>(path)?)
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<RgbaImage> {
+    async fn read_by_hash(
+        &self,
+        _repository: u8,
+        _category: u8,
+        _hash: u64,
+        _split: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!(
+            "reading by hash needs the web API; a local sqpack install cannot resolve one"
+        )
+    }
+
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
         let path = get_icon_path(icon_id, hires);
         let data = tex_loader::read(&self.0, &path)?;
-        Ok(data.into_rgba8())
+        Ok(Either::Right(data.into_rgba8()))
     }
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>> {

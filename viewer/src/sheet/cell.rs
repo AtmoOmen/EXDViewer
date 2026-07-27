@@ -729,7 +729,10 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
     let hires = ALWAYS_HIRES.get(ui.ctx());
     let image_source = icon_mgr.get_or_insert_icon(icon_id, hires, ui.ctx(), move || {
         log::debug!("Icon not found in cache: {icon_id}");
-        TrackedPromise::spawn_local(async move { excel.get_icon(icon_id, hires).await })
+        TrackedPromise::spawn_local(async move {
+            let icon = excel.get_icon(icon_id, hires).await?;
+            crate::data::resolve_icon(icon).await
+        })
     });
     let resp = match image_source {
         ManagedIcon::Loaded { source, .. } => {

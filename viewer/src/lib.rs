@@ -23,6 +23,7 @@
 
 mod about;
 mod app;
+mod assets;
 pub mod audio;
 mod backend;
 mod data;

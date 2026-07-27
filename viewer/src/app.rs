@@ -19,7 +19,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use zip::{ZipWriter, write::SimpleFileOptions};
 
 use crate::{
-    about,
+    about, assets,
     backend::Backend,
     editable_schema::EditableSchema,
     excel::{
@@ -33,16 +33,16 @@ use crate::{
     schema::{provider::SchemaProvider, web::WebProvider},
     settings::{
         ALWAYS_HIRES, BACKEND_CONFIG, BackendConfig, CODE_SYNTAX_THEME, COLOR_THEME,
-        CURRENT_SHEET_LANGUAGES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, GithubSchemaBranch,
-        LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN, PR_CHANGED_ONLY, SCHEMA_EDITOR_VISIBLE,
-        SELECTED_SHEET, SHEET_FILTER_OPTIONS, SHEET_FILTERS, SHEETS_FILTER, SOLID_SCROLLBAR,
-        SORTED_BY_OFFSET, SchemaLocation, TEMP_HIGHLIGHTED_ROW, TEMP_SCROLL_TO, TEXT_MAX_LINES,
-        TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
+        CURRENT_SHEET_LANGUAGES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, FILTER_GUIDE_VISIBLE,
+        GithubSchemaBranch, LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN, PR_CHANGED_ONLY,
+        SCHEMA_EDITOR_VISIBLE, SELECTED_SHEET, SHEET_FILTER_OPTIONS, SHEET_FILTERS, SHEETS_FILTER,
+        SOLID_SCROLLBAR, SORTED_BY_OFFSET, SchemaLocation, TEMP_HIGHLIGHTED_ROW, TEMP_SCROLL_TO,
+        TEXT_MAX_LINES, TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
     },
     setup::{self, SetupWindow},
     sheet::{
         CellResponse, FilterInputType, GlobalContext, MatchOptions, SheetTable, SheetTableResponse,
-        TableContext, export_csv,
+        TableContext, draw_filter_guide, export_csv,
     },
     shortcuts::{GOTO_ROW, GOTO_SHEET},
     utils::{
@@ -180,6 +180,35 @@ impl UpdateState {
     }
 }
 
+/// Which top-level tab the current route belongs to. Drives the switcher and scopes the shortcuts
+/// and menus that only make sense over sheet data.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Sheets,
+    Assets,
+    Music,
+}
+
+impl Tab {
+    fn of(path: &str) -> Self {
+        if path.starts_with("/assets") {
+            Tab::Assets
+        } else if path.starts_with("/music") {
+            Tab::Music
+        } else {
+            Tab::Sheets
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Tab::Sheets => "数据表",
+            Tab::Assets => "资源",
+            Tab::Music => "音乐",
+        }
+    }
+}
+
 pub struct App {
     router: Rc<OnceCell<Router<Self>>>,
     icon_manager: IconManager,
@@ -207,6 +236,7 @@ pub struct App {
     update_check_started: bool,
     about_open: bool,
     music: music::MusicPlayer,
+    assets: assets::AssetBrowser,
     last_system_theme: Option<egui::Theme>,
     /// `None` = Latin only
     loaded_cjk: Option<CjkFont>,
@@ -220,6 +250,8 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
     builder.add_route("/", App::on_setup, App::draw_setup)?;
     builder.add_route("/sheet", App::on_unnamed_sheet, App::draw_unnamed_sheet)?;
     builder.add_route("/sheet/{*name}", App::on_named_sheet, App::draw_named_sheet)?;
+    builder.add_route("/assets", App::on_assets, App::draw_assets)?;
+    builder.add_route("/assets/{*path}", App::on_asset_path, App::draw_assets)?;
     builder.add_route("/music", App::on_music, App::draw_music)?;
     builder.add_route("/music/{id}", App::on_music_track, App::draw_music)?;
     builder.add_route(
@@ -241,18 +273,12 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         self.process_update_events();
 
-        let on_music = self
-            .router
-            .get()
-            .unwrap()
-            .current_path()
-            .path()
-            .starts_with("/music");
+        let tab = Tab::of(self.router.get().unwrap().current_path().path());
 
-        if !on_music && shortcut::consume(&ctx, GOTO_ROW) {
+        if tab == Tab::Sheets && shortcut::consume(&ctx, GOTO_ROW) {
             self.goto_window = Some(goto::GoToWindow::to_row());
         }
-        if !on_music && shortcut::consume(&ctx, GOTO_SHEET) {
+        if tab == Tab::Sheets && shortcut::consume(&ctx, GOTO_SHEET) {
             self.goto_window = Some(goto::GoToWindow::to_sheet());
         }
 
@@ -260,7 +286,7 @@ impl App {
         self.update_sheet_languages(&ctx);
         self.pr_window.poll(&ctx);
         about::draw(&ctx, &mut self.about_open);
-        self.draw_menubar(ui, on_music);
+        self.draw_menubar(ui, tab);
         self.draw_logger(ui.ctx());
         self.draw_pr_window(ui.ctx());
 
@@ -378,7 +404,7 @@ impl App {
         }
     }
 
-    fn draw_menubar(&mut self, ui: &mut egui::Ui, on_music: bool) {
+    fn draw_menubar(&mut self, ui: &mut egui::Ui, tab: Tab) {
         let ctx = &ui.ctx().clone();
         #[cfg(not(target_arch = "wasm32"))]
         let update_event_tx = self.update_event_tx.clone();
@@ -403,7 +429,7 @@ impl App {
                         }
                     });
 
-                    if !on_music {
+                    if tab == Tab::Sheets {
                         ui.menu_button("跳转", |ui| {
                             if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
                                 self.goto_window = Some(goto::GoToWindow::to_row());
@@ -605,23 +631,23 @@ impl App {
                     });
 
                     let seg = egui::vec2(72.0, ui.spacing().interact_size.y);
-                    let switcher_w = 2.0 * seg.x + ui.spacing().item_spacing.x;
+                    let switcher_w = 3.0 * seg.x + 2.0 * ui.spacing().item_spacing.x;
                     let target_left = bar_left + bar_width / 2.0 - switcher_w / 2.0;
                     let space = target_left - ui.cursor().left();
                     if space > 0.0 {
                         ui.add_space(space);
                     }
-                    if ui
-                        .add_sized(seg, Button::selectable(!on_music, "数据表"))
-                        .clicked()
-                    {
-                        self.navigate("/sheet");
-                    }
-                    if ui
-                        .add_sized(seg, Button::selectable(on_music, "音乐"))
-                        .clicked()
-                    {
-                        self.navigate("/music");
+                    for (target, route) in [
+                        (Tab::Sheets, "/sheet"),
+                        (Tab::Assets, "/assets"),
+                        (Tab::Music, "/music"),
+                    ] {
+                        if ui
+                            .add_sized(seg, Button::selectable(tab == target, target.title()))
+                            .clicked()
+                        {
+                            self.navigate(route);
+                        }
                     }
 
                     #[cfg(not(target_arch = "wasm32"))]
@@ -707,7 +733,7 @@ impl App {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "sheet_list");
+                        CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
                         ui.vertical_centered_justified(|ui| ui.heading("表格"));
                     });
                 });
@@ -1022,7 +1048,7 @@ impl App {
                     ui.horizontal(|ui| {
                         if CollapsibleSidePanel::is_collapsed(ui.ctx(), "sheet_list") {
                             ui.with_layout(Layout::left_to_right(egui::Align::Min), |ui| {
-                                CollapsibleSidePanel::draw_arrow(ui, "sheet_list");
+                                CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
                             });
                         }
 
@@ -1090,7 +1116,20 @@ impl App {
                                         use_display_field,
                                     },
                                 );
+                                filter_dirty = true;
                             }
+                        }
+
+                        if filter_type == FilterInputType::Complex {
+                            let mut guide_visible = FILTER_GUIDE_VISIBLE.get(ctx);
+                            if ui
+                                .toggle_value(&mut guide_visible, "\u{ff1f}")
+                                .on_hover_text("筛选指南")
+                                .changed()
+                            {
+                                FILTER_GUIDE_VISIBLE.set(ctx, guide_visible);
+                            }
+                            draw_filter_guide(ctx);
                         }
 
                         ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
@@ -1176,7 +1215,10 @@ impl App {
                     && let Some(schema) = editor.get_schema()
                 {
                     match table.context().set_schema(Some(schema)) {
-                        Ok(()) => table.invalidate_sizes(ui),
+                        Ok(()) => {
+                            table.invalidate_sizes(ui);
+                            table.update_filter(ui.ctx());
+                        }
                         Err(error) => log::error!("设置表定义失败: {error:?}"),
                     }
                 }
@@ -1352,6 +1394,45 @@ impl App {
 
         self.draw_sheet_list(ui);
         self.draw_sheet_data(ui);
+    }
+
+    fn on_assets(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        _params: &Params<'_, '_>,
+    ) -> RouteResponse {
+        if let Some(r) = self.ensure_backend(path) {
+            return r;
+        }
+        RouteResponse::Title("Assets".to_string())
+    }
+
+    fn on_asset_path(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        params: &Params<'_, '_>,
+    ) -> RouteResponse {
+        if let Some(r) = self.ensure_backend(path) {
+            return r;
+        }
+        let Some(asset) = params.get("path") else {
+            return RouteResponse::Redirect("/assets".into());
+        };
+        self.assets.request(asset.to_string());
+        RouteResponse::Title(asset.rsplit('/').next().unwrap_or(asset).to_string())
+    }
+
+    fn draw_assets(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(action) = self.assets.ui(ui, &backend)
+        {
+            match action {
+                assets::Action::Select(asset) => self.navigate(format!("/assets/{asset}")),
+                assets::Action::Navigate(route) => self.navigate(route),
+            }
+        }
     }
 
     fn on_music(
@@ -1550,6 +1631,7 @@ impl App {
             update_check_started: false,
             about_open: false,
             music: music::MusicPlayer::default(),
+            assets: assets::AssetBrowser::default(),
             last_system_theme: None,
             loaded_cjk: None,
             #[cfg(target_arch = "wasm32")]

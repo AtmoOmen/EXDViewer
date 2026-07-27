@@ -5,7 +5,9 @@ use crate::{
 
 use super::{FileProvider, get_icon_path};
 use async_trait::async_trait;
+use either::Either;
 use image::RgbaImage;
+use url::Url;
 
 pub struct WorkerFileProvider(());
 
@@ -68,7 +70,17 @@ impl FileProvider for WorkerFileProvider {
         }
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<RgbaImage> {
+    async fn read_by_hash(
+        &self,
+        _repository: u8,
+        _category: u8,
+        _hash: u64,
+        _split: bool,
+    ) -> anyhow::Result<Vec<u8>> {
+        anyhow::bail!("reading by hash needs the web API; the in-browser worker cannot resolve one")
+    }
+
+    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
         log::info!("WorkerFileProvider: requesting icon {icon_id}, {hires}");
         let path = get_icon_path(icon_id, hires);
         if let WorkerResponse::DataRequestTexture(result) =
@@ -81,7 +93,7 @@ impl FileProvider for WorkerFileProvider {
                         anyhow::anyhow!("WorkerFileProvider: failed to create image from data")
                     })
                 })?;
-            Ok(file)
+            Ok(Either::Right(file))
         } else {
             Err(anyhow::anyhow!(
                 "WorkerFileProvider: invalid response from worker"

@@ -461,7 +461,7 @@ impl MusicPlayer {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "music_list");
+                        CollapsibleSidePanel::draw_arrow(ui, "music_list", Side::Left);
                         ui.vertical_centered_justified(|ui| ui.heading("曲目"));
                     });
                 });
@@ -577,7 +577,9 @@ impl MusicPlayer {
             if CollapsibleSidePanel::is_collapsed(ui.ctx(), "music_list") {
                 Panel::top("music_reexpand").show(ui, |ui| {
                     ui.add_space(4.0);
-                    ui.horizontal(|ui| CollapsibleSidePanel::draw_arrow(ui, "music_list"));
+                    ui.horizontal(|ui| {
+                        CollapsibleSidePanel::draw_arrow(ui, "music_list", Side::Left)
+                    });
                     ui.add_space(4.0);
                 });
             }

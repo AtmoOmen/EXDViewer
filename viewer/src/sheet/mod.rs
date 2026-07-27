@@ -23,7 +23,7 @@ use egui::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use filter::CompiledFilterInput;
-pub use filter::{ComplexFilter, FilterInput, FilterInputType};
+pub use filter::{ComplexFilter, FilterInput, FilterInputType, draw_guide as draw_filter_guide};
 pub use global_context::GlobalContext;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;

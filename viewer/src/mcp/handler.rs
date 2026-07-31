@@ -181,6 +181,83 @@ pub struct GetSheetInfoParams {
     pub name: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadAssetParams {
+    /// 游戏资源路径, 例如 ui/icon/000000/000001.tex
+    pub path: String,
+    /// 从资源字节的哪个偏移开始返回, 默认 0
+    pub offset: Option<usize>,
+    /// 返回字节数, 默认 4096, 服务端最多 65536
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReadAssetByHashParams {
+    pub repository: u8,
+    pub category: u8,
+    /// 十进制或 0x 开头的十六进制哈希
+    pub hash: String,
+    /// true 表示 .index 的拆分哈希, false 表示 .index2 的完整哈希
+    pub split: Option<bool>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CheckAssetPathsParams {
+    /// 最多传入 500 个路径
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListAssetPathsParams {
+    /// 路径模糊查询, 默认返回全部已安装路径
+    pub query: Option<String>,
+    /// 是否包含全局路径列表中当前版本未安装的路径
+    pub include_missing: Option<bool>,
+    /// 是否附带不在全局路径列表中的哈希资源
+    pub include_unnamed: Option<bool>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResolveAssetPathParams {
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InspectAssetParams {
+    pub path: String,
+    /// 每个解析集合最多返回多少项, 默认 100
+    pub max_items: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InspectAssetByHashParams {
+    pub repository: u8,
+    pub category: u8,
+    /// 十进制或 0x 开头的十六进制哈希
+    pub hash: String,
+    pub split: Option<bool>,
+    pub max_items: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct DecodeTextureParams {
+    pub path: String,
+    /// 输出图像最长边, 默认 1024, 服务端最多 2048
+    pub max_dim: Option<u16>,
+}
+
 #[derive(Clone)]
 pub struct McpHandler {
     request_tx: McpChannel,
@@ -215,6 +292,20 @@ impl McpHandler {
         Duration::from_secs(45)
     }
 
+    fn asset_index_timeout() -> Duration {
+        Duration::from_secs(120)
+    }
+
+    fn parse_hash(hash: &str) -> Result<u64, McpError> {
+        let value = hash.trim();
+        let parsed = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+            .map_or_else(|| value.parse::<u64>(), |hex| u64::from_str_radix(hex, 16))
+            .map_err(|error| McpError::invalid_params(format!("哈希无效: {error}"), None))?;
+        Ok(parsed)
+    }
+
     async fn call(&self, request: McpRequest, timeout: Duration) -> Result<String, McpError> {
         let request_name = request.name();
         log::info!("MCP 请求: {request_name}");
@@ -242,6 +333,173 @@ impl McpHandler {
 
 #[tool_router]
 impl McpHandler {
+    #[tool(
+        description = "按游戏资源路径读取原始字节, 返回流类型、大小、格式识别结果以及受限的 Base64 和十六进制字节片段"
+    )]
+    async fn read_asset(
+        &self,
+        Parameters(params): Parameters<ReadAssetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::ReadAsset {
+                    path: params.path,
+                    offset: params.offset.unwrap_or(0),
+                    limit: params.limit,
+                },
+                Self::medium_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        description = "按 repository、category、哈希和 split 读取没有路径名的资源, 返回受限原始字节"
+    )]
+    async fn read_asset_by_hash(
+        &self,
+        Parameters(params): Parameters<ReadAssetByHashParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let hash = Self::parse_hash(&params.hash)?;
+        let result = self
+            .call(
+                McpRequest::ReadAssetByHash {
+                    repository: params.repository,
+                    category: params.category,
+                    hash,
+                    split: params.split.unwrap_or(false),
+                    offset: params.offset.unwrap_or(0),
+                    limit: params.limit,
+                },
+                Self::medium_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "批量检查资源路径是否存在, 最多一次检查 500 个路径")]
+    async fn check_asset_paths(
+        &self,
+        Parameters(params): Parameters<CheckAssetPathsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::CheckAssetPaths {
+                    paths: params.paths,
+                },
+                Self::medium_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        description = "分页查询已安装资源路径, 支持模糊搜索、包含未安装路径和附带未命名哈希资源"
+    )]
+    async fn list_asset_paths(
+        &self,
+        Parameters(params): Parameters<ListAssetPathsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::ListAssetPaths {
+                    api_base: self.config.api_url.clone(),
+                    query: params.query,
+                    include_missing: params.include_missing.unwrap_or(false),
+                    include_unnamed: params.include_unnamed.unwrap_or(false),
+                    offset: params.offset.unwrap_or(0),
+                    limit: params.limit.unwrap_or(100),
+                },
+                Self::asset_index_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "计算资源路径对应的 split 和 whole 索引哈希, 并检查该路径是否存在")]
+    async fn resolve_asset_path(
+        &self,
+        Parameters(params): Parameters<ResolveAssetPathParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::ResolveAssetPath { path: params.path },
+                Self::medium_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        description = "识别并结构化解析资源, 支持纹理、PNG 图像、材质、字体、图标、ULD 布局、SHPK 着色器包和 SHCD 着色器代码"
+    )]
+    async fn inspect_asset(
+        &self,
+        Parameters(params): Parameters<InspectAssetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::InspectAsset {
+                    path: params.path,
+                    max_items: params.max_items.unwrap_or(100),
+                },
+                Self::heavy_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "识别并结构化解析没有路径名的哈希资源, 支持上游新增的资源格式")]
+    async fn inspect_asset_by_hash(
+        &self,
+        Parameters(params): Parameters<InspectAssetByHashParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let hash = Self::parse_hash(&params.hash)?;
+        let result = self
+            .call(
+                McpRequest::InspectAssetByHash {
+                    repository: params.repository,
+                    category: params.category,
+                    hash,
+                    split: params.split.unwrap_or(false),
+                    max_items: params.max_items.unwrap_or(100),
+                },
+                Self::heavy_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(description = "将游戏 TEX 纹理解码为尺寸受限的 PNG 图像, 同时返回源尺寸和输出尺寸")]
+    async fn decode_texture(
+        &self,
+        Parameters(params): Parameters<DecodeTextureParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::DecodeTexture {
+                    path: params.path,
+                    max_dim: params.max_dim.unwrap_or(1024),
+                },
+                Self::heavy_timeout(),
+            )
+            .await?;
+        let mut metadata: serde_json::Value = serde_json::from_str(&result).map_err(|error| {
+            McpError::internal_error(format!("纹理响应解析失败: {error}"), None)
+        })?;
+        let png = metadata["png_base64"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| McpError::internal_error("纹理响应缺少 PNG 数据", None))?;
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("png_base64");
+        }
+        Ok(CallToolResult::success(vec![
+            Content::text(metadata.to_string()),
+            Content::image(png, "image/png"),
+        ]))
+    }
+
     #[tool(description = "列出所有可用的游戏数据表，支持模糊搜索、分页和杂项表开关")]
     async fn list_sheets(
         &self,
@@ -576,16 +834,17 @@ impl McpHandler {
 }
 
 #[tool_handler(
-    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表查询、模式管理、搜索和筛选功能。工具选择规则：不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；宽表必须使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时才使用 detailed"
+    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表、模式和游戏资源访问能力。资源路径搜索使用 list_asset_paths，读取原始字节使用 read_asset 或 read_asset_by_hash，结构化解析使用 inspect_asset 或 inspect_asset_by_hash，查看纹理使用 decode_texture；不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；宽表使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时使用 detailed"
 )]
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(rmcp::model::Implementation::from_build_env())
             .with_instructions(
-                "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表查询工具。\
-                 典型流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
-                 search_cells 只做普通文本搜索, 不接收 DSL；query_rows 才处理 filter。"
+                "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表和游戏资源工具。\
+                 数据表流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
+                 资源流程：list_asset_paths 搜索路径 -> resolve_asset_path 查看索引哈希 -> read_asset 分页读取字节、inspect_asset 结构化解析或 decode_texture 查看纹理；未命名资源使用对应的 by_hash 工具。\
+                 search_cells 只做普通文本搜索, 不接收 DSL；query_rows 处理 filter。"
                     .to_string(),
             )
     }

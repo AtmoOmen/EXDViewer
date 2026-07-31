@@ -27,6 +27,7 @@ use ironworks::excel::Language;
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
 
+mod assets;
 mod handler;
 #[cfg(test)]
 mod tests;
@@ -48,6 +49,48 @@ pub enum RowFormat {
 
 #[derive(Clone, Debug)]
 pub enum McpRequest {
+    ReadAsset {
+        path: String,
+        offset: usize,
+        limit: Option<usize>,
+    },
+    ReadAssetByHash {
+        repository: u8,
+        category: u8,
+        hash: u64,
+        split: bool,
+        offset: usize,
+        limit: Option<usize>,
+    },
+    CheckAssetPaths {
+        paths: Vec<String>,
+    },
+    ListAssetPaths {
+        api_base: String,
+        query: Option<String>,
+        include_missing: bool,
+        include_unnamed: bool,
+        offset: usize,
+        limit: usize,
+    },
+    ResolveAssetPath {
+        path: String,
+    },
+    InspectAsset {
+        path: String,
+        max_items: usize,
+    },
+    InspectAssetByHash {
+        repository: u8,
+        category: u8,
+        hash: u64,
+        split: bool,
+        max_items: usize,
+    },
+    DecodeTexture {
+        path: String,
+        max_dim: u16,
+    },
     ListSheets {
         query: Option<String>,
         include_misc: bool,
@@ -125,6 +168,14 @@ pub enum McpRequest {
 impl McpRequest {
     fn name(&self) -> &'static str {
         match self {
+            Self::ReadAsset { .. } => "read_asset",
+            Self::ReadAssetByHash { .. } => "read_asset_by_hash",
+            Self::CheckAssetPaths { .. } => "check_asset_paths",
+            Self::ListAssetPaths { .. } => "list_asset_paths",
+            Self::ResolveAssetPath { .. } => "resolve_asset_path",
+            Self::InspectAsset { .. } => "inspect_asset",
+            Self::InspectAssetByHash { .. } => "inspect_asset_by_hash",
+            Self::DecodeTexture { .. } => "decode_texture",
             Self::ListSheets { .. } => "list_sheets",
             Self::GetSheetInfo { .. } => "get_sheet_info",
             Self::GetSheetSchema { .. } => "get_sheet_schema",
@@ -1431,6 +1482,83 @@ async fn process_save_schema(backend: &Backend, name: &str, text: &str) -> McpRe
 
 async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
     match req {
+        McpRequest::ReadAsset {
+            path,
+            offset,
+            limit,
+        } => match assets::read_path(backend, &path, offset, limit).await {
+            Ok(result) => McpResponse::Success(result),
+            Err(error) => McpResponse::Error(format!("{error}")),
+        },
+        McpRequest::ReadAssetByHash {
+            repository,
+            category,
+            hash,
+            split,
+            offset,
+            limit,
+        } => match assets::read_hash(backend, repository, category, hash, split, offset, limit)
+            .await
+        {
+            Ok(result) => McpResponse::Success(result),
+            Err(error) => McpResponse::Error(format!("{error}")),
+        },
+        McpRequest::CheckAssetPaths { paths } => match assets::exists_many(backend, &paths).await {
+            Ok(result) => McpResponse::Success(result),
+            Err(error) => McpResponse::Error(format!("{error}")),
+        },
+        McpRequest::ListAssetPaths {
+            api_base,
+            query,
+            include_missing,
+            include_unnamed,
+            offset,
+            limit,
+        } => {
+            match assets::list_paths(
+                backend,
+                &api_base,
+                query.as_deref(),
+                include_missing,
+                include_unnamed,
+                offset,
+                limit,
+            )
+            .await
+            {
+                Ok(result) => McpResponse::Success(result),
+                Err(error) => McpResponse::Error(format!("{error}")),
+            }
+        }
+        McpRequest::ResolveAssetPath { path } => match assets::resolve_path(backend, &path).await {
+            Ok(result) => McpResponse::Success(result),
+            Err(error) => McpResponse::Error(format!("{error}")),
+        },
+        McpRequest::InspectAsset { path, max_items } => {
+            match assets::inspect_path(backend, &path, max_items).await {
+                Ok(result) => McpResponse::Success(result),
+                Err(error) => McpResponse::Error(format!("{error}")),
+            }
+        }
+        McpRequest::InspectAssetByHash {
+            repository,
+            category,
+            hash,
+            split,
+            max_items,
+        } => {
+            match assets::inspect_hash(backend, repository, category, hash, split, max_items).await
+            {
+                Ok(result) => McpResponse::Success(result),
+                Err(error) => McpResponse::Error(format!("{error}")),
+            }
+        }
+        McpRequest::DecodeTexture { path, max_dim } => {
+            match assets::decode_texture(backend, &path, max_dim).await {
+                Ok(result) => McpResponse::Success(result),
+                Err(error) => McpResponse::Error(format!("{error}")),
+            }
+        }
         McpRequest::ListSheets {
             query,
             include_misc,

@@ -57,6 +57,14 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | 工具 | 功能 |
 |---|---|
 | `health_check` | 检查 MCP 服务状态和默认语言 |
+| `list_asset_paths` | 搜索和分页浏览资源路径，可附带未命名哈希资源 |
+| `resolve_asset_path` | 计算资源路径的 split / whole 索引哈希并检查存在性 |
+| `check_asset_paths` | 批量检查资源路径是否存在 |
+| `read_asset` | 按路径分页读取资源原始字节和格式识别结果 |
+| `read_asset_by_hash` | 按仓库、分类和索引哈希分页读取未命名资源 |
+| `inspect_asset` | 按路径结构化解析纹理、PNG、材质、字体、图标、ULD、SHPK 和 SHCD |
+| `inspect_asset_by_hash` | 结构化解析未命名哈希资源 |
+| `decode_texture` | 将 TEX 纹理解码为尺寸受限的 PNG 图像内容 |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
 | `get_sheet_info` | 获取表元数据（列数、子行、语言） |
 | `get_sheet_schema` | 获取完整结构化模式定义，包括链接目标、条件和嵌套字段 |
@@ -74,6 +82,8 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | `resolve_link` | 按 schema 解析链接列并返回目标行，支持条件链接和目标列选择 |
 | `decode_se_string` | 解码 SeString 单元格 |
 | `save_schema` | 保存模式 YAML |
+
+资源原始字节工具默认返回 4096 字节，单次最多返回 65536 字节；响应中的 `next_offset` 可直接用于读取下一段。结构化解析工具通过 `max_items` 控制字形、图标、着色器和布局集合的返回规模，默认 100，最多 500
 
 `query_rows` 与 `get_row` 默认使用 `compact` 格式，将列定义放在响应顶层，行只返回值数组。对宽表应传入 `columns`，元素可为从 0 开始的列索引或 schema 列名。只有需要 SeString 原始字节、类型细节等信息时才传入 `format: "detailed"`
 

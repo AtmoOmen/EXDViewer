@@ -23,8 +23,8 @@ use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise};
 use pathlist::{PathList, Presence};
 
 pub mod deps;
-mod magic;
-mod viewers;
+pub(crate) mod magic;
+pub(crate) mod viewers;
 use magic::Format;
 use viewers::{Preview, Viewer};
 

@@ -1,14 +1,16 @@
 [workspace]
-members = ["pathlist", "viewer", "web"]
+members = ["glyphnames", "pathlist", "shaders", "viewer", "web"]
 resolver = "3"
 
 [workspace.package]
-version = "1.7.0"
+version = "1.8.0"
 authors = ["Asriel Camora <asriel@camora.dev>"]
 repository = "https://github.com/AtmoOmen/EXDViewer"
 edition = "2024"
 
 [patch.crates-io]
+dxbc = { path = "deps/d3dasm/crates/dxbc" }
+hlsl = { path = "deps/d3dasm/crates/hlsl" }
 ironworks = { path = "deps/ironworks/ironworks" }
 xiv-dl-cache = { path = "deps/ffxiv-downloader/rust/cache" }
 xiv-dl-core = { path = "deps/ffxiv-downloader/rust/core" }
@@ -17,6 +19,13 @@ catppuccin-egui = { git = "https://github.com/WorkingRobot/egui.git", branch = "
 [profile.release-dbg]
 inherits = "release"
 debug = true
+
+# A debug build of epaint acquires its context lock with a timeout, and parking_lot measures that
+# timeout with `std::time::Instant`, which wasm32-unknown-unknown does not implement. Any lock that
+# misses the uncontended fast path then panics, killing whatever task it was on. Release builds take
+# the untimed path, which is why only dev builds see it.
+[profile.dev.package.epaint]
+debug-assertions = false
 
 # Optimize the audio decoders in dev builds; unoptimized vorbis/HCA decode is ~30x slower.
 [profile.dev.package.symphonia]

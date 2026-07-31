@@ -14,6 +14,7 @@ use std::{cell::RefCell, fmt::Write, sync::Arc};
 use base64::{Engine, prelude::BASE64_STANDARD};
 #[cfg(not(target_arch = "wasm32"))]
 pub use cell::CellValue;
+pub(crate) use cell::draw_color;
 pub use cell::{CellResponse, MatchOptions};
 use compact_str::ToCompactString;
 pub use csv::export_csv;

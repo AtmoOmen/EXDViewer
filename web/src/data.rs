@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    io::{Read, Seek},
     path::Path,
     str::FromStr,
     sync::Arc,
@@ -8,10 +9,11 @@ use std::{
 };
 
 use anyhow::bail;
+use bytes::Bytes;
 use futures_util::StreamExt;
 use ironworks::{
     Ironworks,
-    sqpack::{SqPack, VInstall, Vfs},
+    sqpack::{self, FileKind, SqPack, VInstall, Vfs},
 };
 use mini_moka::sync::{Cache, CacheBuilder};
 use serde::{Deserialize, Serialize};
@@ -68,11 +70,29 @@ impl RepositoryInfo {
 type CacheIronworks = Ironworks<SqPack<VInstall<CacheVfs>>>;
 
 #[derive(Debug)]
+pub struct StoredFile {
+    pub kind: FileKind,
+    pub bytes: Bytes,
+}
+
+impl StoredFile {
+    fn read<R: Read + Seek>(mut file: sqpack::File<R>) -> Result<Self, ironworks::Error> {
+        let kind = file.kind();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(Self {
+            kind,
+            bytes: bytes.into(),
+        })
+    }
+}
+
+#[derive(Debug)]
 pub struct GameData {
     cache: Server,
     readahead_size: usize,
     ironworks_cache: Cache<(Target, GameVersion), Arc<CacheIronworks>>,
-    file_cache: Cache<(Target, GameVersion, String), Arc<Vec<u8>>>,
+    file_cache: Cache<(Target, GameVersion, String), Arc<StoredFile>>,
 }
 
 impl GameData {
@@ -168,7 +188,7 @@ impl GameData {
         target: Target,
         version: GameVersion,
         file: String,
-    ) -> Result<Arc<Vec<u8>>, ironworks::Error> {
+    ) -> Result<Arc<StoredFile>, ironworks::Error> {
         let key = (target, version, file);
         if let Some(ret) = self.file_cache.get(&key) {
             return Ok(ret);
@@ -178,10 +198,11 @@ impl GameData {
         let ironworks = self.get_version(target, version.clone()).await?;
 
         log::info!("Fetching file: {file} for {target}, version: {version}");
-        let file_data = ironworks.file::<Vec<u8>>(&file)?;
+        let stream = ironworks.find_first(&file, |package| package.file(&file))?;
+        let file_data = StoredFile::read(stream)?;
         log::info!(
             "File fetched: {file} for {target}, version: {version}, size: {}",
-            file_data.len()
+            file_data.bytes.len()
         );
 
         let data = Arc::new(file_data);
@@ -199,7 +220,7 @@ impl GameData {
         repository: u8,
         category: u8,
         hash: ironworks::sqpack::IndexHash,
-    ) -> Result<Arc<Vec<u8>>, ironworks::Error> {
+    ) -> Result<Arc<StoredFile>, ironworks::Error> {
         let ironworks = self.get_version(target, version.clone()).await?;
 
         log::info!(
@@ -209,8 +230,8 @@ impl GameData {
         for package in ironworks.resources() {
             match package.file_by_hash(repository, category, hash) {
                 Ok(file) => {
-                    let data = <Vec<u8> as ironworks::file::File>::read(file)?;
-                    log::info!("Unnamed file fetched: {hash:?}, size: {}", data.len());
+                    let data = StoredFile::read(file)?;
+                    log::info!("Unnamed file fetched: {hash:?}, size: {}", data.bytes.len());
                     return Ok(Arc::new(data));
                 }
                 Err(error) => last = Some(error),
@@ -228,10 +249,9 @@ impl GameData {
         for (slug, version) in contributions(&self.cache, target, version).await? {
             let clut = self.cache.get_clut(slug, version.clone()).await?;
             indexes.extend(
-                clut.files
-                    .keys()
+                clut.files()
                     .filter(|path| path.ends_with(".index") || path.ends_with(".index2"))
-                    .map(|path| (slug, version.clone(), path.clone())),
+                    .map(|path| (slug, version.clone(), path.to_owned())),
             );
         }
 
@@ -622,13 +642,20 @@ impl CacheVfs {
     ) -> anyhow::Result<Self> {
         let mut files = HashMap::new();
         let mut folders = HashSet::new();
+        let mut resident = 0;
         for (slug, version) in contributions(&server, target, version).await? {
             let clut = server.get_clut(slug, version.clone()).await?;
-            for key in clut.files.keys() {
-                files.insert(key.clone(), (slug, version.clone()));
+            resident += clut.resident_size();
+            for path in clut.files() {
+                files.insert(path.to_owned(), (slug, version.clone()));
             }
             folders.extend(clut.folders.iter().cloned());
         }
+        log::info!(
+            "Install for {target}: {} files, CLUTs resident in {resident} bytes",
+            files.len()
+        );
+
         Ok(Self {
             server,
             readahead_size,

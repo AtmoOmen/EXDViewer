@@ -12,13 +12,15 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::{FileSystemDirectoryHandle, js_sys::JsString};
 
 use crate::{
+    data::{build_local_presence, index_hash, stream},
     stopwatch::Stopwatch,
     utils::tex_loader,
     worker::directory::{DynamicDirectory, get_file_str, set_file_str},
 };
 
 use super::{
-    WorkerDirectory, WorkerRequest, WorkerResponse, directory::verify_permission, vfs::DirectoryVfs,
+    WorkerBytes, WorkerDirectory, WorkerFile, WorkerRequest, WorkerResponse, WorkerTexture,
+    directory::verify_permission, vfs::DirectoryVfs,
 };
 
 pub struct SqpackWorker {
@@ -91,6 +93,20 @@ impl SqpackWorker {
     }
 }
 
+fn decode_texture(bytes: &[u8], path: &str, max_dim: Option<u16>) -> Result<WorkerTexture, String> {
+    tex_loader::decode_preview_sized(bytes, path, max_dim)
+        .map(|(image, source)| {
+            let image = image.to_rgba8();
+            WorkerTexture {
+                width: image.width(),
+                height: image.height(),
+                source,
+                data: image.into_vec(),
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
 impl Worker for SqpackWorker {
     type Message = Infallible;
 
@@ -153,28 +169,69 @@ impl Worker for SqpackWorker {
             WorkerRequest::DataRequestFile(path) => {
                 let _stop = Stopwatch::new(format!("SqpackWorker::DataRequestFile({path:?})"));
                 if let Some(inst) = self.install_instance.borrow().as_ref() {
-                    let file = inst.0.file::<Vec<u8>>(&path).map_err(|e| e.to_string());
-                    scope.respond(id, WorkerResponse::DataRequestFile(file));
+                    let file = inst
+                        .sqpack
+                        .file(&path)
+                        .and_then(stream)
+                        .map_err(|e| e.to_string());
+                    scope.respond(
+                        id,
+                        WorkerResponse::DataRequestFile(file.map(WorkerFile::from)),
+                    );
                 }
             }
-            WorkerRequest::DataRequestTexture(path) => {
+            WorkerRequest::DataRequestFileByHash((repository, category, hash, split)) => {
+                let _stop = Stopwatch::new(format!(
+                    "SqpackWorker::DataRequestFileByHash({repository}/{category}/{hash:X})"
+                ));
+                if let Some(inst) = self.install_instance.borrow().as_ref() {
+                    let file = inst
+                        .sqpack
+                        .file_by_hash(repository, category, index_hash(hash, split))
+                        .and_then(stream)
+                        .map_err(|e| e.to_string());
+                    scope.respond(
+                        id,
+                        WorkerResponse::DataRequestFileByHash(file.map(WorkerFile::from)),
+                    );
+                }
+            }
+            WorkerRequest::DataPresence(paths) => {
+                let _stop = Stopwatch::new("SqpackWorker::DataPresence");
+                let map = match self.install_instance.borrow().as_ref() {
+                    Some(inst) => build_local_presence(&inst.sqpack, &paths)
+                        .map(WorkerBytes)
+                        .map_err(|error| error.to_string()),
+                    None => Err("尚未配置游戏安装位置".to_string()),
+                };
+                scope.respond(id, WorkerResponse::DataPresence(map));
+            }
+            WorkerRequest::DataRequestTexture((path, max_dim)) => {
                 let _stop = Stopwatch::new(format!("SqpackWorker::DataRequestTexture({path:?})"));
                 if let Some(inst) = self.install_instance.borrow().as_ref() {
-                    let data = tex_loader::read(&inst.0, &path)
-                        .map(|data| {
-                            let data = data.to_rgba8();
-                            (data.width(), data.height(), data.into_vec())
-                        })
-                        .map_err(|e| e.to_string());
+                    let data = inst
+                        .ironworks
+                        .file::<Vec<u8>>(&path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|bytes| decode_texture(&bytes, &path, max_dim));
                     scope.respond(id, WorkerResponse::DataRequestTexture(data));
                 }
+            }
+            WorkerRequest::DecodeTexture {
+                path,
+                bytes,
+                max_dim,
+            } => {
+                let _stop = Stopwatch::new(format!("SqpackWorker::DecodeTexture({path:?})"));
+                let data = decode_texture(&bytes, &path, max_dim);
+                scope.respond(id, WorkerResponse::DecodeTexture(data));
             }
             WorkerRequest::DataRequestExists(paths) => {
                 let _stop = Stopwatch::new(format!("SqpackWorker::DataRequestExists({paths:?})"));
                 if let Some(inst) = self.install_instance.borrow().as_ref() {
                     let mut result = Vec::with_capacity(paths.len());
                     for path in paths {
-                        result.push(inst.0.exists(&path).map_err(|e| e.to_string()));
+                        result.push(inst.ironworks.exists(&path).map_err(|e| e.to_string()));
                     }
                     let result: Result<Vec<bool>, String> = result.into_iter().collect();
                     scope.respond(id, WorkerResponse::DataRequestExists(result));
@@ -277,7 +334,12 @@ impl Worker for SqpackWorker {
     }
 }
 
-struct InstallInstance(pub Ironworks<SqPack<VInstall<DirectoryVfs>>>);
+struct InstallInstance {
+    ironworks: Ironworks<Rc<SqPack<VInstall<DirectoryVfs>>>>,
+    /// The same resource the `Ironworks` holds. Hash lookups are a SqPack concept, so they need the
+    /// concrete type; sharing it keeps one index cache rather than two.
+    sqpack: Rc<SqPack<VInstall<DirectoryVfs>>>,
+}
 
 impl InstallInstance {
     async fn new(handle: FileSystemDirectoryHandle) -> std::io::Result<Self> {
@@ -286,7 +348,10 @@ impl InstallInstance {
                 .await
                 .map_err(std::io::Error::other)?,
         );
-        let resource = SqPack::new(resource);
-        Ok(Self(Ironworks::new().with_resource(resource)))
+        let sqpack = Rc::new(SqPack::new(resource));
+        Ok(Self {
+            ironworks: Ironworks::new().with_resource(sqpack.clone()),
+            sqpack,
+        })
     }
 }

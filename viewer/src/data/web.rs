@@ -1,11 +1,15 @@
-use crate::utils::{GameVersion, fetch_url};
+use crate::utils::{GameVersion, HttpResponse, fetch, fetch_url};
 
-use super::{FileProvider, get_icon_path, get_xivapi_asset_url};
+use super::{FileProvider, get_icon_path, get_xivapi_asset_url, list_url, with_list_id};
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
 use serde::Deserialize;
 use url::Url;
+
+/// Header the API names a file's sqpack stream kind in. Absent from a server predating it, which is
+/// why the kind is optional rather than a parse failure.
+const STREAM_KIND: &str = "x-stream-kind";
 
 pub struct WebFileProvider(Url);
 
@@ -66,7 +70,7 @@ impl WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push(region)
@@ -82,7 +86,7 @@ impl WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push("regions");
@@ -97,7 +101,7 @@ impl WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push(region)
@@ -118,7 +122,7 @@ impl WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push("repositories");
@@ -128,33 +132,63 @@ impl WebFileProvider {
         let parsed: RepositoriesResponse = serde_json::from_slice(&resp)?;
         Ok(parsed.repositories)
     }
+
+    fn presence_url(&self, list_id: u64) -> anyhow::Result<Url> {
+        let mut url = self.0.clone();
+        url.path_segments_mut()
+            .map_err(|()| {
+                ironworks::Error::Invalid(
+                    ironworks::ErrorValue::Other("URL".to_string()),
+                    "路径解析失败".to_string(),
+                )
+            })?
+            .push("paths")
+            .push(&format!("{list_id:016x}"));
+        Ok(url)
+    }
+}
+
+fn stream(response: HttpResponse) -> (Option<String>, Vec<u8>) {
+    let kind = response.headers.get(STREAM_KIND).map(str::to_owned);
+    (kind, response.bytes)
 }
 
 #[async_trait(?Send)]
 impl FileProvider for WebFileProvider {
-    async fn read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+    async fn read_stream(&self, path: &str) -> anyhow::Result<(Option<String>, Vec<u8>)> {
         let mut url = self.0.clone();
 
         url.path_segments_mut()
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push("file")
             .extend(path.split('/'));
 
-        Ok(fetch_url(url).await?)
+        Ok(stream(fetch(url).await?))
     }
 
-    async fn read_by_hash(
+    async fn path_index(&self, api_base: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
+        with_list_id(api_base, |id| async move {
+            let presence = self.presence_url(id)?;
+            Ok(futures_util::try_join!(
+                fetch_url(list_url(api_base, id)),
+                fetch_url(presence)
+            )?)
+        })
+        .await
+    }
+
+    async fn read_stream_by_hash(
         &self,
         repository: u8,
         category: u8,
         hash: u64,
         split: bool,
-    ) -> anyhow::Result<Vec<u8>> {
+    ) -> anyhow::Result<(Option<String>, Vec<u8>)> {
         let mut url = self.0.clone();
         let hash = if split {
             format!("{hash:016X}")
@@ -166,7 +200,7 @@ impl FileProvider for WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push("hash")
@@ -174,7 +208,7 @@ impl FileProvider for WebFileProvider {
             .push(&category.to_string())
             .push(&hash);
 
-        Ok(fetch_url(url).await?)
+        Ok(stream(fetch(url).await?))
     }
 
     async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
@@ -193,7 +227,7 @@ impl FileProvider for WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push("exists");

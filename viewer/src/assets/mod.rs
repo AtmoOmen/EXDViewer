@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Cursor;
 use std::rc::Rc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -11,23 +10,31 @@ use web_time::{Duration, Instant};
 use anyhow::Result;
 use egui::{
     Align, Button, CentralPanel, Color32, Label, Layout, Rect, RichText, ScrollArea, TextEdit,
-    TextStyle, TextureHandle, Vec2, Widget, collapsing_header::paint_default_icon,
-    containers::panel::Panel, pos2,
+    TextStyle, UiBuilder, Vec2, Widget, collapsing_header::paint_default_icon,
+    containers::panel::Panel, pos2, vec2,
 };
 use nucleo_matcher::pattern::Pattern;
 
 use crate::backend::Backend;
 use crate::excel::provider::ExcelProvider;
-use crate::settings::{BACKEND_CONFIG, InstallLocation};
-use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise, fetch_url};
+use crate::settings::api_base;
+use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise};
 
 use pathlist::{PathList, Presence};
+
+pub mod deps;
+mod magic;
+mod viewers;
+use magic::Format;
+use viewers::{Preview, Viewer};
 
 /// Directories examined per frame while a search runs. Keeps the scan off the critical path without
 /// making a full sweep of the corpus feel stalled.
 const SCAN_BATCH: usize = 600;
 /// Cap on search hits. Nobody scrolls past this, and it bounds the sort each frame.
 const MAX_RESULTS: usize = 500;
+/// How long a typed path has to stand still before the install is asked whether it holds it.\
+const EXISTS_DELAY: Duration = Duration::from_millis(250);
 
 /// One entry in the flattened view of the tree that is currently on screen.
 enum Row {
@@ -39,8 +46,9 @@ enum Row {
         depth: usize,
         dir: usize,
         name: Rc<str>,
-        /// False for unnamed files, which show as their hash.
-        named: bool,
+        /// Set for files absent from the path list: their position in the directory's index
+        /// entries, which is where the real hash lives. `None` means the name came from the list.
+        unnamed: Option<usize>,
     },
 }
 
@@ -52,7 +60,7 @@ struct Node {
 }
 
 /// Sizes and durations in the log, so the console block stays readable at a glance.
-struct Bytes(usize);
+pub struct Bytes(pub usize);
 struct Millis(Duration);
 
 impl fmt::Display for Bytes {
@@ -85,9 +93,11 @@ fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
     // The map is indexed by position in the list, so a pair from different builds would hide and
     // reveal the wrong files rather than fail.
     if paths.list_id() != presence.list_id() {
-        return Err(
-            "路径列表与当前版本文件映射来自不同构建, 请重新加载以获取匹配的数据".to_string(),
-        );
+        return Err(format!(
+            "当前版本的文件映射基于路径列表 {:016x}，当前列表为 {:016x}。",
+            presence.list_id(),
+            paths.list_id(),
+        ));
     }
 
     let at = Instant::now();
@@ -176,21 +186,38 @@ fn live_dirs(paths: &PathList, presence: &Presence) -> Vec<usize> {
 ///
 /// Only for paths that are really in the list. An unnamed file's path is synthesised around its
 /// hash, so hashing it back would produce a confident-looking wrong answer.
-fn path_context(response: &egui::Response, path: &str) {
+/// Hover and right-click for a file. For an unnamed one the path is synthesised, so hashing it
+/// would produce something the game never recorded; its actual index entry is used instead.
+pub(crate) fn path_context(
+    response: &egui::Response,
+    path: &str,
+    unnamed: Option<pathlist::Unnamed>,
+) {
     use ironworks::sqpack::IndexHash;
 
-    let (split, whole) = IndexHash::of(path);
-    let split = match split {
-        Some(IndexHash::Split(hash)) => Some(format!("{hash:016X}")),
-        _ => None,
+    let (split, whole) = match unnamed {
+        Some(file) if file.split => (Some(format!("{:016X}", file.hash)), None),
+        Some(file) => (None, Some(format!("{:08X}", file.hash as u32))),
+        None => {
+            let (split, whole) = IndexHash::of(&path.to_lowercase());
+            let IndexHash::Whole(whole) = whole else {
+                unreachable!("of() always returns a whole hash")
+            };
+            (
+                match split {
+                    Some(IndexHash::Split(hash)) => Some(format!("{hash:016X}")),
+                    _ => None,
+                },
+                Some(format!("{whole:08X}")),
+            )
+        }
     };
-    let IndexHash::Whole(whole) = whole else {
-        unreachable!("of() always returns a whole hash")
-    };
-    let whole = format!("{whole:08X}");
 
     response.clone().on_hover_ui(|ui| {
         ui.label(RichText::new(path).monospace());
+        if unnamed.is_some() {
+            ui.label(RichText::new("不在路径列表中").weak());
+        }
         ui.add_space(2.0);
         egui::Grid::new("path_hashes")
             .num_columns(2)
@@ -200,9 +227,11 @@ fn path_context(response: &egui::Response, path: &str) {
                     ui.label(RichText::new(split).monospace());
                     ui.end_row();
                 }
-                ui.label(RichText::new("index2").weak());
-                ui.label(RichText::new(&whole).monospace());
-                ui.end_row();
+                if let Some(whole) = &whole {
+                    ui.label(RichText::new("index2").weak());
+                    ui.label(RichText::new(whole).monospace());
+                    ui.end_row();
+                }
             });
     });
 
@@ -217,8 +246,37 @@ fn path_context(response: &egui::Response, path: &str) {
             ui.ctx().copy_text(split.clone());
             ui.close();
         }
-        if ui.button("复制 (index2 哈希)").clicked() {
+        if let Some(whole) = &whole
+            && ui.button("复制 (index2 哈希)").clicked()
+        {
             ui.ctx().copy_text(whole.clone());
+            ui.close();
+        }
+    });
+}
+/// The same hover and right-click a path gets, for a value the game identifies by a crc32: the name
+/// on top, the hash in a labelled grid below it, and a copy of each.
+pub(crate) fn crc_context(response: &egui::Response, kind: &str, name: &str, id: u32) {
+    let hash = format!("{id:#010X}");
+
+    response.clone().on_hover_ui(|ui| {
+        ui.label(RichText::new(name).monospace());
+        ui.label(RichText::new(kind).weak());
+        ui.add_space(2.0);
+        egui::Grid::new("crc_hash").num_columns(2).show(ui, |ui| {
+            ui.label(RichText::new("crc32").weak());
+            ui.label(RichText::new(&hash).monospace());
+            ui.end_row();
+        });
+    });
+
+    response.context_menu(|ui| {
+        if ui.button("复制").clicked() {
+            ui.ctx().copy_text(name.to_owned());
+            ui.close();
+        }
+        if ui.button("复制 (crc32)").clicked() {
+            ui.ctx().copy_text(hash.clone());
             ui.close();
         }
     });
@@ -356,7 +414,7 @@ fn push_rows(
                 depth: depth + 1,
                 dir,
                 name: name.clone(),
-                named: i < names.named,
+                unnamed: i.checked_sub(names.named),
             });
         }
     }
@@ -404,6 +462,10 @@ impl Loaded {
     }
 
     /// Names for a directory the user opened, kept so redrawing does not re-decode.
+    fn unnamed_at(&self, dir: usize, index: usize) -> Option<pathlist::Unnamed> {
+        self.unnamed.get(&dir)?.get(index).copied()
+    }
+
     fn names(&mut self, dir: usize) -> Rc<Names> {
         if let Some(names) = self.names.get(&dir) {
             return names.clone();
@@ -455,401 +517,13 @@ enum Load<T: Send + 'static, R = T> {
     Failed(String),
 }
 
-/// Text is capped because the hex dump below it already covers the whole file, and a multi-megabyte
-/// label is not something egui should be asked to lay out.
-const MAX_TEXT_PREVIEW: usize = 256 * 1024;
-
-/// Which colour channels of an image to show. Masking them off is how a packed texture (normal
-/// maps, masks, occlusion) is read: the interesting data is rarely the RGB composite.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Channels {
-    r: bool,
-    g: bool,
-    b: bool,
-    a: bool,
-}
-
-impl Default for Channels {
-    fn default() -> Self {
-        Self {
-            r: true,
-            g: true,
-            b: true,
-            a: true,
-        }
-    }
-}
-
-impl Channels {
-    fn all(self) -> bool {
-        self.r && self.g && self.b && self.a
-    }
-
-    /// Zero the unselected channels, or, when exactly one is picked, show it as greyscale so a
-    /// single packed channel is actually readable.
-    fn apply(self, image: &mut image::RgbaImage) {
-        if self.all() {
-            return;
-        }
-        let only = match (self.r, self.g, self.b, self.a) {
-            (true, false, false, false) => Some(0),
-            (false, true, false, false) => Some(1),
-            (false, false, true, false) => Some(2),
-            (false, false, false, true) => Some(3),
-            _ => None,
-        };
-        for pixel in image.pixels_mut() {
-            let [r, g, b, a] = pixel.0;
-            pixel.0 = match only {
-                Some(channel) => {
-                    let value = pixel.0[channel];
-                    [value, value, value, u8::MAX]
-                }
-                // Alpha is forced opaque when deselected, so the colour channels stay visible.
-                None => [
-                    if self.r { r } else { 0 },
-                    if self.g { g } else { 0 },
-                    if self.b { b } else { 0 },
-                    if self.a { a } else { u8::MAX },
-                ],
-            };
-        }
-    }
-}
-
-/// Which renderer to show a file with. `Raw` is always available; the rest only make sense for the
-/// formats they understand, but any of them can be forced from the dropdown.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Viewer {
-    Texture,
-    Image,
-    Text,
-    Raw,
-}
-
-impl Viewer {
-    /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
-    /// viewer sits in the same place whatever file is selected.
-    const RENDERED: [Self; 3] = [Self::Texture, Self::Image, Self::Text];
-
-    fn label(self) -> &'static str {
-        match self {
-            Self::Texture => "纹理",
-            Self::Image => "图像",
-            Self::Text => "文本",
-            Self::Raw => "原始字节",
-        }
-    }
-
-    /// What a path is shown with unless the dropdown says otherwise.
-    fn recommended(path: &str) -> Self {
-        match path.rsplit('.').next().unwrap_or_default() {
-            "tex" | "atex" => Self::Texture,
-            "png" => Self::Image,
-            "txt" | "csv" => Self::Text,
-            _ => Self::Raw,
-        }
-    }
-}
-
-/// One mipmap level, for the picker under the info table.
-struct Mip {
-    level: u8,
-    width: u16,
-    height: u16,
-    bytes: usize,
-}
-
-/// A rendered view of the selected file.
-enum Preview {
-    Text(String),
-    Image {
-        texture: TextureHandle,
-        size: [usize; 2],
-        /// Label/value pairs describing the source file.
-        facts: Vec<(&'static str, String)>,
-        mips: Vec<Mip>,
-    },
-    /// Nothing to render; an empty message means the type simply has no viewer.
-    Failed(String),
-}
-
-impl Preview {
-    fn decode(
-        ctx: &egui::Context,
-        path: &str,
-        bytes: &[u8],
-        viewer: Viewer,
-        mip: u8,
-        channels: Channels,
-    ) -> Self {
-        let result = match viewer {
-            Viewer::Text => Ok(Self::Text(
-                String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_TEXT_PREVIEW)]).into_owned(),
-            )),
-            Viewer::Image => Self::image(ctx, path, bytes, channels),
-            Viewer::Texture => Self::texture(ctx, path, bytes, mip, channels),
-            Viewer::Raw => return Self::Failed(String::new()),
-        };
-        result.unwrap_or_else(|e| Self::Failed(e.to_string()))
-    }
-
-    fn image(ctx: &egui::Context, path: &str, bytes: &[u8], channels: Channels) -> Result<Self> {
-        let image = image::load_from_memory(bytes)?;
-        let facts = vec![
-            ("格式", "PNG".to_string()),
-            ("尺寸", format!("{} x {}", image.width(), image.height())),
-            ("颜色", format!("{:?}", image.color())),
-            ("文件大小", Bytes(bytes.len()).to_string()),
-        ];
-        Ok(Self::upload(ctx, path, image, facts, Vec::new(), channels))
-    }
-
-    fn texture(
-        ctx: &egui::Context,
-        path: &str,
-        bytes: &[u8],
-        mip: u8,
-        channels: Channels,
-    ) -> Result<Self> {
-        use ironworks::file::{File as _, tex};
-
-        let texture = tex::Texture::read(Cursor::new(bytes.to_vec()))?;
-        let format = texture.format();
-        let mip = mip.min(texture.mip_levels().saturating_sub(1));
-        let facts = vec![
-            ("格式", format!("{format:?}")),
-            ("格式类型", format!("{:?}", format.kind())),
-            ("分量", format.components().to_string()),
-            ("每像素位数", format.bits_per_pixel().to_string()),
-            ("纹理类型", format!("{:?}", texture.kind())),
-            (
-                "尺寸",
-                format!("{} x {}", texture.width(), texture.height()),
-            ),
-            ("深度", texture.depth().to_string()),
-            ("Mipmap 级数", texture.mip_levels().to_string()),
-            ("数组大小", texture.array_size().to_string()),
-            (
-                "像素数据",
-                format!(
-                    "{} ({} 字节)",
-                    Bytes(texture.data().len()),
-                    texture.data().len()
-                ),
-            ),
-            ("文件大小", Bytes(bytes.len()).to_string()),
-        ];
-        let mips = (0..texture.mip_levels())
-            .map(|level| {
-                let (width, height) = texture.mip_size(level);
-                Mip {
-                    level,
-                    width,
-                    height,
-                    bytes: texture.mip_data(level).map_or(0, <[u8]>::len),
-                }
-            })
-            .collect();
-        let image = crate::utils::tex_loader::decode_mip(&texture, mip, path)?;
-        Ok(Self::upload(ctx, path, image, facts, mips, channels))
-    }
-
-    fn upload(
-        ctx: &egui::Context,
-        path: &str,
-        image: image::DynamicImage,
-        facts: Vec<(&'static str, String)>,
-        mips: Vec<Mip>,
-        channels: Channels,
-    ) -> Self {
-        let mut rgba = image.to_rgba8();
-        channels.apply(&mut rgba);
-        let size = [rgba.width() as usize, rgba.height() as usize];
-        let texture = ctx.load_texture(
-            format!("asset:{path}"),
-            egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice()),
-            // Nearest keeps a zoomed-in mipmap readable as actual texels rather than a blur.
-            egui::TextureOptions::NEAREST,
-        );
-        Self::Image {
-            texture,
-            size,
-            facts,
-            mips,
-        }
-    }
-
-    /// The main body: the image or text itself.
-    fn ui(&self, ui: &mut egui::Ui) {
-        match self {
-            Self::Failed(e) if e.is_empty() => {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("此文件类型没有可用查看器, 请使用原始字节").weak());
-                });
-            }
-            Self::Failed(e) => {
-                ui.centered_and_justified(|ui| {
-                    ui.colored_label(Color32::RED, format!("无法渲染此文件: {e}"));
-                });
-            }
-            Self::Text(text) => {
-                ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-                    ui.add(Label::new(RichText::new(text).monospace()).selectable(true));
-                });
-            }
-            Self::Image { texture, size, .. } => {
-                ScrollArea::both().auto_shrink(false).show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.add(
-                            egui::Image::new(texture)
-                                .maintain_aspect_ratio(true)
-                                .fit_to_original_size(1.0)
-                                .max_width(ui.available_width().max(size[0] as f32)),
-                        );
-                    });
-                });
-            }
-        }
-    }
-
-    /// The info sidebar: property table, channel toggles, then the mipmap picker. Returns the new
-    /// (level, channels) if either changed.
-    fn info_ui(&self, ui: &mut egui::Ui, mip: u8, channels: Channels) -> Option<(u8, Channels)> {
-        let Self::Image { facts, mips, .. } = self else {
-            return None;
-        };
-        let (mut level, mut channels, was) = (mip, channels, (mip, channels));
-        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            egui::Grid::new("asset_facts")
-                .num_columns(2)
-                .striped(true)
-                .show(ui, |ui| {
-                    for (label, value) in facts {
-                        ui.label(RichText::new(*label).weak());
-                        ui.label(value);
-                        // Stripes are drawn across the summed column widths, so the last column has
-                        // to take the slack or they stop short of the panel edge.
-                        ui.allocate_space(Vec2::new(ui.available_width(), 0.0));
-                        ui.end_row();
-                    }
-                });
-
-            ui.add_space(8.0);
-            ui.separator();
-            ui.label(RichText::new("通道").weak());
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                for (name, flag) in [
-                    ("R", &mut channels.r),
-                    ("G", &mut channels.g),
-                    ("B", &mut channels.b),
-                    ("A", &mut channels.a),
-                ] {
-                    ui.toggle_value(flag, name);
-                }
-            });
-
-            if mips.len() > 1 {
-                ui.add_space(8.0);
-                ui.separator();
-                ui.label(RichText::new("Mipmaps").weak());
-                ui.add_space(4.0);
-                for entry in mips {
-                    let label = format!(
-                        "{}: {} x {}  ({})",
-                        entry.level,
-                        entry.width,
-                        entry.height,
-                        Bytes(entry.bytes)
-                    );
-                    if ui.selectable_label(entry.level == mip, label).clicked() {
-                        level = entry.level;
-                    }
-                }
-            }
-        });
-        ((level, channels) != was).then_some((level, channels))
-    }
-}
-
-const HEX_COLS: usize = 16;
-/// Rows per page of the byte view. egui positions a virtualised list in `f32`, which stops being
-/// exact past ~16.7M pixels, so a big enough file would scroll unevenly or fail to reach its end.
-/// One page is 1 MiB, comfortably inside that, and files below it get no pagination at all.
-const HEX_PAGE_ROWS: usize = 64 * 1024;
-
-/// Offset, hex, ASCII. Rows are virtualised, so only what is on screen is ever formatted.
-fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], page: &mut usize) {
-    use std::fmt::Write as _;
-
-    let rows = bytes.len().div_ceil(HEX_COLS);
-    let pages = rows.div_ceil(HEX_PAGE_ROWS).max(1);
-    *page = (*page).min(pages - 1);
-
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{} ({} 字节)", Bytes(bytes.len()), bytes.len())).weak());
-        if pages > 1 {
-            ui.separator();
-            if ui.add_enabled(*page > 0, Button::new("◀")).clicked() {
-                *page -= 1;
-            }
-            ui.label(format!("第 {} / {pages} 页", *page + 1));
-            if ui
-                .add_enabled(*page + 1 < pages, Button::new("▶"))
-                .clicked()
-            {
-                *page += 1;
-            }
-            ui.label(
-                RichText::new(format!("起始 {:#010X}", *page * HEX_PAGE_ROWS * HEX_COLS)).weak(),
-            );
-        }
-    });
-    ui.add_space(4.0);
-
-    let first_row = *page * HEX_PAGE_ROWS;
-    let page_rows = (rows - first_row).min(HEX_PAGE_ROWS);
-    let row_height = ui.text_style_height(&TextStyle::Monospace);
-    ScrollArea::both()
-        .auto_shrink(false)
-        .id_salt(*page)
-        .show_rows(ui, row_height, page_rows, |ui, range| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            let mut line = String::with_capacity(80);
-            for row in range {
-                let start = (first_row + row) * HEX_COLS;
-                let chunk = &bytes[start..(start + HEX_COLS).min(bytes.len())];
-                line.clear();
-                let _ = write!(line, "{start:08X}  ");
-                for i in 0..HEX_COLS {
-                    if i == HEX_COLS / 2 {
-                        line.push(' ');
-                    }
-                    match chunk.get(i) {
-                        Some(b) => {
-                            let _ = write!(line, "{b:02X} ");
-                        }
-                        None => line.push_str("   "),
-                    }
-                }
-                line.push(' ');
-                line.extend(chunk.iter().map(|b| match b {
-                    0x20..=0x7e => *b as char,
-                    _ => '.',
-                }));
-                ui.label(RichText::new(&line).monospace());
-            }
-        });
-}
-
-/// An in-progress fuzzy sweep. Search has to reach names inside directories whose own path does not
-/// match the query, so it walks every directory rather than filtering the tree.
 struct Scan {
     pattern: Pattern,
     cursor: usize,
     hits: Vec<(u32, String)>,
+    direct: Option<String>,
+    exists: Load<bool>,
+    typed: Instant,
 }
 
 /// What the browser wants the app to do after a frame.
@@ -858,19 +532,77 @@ pub enum Action {
     Select(String),
     /// A handler wants to hand off to another tab.
     Navigate(String),
+    /// A link named a file by a hash the list has since learned a name for. Replaces the URL rather
+    /// than pushing, so going back does not land on the stale form and bounce forward again.
+    Redirect(String),
+}
+
+/// What a path from a link or the lookup box turns out to name.
+enum Revealed {
+    /// Read it by path, whether or not the list names it: the install is keyed by the hash of the
+    /// path either way.
+    Path,
+    /// A file the list does not name, read by the index entry the tree shows it under.
+    Hash(pathlist::Unnamed),
+    /// A hash the list has since learned a name for, so the link moves to the name.
+    Renamed(String),
+}
+
+/// The listed name a synthesised one stands for.
+fn named_by_hash(dir: &str, listed: &[Rc<str>], name: &str) -> Option<Rc<str>> {
+    use ironworks::sqpack::IndexHash;
+
+    if name.len() != 8 {
+        return None;
+    }
+    let want = u32::from_str_radix(name, 16).ok()?;
+    listed
+        .iter()
+        .find(|candidate| {
+            matches!(
+                IndexHash::of(&format!("{dir}/{candidate}").to_lowercase()).0,
+                Some(IndexHash::Split(hash)) if hash as u32 == want
+            )
+        })
+        .cloned()
+}
+
+/// The query read as a game path, so one the list does not carry can still be opened.
+///
+/// Every real path starts with a category directory and every listed name carries an extension, so
+/// those two together separate a path from a fuzzy fragment such as `uld/mkd`. The install hashes a
+/// lowercased path, so lowercasing loses nothing and makes the URL canonical.
+fn direct_path(query: &str, roots: impl Fn(&str) -> bool) -> Option<String> {
+    let query = query.trim().trim_matches('/').to_lowercase();
+    // The query is handed straight to a URL, where a `#` would quietly truncate it. No character a
+    // real path is spelled with falls outside this.
+    if !query
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
+    {
+        return None;
+    }
+    let mut segments = query.split('/');
+    (roots(segments.next()?) && segments.next_back()?.contains('.')).then_some(query)
 }
 
 pub struct AssetBrowser {
     state: Load<(Vec<u8>, Vec<u8>), Box<Loaded>>,
-    /// Raw bytes of the selected file, and which path they belong to.
-    bytes: Load<Vec<u8>>,
+    /// The selected file as it was read: the kind of sqpack stream it was stored as, where the
+    /// store reports one, and its raw bytes.
+    bytes: Load<(Option<String>, Vec<u8>)>,
     bytes_of: Option<String>,
+    /// What `bytes` turned out to hold, where its leading bytes say. Read once per selection.
+    sniffed: Option<Format>,
     /// Rendered view of `bytes`, decoded once per selection.
     preview: Option<Preview>,
+    /// Assets the current preview references, such as a material's textures.
+    deps: deps::Deps,
     /// Set when the selection is an unnamed file, which has to be read by hash rather than by path.
     selected_unnamed: Option<pathlist::Unnamed>,
     /// Mipmap level on show, and the viewer picked from the dropdown, if not the recommended one.
     mip: u8,
+    slice: u16,
     channels: Channels,
     viewer: Option<Viewer>,
     hex_page: usize,
@@ -881,6 +613,7 @@ pub struct AssetBrowser {
     expanded: HashMap<usize, bool>,
     selected: Option<String>,
     pending: Option<String>,
+    redirect: Option<String>,
 }
 
 impl Default for AssetBrowser {
@@ -889,9 +622,12 @@ impl Default for AssetBrowser {
             state: Load::Idle,
             bytes: Load::Idle,
             bytes_of: None,
+            sniffed: None,
+            deps: deps::Deps::default(),
             preview: None,
             selected_unnamed: None,
             mip: 0,
+            slice: 0,
             channels: Channels::default(),
             viewer: None,
             hex_page: 0,
@@ -902,11 +638,16 @@ impl Default for AssetBrowser {
             expanded: HashMap::new(),
             selected: None,
             pending: None,
+            redirect: None,
         }
     }
 }
 
 impl AssetBrowser {
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
     /// Select the path from a deep link once the index is available.
     pub fn request(&mut self, path: String) {
         if self.selected.as_deref() != Some(path.as_str()) {
@@ -924,8 +665,18 @@ impl AssetBrowser {
             Load::Idle | Load::Loading(_) => {}
             Load::Ready(_) => {
                 if let Some(pending) = self.pending.take() {
-                    self.selected_unnamed = self.reveal(&pending);
-                    self.selected = Some(pending);
+                    let (selected, unnamed) = match self.reveal(&pending) {
+                        Revealed::Path => (pending, None),
+                        Revealed::Hash(file) => (pending, Some(file)),
+                        // The name arrived after the link was made, so the hash is no longer a file
+                        // the tree shows; move the URL to the name it turned out to be.
+                        Revealed::Renamed(named) => {
+                            self.redirect = Some(named.clone());
+                            (named, None)
+                        }
+                    };
+                    self.selected_unnamed = unnamed;
+                    self.selected = Some(selected);
                 }
             }
             // Without an index the tree cannot expand to it, but the detail panel reads the file by
@@ -940,36 +691,34 @@ impl AssetBrowser {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<Action> {
-        self.poll(ui.ctx());
+        self.poll(ui.ctx(), backend);
         self.apply_pending();
-        let clicked = self.side_panel(ui);
-        self.detail_panel(ui, backend);
-        self.goto
+        let clicked = self.side_panel(ui, backend);
+        let followed = self.detail_panel(ui, backend);
+        let moved = self
+            .goto
             .take()
             .map(Action::Navigate)
-            .or_else(|| clicked.map(Action::Select))
+            .or_else(|| clicked.or(followed).map(Action::Select));
+        // A redirect only restores a URL the app is already showing the right file for, so anything
+        // the user did this frame supersedes it rather than firing over the top a frame later.
+        let redirect = self.redirect.take().map(Action::Redirect);
+        moved.or(redirect)
     }
 
-    fn poll(&mut self, ctx: &egui::Context) {
+    fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
         if matches!(self.state, Load::Idle) {
-            let Some((base, region, version)) = api_target(ctx) else {
-                self.state =
-                    Load::Failed("资源浏览器需要 Web API, 本地安装没有路径列表".to_string());
-                return;
-            };
+            let files = backend.files().clone();
+            let api = api_base(ctx);
             self.state = Load::Loading(TrackedPromise::spawn_local(async move {
                 // The list is version-independent and cached hard; the presence map is the only
                 // per-version part, and it is a bit per path.
                 let at = Instant::now();
-                let base = base.trim_end_matches('/').to_owned();
-                let paths = fetch_url(format!("{base}/paths/")).await?;
-                let paths_took = at.elapsed();
-                let at = Instant::now();
-                let presence = fetch_url(format!("{base}/{region}/{version}/paths/")).await?;
+                // Served prebuilt by the API; a local install builds its own from the same list.
+                let (paths, presence) = files.path_index(&api).await?;
                 log::info!(
-                    "assets/fetch: path list {} in {}, presence {} in {}",
+                    "assets/fetch: path list {}, presence {}, in {}",
                     Bytes(paths.len()),
-                    Millis(paths_took),
                     Bytes(presence.len()),
                     Millis(at.elapsed()),
                 );
@@ -990,37 +739,54 @@ impl AssetBrowser {
         }
     }
 
-    /// Expand the tree down to `path` so a deep link lands somewhere visible.
-    /// Reports the unnamed file the target refers to, or `None` if it is one of the listed names.
-    /// An unnamed file is shown as its hash, so its path is synthesised: it must not be hashed back,
-    /// and reading it has to go by hash instead.
-    fn reveal(&mut self, path: &str) -> Option<pathlist::Unnamed> {
+    /// Expand the tree down to `path` so a deep link lands somewhere visible, and report how the
+    /// target has to be read.
+    ///
+    /// A path the tree cannot place still selects, since the install is asked by path and knows
+    /// files the list does not name.
+    fn reveal(&mut self, path: &str) -> Revealed {
         let Load::Ready(loaded) = &mut self.state else {
-            return None;
+            return Revealed::Path;
         };
-        let cut = path.rfind('/')?;
-        let (dir, file) = (&path[..cut], &path[cut + 1..]);
+        let Some(cut) = path.rfind('/') else {
+            return Revealed::Path;
+        };
+        let (folder, file) = (&path[..cut], &path[cut + 1..]);
         let mut parent: Option<usize> = None;
-        for segment in dir.split('/') {
+        for segment in folder.split('/') {
             let children: &[usize] = match parent {
                 Some(p) => &loaded.nodes[p].children,
                 None => &loaded.roots,
             };
-            let &next = children
+            let Some(&next) = children
                 .iter()
-                .find(|&&c| &*loaded.nodes[c].segment == segment)?;
+                .find(|&&c| &*loaded.nodes[c].segment == segment)
+            else {
+                return Revealed::Path;
+            };
             self.expanded.insert(next, true);
             parent = Some(next);
         }
-        let dir = parent.and_then(|node| loaded.nodes[node].dir)?;
+        let Some(dir) = parent.and_then(|node| loaded.nodes[node].dir) else {
+            return Revealed::Path;
+        };
         let names = loaded.names(dir);
-        if names.all[..names.named].iter().any(|name| &**name == file) {
-            return None;
+        let listed = &names.all[..names.named];
+        if listed.iter().any(|name| &**name == file) {
+            return Revealed::Path;
         }
-        loaded.unnamed_file(dir, file)
+        // An unnamed file is shown as its hash, so its path is synthesised: it must not be hashed
+        // back, and reading it has to go by index entry instead.
+        if let Some(unnamed) = loaded.unnamed_file(dir, file) {
+            return Revealed::Hash(unnamed);
+        }
+        match named_by_hash(folder, listed, file) {
+            Some(named) => Revealed::Renamed(format!("{folder}/{named}")),
+            None => Revealed::Path,
+        }
     }
 
-    fn side_panel(&mut self, ui: &mut egui::Ui) -> Option<String> {
+    fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
         let mut clicked = None;
         CollapsibleSidePanel::new("asset_tree", Side::Left).show(ui, |ui, is_open| {
             if !is_open {
@@ -1071,7 +837,7 @@ impl AssetBrowser {
                         self.scan = None;
                         self.draw_tree(ui)
                     } else {
-                        self.draw_search(ui)
+                        self.draw_search(ui, backend)
                     };
                 }
             });
@@ -1154,19 +920,19 @@ impl AssetBrowser {
                                 depth,
                                 dir,
                                 name,
-                                named,
+                                unnamed,
                             } => {
                                 let path = format!("{}/{}", loaded.dir_path(*dir), name);
                                 let text =
                                     RichText::new(format!("{}{}", "    ".repeat(*depth), name));
                                 let selected = self.selected.as_deref() == Some(path.as_str());
-                                let text = if *named { text } else { text.weak() };
+                                let text = if unnamed.is_some() { text.weak() } else { text };
                                 let response = Button::selectable(selected, text).ui(ui);
-                                if *named {
-                                    path_context(&response, &path);
-                                } else {
-                                    response.clone().on_hover_text(&path);
-                                }
+                                path_context(
+                                    &response,
+                                    &path,
+                                    unnamed.and_then(|index| loaded.unnamed_at(*dir, index)),
+                                );
                                 if response.clicked() {
                                     clicked = Some(path);
                                 }
@@ -1182,8 +948,8 @@ impl AssetBrowser {
         clicked
     }
 
-    fn draw_search(&mut self, ui: &mut egui::Ui) -> Option<String> {
-        self.advance_scan(ui.ctx());
+    fn draw_search(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
+        self.advance_scan(ui.ctx(), backend);
         let Some(scan) = &self.scan else {
             return None;
         };
@@ -1191,6 +957,48 @@ impl AssetBrowser {
             return None;
         };
         let total = loaded.paths.dirs().len();
+        let mut clicked = None;
+        // Offered above the matches, because someone typing a whole path already knows what they
+        // want and the sweep for it takes a moment.
+        if let Some(path) = scan.direct.clone() {
+            ui.label(RichText::new("按路径打开").weak());
+            let offer = match &scan.exists {
+                Load::Idle | Load::Loading(_) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("正在检查…");
+                    });
+                    false
+                }
+                Load::Ready(found) => {
+                    if !found {
+                        ui.label(RichText::new("当前版本中没有此文件。").weak());
+                    }
+                    *found
+                }
+                // A check that could not run is not evidence of absence, so the path is still
+                // offered and the reason is put where the user can see it.
+                Load::Failed(error) => {
+                    ui.label(RichText::new(format!("检查失败：{error}")).weak());
+                    true
+                }
+            };
+            if offer {
+                ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let selected = self.selected.as_deref() == Some(path.as_str());
+                    if Button::selectable(selected, path.as_str())
+                        .ui(ui)
+                        .on_hover_text("直接从游戏文件中读取此路径，不受路径列表影响")
+                        .clicked()
+                    {
+                        clicked = Some(path);
+                    }
+                });
+            }
+            ui.separator();
+        }
+
         let scanning = scan.cursor < total;
         if scanning {
             ui.horizontal(|ui| {
@@ -1217,7 +1025,6 @@ impl AssetBrowser {
             );
         }
 
-        let mut clicked = None;
         let row_height = ui.text_style_height(&egui::TextStyle::Button);
         ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
@@ -1242,7 +1049,7 @@ impl AssetBrowser {
         clicked
     }
 
-    fn advance_scan(&mut self, ctx: &egui::Context) {
+    fn advance_scan(&mut self, ctx: &egui::Context, backend: &Backend) {
         let Load::Ready(loaded) = &mut self.state else {
             return;
         };
@@ -1250,7 +1057,47 @@ impl AssetBrowser {
             pattern: FuzzyMatcher::parse_pattern(&self.search),
             cursor: 0,
             hits: Vec::new(),
+            direct: direct_path(&self.search, |root| {
+                loaded
+                    .roots
+                    .iter()
+                    .any(|&node| &*loaded.nodes[node].segment == root)
+            }),
+            exists: Load::Idle,
+            typed: Instant::now(),
         });
+
+        if let Some(path) = &scan.direct {
+            let settled = match &scan.exists {
+                Load::Idle if scan.typed.elapsed() >= EXISTS_DELAY => {
+                    let path = path.clone();
+                    let files = backend.files().clone();
+                    Some(Load::Loading(TrackedPromise::spawn_local(async move {
+                        Ok(files
+                            .exists_many(&[path])
+                            .await?
+                            .first()
+                            .copied()
+                            .unwrap_or(false))
+                    })))
+                }
+                Load::Idle => {
+                    ctx.request_repaint_after(EXISTS_DELAY);
+                    None
+                }
+                Load::Loading(promise) => promise.try_get().map(|result| {
+                    match result.as_ref().map_err(|e| e.to_string()) {
+                        Ok(exists) => Load::Ready(*exists),
+                        Err(error) => Load::Failed(error),
+                    }
+                }),
+                Load::Ready(_) | Load::Failed(_) => None,
+            };
+            if let Some(settled) = settled {
+                scan.exists = settled;
+            }
+        }
+
         let total = loaded.paths.dirs().len();
         if scan.cursor >= total {
             return;
@@ -1272,7 +1119,10 @@ impl AssetBrowser {
         ctx.request_repaint();
     }
 
-    fn detail_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) {
+    fn detail_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
+        // A material links through to the textures it binds, so the panel can ask for a new
+        // selection the same way the tree does.
+        let mut follow = None;
         CentralPanel::default().show(ui, |ui| {
             let Some(path) = self.selected.clone() else {
                 if CollapsibleSidePanel::is_collapsed(ui.ctx(), "asset_tree") {
@@ -1288,6 +1138,18 @@ impl AssetBrowser {
 
             self.ensure_bytes(ui, backend, &path);
 
+            let (stream, empty) = match &self.bytes {
+                Load::Ready((kind, bytes)) => {
+                    let size = Bytes(bytes.len());
+                    let label = match kind {
+                        Some(kind) => format!("{kind} ({size})"),
+                        None => size.to_string(),
+                    };
+                    (Some(label), bytes.is_empty())
+                }
+                _ => (None, false),
+            };
+
             Panel::top("asset_header").show(ui, |ui| {
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -1296,83 +1158,85 @@ impl AssetBrowser {
                             CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left);
                         });
                     }
-                    ui.vertical_centered_justified(|ui| {
-                        ui.heading(path.rsplit('/').next().unwrap_or(&path))
-                    });
+                    ui.vertical_centered_justified(|ui| ui.heading(crate::utils::file_name(&path)));
                 });
                 ui.add_space(4.0);
                 // Wrapped in a `horizontal` so the row is sized by its content. A bare `with_layout`
                 // would take the panel's remaining height, which the panel derives from its content:
                 // the row would then grow by a few pixels on every repaint.
                 ui.horizontal(|ui| {
-                    // Actions are placed from the right; whatever is left over goes to the path.
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let recommended = Viewer::recommended(&path);
-                        let chosen = self.viewer.unwrap_or(recommended);
-                        // A real dropdown, not a bare button: ComboBox draws the indicator and
-                        // closes itself on click, which is why the arms below never call `close`.
-                        egui::ComboBox::from_id_salt("asset_viewer")
-                            .selected_text(format!("👁 {}", chosen.label()))
-                            .show_ui(ui, |ui| {
-                                let mut pick =
-                                    |ui: &mut egui::Ui, viewer: Option<Viewer>, label: String| {
-                                        if ui
-                                            .selectable_label(self.viewer == viewer, label)
-                                            .clicked()
-                                        {
-                                            self.viewer = viewer;
-                                            self.preview = None;
-                                        }
-                                    };
-                                pick(ui, None, format!("推荐 ({})", recommended.label()));
-                                pick(ui, Some(Viewer::Raw), Viewer::Raw.label().to_owned());
-                                ui.separator();
-                                for viewer in Viewer::RENDERED {
-                                    // The recommended one is already the entry at the top. It stays
-                                    // in the list, disabled, so every viewer keeps the same place.
-                                    if viewer == recommended {
-                                        ui.add_enabled(
-                                            false,
-                                            Button::selectable(false, viewer.label()),
-                                        );
-                                    } else {
-                                        pick(ui, Some(viewer), viewer.label().to_owned());
+                    let row = ui.max_rect();
+                    let left = ui
+                        .scope(|ui| {
+                            if let Some(stream) = &stream {
+                                ui.label(RichText::new(stream).weak());
+                            }
+                        })
+                        .response
+                        .rect;
+
+                    let right = ui
+                        .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // A file with no data has nothing for any viewer to show, so there is
+                            // nothing to choose between.
+                            if !empty {
+                                self.viewer_picker(ui, &path);
+                            }
+                            match Kind::of(&path) {
+                                Kind::Sheet => {
+                                    if let Some(sheet) =
+                                        sheet_name(backend.excel().get_entries(), &path)
+                                        && ui.button(format!("在数据表中打开“{sheet}”")).clicked()
+                                    {
+                                        self.goto = Some(format!("/sheet/{sheet}"));
                                     }
                                 }
-                            });
-                        match Kind::of(&path) {
-                            Kind::Sheet => {
-                                if let Some(sheet) =
-                                    sheet_name(backend.excel().get_entries(), &path)
-                                    && ui.button(format!("在数据表中打开 {sheet}")).clicked()
-                                {
-                                    self.goto = Some(format!("/sheet/{sheet}"));
+                                Kind::SheetList => {
+                                    if ui.button("打开数据表页签").clicked() {
+                                        self.goto = Some("/sheet".to_string());
+                                    }
                                 }
+                                Kind::Other(_) => {}
                             }
-                            Kind::SheetList => {
-                                if ui.button("打开数据表页签").clicked() {
-                                    self.goto = Some("/sheet".to_string());
-                                }
-                            }
-                            Kind::Other(_) => {}
-                        }
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        })
+                        .response
+                        .rect;
+
+                    // Centred on the row rather than on the gap the two sides leave, which is off
+                    // centre whenever they differ in width. Never wide enough to reach either of
+                    // them, so a long path truncates rather than running underneath one.
+                    let font = TextStyle::Body.resolve(ui.style());
+                    let width = ui
+                        .painter()
+                        .layout_no_wrap(path.clone(), font, Color32::PLACEHOLDER)
+                        .size()
+                        .x;
+                    let room = (row.center().x - left.right()).min(right.left() - row.center().x)
+                        - ui.spacing().item_spacing.x;
+                    let flanks = left.union(right);
+                    let band = Rect::from_center_size(
+                        pos2(row.center().x, flanks.center().y),
+                        vec2(width.min(room * 2.0).max(0.0), flanks.height()),
+                    );
+                    ui.scope_builder(
+                        UiBuilder::new()
+                            .max_rect(band)
+                            .layout(Layout::left_to_right(Align::Center)),
+                        |ui| {
                             let label = ui.add(
                                 Label::new(RichText::new(&path).weak())
                                     .truncate()
                                     .sense(egui::Sense::click()),
                             );
-                            if self.selected_unnamed.is_none() {
-                                path_context(&label, &path);
-                            }
-                        });
-                    });
+                            path_context(&label, &path, self.selected_unnamed);
+                        },
+                    );
                 });
                 ui.add_space(4.0);
             });
 
             // Only textures and images have anything to put in the sidebar.
-            if matches!(&self.preview, Some(Preview::Image { .. })) {
+            if self.preview.as_ref().is_some_and(Preview::has_details) {
                 let mut change = None;
                 CollapsibleSidePanel::new("asset_info", Side::Right).show(ui, |ui, is_open| {
                     if !is_open {
@@ -1392,22 +1256,33 @@ impl AssetBrowser {
                     });
                     CentralPanel::default().show(ui, |ui| {
                         if let Some(preview) = &self.preview {
-                            change = preview.info_ui(ui, self.mip, self.channels);
+                            change = preview.info_ui(
+                                ui,
+                                (self.mip, self.slice, self.channels),
+                                &mut follow,
+                                &mut self.deps,
+                                backend,
+                            );
                         }
                     });
                 });
-                if let Some((mip, channels)) = change {
+                if let Some((mip, slice, channels)) = change {
+                    // The slice is chosen at draw time, so only the settings that change the pixels
+                    // are worth throwing the decoded preview away for.
+                    let redecode = (mip, channels) != (self.mip, self.channels);
                     self.mip = mip;
+                    self.slice = slice;
                     self.channels = channels;
-                    // Force a re-decode with the new settings.
-                    self.preview = None;
+                    if redecode {
+                        self.preview = None;
+                    }
                 }
             }
 
-            let showing = self.viewer.unwrap_or_else(|| Viewer::recommended(&path));
+            let showing = self.viewer.unwrap_or(self.recommended(&path));
             CentralPanel::default().show(ui, |ui| {
                 if CollapsibleSidePanel::is_collapsed(ui.ctx(), "asset_info")
-                    && matches!(&self.preview, Some(Preview::Image { .. }))
+                    && self.preview.as_ref().is_some_and(Preview::has_details)
                 {
                     ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                         CollapsibleSidePanel::draw_arrow(ui, "asset_info", Side::Right);
@@ -1423,27 +1298,95 @@ impl AssetBrowser {
                     Load::Failed(e) => {
                         ui.colored_label(Color32::RED, e.clone());
                     }
-                    Load::Ready(bytes) if showing == Viewer::Raw => {
+                    Load::Ready((_, bytes)) if bytes.is_empty() => {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(RichText::new("此文件为空").weak());
+                        });
+                    }
+                    Load::Ready((_, bytes)) if showing == Viewer::Raw => {
                         let mut page = self.hex_page;
                         hex_dump(ui, bytes, &mut page);
                         self.hex_page = page;
                     }
-                    Load::Ready(_) => {
-                        if let Some(preview) = &self.preview {
-                            preview.ui(ui);
+                    Load::Ready((_, bytes)) => {
+                        if let Some(preview) = &self.preview
+                            && let Some(target) =
+                                preview.ui(ui, bytes, self.slice, &mut self.deps, backend)
+                        {
+                            follow = Some(target);
                         }
                     }
                 }
             });
         });
+        follow
+    }
+
+    /// What a file is shown with unless the dropdown says otherwise. The bytes are taken over the
+    /// name wherever they say anything, which is the only thing an unnamed file has to go on.
+    fn recommended(&self, path: &str) -> Viewer {
+        self.sniffed
+            .map_or_else(|| Viewer::from_extension(path), Format::viewer)
+    }
+
+    /// The viewer dropdown, which throws the decoded preview away whenever the choice changes. Where
+    /// the bytes and the extension disagree, the extension's reading stays on offer below the
+    /// recommendation rather than being dropped.
+    fn viewer_picker(&mut self, ui: &mut egui::Ui, path: &str) {
+        let extension = Viewer::from_extension(path);
+        let recommended = self.recommended(path);
+        let named = self
+            .sniffed
+            .map_or_else(|| recommended.label(), Format::label);
+        // Following the recommendation reads as whatever the file turned out to be, so a sheet page
+        // does not sit closed as the `Bytes` it is shown with.
+        let chosen = match self.viewer {
+            Some(viewer) => viewer.label(),
+            None => named,
+        };
+        // A real dropdown, not a bare button: ComboBox draws the indicator and closes itself on
+        // click, which is why the arms below never call `close`.
+        egui::ComboBox::from_id_salt("asset_viewer")
+            .selected_text(chosen)
+            .show_ui(ui, |ui| {
+                let mut pick = |ui: &mut egui::Ui, viewer: Option<Viewer>, label: String| {
+                    if ui.selectable_label(self.viewer == viewer, label).clicked() {
+                        self.viewer = viewer;
+                        self.preview = None;
+                    }
+                };
+                pick(ui, None, format!("{named}（推荐）"));
+                // Only where the name claims something of its own, and something else: an
+                // unrecognised extension has nothing to say that `Bytes` below does not.
+                if extension != recommended && extension != Viewer::Raw {
+                    pick(
+                        ui,
+                        Some(extension),
+                        format!("{}（按扩展名）", extension.label()),
+                    );
+                }
+                pick(ui, Some(Viewer::Raw), Viewer::Raw.label().to_owned());
+                ui.separator();
+                for viewer in Viewer::RENDERED {
+                    // The recommended one is already the entry at the top. It stays in the list,
+                    // disabled, so every viewer keeps the same place.
+                    if viewer == recommended {
+                        ui.add_enabled(false, Button::selectable(false, viewer.label()));
+                    } else {
+                        pick(ui, Some(viewer), viewer.label().to_owned());
+                    }
+                }
+            });
     }
 
     /// Fetch the selected file if it is not already in hand, and decode a view of it.
     fn ensure_bytes(&mut self, ui: &mut egui::Ui, backend: &Backend, path: &str) {
         if self.bytes_of.as_deref() != Some(path) {
             self.bytes_of = Some(path.to_string());
+            self.sniffed = None;
             self.preview = None;
             self.mip = 0;
+            self.slice = 0;
             self.channels = Channels::default();
             self.viewer = None;
             self.hex_page = 0;
@@ -1453,35 +1396,44 @@ impl AssetBrowser {
             let wanted = path.to_string();
             self.bytes = Load::Loading(TrackedPromise::spawn_local(async move {
                 let at = Instant::now();
-                let bytes = match unnamed {
+                let (kind, bytes) = match unnamed {
                     Some(file) => {
                         files
-                            .read_by_hash(file.repository, file.category, file.hash, file.split)
+                            .read_stream_by_hash(
+                                file.repository,
+                                file.category,
+                                file.hash,
+                                file.split,
+                            )
                             .await?
                     }
-                    None => files.read(&wanted).await?,
+                    None => files.read_stream(&wanted).await?,
                 };
                 log::info!(
                     "assets/read: {wanted} {} in {}",
                     Bytes(bytes.len()),
                     Millis(at.elapsed())
                 );
-                Ok(bytes)
+                Ok((kind, bytes))
             }));
         }
         if let Load::Loading(promise) = &self.bytes
             && let Some(result) = promise.try_get()
         {
             self.bytes = match result.as_ref() {
-                Ok(bytes) => Load::Ready(bytes.clone()),
+                Ok((kind, bytes)) => {
+                    self.sniffed = magic::sniff(bytes);
+                    Load::Ready((kind.clone(), bytes.clone()))
+                }
                 Err(e) => Load::Failed(e.to_string()),
             };
         }
 
         // Decoding uploads a texture, so it needs the context and happens here rather than in the
         // fetch. Once per file, or again when a different mipmap is picked.
-        let viewer = self.viewer.unwrap_or_else(|| Viewer::recommended(path));
-        if let Load::Ready(bytes) = &self.bytes
+        let viewer = self.viewer.unwrap_or(self.recommended(path));
+        if let Load::Ready((_, bytes)) = &self.bytes
+            && !bytes.is_empty()
             && self.preview.is_none()
             && viewer != Viewer::Raw
         {
@@ -1602,17 +1554,6 @@ fn sheet_name(entries: &HashMap<String, i32>, path: &str) -> Option<String> {
             Some(i) => candidate = &candidate[..split + i],
             None => return None,
         }
-    }
-}
-
-fn api_target(ctx: &egui::Context) -> Option<(String, String, String)> {
-    match BACKEND_CONFIG.get(ctx)?.location {
-        InstallLocation::Web(url, region, version) => Some((
-            url,
-            region.api_name().to_string(),
-            version.map_or_else(|| "latest".to_string(), |v| v.to_string()),
-        )),
-        _ => None,
     }
 }
 
@@ -1763,4 +1704,138 @@ mod tests {
         assert!(dirs_mapped.contains(&Some(0)) && dirs_mapped.contains(&Some(2)));
         assert!(!dirs_mapped.contains(&Some(1)));
     }
+}
+
+/// Text is capped because the hex dump below it already covers the whole file, and a multi-megabyte
+/// label is not something egui should be asked to lay out.
+pub const MAX_TEXT_PREVIEW: usize = 256 * 1024;
+
+/// Which colour channels of an image to show. Masking them off is how a packed texture (normal
+/// maps, masks, occlusion) is read: the interesting data is rarely the RGB composite.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Channels {
+    r: bool,
+    g: bool,
+    b: bool,
+    a: bool,
+}
+
+impl Default for Channels {
+    fn default() -> Self {
+        Self {
+            r: true,
+            g: true,
+            b: true,
+            a: true,
+        }
+    }
+}
+
+impl Channels {
+    fn all(self) -> bool {
+        self.r && self.g && self.b && self.a
+    }
+
+    /// Zero the unselected channels, or, when exactly one is picked, show it as greyscale so a
+    /// single packed channel is actually readable.
+    fn apply(self, image: &mut image::RgbaImage) {
+        if self.all() {
+            return;
+        }
+        let only = match (self.r, self.g, self.b, self.a) {
+            (true, false, false, false) => Some(0),
+            (false, true, false, false) => Some(1),
+            (false, false, true, false) => Some(2),
+            (false, false, false, true) => Some(3),
+            _ => None,
+        };
+        for pixel in image.pixels_mut() {
+            let [r, g, b, a] = pixel.0;
+            pixel.0 = match only {
+                Some(channel) => {
+                    let value = pixel.0[channel];
+                    [value, value, value, u8::MAX]
+                }
+                // Alpha is forced opaque when deselected, so the colour channels stay visible.
+                None => [
+                    if self.r { r } else { 0 },
+                    if self.g { g } else { 0 },
+                    if self.b { b } else { 0 },
+                    if self.a { a } else { u8::MAX },
+                ],
+            };
+        }
+    }
+}
+
+/// Which renderer to show a file with. `Raw` is always available; the rest only make sense for the
+/// formats they understand, but any of them can be forced from the dropdown.
+const HEX_COLS: usize = 16;
+/// Rows per page of the byte view. egui positions a virtualised list in `f32`, which stops being
+/// exact past ~16.7M pixels, so a big enough file would scroll unevenly or fail to reach its end.
+/// One page is 1 MiB, comfortably inside that, and files below it get no pagination at all.
+const HEX_PAGE_ROWS: usize = 64 * 1024;
+
+/// Offset, hex, ASCII. Rows are virtualised, so only what is on screen is ever formatted.
+fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], page: &mut usize) {
+    use std::fmt::Write as _;
+
+    let rows = bytes.len().div_ceil(HEX_COLS);
+    let pages = rows.div_ceil(HEX_PAGE_ROWS).max(1);
+    *page = (*page).min(pages - 1);
+
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{}（{} 字节）", Bytes(bytes.len()), bytes.len())).weak());
+        if pages > 1 {
+            ui.separator();
+            if ui.add_enabled(*page > 0, Button::new("◀")).clicked() {
+                *page -= 1;
+            }
+            ui.label(format!("第 {} / {pages} 页", *page + 1));
+            if ui
+                .add_enabled(*page + 1 < pages, Button::new("▶"))
+                .clicked()
+            {
+                *page += 1;
+            }
+            ui.label(
+                RichText::new(format!("起始 {:#010X}", *page * HEX_PAGE_ROWS * HEX_COLS)).weak(),
+            );
+        }
+    });
+    ui.add_space(4.0);
+
+    let first_row = *page * HEX_PAGE_ROWS;
+    let page_rows = (rows - first_row).min(HEX_PAGE_ROWS);
+    let row_height = ui.text_style_height(&TextStyle::Monospace);
+    ScrollArea::both()
+        .auto_shrink(false)
+        .id_salt(*page)
+        .show_rows(ui, row_height, page_rows, |ui, range| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            let mut line = String::with_capacity(80);
+            for row in range {
+                let start = (first_row + row) * HEX_COLS;
+                let chunk = &bytes[start..(start + HEX_COLS).min(bytes.len())];
+                line.clear();
+                let _ = write!(line, "{start:08X}  ");
+                for i in 0..HEX_COLS {
+                    if i == HEX_COLS / 2 {
+                        line.push(' ');
+                    }
+                    match chunk.get(i) {
+                        Some(b) => {
+                            let _ = write!(line, "{b:02X} ");
+                        }
+                        None => line.push_str("   "),
+                    }
+                }
+                line.push(' ');
+                line.extend(chunk.iter().map(|b| match b {
+                    0x20..=0x7e => *b as char,
+                    _ => '.',
+                }));
+                ui.label(RichText::new(&line).monospace());
+            }
+        });
 }

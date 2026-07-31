@@ -319,7 +319,7 @@ impl McpHandler {
         let config = &self.config;
 
         let version_info = match &config.location {
-            crate::settings::InstallLocation::Web(_, region, version) => serde_json::json!({
+            crate::settings::InstallLocation::Web(region, version) => serde_json::json!({
                 "source": "web",
                 "region": region.name(),
                 "version": version.as_ref().map(|v| v.to_string())

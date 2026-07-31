@@ -6,7 +6,7 @@ use tokio::{runtime::Handle, select, sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use xiv_core::file::version::GameVersion;
 
-use crate::data::{GameData, RepositoryInfo, Target, VersionInfo};
+use crate::data::{GameData, RepositoryInfo, StoredFile, Target, VersionInfo};
 use crate::paths::PathIndex;
 
 #[derive(Debug, Clone)]
@@ -20,17 +20,19 @@ pub enum RequestData {
         ironworks::sqpack::IndexHash,
     ),
     Exists(Target, Option<GameVersion>, Vec<String>),
+    ListId,
     GlobalPaths,
-    Presence(Target, Option<GameVersion>),
+    Presence(Target, Option<GameVersion>, u64),
     Repositories,
 }
 
 pub enum Response {
-    GetFile(Result<Arc<Vec<u8>>, ironworks::Error>),
-    GetFileByHash(Result<Arc<Vec<u8>>, ironworks::Error>),
+    GetFile(Result<Arc<StoredFile>, ironworks::Error>),
+    GetFileByHash(Result<Arc<StoredFile>, ironworks::Error>),
     Exists(Result<Vec<bool>, ironworks::Error>),
-    GlobalPaths(anyhow::Result<Bytes>),
-    Presence(anyhow::Result<Bytes>),
+    ListId(anyhow::Result<u64>),
+    GlobalPaths(anyhow::Result<(u64, Bytes)>),
+    Presence(anyhow::Result<Option<Bytes>>),
     Repositories(anyhow::Result<Vec<RepositoryInfo>>),
 }
 
@@ -140,16 +142,19 @@ impl MessageQueue {
 
                                             Response::Exists(result)
                                         }
+                                        RequestData::ListId => {
+                                            Response::ListId(this.paths.list_id().await)
+                                        }
                                         RequestData::GlobalPaths => {
                                             Response::GlobalPaths(this.paths.global().await)
                                         }
-                                        RequestData::Presence(target, version) => {
+                                        RequestData::Presence(target, version, list_id) => {
                                             let version = match version {
                                                 Some(v) => Some(v),
                                                 None => this.data.versions_for(target).await.map(|v| v.latest),
                                             };
                                             let result = match version {
-                                                Some(version) => this.paths.presence(&this.data, target, version).await,
+                                                Some(version) => this.paths.presence(&this.data, target, version, list_id).await,
                                                 None => Err(anyhow::anyhow!("No version info available")),
                                             };
 
@@ -236,7 +241,24 @@ impl MessageQueue {
         }
     }
 
-    pub async fn get_global_paths(&self) -> anyhow::Result<Bytes> {
+    pub async fn get_list_id(&self) -> anyhow::Result<u64> {
+        let (tx, rx) = oneshot::channel();
+        self.0
+            .tx
+            .send(Request {
+                data: RequestData::ListId,
+                tx,
+            })
+            .await
+            .expect("Failed to send request to message queue");
+
+        match rx.await {
+            Ok(Response::ListId(result)) => result,
+            _ => Err(anyhow::anyhow!("Failed to get the path list id")),
+        }
+    }
+
+    pub async fn get_global_paths(&self) -> anyhow::Result<(u64, Bytes)> {
         let (tx, rx) = oneshot::channel();
         self.0
             .tx
@@ -257,12 +279,13 @@ impl MessageQueue {
         &self,
         target: Target,
         version: Option<GameVersion>,
-    ) -> anyhow::Result<Bytes> {
+        list_id: u64,
+    ) -> anyhow::Result<Option<Bytes>> {
         let (tx, rx) = oneshot::channel();
         self.0
             .tx
             .send(Request {
-                data: RequestData::Presence(target, version),
+                data: RequestData::Presence(target, version, list_id),
                 tx,
             })
             .await
@@ -279,7 +302,7 @@ impl MessageQueue {
         target: Target,
         version: Option<GameVersion>,
         path: String,
-    ) -> Result<Arc<Vec<u8>>, ironworks::Error> {
+    ) -> Result<Arc<StoredFile>, ironworks::Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .tx
@@ -305,7 +328,7 @@ impl MessageQueue {
         repository: u8,
         category: u8,
         hash: ironworks::sqpack::IndexHash,
-    ) -> Result<Arc<Vec<u8>>, ironworks::Error> {
+    ) -> Result<Arc<StoredFile>, ironworks::Error> {
         let (tx, rx) = oneshot::channel();
         self.0
             .tx

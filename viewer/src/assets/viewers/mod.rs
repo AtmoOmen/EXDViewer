@@ -1,0 +1,537 @@
+//! Per-type views of a selected asset.
+//!
+//! Each viewer lives in its own module and is reached only through [`Viewer`], so adding a type is a
+//! new file plus an arm here rather than edits threaded through the browser.
+
+use egui::{
+    Align, Color32, Label, Layout, Rect, RichText, ScrollArea, Sense, TextureHandle, Vec2, vec2,
+};
+
+use super::{Bytes, Channels, MAX_TEXT_PREVIEW};
+
+pub mod font;
+pub mod icons;
+pub mod material;
+pub mod png;
+mod shader;
+pub mod shcd;
+pub mod shpk;
+pub mod texture;
+pub mod uld;
+
+/// Space kept around whatever a grid cell holds.
+const PADDING: f32 = 6.0;
+
+/// Uniform cells in as many columns as fit, virtualised by row: only the rows on screen are laid
+/// out, which is what keeps a font of twenty-eight thousand glyphs from asking for every sheet it
+/// names at once. Columns are counted from the width inside the scroll area, so the grid never
+/// overflows into space there is no bar to reach.
+fn grid(
+    ui: &mut egui::Ui,
+    cell: Vec2,
+    count: usize,
+    mut draw: impl FnMut(&mut egui::Ui, usize, Rect),
+) {
+    ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show_viewport(ui, |ui, viewport| {
+            let width = ui.available_width();
+            let columns = (width / cell.x).floor().max(1.0) as usize;
+            let rows = count.div_ceil(columns);
+            let origin =
+                ui.cursor().left_top() + vec2((width - columns as f32 * cell.x) / 2.0, 0.0);
+            ui.set_height(rows as f32 * cell.y);
+
+            let first = (viewport.min.y / cell.y).floor().max(0.0) as usize;
+            let last = ((viewport.max.y / cell.y).ceil() as usize).min(rows);
+            for index in (first * columns)..(last * columns).min(count) {
+                let at = Rect::from_min_size(
+                    origin
+                        + vec2(
+                            (index % columns) as f32 * cell.x,
+                            (index / columns) as f32 * cell.y,
+                        ),
+                    cell,
+                );
+                draw(ui, index, at);
+            }
+        });
+}
+
+/// Stand-in for a sheet that never arrived, in the space its art would have taken.
+fn missing(ui: &egui::Ui, rect: Rect) {
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "⚠",
+        egui::FontId::default(),
+        Color32::LIGHT_RED,
+    );
+}
+
+/// A table of label and value, which is most of what a details panel is.
+fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
+    egui::Grid::new(id)
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for (label, value) in rows {
+                ui.label(RichText::new(*label).weak());
+                ui.label(RichText::new(value).monospace());
+                ui.allocate_space(vec2(ui.available_width(), 0.0));
+                ui.end_row();
+            }
+        });
+}
+
+/// The textures a viewer draws from, where the file itself never names them. Returns one if it was
+/// followed.
+fn textures<'a>(
+    ui: &mut egui::Ui,
+    paths: impl IntoIterator<Item = (Option<&'a str>, &'a str)>,
+) -> Option<String> {
+    ui.add_space(8.0);
+    ui.separator();
+    ui.label(RichText::new("纹理").weak());
+    ui.add_space(4.0);
+
+    let mut follow = None;
+    egui::Grid::new("textures")
+        .num_columns(2)
+        .striped(true)
+        .show(ui, |ui| {
+            for (label, path) in paths {
+                if let Some(label) = label {
+                    ui.label(RichText::new(label).weak());
+                }
+                if link(ui, crate::utils::file_name(path), path) {
+                    follow = Some(path.to_owned());
+                }
+                ui.allocate_space(vec2(ui.available_width(), 0.0));
+                ui.end_row();
+            }
+        });
+    follow
+}
+
+/// A section title in the main area: the details panel's weak styling at heading size.
+fn section(ui: &mut egui::Ui, title: &str) {
+    ui.label(RichText::new(title).text_style(egui::TextStyle::Heading));
+    ui.add_space(4.0);
+}
+
+/// A group heading inside a section, for the tables that come in several kinds.
+fn heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(text).weak());
+    ui.add_space(4.0);
+}
+
+/// The weak header row above a striped table.
+fn headers(ui: &mut egui::Ui, names: &[&str]) {
+    for name in names {
+        ui.label(RichText::new(*name).weak().small());
+    }
+    ui.allocate_space(vec2(ui.available_width(), 0.0));
+    ui.end_row();
+}
+
+/// A clickable id, with the hover and copy menu every crc-named value in the browser gets.
+fn hashed(ui: &mut egui::Ui, kind: &str, name: &str, id: u32, dim: bool) {
+    labelled(ui, kind, name, name, id, dim);
+}
+
+/// The same, drawn under a shorter label. Hovering still gives the whole name and its hash, so
+/// nothing is lost by not spelling out a key's own name in every one of its values.
+fn labelled(ui: &mut egui::Ui, kind: &str, name: &str, shown: &str, id: u32, dim: bool) {
+    let text = RichText::new(shown).monospace();
+    let response = ui.add(
+        egui::Label::new(match dim {
+            true => text.weak(),
+            false => text,
+        })
+        .sense(Sense::click()),
+    );
+    crate::assets::crc_context(&response, kind, name, id);
+}
+
+/// A path rendered as a link: hyperlink colour, pointer cursor, and the same hover and right-click
+/// menu every other path in the browser gets. Returns whether it was followed.
+fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
+    let response = ui
+        .add(
+            egui::Label::new(
+                RichText::new(text)
+                    .monospace()
+                    .color(ui.visuals().hyperlink_color),
+            )
+            .sense(Sense::click()),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    crate::assets::path_context(&response, path, None);
+    response.clicked()
+}
+
+pub enum Preview {
+    Text(String),
+    Image {
+        texture: TextureHandle,
+        size: [usize; 2],
+        /// Slice count for a volume texture; one for everything else.
+        depth: u16,
+        /// Channels the source format carries, which is what the channel toggles should offer.
+        components: u8,
+        /// Label/value pairs describing the source file.
+        facts: Vec<(&'static str, String)>,
+        mips: Vec<Mip>,
+    },
+    /// A parsed material, rendered as its own layout rather than a flat table.
+    Material(Box<material::Rendered>),
+    /// A parsed UI layout.
+    Uld(Box<uld::Rendered>),
+    /// A parsed font.
+    Font(Box<font::Rendered>),
+    /// The parsed icon sheet.
+    Icons(Box<icons::Rendered>),
+    /// A parsed shader package.
+    Shpk(Box<shpk::Rendered>),
+    /// A parsed shader.
+    Shcd(Box<shcd::Rendered>),
+    /// Nothing to render; an empty message means the type simply has no viewer.
+    Failed(String),
+}
+
+impl Preview {
+    pub fn decode(
+        ctx: &egui::Context,
+        path: &str,
+        bytes: &[u8],
+        viewer: Viewer,
+        mip: u8,
+        channels: Channels,
+    ) -> Self {
+        let result = match viewer {
+            Viewer::Text => Ok(Self::Text(
+                String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_TEXT_PREVIEW)]).into_owned(),
+            )),
+            Viewer::Image => png::decode(ctx, path, bytes, channels),
+            Viewer::Texture => texture::decode(ctx, path, bytes, mip, channels),
+            Viewer::Material => material::decode(path, bytes),
+            Viewer::Uld => uld::decode(path, bytes),
+            Viewer::Font => font::decode(path, bytes),
+            Viewer::Icons => icons::decode(path, bytes),
+            Viewer::Shpk => shpk::decode(path, bytes),
+            Viewer::Shcd => shcd::decode(path, bytes),
+            Viewer::Raw => return Self::Failed(String::new()),
+        };
+        result.unwrap_or_else(|e| Self::Failed(e.to_string()))
+    }
+
+    /// Draws the preview. Returns a path when the user follows a link out of it, such as a
+    /// material's texture.
+    ///
+    /// `bytes` is the file the preview was decoded from, still owned by the browser.
+    pub fn ui(
+        &self,
+        ui: &mut egui::Ui,
+        bytes: &[u8],
+        slice: u16,
+        deps: &mut crate::assets::deps::Deps,
+        backend: &crate::backend::Backend,
+    ) -> Option<String> {
+        let mut follow = None;
+        match self {
+            Self::Material(material) => {
+                follow = material::ui(ui, material, deps, backend);
+            }
+            Self::Uld(layout) => {
+                follow = uld::ui(ui, layout, deps, backend);
+            }
+            Self::Font(font) => font::ui(ui, font, deps, backend),
+            Self::Icons(icons) => icons::ui(ui, icons, deps, backend),
+            Self::Shpk(package) => shpk::ui(ui, package, bytes),
+            Self::Shcd(code) => shcd::ui(ui, code, bytes),
+            Self::Failed(e) if e.is_empty() => {
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("此文件类型暂无查看器，请使用原始字节模式。").weak());
+                });
+            }
+            Self::Failed(e) => {
+                ui.centered_and_justified(|ui| {
+                    ui.colored_label(Color32::RED, format!("无法渲染此文件：{e}"));
+                });
+            }
+            Self::Text(text) => {
+                ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                    ui.add(Label::new(RichText::new(text).monospace()).selectable(true));
+                });
+            }
+            Self::Image {
+                texture,
+                size,
+                depth,
+                ..
+            } => {
+                // The whole volume is resident, so changing slice is a different uv rect rather
+                // than another decode and upload -- scrubbing costs nothing.
+                let depth = f32::from((*depth).max(1));
+                let top = f32::from(slice) / depth;
+                let uv = egui::Rect::from_min_max(
+                    egui::pos2(0.0, top),
+                    egui::pos2(1.0, top + 1.0 / depth),
+                );
+                // `uv` only changes what is sampled; the widget still sizes itself from the whole
+                // texture unless the source size is stated as one slice.
+                let slice_size = egui::vec2(size[0] as f32, (size[1] as f32 / depth).max(1.0));
+                ScrollArea::both().auto_shrink(false).show(ui, |ui| {
+                    let align = if slice_size.x < ui.available_width() {
+                        Align::Center
+                    } else {
+                        Align::Min
+                    };
+                    ui.with_layout(Layout::top_down(align), |ui| {
+                        ui.add(
+                            egui::Image::new(egui::load::SizedTexture::new(
+                                texture.id(),
+                                slice_size,
+                            ))
+                            .uv(uv)
+                            .fit_to_original_size(1.0),
+                        );
+                    });
+                });
+            }
+        }
+        follow
+    }
+
+    /// The info sidebar: property table, channel toggles, then the mipmap picker. Returns the new
+    /// (level, channels) if either changed.
+    /// Whether this preview has anything for the Details panel.
+    pub fn has_details(&self) -> bool {
+        match self {
+            Self::Image { .. } => true,
+            Self::Material(material) => material.has_params(),
+            Self::Uld(layout) => layout.has_details(),
+            Self::Font(_) | Self::Icons(_) | Self::Shpk(_) | Self::Shcd(_) => true,
+            _ => false,
+        }
+    }
+
+    /// `view` is what the picker below the table is currently set to, and what it returns is the
+    /// same triple once the user has moved it.
+    pub fn info_ui(
+        &self,
+        ui: &mut egui::Ui,
+        view: (u8, u16, Channels),
+        follow: &mut Option<String>,
+        deps: &mut crate::assets::deps::Deps,
+        backend: &crate::backend::Backend,
+    ) -> Option<(u8, u16, Channels)> {
+        if let Self::Material(material) = self {
+            material::details_ui(ui, material, follow);
+            return None;
+        }
+        if let Self::Uld(layout) = self {
+            uld::details_ui(ui, layout, deps, backend);
+            return None;
+        }
+        if let Self::Font(font) = self {
+            font.details_ui(ui, follow);
+            return None;
+        }
+        if let Self::Icons(icons) = self {
+            icons.details_ui(ui, follow);
+            return None;
+        }
+        if let Self::Shpk(package) = self {
+            package.details_ui(ui);
+            return None;
+        }
+        if let Self::Shcd(code) = self {
+            code.details_ui(ui);
+            return None;
+        }
+        let Self::Image {
+            facts,
+            mips,
+            depth,
+            components,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let (mip, mut slice, mut channels) = view;
+        let mut level = mip;
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            egui::Grid::new("asset_facts")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    for (label, value) in facts {
+                        ui.label(RichText::new(*label).weak());
+                        ui.label(value);
+                        // Stripes are drawn across the summed column widths, so the last column has
+                        // to take the slack or they stop short of the panel edge.
+                        ui.allocate_space(Vec2::new(ui.available_width(), 0.0));
+                        ui.end_row();
+                    }
+                });
+
+            if *components > 1 {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("通道").weak());
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    // A single-component format is drawn as grey, so it has no toggles at all.
+                    let offered: &mut [(&str, &mut bool)] = match components {
+                        2 => &mut [("R", &mut channels.r), ("G", &mut channels.g)],
+                        3 => &mut [
+                            ("R", &mut channels.r),
+                            ("G", &mut channels.g),
+                            ("B", &mut channels.b),
+                        ],
+                        _ => &mut [
+                            ("R", &mut channels.r),
+                            ("G", &mut channels.g),
+                            ("B", &mut channels.b),
+                            ("A", &mut channels.a),
+                        ],
+                    };
+                    for (name, flag) in offered {
+                        ui.toggle_value(flag, *name);
+                    }
+                });
+            }
+
+            if *depth > 1 {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new(if *depth == 6 { "表面" } else { "切片" }).weak());
+                ui.add_space(4.0);
+                ui.add(egui::Slider::new(&mut slice, 0..=depth.saturating_sub(1)));
+            }
+
+            if mips.len() > 1 {
+                ui.add_space(8.0);
+                ui.separator();
+                ui.label(RichText::new("多级渐远纹理").weak());
+                ui.add_space(4.0);
+                for entry in mips {
+                    let label = format!(
+                        "{}: {} x {}  ({})",
+                        entry.level,
+                        entry.width,
+                        entry.height,
+                        Bytes(entry.bytes)
+                    );
+                    if ui.selectable_label(entry.level == mip, label).clicked() {
+                        level = entry.level;
+                    }
+                }
+            }
+        });
+        ((level, slice, channels) != view).then_some((level, slice, channels))
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Viewer {
+    Texture,
+    Image,
+    Material,
+    Uld,
+    Font,
+    Icons,
+    Shpk,
+    Shcd,
+    Text,
+    Raw,
+}
+
+impl Viewer {
+    /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
+    /// viewer sits in the same place whatever file is selected.
+    pub const RENDERED: [Self; 9] = [
+        Self::Texture,
+        Self::Image,
+        Self::Material,
+        Self::Uld,
+        Self::Font,
+        Self::Icons,
+        Self::Shpk,
+        Self::Shcd,
+        Self::Text,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Texture => "纹理",
+            Self::Image => "图像",
+            Self::Material => "材质",
+            Self::Uld => "布局",
+            Self::Font => "字体",
+            Self::Icons => "图标",
+            Self::Shpk => "着色器包",
+            Self::Shcd => "着色器代码",
+            Self::Text => "文本",
+            Self::Raw => "原始字节",
+        }
+    }
+
+    /// What a path's name says it holds. An unnamed file has nothing here to go on.
+    pub fn from_extension(path: &str) -> Self {
+        match path.rsplit('.').next().unwrap_or_default() {
+            "tex" | "atex" => Self::Texture,
+            "png" => Self::Image,
+            "mtrl" => Self::Material,
+            "uld" => Self::Uld,
+            "fdt" => Self::Font,
+            "gfd" => Self::Icons,
+            "shpk" => Self::Shpk,
+            "shcd" => Self::Shcd,
+            "txt" | "csv" => Self::Text,
+            _ => Self::Raw,
+        }
+    }
+}
+
+/// One mipmap level, for the picker under the info table.
+pub struct Mip {
+    pub level: u8,
+    pub width: u16,
+    pub height: u16,
+    pub bytes: usize,
+}
+
+/// Build the image preview both the image and texture viewers end at.
+pub(super) fn upload(
+    ctx: &egui::Context,
+    path: &str,
+    image: image::DynamicImage,
+    depth: u16,
+    components: u8,
+    facts: Vec<(&'static str, String)>,
+    mips: Vec<Mip>,
+    channels: Channels,
+) -> Preview {
+    let mut rgba = image.to_rgba8();
+    channels.apply(&mut rgba);
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let texture = ctx.load_texture(
+        format!("asset:{path}"),
+        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice()),
+        // Nearest keeps a zoomed-in mipmap readable as actual texels rather than a blur.
+        egui::TextureOptions::NEAREST,
+    );
+    Preview::Image {
+        texture,
+        size,
+        depth,
+        components,
+        facts,
+        mips,
+    }
+}

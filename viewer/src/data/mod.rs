@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek};
 use std::sync::LazyLock;
 
 use async_trait::async_trait;
@@ -18,18 +18,57 @@ pub mod worker;
 /// are layered on top of this.
 #[async_trait(?Send)]
 pub trait FileProvider {
-    /// Read a file's raw bytes by path.
-    async fn read(&self, path: &str) -> anyhow::Result<Vec<u8>>;
+    /// Read a file's raw bytes by path, alongside the name of the sqpack stream they were stored
+    /// as. The kind is `None` where the store cannot report one, which is any API server older than
+    /// the header it travels in.
+    async fn read_stream(&self, path: &str) -> anyhow::Result<(Option<String>, Vec<u8>)>;
 
-    /// Read a file the game records only as a hash. Unnamed files have no path, so this is the
-    /// only way to reach them; it is a web-API concept and the local providers refuse it.
+    /// Read a file the game records only as a hash. Unnamed files have no path, so this is the only
+    /// way to reach them.
+    async fn read_stream_by_hash(
+        &self,
+        repository: u8,
+        category: u8,
+        hash: u64,
+        split: bool,
+    ) -> anyhow::Result<(Option<String>, Vec<u8>)>;
+
+    /// Read a file's raw bytes by path.
+    async fn read(&self, path: &str) -> anyhow::Result<Vec<u8>> {
+        Ok(self.read_stream(path).await?.1)
+    }
+
+    /// The global path list and, alongside it, which of its entries this install actually ships as
+    /// an encoded [`pathlist::Presence`].
+    ///
+    /// Both come back together because a local provider has to read the list in order to build the
+    /// map, and returning it saves fetching the same 20 MB twice. The API serves a map built per
+    /// version instead, so for it the two are separate requests; the pair has to agree, so it is
+    /// the provider that decides how to fetch them, not the caller.
+    async fn path_index(&self, api_base: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)>;
+
     async fn read_by_hash(
         &self,
         repository: u8,
         category: u8,
         hash: u64,
         split: bool,
-    ) -> anyhow::Result<Vec<u8>>;
+    ) -> anyhow::Result<Vec<u8>> {
+        Ok(self
+            .read_stream_by_hash(repository, category, hash, split)
+            .await?
+            .1)
+    }
+
+    /// Read and decode a texture to RGBA, no larger than `max_dim` on its longest edge; `None`
+    /// decodes at full size.
+    async fn read_texture(
+        &self,
+        path: &str,
+        max_dim: Option<u16>,
+    ) -> anyhow::Result<DecodedTexture> {
+        decode_texture(path, self.read(path).await?, max_dim).await
+    }
 
     async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>>;
 
@@ -44,6 +83,59 @@ pub async fn resolve_icon(icon: Either<Url, RgbaImage>) -> anyhow::Result<RgbaIm
         }
         Either::Right(image) => Ok(image),
     }
+}
+
+/// A texture decoded for display.
+pub struct DecodedTexture {
+    pub image: RgbaImage,
+    /// The size of the texture the pixels were decoded from.
+    pub source: [u16; 2],
+}
+
+#[cfg(target_arch = "wasm32")]
+impl DecodedTexture {
+    fn from_worker(texture: crate::worker::WorkerTexture) -> anyhow::Result<Self> {
+        let image = RgbaImage::from_vec(texture.width, texture.height, texture.data)
+            .ok_or_else(|| anyhow::anyhow!("解码后的纹理数据与自身尺寸不匹配"))?;
+        Ok(Self {
+            image,
+            source: texture.source,
+        })
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn decode_texture(
+    path: &str,
+    bytes: Vec<u8>,
+    max_dim: Option<u16>,
+) -> anyhow::Result<DecodedTexture> {
+    use crate::worker::{WorkerRequest, WorkerResponse};
+
+    let request = WorkerRequest::DecodeTexture {
+        path: path.to_owned(),
+        bytes,
+        max_dim,
+    };
+    match crate::backend::worker::transact(request).await {
+        WorkerResponse::DecodeTexture(result) => DecodedTexture::from_worker(
+            result.map_err(|error| anyhow::anyhow!("纹理解码失败：{error}"))?,
+        ),
+        _ => Err(anyhow::anyhow!("工作线程返回了无效响应")),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn decode_texture(
+    path: &str,
+    bytes: Vec<u8>,
+    max_dim: Option<u16>,
+) -> anyhow::Result<DecodedTexture> {
+    let (image, source) = crate::utils::tex_loader::decode_preview_sized(&bytes, path, max_dim)?;
+    Ok(DecodedTexture {
+        image: image.to_rgba8(),
+        source,
+    })
 }
 
 /// Typed reads layered on [`FileProvider`]. Blanket-implemented for every
@@ -61,6 +153,97 @@ pub trait FileProviderExt: FileProvider {
 }
 
 impl<P: FileProvider + ?Sized> FileProviderExt for P {}
+
+#[derive(serde::Deserialize)]
+struct ListInfo {
+    list: String,
+}
+
+async fn list_id(api_base: &str) -> anyhow::Result<u64> {
+    let info: ListInfo =
+        serde_json::from_slice(&crate::utils::fetch_url(format!("{api_base}/paths/")).await?)?;
+    Ok(u64::from_str_radix(&info.list, 16)?)
+}
+
+pub fn list_url(api_base: &str, list_id: u64) -> String {
+    format!("{api_base}/paths/{list_id:016x}/")
+}
+
+pub async fn with_list_id<T, F>(api_base: &str, take: impl Fn(u64) -> F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let id = list_id(api_base).await?;
+    match take(id).await {
+        Ok(taken) => Ok(taken),
+        Err(_) => take(list_id(api_base).await?).await,
+    }
+}
+
+/// Build a presence map for a local install by matching the global path list against what the
+/// packages actually index. The API does this server-side per version; with no API there is nobody
+/// else to ask, so the client does the same work over its own packages.
+pub fn build_local_presence<R: ironworks::sqpack::Resource>(
+    sqpack: &ironworks::sqpack::SqPack<R>,
+    path_list: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let paths = pathlist::PathList::decode(path_list)?;
+
+    let mut installed = std::collections::HashSet::new();
+    for entry in sqpack.entries()? {
+        installed.insert((entry.repository, entry.category, entry.hash));
+    }
+
+    // A short walk would encode a map whose bits no longer line up with the list, so a failure to
+    // read a directory's names has to surface rather than silently truncate.
+    let mut failed = None;
+    let map = pathlist::build_presence(
+        paths.len(),
+        &installed,
+        |path| sqpack.locate(path).ok(),
+        paths.list_id(),
+        |visit| {
+            for dir in 0..paths.dirs().len() {
+                match paths.names(dir) {
+                    Ok(names) => {
+                        for name in &names {
+                            visit(&paths.dirs()[dir], name);
+                        }
+                    }
+                    Err(error) => {
+                        failed = Some(error);
+                        return;
+                    }
+                }
+            }
+        },
+    );
+    match failed {
+        Some(error) => Err(error),
+        None => Ok(map),
+    }
+}
+
+/// A sqpack file read to the end, labelled with the kind of stream it was stored as.
+pub fn stream<R: Read + Seek>(
+    mut file: ironworks::sqpack::File<R>,
+) -> Result<(String, Vec<u8>), ironworks::Error> {
+    let kind = file.kind().name().to_owned();
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok((kind, bytes))
+}
+
+/// The `(hash, split)` pair [`FileProvider::read_by_hash`] carries, as ironworks models it. A split
+/// hash comes from `.index` and covers directory and file name separately; a whole one comes from
+/// `.index2` and is only ever 32 bits wide.
+pub fn index_hash(hash: u64, split: bool) -> ironworks::sqpack::IndexHash {
+    if split {
+        ironworks::sqpack::IndexHash::Split(hash)
+    } else {
+        ironworks::sqpack::IndexHash::Whole(hash as u32)
+    }
+}
 
 pub fn get_icon_path(icon_id: u32, hires: bool) -> String {
     format!(

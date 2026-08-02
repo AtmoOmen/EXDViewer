@@ -9,8 +9,8 @@ use web_time::{Duration, Instant};
 
 use anyhow::Result;
 use egui::{
-    Align, Button, CentralPanel, Color32, Label, Layout, Rect, RichText, ScrollArea, TextEdit,
-    TextStyle, UiBuilder, Vec2, Widget, collapsing_header::paint_default_icon,
+    Align, Button, CentralPanel, Color32, ColorImage, Label, Layout, Rect, RichText, ScrollArea,
+    TextEdit, TextStyle, UiBuilder, Vec2, Widget, collapsing_header::paint_default_icon,
     containers::panel::Panel, pos2, vec2,
 };
 use nucleo_matcher::pattern::Pattern;
@@ -596,6 +596,7 @@ pub struct AssetBrowser {
     sniffed: Option<Format>,
     /// Rendered view of `bytes`, decoded once per selection.
     preview: Option<Preview>,
+    image_export: Option<TrackedPromise<()>>,
     /// Assets the current preview references, such as a material's textures.
     deps: deps::Deps,
     /// Set when the selection is an unnamed file, which has to be read by hash rather than by path.
@@ -625,6 +626,7 @@ impl Default for AssetBrowser {
             sniffed: None,
             deps: deps::Deps::default(),
             preview: None,
+            image_export: None,
             selected_unnamed: None,
             mip: 0,
             slice: 0,
@@ -1120,6 +1122,11 @@ impl AssetBrowser {
     }
 
     fn detail_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
+        self.image_export
+            .take_if(|promise| promise.try_get().is_some());
+        let exporting_image = self.image_export.is_some();
+        let mut copy_image = false;
+        let mut export_image = false;
         // A material links through to the textures it binds, so the panel can ask for a new
         // selection the same way the tree does.
         let mut follow = None;
@@ -1182,6 +1189,17 @@ impl AssetBrowser {
                             if !empty {
                                 self.viewer_picker(ui, &path);
                             }
+                            if self.preview.as_ref().is_some_and(Preview::has_image) {
+                                if ui
+                                    .add_enabled(!exporting_image, egui::Button::new("导出 PNG"))
+                                    .clicked()
+                                {
+                                    export_image = true;
+                                }
+                                if ui.button("复制图片").clicked() {
+                                    copy_image = true;
+                                }
+                            }
                             match Kind::of(&path) {
                                 Kind::Sheet => {
                                     if let Some(sheet) =
@@ -1234,6 +1252,51 @@ impl AssetBrowser {
                 });
                 ui.add_space(4.0);
             });
+
+            if copy_image
+                && let Some(image) = self
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.image(self.slice))
+            {
+                ui.ctx().copy_image(ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ));
+            }
+            if export_image
+                && let Some(image) = self
+                    .preview
+                    .as_ref()
+                    .and_then(|preview| preview.image(self.slice))
+            {
+                let name = crate::utils::file_name(&path);
+                let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+                let file_name = format!("{stem}.png");
+                self.image_export = Some(TrackedPromise::spawn_local(async move {
+                    let data = match crate::utils::tex_loader::write(image, image::ImageFormat::Png)
+                    {
+                        Ok(data) => data,
+                        Err(error) => {
+                            log::error!("PNG 编码失败: {error}");
+                            return;
+                        }
+                    };
+                    if let Some(file) = rfd::AsyncFileDialog::new()
+                        .set_title("导出图片")
+                        .set_file_name(file_name)
+                        .add_filter("PNG 图片", &["png"])
+                        .save_file()
+                        .await
+                    {
+                        if let Err(error) = file.write(&data).await {
+                            log::error!("写入图片失败: {error}");
+                        } else {
+                            log::info!("图片导出成功");
+                        }
+                    }
+                }));
+            }
 
             // Only textures and images have anything to put in the sidebar.
             if self.preview.as_ref().is_some_and(Preview::has_details) {

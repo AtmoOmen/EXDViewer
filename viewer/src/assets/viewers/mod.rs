@@ -6,6 +6,7 @@
 use egui::{
     Align, Color32, Label, Layout, Rect, RichText, ScrollArea, Sense, TextureHandle, Vec2, vec2,
 };
+use std::sync::Arc;
 
 use super::{Bytes, Channels, MAX_TEXT_PREVIEW};
 
@@ -176,6 +177,7 @@ pub enum Preview {
     Text(String),
     Image {
         texture: TextureHandle,
+        pixels: Arc<image::RgbaImage>,
         size: [usize; 2],
         /// Slice count for a volume texture; one for everything else.
         depth: u16,
@@ -225,6 +227,23 @@ impl Preview {
             Viewer::Raw => return Self::Failed(String::new()),
         };
         result.unwrap_or_else(|e| Self::Failed(e.to_string()))
+    }
+
+    pub fn image(&self, slice: u16) -> Option<image::RgbaImage> {
+        let Self::Image { pixels, depth, .. } = self else {
+            return None;
+        };
+        let depth = u32::from((*depth).max(1));
+        let height = pixels.height() / depth;
+        let slice = u32::from(slice).min(depth - 1);
+        Some(
+            image::imageops::crop_imm(pixels.as_ref(), 0, slice * height, pixels.width(), height)
+                .to_image(),
+        )
+    }
+
+    pub fn has_image(&self) -> bool {
+        matches!(self, Self::Image { .. })
     }
 
     /// Draws the preview. Returns a path when the user follows a link out of it, such as a
@@ -520,14 +539,16 @@ pub(super) fn upload(
     let mut rgba = image.to_rgba8();
     channels.apply(&mut rgba);
     let size = [rgba.width() as usize, rgba.height() as usize];
+    let pixels = Arc::new(rgba);
     let texture = ctx.load_texture(
         format!("asset:{path}"),
-        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice()),
+        egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_flat_samples().as_slice()),
         // Nearest keeps a zoomed-in mipmap readable as actual texels rather than a blur.
         egui::TextureOptions::NEAREST,
     );
     Preview::Image {
         texture,
+        pixels,
         size,
         depth,
         components,

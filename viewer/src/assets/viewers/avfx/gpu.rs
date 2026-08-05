@@ -186,7 +186,8 @@ impl Particles {
         .ok_or("the package has not arrived")?;
 
         if !self.programs.contains_key(&batch.def) {
-            let held = build(bytes, shading)?;
+            let keys = [shading.keys.clone(), shading.lights.clone()].concat();
+            let held = Program::build(bytes, &keys, shading.sprite)?;
             let program = build_pair(gl, &held.vertex, &held.fragment)?;
             self.programs.insert(batch.def, Linked { program, held });
         }
@@ -432,18 +433,8 @@ impl Drop for Particles {
     }
 }
 
-/// The pair a particle's own keys resolve to. A package carries only the key combinations it was
-/// built with, so the lights the effect asks for are given up before the textures the particle names,
-/// and the package's own defaults are what is left.
-fn build(bytes: &[u8], shading: &Shading) -> Result<Program, String> {
-    let lit = [shading.keys.clone(), shading.lights.clone()].concat();
-    Program::build(bytes, &lit, shading.sprite)
-        .or_else(|_| Program::build(bytes, &shading.keys, shading.sprite))
-        .or_else(|_| Program::build(bytes, &[], shading.sprite))
-}
-
-/// How a blend's source and destination are weighted. The shader hands over a source already
-/// multiplied by its own opacity, so alpha is not a factor here.
+/// How a blend's source and destination are weighted. Both packages hand over a color the shader has
+/// not scaled by its own opacity, so the source factor carries it.
 fn blend(gl: &glow::Context, blend: Blend) {
     unsafe {
         gl.blend_equation(match blend {
@@ -498,11 +489,7 @@ fn upload(gl: &glow::Context, mesh: &Mesh) -> Result<Buffers, String> {
     }
 }
 
-fn build_pair(
-    gl: &glow::Context,
-    vertex: &str,
-    fragment: &str,
-) -> Result<glow::Program, String> {
+fn build_pair(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::Program, String> {
     unsafe {
         let program = gl.create_program()?;
         let mut built = Vec::new();

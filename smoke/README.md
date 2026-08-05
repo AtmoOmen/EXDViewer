@@ -10,9 +10,13 @@ That is the whole command. It builds `viewer/dist` with trunk, serves it, drives
 chromium over it, and exits non-zero with the browser messages that failed it.
 
 Flags: `--no-build` reuses the existing `viewer/dist`, `--shots` writes screenshots to
-`smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--explore`
-is `--model-only` with screenshots (use it to recalibrate the click coordinates in `smoke.ts`
-after a UI change). Every run writes `smoke/last-run.json`.
+`smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--avfx-only`
+runs the effects and nothing else, `--explore` is `--model-only` with screenshots (use it to
+recalibrate the click coordinates in `smoke.ts` after a UI change). `--model=` and `--scene=` each
+take one path and `--avfx=` takes a comma-separated list. Every run writes `smoke/last-run.json`.
+
+A full run opens **nine effects** after the scene and takes around twenty minutes. Each one is a
+fresh page, so each one pulls the two apricot packages again, and they are 20 and 40 MiB.
 
 **`main` is red right now, for real reasons.** See "Known red" below for the three it still
 reports. A red run here is not a broken harness; read the deduped list it prints.
@@ -42,6 +46,10 @@ It then walks the paths that broke:
 2. Clicks **Game shaders** and waits for the deferred path to link programs and bind a G-buffer.
 3. Sweeps the channel row, covering `SV_Target`, `SV_Target1..4` and `Lit`.
 4. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
+5. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
+   which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
+   Each effect has to draw something, and across the run the two shots of at least one of them have
+   to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
 
 `smoke/instrument.js` is injected before the app loads and counts draws, instanced draws, blits,
 `drawBuffers` calls and program links. Those counters are asserted, so a click that lands in the
@@ -88,8 +96,8 @@ The two blit faults are gone too. Measured at `b965b62`, before
 
 ## What it does not cover
 
-Only the two 3D viewers and only one asset each. It does not check that anything is drawn
-*correctly*: no reference images, no pixel comparison. Channel coverage is a positional sweep
+Only the three 3D viewers, and only one asset each for the model and the scene. It does not check
+that anything is drawn *correctly*: no reference images, no pixel comparison. Channel coverage is a positional sweep
 over the row rather than a lookup of each label, so it counts distinct selections rather than
 naming them. The click coordinates are calibrated against a 1600x1000 viewport and need
 `--explore` and a fresh look if the layout moves.

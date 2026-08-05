@@ -9,9 +9,13 @@ use web_time::{Duration, Instant};
 
 use anyhow::Result;
 use egui::{
-    Align, Button, CentralPanel, Color32, Label, Layout, Rect, RichText, ScrollArea, TextEdit,
-    TextStyle, UiBuilder, Vec2, Widget, collapsing_header::paint_default_icon,
-    containers::panel::Panel, pos2, vec2,
+    Align, Button, CentralPanel, Color32, Label, Layout, Rect, RichText, ScrollArea, Sense,
+    TextEdit, TextStyle, UiBuilder, Vec2, Widget,
+    collapsing_header::paint_default_icon,
+    containers::panel::Panel,
+    pos2,
+    text::{CCursor, LayoutJob, TextFormat},
+    vec2,
 };
 use nucleo_matcher::pattern::Pattern;
 use regex_lite::{Regex, RegexBuilder};
@@ -849,7 +853,7 @@ pub struct AssetBrowser {
     slice: u16,
     channels: Channels,
     viewer: Option<Viewer>,
-    hex_page: usize,
+    hex: Hex,
     goto: Option<String>,
     search: String,
     mode: SearchMode,
@@ -883,7 +887,7 @@ impl Default for AssetBrowser {
             slice: 0,
             channels: Channels::default(),
             viewer: None,
-            hex_page: 0,
+            hex: Hex::default(),
             goto: None,
             search: String::new(),
             mode: SearchMode::Fuzzy,
@@ -1802,9 +1806,7 @@ impl AssetBrowser {
                         });
                     }
                     Load::Ready((_, bytes)) if showing == Viewer::Raw => {
-                        let mut page = self.hex_page;
-                        hex_dump(ui, bytes, &mut page);
-                        self.hex_page = page;
+                        hex_dump(ui, bytes, &mut self.hex);
                     }
                     Load::Ready((_, bytes)) => {
                         if let Some(preview) = &self.preview
@@ -1886,7 +1888,7 @@ impl AssetBrowser {
             self.slice = 0;
             self.channels = Channels::default();
             self.viewer = None;
-            self.hex_page = 0;
+            self.hex = Hex::default();
             let files = backend.files().clone();
             // An unnamed file has no path to ask for, so it is fetched by hash instead.
             let unnamed = self.selected_unnamed;
@@ -2417,6 +2419,120 @@ mod tests {
             "the shut folder should still be there to reopen, and nothing below it drawn"
         );
     }
+
+    /// Where a click lands is read off the row it landed on, so the two have to agree on which
+    /// character each byte occupies.
+    #[test]
+    fn a_row_holds_its_bytes_where_a_click_looks_for_them() {
+        let row = hex_row(0x10, b"AB\x00");
+        assert_eq!(&row[..HEX_AT], "00000010  ");
+        assert_eq!(&row[hex_at(0)..hex_at(0) + 2], "41");
+        assert_eq!(&row[hex_at(2)..hex_at(2) + 2], "00");
+        assert_eq!(&row[TEXT_AT..], "AB.");
+        assert_eq!(hex_row(0, &[0; HEX_COLS]).len(), ROW_CHARS);
+
+        for col in 0..HEX_COLS {
+            assert_eq!(byte_at(hex_at(col)), Some(col));
+            assert_eq!(byte_at(hex_at(col) + 1), Some(col));
+            assert_eq!(byte_at(TEXT_AT + col), Some(col));
+        }
+        // The offset, the space that splits the halves, and the one before the text column.
+        assert_eq!(byte_at(0), None);
+        assert_eq!(byte_at(HEX_AT - 1), None);
+        assert_eq!(hex_at(HEX_COLS / 2) - hex_at(HEX_COLS / 2 - 1), 4);
+        assert_eq!(byte_at(TEXT_AT - 1), None);
+        assert_eq!(byte_at(ROW_CHARS), None);
+    }
+
+    /// A click lands on a byte, and a copy hands back what the hex column shows of it.
+    #[test]
+    fn a_click_picks_out_a_byte_and_a_copy_hands_it_over() {
+        let bytes: Vec<u8> = (0..=u8::MAX).collect();
+        let mut state = Hex::default();
+        let ctx = egui::Context::default();
+        let at = pos2(300.0, 100.0);
+        let frame = |events: Vec<egui::Event>, state: &mut Hex| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(700.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| hex_dump(ui, &bytes, state))
+        };
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        frame(vec![egui::Event::PointerMoved(at)], &mut state);
+        frame(vec![press(true)], &mut state);
+        frame(vec![press(false)], &mut state);
+        let picked = state.range().expect("the click landed on no byte");
+
+        let output = frame(vec![egui::Event::Copy], &mut state);
+        let copied = output
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            });
+        assert_eq!(copied, Some(hex_text(&bytes[picked]).as_str()));
+    }
+
+    /// The scroll area keeps its offset across selections, so a short file is drawn with whatever a
+    /// long one was left at until the area itself pulls it back.
+    #[test]
+    fn a_short_file_survives_the_offset_a_long_one_left() {
+        let ctx = egui::Context::default();
+        let at = pos2(300.0, 100.0);
+        let draw = |bytes: &[u8], events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(700.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut state = Hex::default();
+            let _ = ctx.run_ui(input, |ui| hex_dump(ui, bytes, &mut state));
+        };
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -100_000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        let long = vec![0u8; 8 << 20];
+        draw(&long, vec![egui::Event::PointerMoved(at)]);
+        draw(&long, vec![wheel]);
+        draw(&[0u8; 64], vec![]);
+    }
+
+    /// A file of hundreds of megabytes is drawn a screen at a time, so what it costs to draw is
+    /// what is on screen rather than what the file holds.
+    #[test]
+    fn a_large_file_only_draws_the_rows_on_screen() {
+        let drawn = |size: usize| {
+            let bytes = vec![0u8; size];
+            let mut state = Hex::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(600.0, 300.0))),
+                ..Default::default()
+            };
+            let at = Instant::now();
+            let _ = egui::Context::default().run_ui(input, |ui| hex_dump(ui, &bytes, &mut state));
+            at.elapsed()
+        };
+        let screen = drawn(64 << 10);
+        let whole = drawn(256 << 20);
+        assert!(
+            whole < screen * 10,
+            "a screenful took {screen:?} where a file four thousand times the size took {whole:?}"
+        );
+    }
 }
 
 /// Text is capped because the hex dump below it already covers the whole file, and a multi-megabyte
@@ -2488,67 +2604,253 @@ const HEX_COLS: usize = 16;
 /// exact past ~16.7M pixels, so a big enough file would scroll unevenly or fail to reach its end.
 /// One page is 1 MiB, comfortably inside that, and files below it get no pagination at all.
 const HEX_PAGE_ROWS: usize = 64 * 1024;
+/// Where a row's hex column starts, and where the text beside it does, in characters.
+const HEX_AT: usize = 10;
+const TEXT_AT: usize = 60;
+/// Characters in a full row.
+const ROW_CHARS: usize = TEXT_AT + HEX_COLS;
 
-/// Offset, hex, ASCII. Rows are virtualised, so only what is on screen is ever formatted.
-fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], page: &mut usize) {
+/// What the byte view is looking at: which page of a long file, and the stretch of it picked out.
+#[derive(Default)]
+struct Hex {
+    page: usize,
+    /// Where a selection was anchored and where it was taken to, as offsets into the file.
+    selection: Option<(usize, usize)>,
+}
+
+impl Hex {
+    fn range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        self.selection.map(|(from, to)| from.min(to)..=from.max(to))
+    }
+}
+
+/// The character a byte's hex pair starts at. An extra space splits the row in half.
+fn hex_at(col: usize) -> usize {
+    HEX_AT + col * 3 + usize::from(col >= HEX_COLS / 2)
+}
+
+/// Which byte of a row a character sits on, whether it is in the hex or in the text beside it.
+/// `None` over the offset and the gaps that separate the three.
+fn byte_at(at: usize) -> Option<usize> {
+    if (TEXT_AT..ROW_CHARS).contains(&at) {
+        return Some(at - TEXT_AT);
+    }
+    let within = at.checked_sub(HEX_AT).filter(|at| *at <= HEX_COLS * 3)?;
+    Some(match within < HEX_COLS / 2 * 3 {
+        true => within / 3,
+        false => (within - 1) / 3,
+    })
+}
+
+/// One row of the dump: its offset, sixteen bytes in hex, then those bytes as text.
+fn hex_row(start: usize, chunk: &[u8]) -> String {
     use std::fmt::Write as _;
 
+    let mut line = String::with_capacity(ROW_CHARS);
+    let _ = write!(line, "{start:08X}  ");
+    for col in 0..HEX_COLS {
+        if col == HEX_COLS / 2 {
+            line.push(' ');
+        }
+        match chunk.get(col) {
+            Some(byte) => {
+                let _ = write!(line, "{byte:02X} ");
+            }
+            None => line.push_str("   "),
+        }
+    }
+    line.push(' ');
+    line.extend(chunk.iter().map(printable));
+    line
+}
+
+/// A byte as the text column shows it.
+fn printable(byte: &u8) -> char {
+    match byte {
+        0x20..=0x7e => *byte as char,
+        _ => '.',
+    }
+}
+
+/// The bytes behind a selection, in the form the hex column shows them.
+fn hex_text(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Offset, hex and text, painted rather than laid out as widgets so that a byte is one thing in
+/// both columns: dragging picks out a stretch of the file, and the hex and the text light up over
+/// the same bytes. Only the rows on screen are ever formatted.
+fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], state: &mut Hex) {
     let rows = bytes.len().div_ceil(HEX_COLS);
     let pages = rows.div_ceil(HEX_PAGE_ROWS).max(1);
-    *page = (*page).min(pages - 1);
+    state.page = state.page.min(pages - 1);
 
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("{} ({} bytes)", Bytes(bytes.len()), bytes.len())).weak());
         if pages > 1 {
             ui.separator();
-            if ui.add_enabled(*page > 0, Button::new("◀")).clicked() {
-                *page -= 1;
+            if ui.add_enabled(state.page > 0, Button::new("◀")).clicked() {
+                state.page -= 1;
             }
-            ui.label(format!("page {} / {pages}", *page + 1));
+            ui.label(format!("page {} / {pages}", state.page + 1));
             if ui
-                .add_enabled(*page + 1 < pages, Button::new("▶"))
+                .add_enabled(state.page + 1 < pages, Button::new("▶"))
                 .clicked()
             {
-                *page += 1;
+                state.page += 1;
             }
             ui.label(
-                RichText::new(format!("from {:#010X}", *page * HEX_PAGE_ROWS * HEX_COLS)).weak(),
+                RichText::new(format!(
+                    "from {:#010X}",
+                    state.page * HEX_PAGE_ROWS * HEX_COLS
+                ))
+                .weak(),
             );
+        }
+        if let Some(picked) = state.range() {
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "{:#010X}..{:#010X} ({} bytes)",
+                    picked.start(),
+                    picked.end(),
+                    picked.end() - picked.start() + 1
+                ))
+                .weak(),
+            );
+            let picked = &bytes[picked];
+            if ui.small_button("Copy hex").clicked() {
+                ui.ctx().copy_text(hex_text(picked));
+            }
+            if ui.small_button("Copy text").clicked() {
+                ui.ctx()
+                    .copy_text(picked.iter().map(printable).collect::<String>());
+            }
         }
     });
     ui.add_space(4.0);
 
-    let first_row = *page * HEX_PAGE_ROWS;
+    let first_row = state.page * HEX_PAGE_ROWS;
     let page_rows = (rows - first_row).min(HEX_PAGE_ROWS);
-    let row_height = ui.text_style_height(&TextStyle::Monospace);
+    let font = TextStyle::Monospace.resolve(ui.style());
+    let height = ui.text_style_height(&TextStyle::Monospace);
+    let ink = ui.visuals().text_color();
+    let dim = ui.visuals().weak_text_color();
+    let fill = ui.visuals().selection.bg_fill;
+    let width = ui
+        .painter()
+        .layout_no_wrap("0".repeat(ROW_CHARS), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let shift = ui.input(|input| input.modifiers.shift);
+
     ScrollArea::both()
         .auto_shrink(false)
-        .id_salt(*page)
-        .show_rows(ui, row_height, page_rows, |ui, range| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            let mut line = String::with_capacity(80);
-            for row in range {
+        .id_salt(state.page)
+        .show_viewport(ui, |ui, viewport| {
+            let origin = ui.cursor().left_top();
+            ui.set_width(width);
+            ui.set_height(page_rows as f32 * height);
+
+            // A scroll offset kept from a longer file outlives the switch to a shorter one, so the
+            // first row is held to the last rather than trusted to sit above it.
+            let last = ((viewport.max.y / height).ceil() as usize).min(page_rows);
+            let first = ((viewport.min.y / height).floor().max(0.0) as usize).min(last);
+
+            let laid = |row: usize| {
                 let start = (first_row + row) * HEX_COLS;
-                let chunk = &bytes[start..(start + HEX_COLS).min(bytes.len())];
-                line.clear();
-                let _ = write!(line, "{start:08X}  ");
-                for i in 0..HEX_COLS {
-                    if i == HEX_COLS / 2 {
-                        line.push(' ');
-                    }
-                    match chunk.get(i) {
-                        Some(b) => {
-                            let _ = write!(line, "{b:02X} ");
-                        }
-                        None => line.push_str("   "),
+                let text = hex_row(start, &bytes[start..(start + HEX_COLS).min(bytes.len())]);
+                let mut job = LayoutJob::default();
+                job.append(&text[..8], 0.0, TextFormat::simple(font.clone(), dim));
+                job.append(&text[8..], 0.0, TextFormat::simple(font.clone(), ink));
+                ui.painter().layout_job(job)
+            };
+            // The galley that painted a row is what says where its characters are, so a click lands
+            // on the byte under it whatever the display is scaled by.
+            let under = |at: egui::Pos2| {
+                let row = ((at.y - origin.y) / height).floor().max(0.0) as usize;
+                let row = row.min(page_rows - 1);
+                let top = origin + vec2(0.0, row as f32 * height);
+                let cursor = laid(row).cursor_from_pos(at - top).index.0;
+                let byte = (first_row + row) * HEX_COLS + byte_at(cursor)?;
+                Some(byte.min(bytes.len() - 1))
+            };
+
+            let shown = Rect::from_min_size(
+                origin + vec2(0.0, first as f32 * height),
+                vec2(width, (last - first) as f32 * height),
+            );
+            let response = ui
+                .interact(shown, ui.id().with("bytes"), Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::Text);
+
+            // Pressing on the dump is what puts the keyboard on it, so a copy comes from here rather
+            // than from whatever was focused before.
+            if response.clicked() || response.drag_started() {
+                response.request_focus();
+            }
+            match response.interact_pointer_pos().and_then(&under) {
+                Some(at) if response.drag_started() || response.clicked() => {
+                    state.selection = match (shift, state.selection) {
+                        (true, Some((from, _))) => Some((from, at)),
+                        _ => Some((at, at)),
+                    };
+                }
+                Some(at) if response.dragged() => {
+                    if let Some((from, _)) = state.selection {
+                        state.selection = Some((from, at));
                     }
                 }
-                line.push(' ');
-                line.extend(chunk.iter().map(|b| match b {
-                    0x20..=0x7e => *b as char,
-                    _ => '.',
-                }));
-                ui.label(RichText::new(&line).monospace());
+                // Clicking the offset column, which is on no byte, is how a selection is dropped.
+                None if response.clicked() => state.selection = None,
+                _ => {}
+            }
+
+            // The event rather than the key, since that is what a browser delivers, and only while
+            // this is what the keyboard is on, so a copy out of the search box is left alone.
+            if response.has_focus()
+                && let Some(picked) = state.range()
+                && ui.input(|input| input.events.contains(&egui::Event::Copy))
+            {
+                ui.ctx().copy_text(hex_text(&bytes[picked]));
+            }
+
+            let picked = state.range();
+            let hovered = response.hover_pos().and_then(&under);
+            for row in first..last {
+                let start = (first_row + row) * HEX_COLS;
+                let held = (bytes.len() - start).min(HEX_COLS);
+                let top = origin + vec2(0.0, row as f32 * height);
+                let galley = laid(row);
+
+                let mark = |from: usize, to: usize, fill: Color32| {
+                    let x = |at: usize| galley.pos_from_cursor(CCursor::new(at)).left();
+                    for (from, to) in [
+                        (hex_at(from), hex_at(to) + 2),
+                        (TEXT_AT + from, TEXT_AT + to + 1),
+                    ] {
+                        let rect =
+                            Rect::from_min_max(top + vec2(x(from), 0.0), top + vec2(x(to), height));
+                        ui.painter().rect_filled(rect, 2.0, fill);
+                    }
+                };
+                if let Some(at) = hovered
+                    && (start..start + held).contains(&at)
+                {
+                    mark(at - start, at - start, fill.gamma_multiply(0.4));
+                }
+                if let Some(picked) = &picked {
+                    let from = (*picked.start()).max(start);
+                    let to = (*picked.end()).min(start + held - 1);
+                    if from <= to {
+                        mark(from - start, to - start, fill);
+                    }
+                }
+                ui.painter().galley(top, galley, ink);
             }
         });
 }

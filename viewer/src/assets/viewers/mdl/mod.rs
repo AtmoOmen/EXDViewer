@@ -224,7 +224,8 @@ pub struct Rendered {
     debug: Cell<gpu::Debug>,
     /// Whether to draw with the game's own shaders rather than with this viewer's approximation.
     shaded: Cell<bool>,
-    /// Which G-buffer channel the game's own shaders put on screen.
+    /// Which G-buffer channel the game's own shaders put on screen, starting at the frame their
+    /// lighting resolves rather than at a channel of the buffer it is resolved from.
     target: Cell<usize>,
 }
 
@@ -255,7 +256,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
         shaded: Cell::new(false),
-        target: Cell::new(0),
+        target: Cell::new(gpu::LIT),
     })))
 }
 

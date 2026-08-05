@@ -504,8 +504,10 @@ impl Game {
         size: (i32, i32),
     ) -> Result<(), String> {
         // egui draws into whatever it bound before the callback, and the G-buffer has to go back to
-        // it once the channel is on screen.
-        let bound = unsafe { gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING) };
+        // it once the channel is on screen. Asking the painter rather than the context is what makes
+        // this work on the web: glow keeps its own map of the resources it created, and a
+        // framebuffer read back out of WebGL is a JS object it cannot find in there.
+        let bound = painter.intermediate_fbo();
         self.buffers.attach(gl, size)?;
         let stand_in = self.buffers.stand_in(gl)?;
         // Only the callback knows how many pixels the widget really covers, and a screen-wide pass

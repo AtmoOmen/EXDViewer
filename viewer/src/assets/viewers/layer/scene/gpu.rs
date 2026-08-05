@@ -158,8 +158,10 @@ impl Renderer {
             }
         }
         // egui draws into whatever it bound before the callback, and the frame has to go back to
-        // it once the scene is on screen.
-        let bound = unsafe { gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING) };
+        // it once the scene is on screen. Asking the painter rather than the context is what makes
+        // this work on the web: glow keeps its own map of the resources it created, and a
+        // framebuffer read back out of WebGL is a JS object it cannot find in there.
+        let bound = painter.intermediate_fbo();
         let held = info.viewport_in_pixels();
         let size = (held.width_px.max(1), held.height_px.max(1));
         if let Err(why) = self.render(gl, painter, frame, size) {

@@ -307,7 +307,10 @@ fn parameters(package: &ShaderPackage, material: &mtrl::Material) -> Vec<u8> {
             continue;
         };
         let lanes = param.byte_size() as usize / 4;
-        put(param.byte_offset() as usize, &values[..lanes.min(values.len())]);
+        put(
+            param.byte_offset() as usize,
+            &values[..lanes.min(values.len())],
+        );
     }
     out
 }
@@ -584,7 +587,7 @@ pub fn joints(count: usize, transform: Mat4) -> Vec<u32> {
 pub fn table(held: &mtrl::ColorTable) -> Option<(&[u16], usize, usize)> {
     let rows = held.rows();
     let raw = held.raw();
-    if rows == 0 || raw.len() % (rows * 4) != 0 {
+    if rows == 0 || !raw.len().is_multiple_of(rows * 4) {
         return None;
     }
     Some((raw, raw.len() / rows / 4, rows))

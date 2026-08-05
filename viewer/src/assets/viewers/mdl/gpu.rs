@@ -530,7 +530,10 @@ impl Game {
                 program: built,
             },
         ) {
-            graveyard().lock().unwrap().push(Dead::Program(stale.program));
+            graveyard()
+                .lock()
+                .unwrap()
+                .push(Dead::Program(stale.program));
         }
         Ok(built)
     }
@@ -547,7 +550,11 @@ impl Game {
 
     /// The joint palette, which every skinned shader reads through a texture of dwords. Rewritten
     /// each frame, since a joint carries the camera as well as the pose.
-    fn palette(&mut self, gl: &glow::Context, transform: glam::Mat4) -> Result<glow::Texture, String> {
+    fn palette(
+        &mut self,
+        gl: &glow::Context,
+        transform: glam::Mat4,
+    ) -> Result<glow::Texture, String> {
         let values = program::joints(JOINTS, transform);
         unsafe {
             let held = match self.joints {
@@ -747,11 +754,7 @@ impl Game {
                         }
                         let block_buffer = self.blocks[at];
                         gl.bind_buffer(glow::UNIFORM_BUFFER, Some(block_buffer));
-                        gl.buffer_data_u8_slice(
-                            glow::UNIFORM_BUFFER,
-                            &data,
-                            glow::DYNAMIC_DRAW,
-                        );
+                        gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &data, glow::DYNAMIC_DRAW);
                         gl.bind_buffer_base(glow::UNIFORM_BUFFER, at as u32, Some(block_buffer));
                         gl.uniform_block_binding(program, block, at as u32);
                     }

@@ -164,8 +164,14 @@ enum Package {
 struct Translated {
     target: usize,
     attachments: usize,
-    held: Result<(Arc<program::Program>, Option<Arc<program::Program>>), String>,
+    held: Result<Pair, String>,
 }
+
+/// The buffer pass, and the depth pass that runs before it where the node names one.
+type Pair = (Arc<program::Program>, Option<Arc<program::Program>>);
+
+/// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
+type Table = Arc<(Vec<u16>, usize, usize)>;
 
 /// One detail level's geometry, and everything the browser says about it.
 struct Level {
@@ -209,7 +215,7 @@ pub struct Rendered {
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
     /// The color table in the game's own layout, by material.
-    tables: RefCell<BTreeMap<usize, Arc<(Vec<u16>, usize, usize)>>>,
+    tables: RefCell<BTreeMap<usize, Table>>,
     camera: Cell<Camera>,
     /// Decoded texture bytes handed to egui so far.
     resident: Cell<usize>,
@@ -538,9 +544,9 @@ fn xyzw(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
 fn uv(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
     match values {
         VertexValues::Vector2(held) => held.get(at).map(|value| [value[0], value[1], 0.0, 0.0]),
-        VertexValues::Vector3(held) => {
-            held.get(at).map(|value| [value[0], value[1], value[2], 0.0])
-        }
+        VertexValues::Vector3(held) => held
+            .get(at)
+            .map(|value| [value[0], value[1], value[2], 0.0]),
         VertexValues::Vector4(held) => held.get(at).copied(),
         _ => None,
     }
@@ -553,9 +559,9 @@ fn bytes(values: &VertexValues, at: usize) -> Option<[u8; 4]> {
         VertexValues::Vector4(held) => held
             .get(at)
             .map(|value| value.map(|channel| (channel.clamp(0.0, 1.0) * 255.0) as u8)),
-        VertexValues::Bytes8(held) => held.get(at).map(|value| {
-            [value[0], value[2], value[4], value[6]]
-        }),
+        VertexValues::Bytes8(held) => held
+            .get(at)
+            .map(|value| [value[0], value[2], value[4], value[6]]),
         VertexValues::Uint(held) => held.get(at).map(|value| value.to_le_bytes()),
         _ => None,
     }
@@ -988,7 +994,10 @@ impl Rendered {
         ui.painter().add(egui::PaintCallback {
             rect,
             callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
-                model.lock().unwrap().draw(painter.gl(), painter, &frame, &info);
+                model
+                    .lock()
+                    .unwrap()
+                    .draw(painter.gl(), painter, &frame, &info);
             })),
         });
     }

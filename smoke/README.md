@@ -51,9 +51,11 @@ It then walks the paths that broke:
    handed a `redirect`, so opening a model needs no clicking.
 2. Clicks **Game shaders** and waits for the deferred path to link programs and bind a G-buffer.
 3. Sweeps the channel row, covering `SV_Target`, `SV_Target1..4` and `Lit`.
-4. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
-5. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
-6. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
+4. Clicks **Game shaders** off again and compares the preview frame against the one taken before
+   any of that, which is what catches the deferred path leaving GL state behind.
+5. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
+6. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
+7. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.

@@ -83,7 +83,8 @@ pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<Dynam
     };
 
     let buffer = match texture.format() {
-        tex::Format::A8Unorm | tex::Format::L8Unorm => read_gray8(width, height, plain()?)?,
+        tex::Format::A8Unorm => read_alpha8(width, height, plain()?)?,
+        tex::Format::L8Unorm => read_gray8(width, height, plain()?)?,
         tex::Format::R8Unorm | tex::Format::R8Uint => read_channels8(width, height, plain()?, 1)?,
         tex::Format::Rg8Unorm => read_channels8(width, height, plain()?, 2)?,
         tex::Format::Bgrx8Unorm => read_bgrx8(width, height, plain()?)?,
@@ -158,6 +159,19 @@ fn read_gray8(width: u16, height: u16, data: &[u8]) -> Result<DynamicImage> {
     let buffer = ImageBuffer::from_raw(width.into(), height.into(), data.to_owned())
         .context("failed to build image buffer")?;
     Ok(DynamicImage::ImageLuma8(buffer))
+}
+
+/// Alpha only, whose one channel reaches all four: an effect adding such a texture takes its color
+/// from it and one blending it takes its cutout from it, so leaving the alpha opaque paints the
+/// whole quad rather than the shape the file holds.
+fn read_alpha8(width: u16, height: u16, data: &[u8]) -> Result<DynamicImage> {
+    let pixels = data
+        .iter()
+        .flat_map(|&value| [value; 4])
+        .collect::<Vec<_>>();
+    let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
+        .context("failed to build image buffer")?;
+    Ok(DynamicImage::ImageRgba8(buffer))
 }
 
 /// Widen an 8-bit-per-channel image to RGBA. One channel shows as gray rather than red, since these

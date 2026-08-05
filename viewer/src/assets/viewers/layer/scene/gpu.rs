@@ -309,13 +309,17 @@ impl Renderer {
                         if held.batch() > 1 {
                             self.buffers.bind(gl, program, held, &scene, &[])?;
                         }
+                        // Before anything is bound: making a texture binds it to whichever unit
+                        // happens to be active, so one made partway through the loop below takes
+                        // over the unit the sampler before it was just given.
+                        let table = match &shaded.table {
+                            Some(table) => Some(self.table(gl, surface.material, table)?),
+                            None => None,
+                        };
                         let mut unit = 0;
                         for texture in &held.textures {
                             let bound = match texture.id {
-                                TABLE => match &shaded.table {
-                                    Some(table) => Some(self.table(gl, surface.material, table)?),
-                                    None => None,
-                                },
+                                TABLE => table,
                                 id => shaded
                                     .textures
                                     .iter()

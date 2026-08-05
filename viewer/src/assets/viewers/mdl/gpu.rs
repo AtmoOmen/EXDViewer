@@ -506,6 +506,7 @@ impl Game {
             size: (size.0 as f32, size.1 as f32),
             ..frame.scene
         };
+        let palette = self.palette(gl, scene.view * scene.model)?;
 
         // The G-buffer a page at a time, and each page's depth pass before its buffer pass: the game
         // runs those as two passes over the whole draw rather than as two draws of one surface.
@@ -552,13 +553,17 @@ impl Game {
                         }
                     }
                     self.buffers.bind(gl, program, held, &scene, &[])?;
+                    // Before anything is bound: making a texture binds it to whichever unit
+                    // happens to be active, so one made partway through the loop below takes over
+                    // the unit the sampler before it was just given.
+                    let table = match &shaded.table {
+                        Some(table) => Some(self.table(gl, surface.material, table)?),
+                        None => None,
+                    };
                     let mut unit = 0;
                     for texture in &held.textures {
                         let bound = match texture.id {
-                            TABLE => match &shaded.table {
-                                Some(table) => Some(self.table(gl, surface.material, table)?),
-                                None => None,
-                            },
+                            TABLE => table,
                             id => shaded
                                 .textures
                                 .iter()
@@ -574,7 +579,7 @@ impl Game {
                     for structured in &held.structured {
                         let bound = match structured.name.as_str() {
                             TYPES => self.buffers.types(gl)?,
-                            _ => self.palette(gl, scene.view * scene.model)?,
+                            _ => palette,
                         };
                         sampler(gl, program, &structured.name, unit, bound);
                         unit += 1;

@@ -16,6 +16,7 @@ const dist = resolve(root, "viewer/dist");
 const args = new Set(Bun.argv.slice(2));
 const shots = args.has("--shots") || args.has("--explore");
 const explore = args.has("--explore");
+const modelOnly = explore || args.has("--model-only");
 const shotDir = join(root, "smoke/shots");
 
 const MODEL = "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl";
@@ -262,8 +263,8 @@ async function main() {
         console.log(`   after load: draws=${plain.draws} links=${plain.links} blits=${plain.blits}`);
         report.plain = plain;
 
-        if (explore) {
-            console.log("\n== explore: screenshots written, stopping before any click");
+        if (modelOnly) {
+            console.log("\n== stopping after the model, before any click");
             return;
         }
 
@@ -340,13 +341,6 @@ async function main() {
         await server.stop(true);
         rmSync(profile, { recursive: true, force: true });
     }
-
-    console.log(`\n${"=".repeat(60)}`);
-    if (failures.length) {
-        report_failures();
-        process.exit(1);
-    }
-    console.log("PASS: no GL errors, panics or ERROR logs");
 }
 
 /// One entry per distinct message, since a GL error in a paint callback repeats every frame.
@@ -372,9 +366,18 @@ function report_failures() {
     }
 }
 
-main().catch((error) => {
-    console.log(`\n${"=".repeat(60)}`);
-    console.log(`FAIL: ${error.message}\n`);
-    if (failures.length) report_failures();
-    process.exit(1);
-});
+main()
+    .then(() => {
+        console.log(`\n${"=".repeat(60)}`);
+        if (failures.length) {
+            report_failures();
+            process.exit(1);
+        }
+        console.log("PASS: no GL errors, panics or ERROR logs");
+    })
+    .catch((error) => {
+        console.log(`\n${"=".repeat(60)}`);
+        console.log(`FAIL: ${error.message}\n`);
+        if (failures.length) report_failures();
+        process.exit(1);
+    });

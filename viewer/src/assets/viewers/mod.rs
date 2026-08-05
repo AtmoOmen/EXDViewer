@@ -14,11 +14,14 @@ pub mod avfx;
 pub mod chara;
 pub mod cmp;
 pub mod eid;
+pub mod eqdp;
 pub mod eqp;
 pub mod est;
+pub mod evp;
 pub mod font;
 pub mod gmp;
 pub mod grass;
+pub mod hwc;
 pub mod icons;
 pub mod imc;
 pub mod layer;
@@ -330,10 +333,14 @@ pub enum Preview {
     Phyb(Box<phyb::Rendered>),
     /// A parsed skeleton.
     Sklb(Box<sklb::Rendered>),
+    /// A parsed set of deformer parameters.
+    Eqdp(Box<eqdp::Rendered>),
     /// A parsed set of equipment parameters.
     Eqp(Box<eqp::Rendered>),
     /// A parsed set of gimmick parameters.
     Gmp(Box<gmp::Rendered>),
+    /// A parsed set of equipment VFX parameters.
+    Evp(Box<evp::Rendered>),
     /// A parsed layer group, from either of the two files that hold one.
     Layers(Box<layer::Rendered>),
     /// A parsed annotation of what a zone's layers placed.
@@ -393,8 +400,11 @@ impl Preview {
             Viewer::Pap => pap::decode(path, bytes),
             Viewer::Phyb => phyb::decode(path, bytes),
             Viewer::Sklb => sklb::decode(path, bytes),
+            Viewer::Eqdp => eqdp::decode(path, bytes),
             Viewer::Eqp => eqp::decode(path, bytes),
             Viewer::Gmp => gmp::decode(path, bytes),
+            Viewer::Evp => evp::decode(path, bytes),
+            Viewer::Hwc => hwc::decode(ctx, path, bytes, channels),
             Viewer::Lgb => layer::lgb::decode(path, bytes),
             Viewer::Sgb => layer::sgb::decode(path, bytes),
             Viewer::Lvb => layer::lvb::decode(path, bytes),
@@ -453,8 +463,10 @@ impl Preview {
             Self::Pap(pack) => follow = pap::ui(ui, pack),
             Self::Phyb(physics) => phyb::ui(ui, physics),
             Self::Sklb(skeleton) => sklb::ui(ui, skeleton),
+            Self::Eqdp(parameters) => eqdp::ui(ui, parameters),
             Self::Eqp(parameters) => eqp::ui(ui, parameters),
             Self::Gmp(parameters) => gmp::ui(ui, parameters),
+            Self::Evp(parameters) => evp::ui(ui, parameters),
             Self::Layers(layers) => follow = layer::ui(ui, layers, deps, backend),
             Self::Zone(annotations) => follow = zone::instanced::ui(ui, annotations),
             Self::Environments(set) => follow = zone::envs::ui(ui, set, deps, backend),
@@ -552,8 +564,10 @@ impl Preview {
             | Self::Pap(_)
             | Self::Phyb(_)
             | Self::Sklb(_)
+            | Self::Eqdp(_)
             | Self::Eqp(_)
             | Self::Gmp(_)
+            | Self::Evp(_)
             | Self::Layers(_)
             | Self::Zone(_)
             | Self::Environments(_)
@@ -658,11 +672,19 @@ impl Preview {
             skeleton.details_ui(ui);
             return None;
         }
+        if let Self::Eqdp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
         if let Self::Eqp(parameters) = self {
             parameters.details_ui(ui);
             return None;
         }
         if let Self::Gmp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Evp(parameters) = self {
             parameters.details_ui(ui);
             return None;
         }
@@ -814,8 +836,11 @@ pub enum Viewer {
     Pap,
     Phyb,
     Sklb,
+    Eqdp,
     Eqp,
     Gmp,
+    Evp,
+    Hwc,
     Lgb,
     Sgb,
     Lvb,
@@ -839,7 +864,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 41] = [
+    pub const RENDERED: [Self; 44] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -862,8 +887,11 @@ impl Viewer {
         Self::Pap,
         Self::Phyb,
         Self::Sklb,
+        Self::Eqdp,
         Self::Eqp,
         Self::Gmp,
+        Self::Evp,
+        Self::Hwc,
         Self::Lgb,
         Self::Sgb,
         Self::Lvb,
@@ -907,8 +935,11 @@ impl Viewer {
             Self::Pap => "Animation",
             Self::Phyb => "Physics",
             Self::Sklb => "Skeleton",
+            Self::Eqdp => "Deformer parameters",
             Self::Eqp => "Equipment parameters",
             Self::Gmp => "Gimmick parameters",
+            Self::Evp => "Equipment VFX parameters",
+            Self::Hwc => "Cursor",
             Self::Lgb => "Layer group",
             Self::Sgb => "Shared group",
             Self::Lvb => "Level",

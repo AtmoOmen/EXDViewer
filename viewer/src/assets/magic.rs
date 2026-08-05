@@ -1,9 +1,9 @@
 //! What a file is, read from its bytes rather than from its name.
 //!
-//! Most of what the game ships leads with a magic. The three formats here that do not are `.tex`
-//! and `.tera`, recognized by the shape of their fixed headers, and `.mtrl`, which is small enough
-//! to read outright and names a shader package that gives it away. Anything left over that decodes
-//! cleanly is text.
+//! Most of what the game ships leads with a magic. The formats here that do not are `.tex` and
+//! `.tera`, recognized by the shape of their fixed headers, `.mtrl`, which is small enough to read
+//! outright and names a shader package that gives it away, and `.hwc`, which is a bare pixel buffer
+//! with nothing to go on but its length. Anything left over that decodes cleanly is text.
 
 use std::io::Cursor;
 
@@ -23,6 +23,9 @@ const TERA_HEADER: usize = 52;
 
 /// The only `.tera` version the game ships. Earlier ones lay the header out differently.
 const TERA_VERSION: u32 = 0x0100_0003;
+
+/// A `.hwc`, which is 64x64 pixels of four bytes and nothing else.
+const CURSOR: usize = 64 * 64 * 4;
 
 /// A format as its bytes identify it.
 #[derive(Clone, Copy)]
@@ -59,6 +62,7 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"ShPk", Format::Shown(Viewer::Shpk)),
     (b"ShCd", Format::Shown(Viewer::Shcd)),
     (b"die\0", Format::Shown(Viewer::Eid)),
+    (b"EVP", Format::Shown(Viewer::Evp)),
     (b"plks", Format::Shown(Viewer::Skp)),
     (b"blks", Format::Shown(Viewer::Sklb)),
     (b"SEDBSSCF", Format::Named("Sound")),
@@ -84,7 +88,8 @@ const MAGIC: &[(&[u8], Format)] = &[
 ];
 
 /// What the bytes say the file is, or `None` where they say nothing. Ordered strongest test first:
-/// a magic settles it outright, and the three guesses below only ever see what no magic claimed.
+/// a magic settles it outright, and the guesses below only ever see what no magic claimed. A cursor
+/// is last of all, since its length is the weakest test here and any binary of that size passes it.
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if let Some((_, format)) = MAGIC.iter().find(|(magic, _)| bytes.starts_with(magic)) {
         return Some(*format);
@@ -98,7 +103,10 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if is_terrain(bytes) {
         return Some(Format::Shown(Viewer::Tera));
     }
-    is_text(bytes).then_some(Format::Shown(Viewer::Text))
+    if is_text(bytes) {
+        return Some(Format::Shown(Viewer::Text));
+    }
+    (bytes.len() == CURSOR).then_some(Format::Shown(Viewer::Hwc))
 }
 
 /// Read as a material and believed only if it names a shader package, which nothing else would.
@@ -175,6 +183,7 @@ mod tests {
         assert_eq!(label(b"SEDBSSCF\0\0\0\0"), Some("Sound"));
         assert_eq!(label(b"blks\0\0\0\0"), Some("Skeleton"));
         assert_eq!(label(b"die\0" as &[u8]), Some("Bind points"));
+        assert_eq!(label(b"EVP\x0b\0\0\0\0"), Some("Equipment VFX parameters"));
         assert_eq!(label(b"plks0031"), Some("Skeleton parameters"));
         assert_eq!(label(b"LGB1\0\0\0\0"), Some("Layer group"));
         assert_eq!(label(b"SGB1\0\0\0\0"), Some("Shared group"));
@@ -249,6 +258,19 @@ mod tests {
         }
         // A header cut short is not a terrain file, however well the part that survived reads.
         assert!(label(&header[..TERA_HEADER - 1]) != Some("Terrain"));
+    }
+
+    /// The weakest test in the file, so it only ever sees what nothing else claimed, and it sees
+    /// that on its length alone.
+    #[test]
+    fn reads_a_cursor_by_its_length() {
+        assert_eq!(label(&[1u8; CURSOR]), Some("Cursor"));
+        assert!(label(&[1u8; CURSOR - 1]) != Some("Cursor"));
+        assert!(label(&[1u8; CURSOR + 1]) != Some("Cursor"));
+        // A file of that length that says what it is keeps saying it.
+        let mut named = vec![0u8; CURSOR];
+        named[..4].copy_from_slice(b"TMLB");
+        assert_eq!(label(&named), Some("Timeline"));
     }
 
     #[test]

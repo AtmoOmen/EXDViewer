@@ -343,11 +343,20 @@ async function main() {
     }
 }
 
-/// One entry per distinct message, since a GL error in a paint callback repeats every frame.
+/// One entry per distinct message, since a GL error in a paint callback repeats every frame and the
+/// same complaint about a hundred assets is still one problem.
+function shape(text: string) {
+    return text
+        .split("\n")[0]
+        .trim()
+        .replace(/0x[0-9a-f]+/gi, "0x*")
+        .replace(/[\w/]+\.(mdl|mtrl|tex|shpk|lgb|sgb|lvb|avfx)\b/gi, "*");
+}
+
 function report_failures() {
     const kinds = new Map<string, { count: number; phases: Set<string>; sample: Message }>();
     for (const failure of failures) {
-        const key = failure.text.split("\n")[0].trim();
+        const key = shape(failure.text);
         let kind = kinds.get(key);
         if (!kind) kinds.set(key, (kind = { count: 0, phases: new Set(), sample: failure }));
         kind.count++;

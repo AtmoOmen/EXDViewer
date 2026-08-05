@@ -27,7 +27,7 @@ const HEIGHT = 1000;
 
 // The control row sits at the top of the viewer pane. `ROW_LEFT` is where "Game shaders" is, and the
 // sweep walks right from `SWEEP_FROM` across the channel labels that appear beside it. Recalibrate
-// with `--explore`, which writes annotated screenshots to smoke/shots.
+// with `--explore`, which writes screenshots to smoke/shots and stops before any click.
 const ROW_Y = 116;
 const ROW_LEFT = 268;
 const SWEEP_FROM = 325;

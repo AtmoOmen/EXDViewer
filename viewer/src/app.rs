@@ -28,6 +28,7 @@ use crate::{
     goto::{self, ListNav},
     icons, music,
     pr_window::{self, PrAction, PrWindow},
+    quests,
     router::{
         Router,
         path::Path,
@@ -158,6 +159,7 @@ enum Tab {
     Assets,
     Icons,
     Music,
+    Quests,
 }
 
 impl Tab {
@@ -168,6 +170,8 @@ impl Tab {
             Tab::Icons
         } else if path.starts_with("/music") {
             Tab::Music
+        } else if path.starts_with("/quests") {
+            Tab::Quests
         } else {
             Tab::Sheets
         }
@@ -179,6 +183,7 @@ impl Tab {
             Tab::Assets => "Assets",
             Tab::Icons => "Icons",
             Tab::Music => "Music",
+            Tab::Quests => "Quests",
         }
     }
 }
@@ -203,6 +208,7 @@ pub struct App {
     music: music::MusicPlayer,
     assets: assets::AssetBrowser,
     icons: icons::IconBrowser,
+    quests: quests::QuestBrowser,
     last_system_theme: Option<egui::Theme>,
     /// `None` = Latin only
     loaded_cjk: Option<CjkFont>,
@@ -253,6 +259,18 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
         App::title_music,
     )?;
     builder.add_route(
+        "/quests",
+        App::on_quests,
+        App::draw_quests,
+        App::title_quests,
+    )?;
+    builder.add_route(
+        "/quests/{id}",
+        App::on_quest,
+        App::draw_quests,
+        App::title_quests,
+    )?;
+    builder.add_route(
         CALLBACK_PATH,
         App::on_auth_callback,
         App::draw_auth_callback,
@@ -281,6 +299,13 @@ impl App {
     fn title_music(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
         let id = params.get("id")?.parse::<u32>().ok()?;
         Some(self.music.name_of(id).unwrap_or("Music").to_string())
+    }
+
+    fn title_quests(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
+        let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
+            return Some("Quests".to_string());
+        };
+        Some(self.quests.name_of(id).unwrap_or("Quests").to_string())
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
@@ -405,6 +430,7 @@ impl App {
             Tab::Assets => self.assets.open_palette(),
             Tab::Icons => self.icons.open_palette(),
             Tab::Music => self.music.open_palette(),
+            Tab::Quests => self.quests.open_palette(),
         }
     }
 
@@ -447,6 +473,7 @@ impl App {
                             Tab::Assets => "Find Asset…",
                             Tab::Icons => "Find Icon…",
                             Tab::Music => "Find Track…",
+                            Tab::Quests => "Find Quest…",
                         };
                         if shortcut::button(ui, palette, PALETTE).clicked() {
                             self.open_palette(tab);
@@ -650,7 +677,7 @@ impl App {
                     });
 
                     let seg = egui::vec2(72.0, ui.spacing().interact_size.y);
-                    let switcher_w = 4.0 * seg.x + 3.0 * ui.spacing().item_spacing.x;
+                    let switcher_w = 5.0 * seg.x + 4.0 * ui.spacing().item_spacing.x;
                     let target_left = bar_left + bar_width / 2.0 - switcher_w / 2.0;
                     let space = target_left - ui.cursor().left();
                     if space > 0.0 {
@@ -661,6 +688,7 @@ impl App {
                         (Tab::Assets, "/assets"),
                         (Tab::Icons, "/icons"),
                         (Tab::Music, "/music"),
+                        (Tab::Quests, "/quests"),
                     ] {
                         if ui
                             .add_sized(seg, Button::selectable(tab == target, target.title()))
@@ -1300,6 +1328,7 @@ impl App {
             self.assets.reset();
             self.icons.reset();
             self.music.reset();
+            self.quests.reset();
             CURRENT_SHEET_LANGUAGES.remove(ui.ctx());
 
             BACKEND_CONFIG.set(ui.ctx(), Some(config));
@@ -1509,6 +1538,39 @@ impl App {
         }
     }
 
+    fn on_quests(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        self.quests
+            .selected()
+            .map(|row_id| format!("/quests/{row_id}").into())
+    }
+
+    fn on_quest(&mut self, _ui: &mut egui::Ui, path: &Path, params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        match params.get("id").and_then(|id| id.parse::<u32>().ok()) {
+            Some(row_id) => {
+                self.quests.request(row_id);
+                None
+            }
+            None => Some("/quests".into()),
+        }
+    }
+
+    fn draw_quests(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(action) = self.quests.ui(ui, &backend, &self.icon_manager)
+        {
+            match action {
+                quests::Action::Select(row_id) => self.navigate(format!("/quests/{row_id}")),
+                quests::Action::Navigate(route) => self.navigate(route),
+            }
+        }
+    }
+
     fn command_open_pr(&mut self) {
         let names: Vec<String> = self
             .get_modified_schemas()
@@ -1661,6 +1723,7 @@ impl App {
             music: music::MusicPlayer::default(),
             assets: assets::AssetBrowser::default(),
             icons: icons::IconBrowser::default(),
+            quests: quests::QuestBrowser::default(),
             last_system_theme: None,
             loaded_cjk: None,
             #[cfg(target_arch = "wasm32")]

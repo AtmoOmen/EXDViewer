@@ -352,6 +352,10 @@ async function main() {
         phase = `avfx:${name}`;
         console.log(`\n== effect: ${path}`);
         await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
+        // eframe writes egui's memory out as the page unloads, and the details panel's width is in
+        // it: an earlier phase leaves the panel wide enough to move the playback bar out from under
+        // `SEEK`. The store is gone by the time the wasm has loaded and read it.
+        await cdp.eval("localStorage.clear()").catch(() => {});
         await waitFor("the effect to be titled", 180_000, async () => {
             const title = await cdp.eval<string>("document.title").catch(() => "");
             return title.includes(name);
@@ -391,10 +395,6 @@ async function main() {
     /// Every effect in turn. The two shots of one are taken at different points of its own timeline,
     /// so a run where none of them ever differ is one where the seek missed the slider.
     async function effects() {
-        // egui persists panel widths to local storage, and a character model's material list leaves
-        // the details panel wide enough to push the playback bar out from under `SEEK`. Dropping the
-        // store puts every effect on the layout the app opens with.
-        await cdp.eval("localStorage.clear()").catch(() => {});
         const held = [];
         for (const [index, path] of EFFECTS.entries()) {
             held.push(await effect(path, index));

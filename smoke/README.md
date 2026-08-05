@@ -81,11 +81,20 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-The effects. Every run since 2026-08-05 logs `assets/avfx: particle N: the package has not arrived`
-hundreds of times and then fails on `every effect looked identical at both points of its timeline`,
-because with no package nothing draws and the two shots of a frame match. Measured at both
-`3a74da1` and `b383a15` over the same one effect, so it is not the deferred path: the two apricot
-packages are 20 and 40 MiB and the twelve seconds the run waits for them are no longer enough.
+The effects seek, but only in a **full** run: it fails on `every effect looked identical at both
+points of its timeline` for all nine at once, while `--avfx-only` over the same effects seeks
+correctly and their two shots differ. So the effects themselves draw and the twelve-second wait is
+adequate; what breaks is where the run clicks.
+
+`SEEK` and `PREVIEW` are absolute window coordinates, and **the details panel is resizable and egui
+remembers its width across a navigation**. An earlier phase leaves it wide (a character model's
+material list is the widest thing the panel holds), which squeezes the viewer pane and moves the
+playback bar out from under `SEEK`. Measured on the same build: the panel's left edge sits at about
+x=1240 in an `--avfx-only` run and about x=842 after the model, scene and level phases have run.
+
+Fixing it means not depending on a persisted layout: reset the panel width before the effects
+phase, or find the bar rather than assuming where it is. Do **not** weaken the assertion, which is
+the only thing standing between this and shots of an arbitrary frame.
 
 Both of the problems reported at `f8b3ecc` are fixed. `glDrawArrays: Mismatch between texture
 format and sampler type` was the stand-in textures being made lazily from inside the binding loop:

@@ -104,6 +104,9 @@ const MUTED_TEXT = [
     /Automatic fallback to software WebGL/i,
     /WEBGL_debug_renderer_info is deprecated/i,
     /GPU stall due to ReadPixels/i,
+    // The app asks GitHub for its own release list on startup. Unauthenticated, that runs out of
+    // rate limit after a handful of runs, and it says nothing about what the app draws.
+    /Error fetching versions/i,
 ];
 
 // eframe's WebLogger maps Rust's Error level onto console.warn with an "ERROR:" prefix rather than
@@ -356,6 +359,9 @@ async function main() {
             await click(cdp, SEEK.from + (SEEK.to - SEEK.from) * part, SEEK.y);
             await sleep(1500);
             seen.push(await shot(cdp, `${held}-${part}`, PREVIEW));
+            // The clip is what the comparison runs on; the whole window is what says where the
+            // playback bar actually is when the clip stops moving.
+            if (shots) await shot(cdp, `${held}-${part}-window`);
         }
         // A navigation resets the counters, so what is drawn is the absolute count, not a delta.
         const after = await counters(cdp);

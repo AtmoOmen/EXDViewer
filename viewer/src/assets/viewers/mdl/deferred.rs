@@ -182,7 +182,8 @@ impl Buffers {
     /// Draws one of those over the widget and leaves egui's own framebuffer bound behind it.
     ///
     /// A pass rather than a blit: the framebuffer a browser hands a callback is multisampled, and
-    /// blitting into one of those is an error rather than a resolve.
+    /// blitting into one of those is an error rather than a resolve. The depth buffer goes with it,
+    /// since that is what says which pixels the frame covered and which are egui's to keep.
     pub fn show(
         &mut self,
         gl: &glow::Context,
@@ -199,6 +200,9 @@ impl Buffers {
                 None => gl.draw_buffers(&[glow::BACK]),
             }
             gl.viewport(viewport.0, viewport.1, viewport.2, viewport.3);
+            // Back on for the widget, which is drawn in the window's own coordinates, where that
+            // clip rect means what it says.
+            gl.enable(glow::SCISSOR_TEST);
             gl.color_mask(true, true, true, true);
             gl.depth_mask(false);
             gl.disable(glow::DEPTH_TEST);
@@ -346,6 +350,10 @@ impl Buffers {
             gl.draw_buffers(&attachments);
             gl.viewport(0, 0, self.size.0, self.size.1);
             gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            // egui leaves the scissor set to the widget's rect in the window's own coordinates, and
+            // the frame is a buffer of its own that starts at nought: leaving it on clips the clear
+            // and every draw after it to whatever part of the frame the rect happens to overlap.
+            gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LEQUAL);

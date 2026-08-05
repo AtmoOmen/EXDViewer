@@ -1663,6 +1663,18 @@ mod tests {
     fn a_sprite_is_framed_on_the_quad_it_draws() {
         let effect = &playing(&[life(-1.0), scale(4.0)], (0, 0)).effect;
         assert_eq!(effect.fit(), (Vec3::ZERO, 2.0));
+
+        // Left lying across x and z, the height it is framed on is the one it is deep by.
+        let flat = nest(
+            "Scl",
+            &["X", "Y", "Z"]
+                .iter()
+                .zip([1.0, 1.0, 8.0])
+                .map(|(axis, value)| curve(axis, 0, 0, &scalars(&[(0, 1, value)])))
+                .collect::<Vec<_>>(),
+        );
+        let effect = &playing(&[life(-1.0), block("RBDT", &integer(1)), flat], (0, 0)).effect;
+        assert_eq!(effect.fit(), (Vec3::ZERO, 4.0));
     }
 
     #[test]
@@ -1758,6 +1770,38 @@ mod tests {
         assert_eq!(uv[0], [2.0, 0.0, 0.0, -0.25]);
         assert_eq!(uv[1], [0.0, 2.0, 0.0, -0.5]);
         assert_eq!(uv[2], [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// Naming no rotation base leaves a sprite in its own plane rather than against the screen, and
+    /// a decal in the one it is cast onto.
+    #[test]
+    fn a_sprite_with_no_rotation_base_stays_in_its_own_plane() {
+        let unbased = |kind: i32| {
+            let effect = &playing(
+                &[
+                    life(-1.0),
+                    block("PrVT", &integer(kind)),
+                    block("RBDT", &integer(10)),
+                ],
+                (0, 0),
+            )
+            .effect;
+            at(effect, 0)[0].facing
+        };
+        assert_eq!(unbased(1), sim::Facing::Still(sim::Axis::Z));
+        assert_eq!(unbased(2), sim::Facing::Still(sim::Axis::Z));
+        assert_eq!(unbased(11), sim::Facing::Still(sim::Axis::Y));
+        // The screen billboard is a base of its own, and still reads as one.
+        let effect = &playing(
+            &[
+                life(-1.0),
+                block("PrVT", &integer(8)),
+                block("RBDT", &integer(5)),
+            ],
+            (0, 0),
+        )
+        .effect;
+        assert_eq!(at(effect, 0)[0].facing, sim::Facing::Screen);
     }
 
     /// A quad billed against the camera can carry the turn about its own normal, and that is the one

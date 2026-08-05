@@ -317,13 +317,15 @@ pub enum Facing {
 impl Facing {
     /// What `RBDT` reads as for a particle of `kind`. A decal is cast onto what lies under it, so
     /// the axis it names settles nothing: it is scaled across x and z, where every other kind is
-    /// scaled across the two axes the one it names leaves.
+    /// scaled across the two axes the one it names leaves. Naming no base at all is not a default:
+    /// the powder package turns a corner by the particle's own angles and never reads the view, so
+    /// what names none is left in the plane its own rotation puts it in.
     fn read(kind: i32, base: i32) -> Self {
         match (kind, base) {
-            (10..=12, 0..=2) => Self::Still(Axis::Y),
+            (10..=12, 0..=2 | 10) => Self::Still(Axis::Y),
             (_, 0) => Self::Still(Axis::X),
             (_, 1) => Self::Still(Axis::Y),
-            (_, 2) => Self::Still(Axis::Z),
+            (_, 2 | 10) => Self::Still(Axis::Z),
             (_, 4 | 8 | 9) => Self::Upright,
             (_, 6) => Self::Camera,
             _ => Self::Screen,
@@ -1053,7 +1055,13 @@ impl Effect {
                     + live.place.turn * ((live.at + def.position.at(age)) * live.place.scale);
                 let scale = (def.scale.at(age) * live.place.scale).abs();
                 let reach = match def.shape {
-                    Shape::Sprite => scale.x.max(scale.y) * 0.5,
+                    Shape::Sprite => {
+                        0.5 * match def.facing {
+                            Facing::Still(Axis::X) => scale.y.max(scale.z),
+                            Facing::Still(Axis::Y) => scale.x.max(scale.z),
+                            _ => scale.x.max(scale.y),
+                        }
+                    }
                     Shape::Model(index) => {
                         scale.max_element() * models.get(index).copied().unwrap_or(0.5)
                     }

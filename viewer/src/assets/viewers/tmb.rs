@@ -10,7 +10,7 @@ use std::io::Cursor;
 use anyhow::Result;
 use egui::{RichText, ScrollArea};
 use ironworks::file::File;
-use ironworks::file::tmb::{Command, CommandKind, Item, Timeline};
+use ironworks::file::tmb::{Command, CommandKind, Condition, Item, Timeline};
 
 use super::{Preview, facts, link, section};
 use crate::utils::file_name;
@@ -69,7 +69,7 @@ fn children(item: &Item) -> &[i16] {
 /// One drawn line: an item, or a step of the condition gating a track.
 struct Row {
     item: usize,
-    step: Option<usize>,
+    step: Option<Condition>,
     depth: usize,
 }
 
@@ -145,8 +145,6 @@ impl Items {
                 ui.add_space(row.depth as f32 * INDENT);
                 match row.step {
                     Some(step) => {
-                        let Item::Track(track) = item else { return };
-                        let step = track.condition()[step];
                         ui.label(
                             RichText::new(format!(
                                 "operation {:#04x}  value {:#010x}  {}",
@@ -197,10 +195,10 @@ fn push(
     });
 
     if let Item::Track(track) = &items[index] {
-        for step in 0..track.condition().len() {
+        for step in track.condition() {
             rows.push(Row {
                 item: index,
-                step: Some(step),
+                step: Some(*step),
                 depth: depth + 1,
             });
         }
@@ -328,5 +326,79 @@ impl Rendered {
         ScrollArea::vertical()
             .auto_shrink(false)
             .show(ui, |ui| facts(ui, "tmb_identity", &self.identity));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Items, Timeline};
+    use ironworks::file::File;
+
+    /// A timeline of one actor holding one track holding one command, with the id lists in a pool
+    /// past the items. Offsets are relative to the item's own start plus its eight byte header.
+    fn timeline() -> Vec<u8> {
+        let (actors, tracks, commands) = (116u32, 118u32, 120u32);
+        let mut bytes = Vec::new();
+        bytes.extend(b"TMLB");
+        bytes.extend(122u32.to_le_bytes());
+        bytes.extend(5u32.to_le_bytes());
+
+        bytes.extend(b"TMDH");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(0i16.to_le_bytes());
+        bytes.extend(0i16.to_le_bytes());
+        bytes.extend(100i16.to_le_bytes());
+        bytes.extend(3i16.to_le_bytes());
+
+        bytes.extend(b"TMAL");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend((actors - 36).to_le_bytes());
+        bytes.extend(1u32.to_le_bytes());
+
+        bytes.extend(b"TMAC");
+        bytes.extend(28u32.to_le_bytes());
+        bytes.extend(1i16.to_le_bytes());
+        bytes.extend(0i16.to_le_bytes());
+        bytes.extend(0i32.to_le_bytes());
+        bytes.extend(0i32.to_le_bytes());
+        bytes.extend((tracks - 52).to_le_bytes());
+        bytes.extend(1u32.to_le_bytes());
+
+        bytes.extend(b"TMTR");
+        bytes.extend(24u32.to_le_bytes());
+        bytes.extend(2i16.to_le_bytes());
+        bytes.extend(0i16.to_le_bytes());
+        bytes.extend((commands - 80).to_le_bytes());
+        bytes.extend(1u32.to_le_bytes());
+        bytes.extend(0i32.to_le_bytes());
+
+        bytes.extend(b"C011");
+        bytes.extend(20u32.to_le_bytes());
+        bytes.extend(3i16.to_le_bytes());
+        bytes.extend(5i16.to_le_bytes());
+        bytes.extend(1i32.to_le_bytes());
+        bytes.extend(0i32.to_le_bytes());
+
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(2u16.to_le_bytes());
+        bytes.extend(3u16.to_le_bytes());
+        bytes
+    }
+
+    /// The file lists its items flat, and only the ids say which of them run under which.
+    #[test]
+    fn nests_the_items_the_ids_name() {
+        let items = Items::new(Timeline::read(std::io::Cursor::new(timeline())).unwrap());
+
+        assert_eq!(items.count(), 5);
+        assert_eq!(items.duration(), Some(100));
+        assert_eq!(
+            items
+                .rows
+                .iter()
+                .map(|row| (row.item, row.depth))
+                .collect::<Vec<_>>(),
+            [(0, 0), (1, 0), (2, 1), (3, 2), (4, 3)]
+        );
     }
 }

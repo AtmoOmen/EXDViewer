@@ -270,7 +270,6 @@ async function main() {
         const name = path.split("/").pop() ?? path;
         phase = `avfx:${name}`;
         console.log(`\n== effect: ${path}`);
-        const before = await counters(cdp).catch(() => ({}) as any);
         await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
         await waitFor("the effect to be titled", 180_000, async () => {
             const title = await cdp.eval<string>("document.title").catch(() => "");
@@ -279,20 +278,38 @@ async function main() {
         // Long enough for the two apricot packages, which are 20 and 40 MiB, and for the textures.
         await sleep(12000);
         const held = `05-avfx-${String(index).padStart(2, "0")}-${name.replace(/\.avfx$/, "")}`;
+        const seen: string[] = [];
         for (const part of [0.3, 0.6]) {
             await click(cdp, SEEK.from + (SEEK.to - SEEK.from) * part, SEEK.y);
             await sleep(1500);
-            await shot(cdp, `${held}-${part}`, PREVIEW);
+            seen.push(await shot(cdp, `${held}-${part}`, PREVIEW));
         }
+        // A navigation resets the counters, so what is drawn is the absolute count, not a delta.
         const after = await counters(cdp);
-        console.log(
-            `   draws +${(after.draws ?? 0) - (before.draws ?? 0)}` +
-                ` links +${(after.links ?? 0) - (before.links ?? 0)}`,
-        );
-        for (const message of noted.filter((held) => held.where === phase)) {
+        console.log(`   draws ${after.draws} links ${after.links}`);
+        for (const message of noted.filter((one) => one.where === phase)) {
             console.log(`   ${message.text.split("\n")[0].slice(0, 200)}`);
         }
-        return { path, draws: (after.draws ?? 0) - (before.draws ?? 0), links: (after.links ?? 0) - (before.links ?? 0) };
+        if (!after.draws) {
+            throw new Error(`${path} drew nothing at all, so this run proves nothing about it`);
+        }
+        return { path, draws: after.draws, links: after.links, frames: seen };
+    }
+
+    /// Every effect in turn. The two shots of one are taken at different points of its own timeline,
+    /// so a run where none of them ever differ is one where the seek missed the slider.
+    async function effects() {
+        const held = [];
+        for (const [index, path] of EFFECTS.entries()) {
+            held.push(await effect(path, index));
+        }
+        report.effects = held;
+        if (!held.some((one) => one.frames[0] !== one.frames[1])) {
+            throw new Error(
+                "every effect looked identical at both points of its timeline; the seek never " +
+                    "landed on the slider, so these shots are of an arbitrary frame",
+            );
+        }
     }
 
     try {
@@ -319,10 +336,7 @@ async function main() {
         }
 
         if (effectsOnly) {
-            report.effects = [];
-            for (const [index, path] of EFFECTS.entries()) {
-                (report.effects as unknown[]).push(await effect(path, index));
-            }
+            await effects();
             return;
         }
 
@@ -408,10 +422,7 @@ async function main() {
         console.log(`   instanced draws: ${scene.instanced}  links: ${scene.links}`);
         report.scene = scene;
 
-        report.effects = [];
-        for (const [index, path] of EFFECTS.entries()) {
-            (report.effects as unknown[]).push(await effect(path, index));
-        }
+        await effects();
     } finally {
         if (crashed) failures.push({ where: phase, source: "browser", level: "error", text: "the renderer process crashed" });
         writeFileSync(

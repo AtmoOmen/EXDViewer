@@ -214,7 +214,11 @@ impl Graph {
     pub fn ranked_slice(&self, component: u32, ranks: Range<u32>) -> &[u32] {
         let nodes = self.component_nodes(component);
         let start = nodes.partition_point(|node| self.rank(*node) < ranks.start);
-        let end = nodes.partition_point(|node| self.rank(*node) < ranks.end);
+        // An overscrolled viewport asks for a window past the end, and a backwards slice panics,
+        // which in the browser takes the whole app down.
+        let end = nodes
+            .partition_point(|node| self.rank(*node) < ranks.end)
+            .max(start);
         &nodes[start..end]
     }
 

@@ -532,10 +532,22 @@ impl QuestBrowser {
                 if !is_open {
                     return;
                 }
+                let title = node
+                    .zip(self.index.as_ref())
+                    .map_or("Quest", |(node, index)| index.quest(node).name.as_str());
                 Panel::top("quest_info_header").show(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         CollapsibleSidePanel::draw_arrow(ui, "quest_info", Side::Right);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            // Balances the arrow, so the heading centers on the panel rather than
+                            // on the space left over beside it.
+                            ui.add_space(ui.spacing().indent);
+                            ui.vertical_centered_justified(|ui| {
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                ui.heading(title);
+                            });
+                        });
                     });
                     ui.add_space(4.0);
                 });

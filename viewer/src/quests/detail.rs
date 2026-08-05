@@ -169,18 +169,15 @@ impl Detail {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, index: &Index, node: u32) -> Option<Action> {
-        let quest = index.quest(node);
         let mut action = None;
-
-        ui.label(RichText::new(&quest.name).heading());
-        ui.label(
-            RichText::new(format!("{} · row {}", quest.id, quest.row_id))
-                .weak()
-                .small(),
-        );
-        ui.add_space(6.0);
-
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            let quest = index.quest(node);
+            ui.label(
+                RichText::new(format!("{} · row {}", quest.id, quest.row_id))
+                    .weak()
+                    .small(),
+            );
+            ui.add_space(6.0);
             action = self.body(ui, index, node);
         });
         action
@@ -223,13 +220,11 @@ impl Detail {
         let mut action = None;
         let prereqs = index.graph.prereqs(node);
         if !prereqs.is_empty() {
-            let any = index.quest(node).join == 2;
-            let title = if any && prereqs.len() > 1 {
-                "Requires any one of"
-            } else {
-                "Requires"
-            };
-            action = action.or(section(ui, title, true, |ui| {
+            let any = index.quest(node).join == 2 && prereqs.len() > 1;
+            action = action.or(section(ui, "Requires", true, |ui| {
+                if any {
+                    ui.label(RichText::new("Any one of these will do.").weak().small());
+                }
                 quest_list(ui, index, prereqs)
             }));
         }

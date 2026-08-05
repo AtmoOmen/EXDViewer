@@ -36,6 +36,7 @@ use crate::{settings::AVFX_FRAME_RATE, utils::file_name};
 
 mod curve;
 mod gpu;
+mod program;
 mod sim;
 
 use curve::Curve;
@@ -50,10 +51,21 @@ const MARGIN: f32 = 1.6;
 const TEXTURE_SIZE: u16 = 256;
 const TEXTURE_BUDGET: usize = 64 << 20;
 
+/// Models one definition may draw at once. The model package reads one transform at a time, so each
+/// is a draw call of its own and an effect spawning thousands would take a browser tab with it.
+const MODELS: usize = 512;
+
 enum Texture {
     Fetching(TrackedPromise<Result<DecodedTexture>>),
     Ready(TextureHandle),
     Absent,
+}
+
+/// A shader package, from the moment it is asked for to the moment it can be translated.
+enum Package {
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready(Vec<u8>),
+    Failed,
 }
 
 /// Where the camera is looking from.
@@ -125,6 +137,9 @@ pub struct Rendered {
     reach: f32,
     textures: RefCell<HashMap<String, Texture>>,
     resident: Cell<usize>,
+    /// The apricot packages the effect is drawn with, and what the draw callback last saw of them.
+    packages: RefCell<HashMap<&'static str, Package>>,
+    resolved: RefCell<Arc<gpu::Packages>>,
 }
 
 /// The first block carrying `name`.
@@ -651,6 +666,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         reach,
         textures: RefCell::default(),
         resident: Cell::new(0),
+        packages: RefCell::default(),
+        resolved: RefCell::default(),
     })))
 }
 
@@ -791,6 +808,7 @@ impl Rendered {
     /// Asks for the textures the effect samples and hands what arrived to egui. Runs every frame; a
     /// texture that is already resolved costs a lookup.
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
+        self.poll_packages(backend);
         let mut textures = self.textures.borrow_mut();
         for path in &self.effect.textures {
             if textures.contains_key(path) {
@@ -846,6 +864,47 @@ impl Rendered {
                 }
             };
         }
+    }
+
+    /// Asks for the two apricot packages, which are what the effect is shaded by.
+    fn poll_packages(&self, backend: &Backend) {
+        let mut packages = self.packages.borrow_mut();
+        for path in [program::SHAPE, program::MODEL] {
+            packages.entry(path).or_insert_with(|| {
+                let files = backend.files().clone();
+                Package::Fetching(TrackedPromise::spawn_local(
+                    async move { files.read(path).await },
+                ))
+            });
+        }
+        let mut arrived = false;
+        for (path, package) in packages.iter_mut() {
+            let Package::Fetching(promise) = package else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            arrived = true;
+            *package = match result {
+                Ok(bytes) => Package::Ready(bytes.clone()),
+                Err(why) => {
+                    log::error!("assets/avfx: {path}: {why}");
+                    Package::Failed
+                }
+            };
+        }
+        if !arrived {
+            return;
+        }
+        let held = |path| match packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes.clone()),
+            _ => None,
+        };
+        *self.resolved.borrow_mut() = Arc::new(gpu::Packages {
+            shape: held(program::SHAPE),
+            model: held(program::MODEL),
+        });
     }
 
     /// The playback bar, and the effect running under it.
@@ -960,13 +1019,19 @@ impl Rendered {
         let projection =
             Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, span + self.reach);
 
-        // A sprite is set into the screen's plane, which is what the camera's own axes are for.
+        // A sprite is set into the screen's plane, which is what the camera's own axes are for. The
+        // shape package reads a stream already placed in the world, so the billboard happens here.
         let axes = glam::Mat3::from_mat4(view).transpose();
         let frame = gpu::Frame {
-            view_projection: (projection * view).to_cols_array(),
-            right: axes.x_axis.to_array(),
-            up: axes.y_axis.to_array(),
-            batches: self.batches(view),
+            scene: program::Scene {
+                view,
+                projection,
+                size: (rect.width(), rect.height()),
+                light: (eye - camera.target).normalize_or(Vec3::Y),
+                ..program::Scene::default()
+            },
+            batches: self.batches(view, axes.x_axis, axes.y_axis),
+            packages: self.resolved.borrow().clone(),
         };
 
         // The context is taken from the painter rather than captured: `glow::Context` is neither
@@ -983,56 +1048,75 @@ impl Rendered {
         });
     }
 
-    /// The live particles, gathered into one draw apiece per shape, texture and blend, furthest
+    /// The live particles, gathered into one draw apiece per particle definition and blend, furthest
     /// group first. Blending reads what is already there, so the order is part of the picture.
-    fn batches(&self, view: Mat4) -> Vec<gpu::Batch> {
+    fn batches(&self, view: Mat4, right: Vec3, up: Vec3) -> Vec<gpu::Batch> {
         let textures = self.textures.borrow();
-        let bind = |index: usize| match self
+        let bound: Vec<Option<egui::TextureId>> = self
             .effect
             .textures
-            .get(index)
-            .and_then(|path| textures.get(path))
-        {
-            Some(Texture::Ready(handle)) => Some(handle.id()),
-            _ => None,
-        };
+            .iter()
+            .map(|path| match textures.get(path) {
+                Some(Texture::Ready(handle)) => Some(handle.id()),
+                _ => None,
+            })
+            .collect();
 
-        let mut groups: BTreeMap<_, Vec<(f32, gpu::Instance)>> = BTreeMap::new();
+        let mut groups: BTreeMap<_, Vec<(f32, sim::Drawn)>> = BTreeMap::new();
         for drawn in self.effect.drawn(&self.live.borrow()) {
             let center = Vec3::from(drawn.center);
             let depth = (view * Vec4::from((center, 1.0))).z;
             groups
-                .entry((drawn.shape, drawn.texture, drawn.blend))
+                .entry((drawn.def, drawn.shape, drawn.blend))
                 .or_default()
-                .push((
-                    depth,
-                    gpu::Instance {
-                        center: drawn.center,
-                        scale: drawn.scale,
-                        turn: drawn.turn,
-                        color: drawn.color,
-                    },
-                ));
+                .push((depth, drawn));
         }
 
         let mut batches: Vec<(f32, gpu::Batch)> = groups
             .into_iter()
-            .map(|((shape, texture, blend), mut instances)| {
-                instances.sort_by(|(a, _), (b, _)| a.total_cmp(b));
-                let mean =
-                    instances.iter().map(|(depth, _)| depth).sum::<f32>() / instances.len() as f32;
-                (
+            .filter_map(|((def, shape, blend), mut held)| {
+                held.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+                let mean = held.iter().map(|(depth, _)| depth).sum::<f32>() / held.len() as f32;
+                let mut vertices = Vec::new();
+                let mut instances = Vec::new();
+                for (_, drawn) in &held {
+                    match shape {
+                        sim::Shape::Sprite => {
+                            let scale = Vec3::from(drawn.scale);
+                            gpu::quad(
+                                Vec3::from(drawn.center),
+                                right * scale.x,
+                                up * scale.y,
+                                drawn.color,
+                                &mut vertices,
+                            );
+                        }
+                        sim::Shape::Model(_) if instances.len() < MODELS => {
+                            instances.push(program::Instance {
+                                transform: Mat4::from_scale_rotation_translation(
+                                    Vec3::from(drawn.scale),
+                                    glam::Quat::from_array(drawn.turn),
+                                    Vec3::from(drawn.center),
+                                ),
+                                color: Vec4::from(drawn.color),
+                                ..program::Instance::default()
+                            });
+                        }
+                        sim::Shape::Model(_) => {}
+                    }
+                }
+                Some((
                     mean,
                     gpu::Batch {
                         shape,
-                        texture: texture.and_then(bind),
+                        textures: bound.clone(),
                         blend,
-                        instances: instances
-                            .into_iter()
-                            .map(|(_, instance)| instance)
-                            .collect(),
+                        def,
+                        shading: self.effect.shading(def)?,
+                        vertices,
+                        instances,
                     },
-                )
+                ))
             })
             .collect();
         batches.sort_by(|(a, _), (b, _)| a.total_cmp(b));

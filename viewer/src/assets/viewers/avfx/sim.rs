@@ -11,9 +11,10 @@
 //! effect plays the same way every time and scrubbing back to a frame lands where it did before.
 
 use glam::{Quat, Vec3, Vec4};
-use ironworks::file::avfx::{Avfx, Block, Item, Model as Geometry};
+use ironworks::file::avfx::{Avfx, Block, DirectionalLightSource, Item, Model as Geometry};
 
 use super::curve::{self, Curve};
+use super::program::{self, UV_SETS};
 use super::find;
 
 /// Live particles and running emitters one effect may hold. Both counts come off the file unchecked
@@ -204,6 +205,41 @@ pub enum Shape {
     Model(usize),
 }
 
+/// One of the texture roles a particle names, as the package's own sampler is called.
+const ROLES: [&str; 8] = [
+    "g_SamplerColor1",
+    "g_SamplerColor2",
+    "g_SamplerColor3",
+    "g_SamplerColor4",
+    "g_SamplerNormal",
+    "g_SamplerDistortion",
+    "g_SamplerPalette",
+    "g_SamplerReflection_",
+];
+
+/// The tags each of those roles is written under.
+const SETS: [&str; 8] = ["TC1", "TC2", "TC3", "TC4", "TN", "TD", "TP", "TR"];
+
+/// How a texture set combines with what came before it. `TCCT` and `TCAT`, whose orders VFXEditor
+/// names and which the package's own key values follow one for one.
+const CALCULATE_COLOR: [&str; 6] = ["Mul", "Add", "Sub", "Max", "Min", "None"];
+const CALCULATE_ALPHA: [&str; 4] = ["Mul", "Max", "Min", "None"];
+
+/// How a texture is filtered and wrapped. `TFT` runs from off through three degrees of anisotropy,
+/// none of which GL ES has, so anything past off is filtered.
+const WRAPS: [u32; 3] = [glow::REPEAT, glow::CLAMP_TO_EDGE, glow::MIRRORED_REPEAT];
+
+/// What a particle asks its shader package for: the keys its own texture sets resolve to, and which
+/// of the effect's textures fills each role the package names.
+pub struct Shading {
+    pub keys: Vec<(u32, u32)>,
+    /// The package's own sampler id, the effect's texture behind it, and how it is sampled.
+    pub textures: Vec<(u32, usize, u32, [u32; 2])>,
+    /// Whether this is drawn from a stream the viewer places in the world rather than from one of
+    /// the effect's own models.
+    pub sprite: bool,
+}
+
 struct Particle {
     life: Option<f32>,
     gravity: Track,
@@ -216,18 +252,150 @@ struct Particle {
     texture: Option<usize>,
     shape: Shape,
     blend: Blend,
+    shading: std::sync::Arc<Shading>,
+}
+
+/// The keys and textures a particle's own texture sets and depth handling resolve to. Everything a
+/// drawing package would read off an `.mtrl` an effect states here, and apricot declares no material
+/// keys at all, so all of it lands in the scene group.
+fn shading(block: &Block, lights: Option<Vec<(u32, u32)>>, sprite: bool) -> Shading {
+    let blocks = block.blocks();
+    let mut keys = Vec::new();
+    let mut textures = Vec::new();
+    let mut key = |name: &str, value: String| {
+        keys.push((program::id(name), program::id(&value)));
+    };
+
+    let sets = integer(blocks, "UvSN").unwrap_or_default().clamp(0, 4);
+    key("UvSetCount_Table", format!("UvSetCount_{sets}"));
+    key(
+        "DepthOffsetType_Table",
+        match integer(blocks, "DOTy") == Some(1) {
+            true => "DepthOffsetType_FixedIntervalNDC",
+            false => "DepthOffsetType_Legacy",
+        }
+        .to_owned(),
+    );
+
+    for (at, (tag, role)) in SETS.iter().zip(ROLES).enumerate() {
+        let inner = nested(blocks, tag);
+        let held = index(inner, "TxNo").or_else(|| index(inner, "TLst"));
+        let name = match at {
+            0..=3 => format!("TextureColor{}", at + 1),
+            4 => "TextureNormal".to_owned(),
+            5 => "TextureDistortion".to_owned(),
+            6 => "TexturePalette".to_owned(),
+            _ => "TextureReflection".to_owned(),
+        };
+        let on = find(inner, "bEna").and_then(Block::bool) == Some(true) && held.is_some();
+        key(
+            &format!("{name}_Table"),
+            format!("{name}_{}", if on { "Enable" } else { "Disable" }),
+        );
+        if !on {
+            continue;
+        }
+        let uv = integer(inner, "UvSN").unwrap_or_default().clamp(0, 3);
+        // The palette is a lookup rather than a surface, so it has no uv set of its own.
+        if at != 6 {
+            key(&format!("{name}_UvNo_Table"), format!("{name}_Uv_{uv}"));
+        }
+        if at <= 3 {
+            key(
+                &format!("{name}_ColorToAlpha_Table"),
+                format!(
+                    "{name}_ColorToAlpha_{}",
+                    match find(inner, "bC2A").and_then(Block::bool) == Some(true) {
+                        true => "On",
+                        false => "Off",
+                    }
+                ),
+            );
+        }
+        // The first color set is what the others are combined into, so it has no arithmetic.
+        let combine = |table: &[&str], tag: &str| {
+            let held = integer(inner, tag).unwrap_or_default();
+            table
+                .get(usize::try_from(held).unwrap_or(0))
+                .copied()
+                .unwrap_or(table[0])
+                .to_owned()
+        };
+        if (1..=3).contains(&at) || at == 7 {
+            key(
+                &format!("{name}_CalculateColor_Table"),
+                format!(
+                    "{name}_CalculateColor_{}",
+                    combine(&CALCULATE_COLOR, "TCCT")
+                ),
+            );
+        }
+        if (1..=3).contains(&at) {
+            key(
+                &format!("{name}_CalculateAlpha_Table"),
+                format!(
+                    "{name}_CalculateAlpha_{}",
+                    combine(&CALCULATE_ALPHA, "TCAT")
+                ),
+            );
+        }
+        if at == 5 {
+            for set in 0..UV_SETS {
+                let on = find(inner, &format!("bT{}", set + 1)).and_then(Block::bool) == Some(true);
+                key(
+                    &format!("TextureDistortion_UvSet{set}_Table"),
+                    format!(
+                        "TextureDistortion_UvSet_{}",
+                        if on { "Enable" } else { "Disable" }
+                    ),
+                );
+            }
+        }
+        let wrap = |tag: &str| {
+            let held = integer(inner, tag).unwrap_or_default();
+            WRAPS
+                .get(usize::try_from(held).unwrap_or(0))
+                .copied()
+                .unwrap_or(glow::REPEAT)
+        };
+        let filter = match integer(inner, "TFT").unwrap_or(1) > 0 {
+            true => glow::LINEAR,
+            false => glow::NEAREST,
+        };
+        textures.push((
+            program::id(role),
+            held.unwrap_or_default(),
+            filter,
+            [wrap("TBUT"), wrap("TBVT")],
+        ));
+    }
+    keys.extend(lights.into_iter().flatten());
+    Shading {
+        keys,
+        textures,
+        sprite,
+    }
 }
 
 impl Particle {
-    fn read(block: &Block, models: usize) -> Self {
+    fn read(block: &Block, models: usize, lights: &[(u32, u32)]) -> Self {
         let blocks = block.blocks();
         let data = nested(blocks, "Data");
         let model = |name| match index(data, name) {
             Some(model) if model < models => Shape::Model(model),
             _ => Shape::Sprite,
         };
+        // The kinds that draw geometry name it under a tag of their own.
+        let shape = match integer(blocks, "PrVT").unwrap_or_default() {
+            5 | 14 => model("MdNo"),
+            13 => model("MNO"),
+            _ => Shape::Sprite,
+        };
+        let sprite = shape == Shape::Sprite;
         Self {
             life: life(blocks),
+            shading: std::sync::Arc::new(shading(block, (!sprite).then(|| lights.to_vec()), sprite)),
+            shape,
             gravity: Track::read(blocks, "Gra", 0.0),
             drag: Track::read(blocks, "ARs", 0.0),
             position: Axes::read(blocks, "Pos", 0.0),
@@ -236,15 +404,37 @@ impl Particle {
             spin: triple(blocks, ["VRX", "VRY", "VRZ"], 0.0),
             color: Tint::read(blocks, "Col"),
             texture: index(nested(blocks, "TC1"), "TLst"),
-            // The kinds that draw geometry name it under a tag of their own.
-            shape: match integer(blocks, "PrVT").unwrap_or_default() {
-                5 | 14 => model("MdNo"),
-                13 => model("MNO"),
-                _ => Shape::Sprite,
-            },
             blend: integer(blocks, "RMT").unwrap_or_default().into(),
         }
     }
+}
+
+/// The light keys an effect's own settings resolve to. Where a file names no light the package
+/// defaults answer, and those draw an effect unlit.
+fn lights(file: &Avfx) -> Vec<(u32, u32)> {
+    let mut out = Vec::new();
+    let mut key = |name: &str, value: &str| out.push((program::id(name), program::id(value)));
+    if !matches!(
+        file.directional_light_source(),
+        None | Some(DirectionalLightSource::None)
+    ) {
+        key("DirectionalLight_Table", "DirectionalLight_Enable");
+    }
+    let held = file
+        .point_light_sources()
+        .iter()
+        .filter(|source| !matches!(source, None | Some(ironworks::file::avfx::PointLightSource::None)))
+        .count();
+    if held > 0 {
+        key(
+            "PointLightCount_Table",
+            match held {
+                1 => "PointLightCount_1_0",
+                _ => "PointLightCount_1_1",
+            },
+        );
+    }
+    out
 }
 
 /// One entry of an emitter's particle or emitter list.
@@ -381,13 +571,17 @@ fn runs(file: &Avfx) -> Vec<Run> {
     runs
 }
 
-/// A model vertex as the shader reads it.
+/// A model vertex as the game's own shaders read it: four uv sets, and a normal and tangent the
+/// shader takes the bias off itself, which is why they go up as the bytes the file holds rather than
+/// as the signed values ironworks reads them into.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
-    pub position: [f32; 3],
-    pub uv: [f32; 2],
+    pub position: [f32; 4],
+    pub normal: [u8; 4],
+    pub tangent: [u8; 4],
     pub color: [u8; 4],
+    pub uv: [f32; 8],
 }
 
 pub struct Mesh {
@@ -396,18 +590,17 @@ pub struct Mesh {
 }
 
 fn mesh(model: &Geometry) -> Mesh {
+    let biased = |held: [i8; 4]| held.map(|lane| (lane as u8).wrapping_add(128));
     Mesh {
         vertices: model
             .vertices()
             .iter()
             .map(|vertex| Vertex {
-                position: [
-                    vertex.position()[0],
-                    vertex.position()[1],
-                    vertex.position()[2],
-                ],
-                uv: vertex.uv()[0],
+                position: vertex.position(),
+                normal: biased(vertex.normal()),
+                tangent: biased(vertex.tangent()),
                 color: vertex.colour(),
+                uv: std::array::from_fn(|lane| vertex.uv()[lane / 2][lane % 2]),
             })
             .collect(),
         indices: model
@@ -468,6 +661,8 @@ pub struct Drawn {
     pub texture: Option<usize>,
     pub shape: Shape,
     pub blend: Blend,
+    /// Which of the effect's particles this is one of, which is what its shading is read off.
+    pub def: usize,
 }
 
 pub struct Effect {
@@ -483,10 +678,11 @@ pub struct Effect {
 
 impl Effect {
     pub fn read(file: &Avfx) -> Self {
+        let lights = lights(file);
         let particles: Vec<Particle> = file
             .particles()
             .iter()
-            .map(|particle| Particle::read(particle, file.models().len()))
+            .map(|particle| Particle::read(particle, file.models().len(), &lights))
             .collect();
         let emitters = file
             .emitters()
@@ -652,9 +848,15 @@ impl Effect {
                     texture: def.texture,
                     shape: def.shape,
                     blend: def.blend,
+                    def: live.def,
                 }
             })
             .collect()
+    }
+
+    /// What the shader package a particle is drawn with is asked for.
+    pub fn shading(&self, def: usize) -> Option<std::sync::Arc<Shading>> {
+        self.particles.get(def).map(|held| held.shading.clone())
     }
 
     /// A sphere the whole run fits inside, for the camera to open on.

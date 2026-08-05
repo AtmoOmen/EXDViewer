@@ -529,11 +529,14 @@ fn build_pair(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::
 /// The corners of one sprite, in the world: the quad the viewer bills against the camera, at the
 /// particle's own place and turn, with its color and uv sets written as the fixed point the shader
 /// reads them back through.
+///
+/// The sprite packages put no transform on a texture coordinate, so each set arrives transformed.
 pub fn quad(
     center: glam::Vec3,
     right: glam::Vec3,
     up: glam::Vec3,
     color: [f32; 4],
+    uv: &[[f32; 4]; program::UV_SETS * program::UV_REGISTERS],
     into: &mut Vec<Sprite>,
 ) {
     let fixed = |value: f32| (value * program::FIXED).clamp(-32767.0, 32767.0) as i16;
@@ -543,17 +546,27 @@ pub fn quad(
         fixed(color[2]),
         fixed(color[3]),
     ];
-    let corner = |x: f32, y: f32, u: f32, v: f32| Sprite {
-        position: [
-            center.x + right.x * x + up.x * y,
-            center.y + right.y * x + up.y * y,
-            center.z + right.z * x + up.z * y,
-            0.0,
-        ],
-        color: tint,
-        uv01: [fixed(u), fixed(v), fixed(u), fixed(v)],
-        uv23: [fixed(u), fixed(v), fixed(u), fixed(v)],
-        extra: [0.0; 4],
+    let corner = |x: f32, y: f32, u: f32, v: f32| {
+        let set = |at: usize| {
+            let rows = &uv[at * program::UV_REGISTERS..];
+            [
+                fixed(rows[0][0] * u + rows[0][1] * v + rows[0][3]),
+                fixed(rows[1][0] * u + rows[1][1] * v + rows[1][3]),
+            ]
+        };
+        let (first, second, third, fourth) = (set(0), set(1), set(2), set(3));
+        Sprite {
+            position: [
+                center.x + right.x * x + up.x * y,
+                center.y + right.y * x + up.y * y,
+                center.z + right.z * x + up.z * y,
+                0.0,
+            ],
+            color: tint,
+            uv01: [first[0], first[1], second[0], second[1]],
+            uv23: [third[0], third[1], fourth[0], fourth[1]],
+            extra: [0.0; 4],
+        }
     };
     let corners = [
         corner(-0.5, -0.5, 0.0, 1.0),
@@ -564,4 +577,27 @@ pub fn quad(
     into.extend([
         corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
     ]);
+}
+
+#[cfg(test)]
+mod test {
+    use super::{program, quad};
+
+    #[test]
+    fn a_uv_set_reaches_the_corners_it_is_written_into() {
+        let mut uv = program::UV_IDENTITY;
+        uv[0] = [2.0, 0.0, 0.0, -0.5];
+        uv[1] = [0.0, 2.0, 0.0, -0.5];
+        let mut into = Vec::new();
+        quad(
+            glam::Vec3::ZERO,
+            glam::Vec3::X,
+            glam::Vec3::Y,
+            [1.0; 4],
+            &uv,
+            &mut into,
+        );
+        // The first corner takes the bottom left, which the second set leaves where it was.
+        assert_eq!(into[0].uv01, [-500, 1500, 0, 1000]);
+    }
 }

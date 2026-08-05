@@ -134,7 +134,6 @@ pub struct Rendered {
     playing: Cell<bool>,
     camera: Cell<Camera>,
     home: Camera,
-    reach: f32,
     textures: RefCell<HashMap<String, Texture>>,
     resident: Cell<usize>,
     /// The apricot packages the effect is drawn with, and what the draw callback last saw of them.
@@ -663,7 +662,6 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         playing: Cell::new(true),
         camera: Cell::new(home),
         home,
-        reach,
         textures: RefCell::default(),
         resident: Cell::new(0),
         packages: RefCell::default(),
@@ -1014,10 +1012,15 @@ impl Rendered {
 
         let eye = camera.eye();
         let view = Mat4::look_at_rh(eye, camera.target, Vec3::Y);
-        let span = (eye - self.home.target).length();
-        let near = (span - self.reach).max(self.reach * 0.005);
-        let projection =
-            Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, span + self.reach);
+        // Nothing here depth tests, so the planes do nothing but clip. A slab fitted to the effect's
+        // own reach cuts the corners off the very bounds it was taken from, and loses whatever a
+        // particle does past the frames the fit ran over.
+        let projection = Mat4::perspective_rh_gl(
+            FOV,
+            rect.width() / rect.height(),
+            camera.distance * 0.005,
+            camera.distance * 200.0,
+        );
 
         // A sprite is set into the screen's plane, which is what the camera's own axes are for. The
         // shape package reads a stream already placed in the world, so the billboard happens here.
@@ -1030,7 +1033,7 @@ impl Rendered {
                 light: (eye - camera.target).normalize_or(Vec3::Y),
                 ..program::Scene::default()
             },
-            batches: self.batches(view, axes.x_axis, axes.y_axis),
+            batches: self.batches(view, eye, axes.x_axis, axes.y_axis),
             packages: self.resolved.borrow().clone(),
         };
 
@@ -1050,7 +1053,7 @@ impl Rendered {
 
     /// The live particles, gathered into one draw apiece per particle definition and blend, furthest
     /// group first. Blending reads what is already there, so the order is part of the picture.
-    fn batches(&self, view: Mat4, right: Vec3, up: Vec3) -> Vec<gpu::Batch> {
+    fn batches(&self, view: Mat4, eye: Vec3, right: Vec3, up: Vec3) -> Vec<gpu::Batch> {
         let textures = self.textures.borrow();
         let bound: Vec<Option<egui::TextureId>> = self
             .effect
@@ -1083,11 +1086,13 @@ impl Rendered {
                     match shape {
                         sim::Shape::Sprite => {
                             let scale = Vec3::from(drawn.scale);
+                            let (across, down) = facing(drawn, eye, right, up);
                             gpu::quad(
                                 Vec3::from(drawn.center),
-                                right * scale.x,
-                                up * scale.y,
+                                across * scale.x,
+                                down * scale.y,
                                 drawn.color,
+                                &drawn.uv,
                                 &mut vertices,
                             );
                         }
@@ -1099,6 +1104,7 @@ impl Rendered {
                                     Vec3::from(drawn.center),
                                 ),
                                 color: Vec4::from(drawn.color),
+                                uv: drawn.uv,
                                 ..program::Instance::default()
                             });
                         }
@@ -1183,6 +1189,34 @@ impl Rendered {
                 facts(ui, "avfx_settings", &self.settings);
             }
         });
+    }
+}
+
+/// The two world axes one sprite's quad spans, in the frame its file asks for. The shape package
+/// reads a stream the viewer has already placed in the world, so which way a particle is turned is
+/// settled here rather than in the shader.
+fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) {
+    // A quad in the screen's plane can carry only the turn about its own normal, and the file writes
+    // that one as the last of its Euler angles.
+    let spun = |across: Vec3, down: Vec3| {
+        let (sin, cos) = drawn.roll.sin_cos();
+        (across * cos + down * sin, down * cos - across * sin)
+    };
+    match drawn.facing {
+        sim::Facing::Camera => {
+            let away = (eye - Vec3::from(drawn.center)).normalize_or(-Vec3::Z);
+            let across = up.cross(away).normalize_or(right);
+            spun(across, away.cross(across))
+        }
+        // Standing upright is the whole of what this one asks for, so it takes no turn: a roll would
+        // lean the quad off the axis it is billed about.
+        sim::Facing::Upright => {
+            let across = Vec3::Y
+                .cross(eye - Vec3::from(drawn.center))
+                .normalize_or(right);
+            (across, Vec3::Y)
+        }
+        sim::Facing::Screen => spun(right, up),
     }
 }
 
@@ -1675,6 +1709,50 @@ mod tests {
         )
         .effect;
         assert_eq!(at(effect, 0)[0].shape, sim::Shape::Sprite);
+    }
+
+    /// An axis the file ties to another is written no curve of its own.
+    #[test]
+    fn a_tied_axis_takes_the_curve_of_the_one_it_follows() {
+        let width = curve("X", 0, 0, &scalars(&[(0, 1, 3.0)]));
+        let tied = nest("Scl", &[block("ACT", &integer(1)), width.clone()]);
+        let effect = &playing(&[life(-1.0), tied], (0, 0)).effect;
+        assert_eq!(at(effect, 0)[0].scale, [3.0; 3]);
+
+        let apart = nest("Scl", &[width]);
+        let effect = &playing(&[life(-1.0), apart], (0, 0)).effect;
+        assert_eq!(at(effect, 0)[0].scale, [3.0, 1.0, 1.0]);
+    }
+
+    /// The sprite packages put no transform on a texture coordinate, so what a uv set does has to
+    /// arrive with the coordinate.
+    #[test]
+    fn a_uv_set_scales_and_scrolls_about_the_texture_middle() {
+        let axes = |tag: &str, values: [f32; 2]| {
+            nest(
+                tag,
+                &["X", "Y"]
+                    .iter()
+                    .zip(values)
+                    .map(|(axis, value)| curve(axis, 0, 0, &scalars(&[(0, 1, value)])))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let set = nest("UvSt", &[axes("Scl", [2.0, 2.0]), axes("Scr", [0.25, 0.0])]);
+        let effect = &playing(&[life(-1.0), set], (0, 0)).effect;
+        let uv = at(effect, 0)[0].uv;
+        assert_eq!(uv[0], [2.0, 0.0, 0.0, -0.25]);
+        assert_eq!(uv[1], [0.0, 2.0, 0.0, -0.5]);
+        assert_eq!(uv[2], [1.0, 0.0, 0.0, 0.0]);
+    }
+
+    /// A quad billed against the camera can carry the turn about its own normal, and that is the one
+    /// the file writes as `Rot/Z`.
+    #[test]
+    fn a_sprite_carries_the_turn_the_billboard_can_hold() {
+        let turn = nest("Rot", &[curve("Z", 0, 0, &scalars(&[(0, 1, 1.5)]))]);
+        let effect = &playing(&[life(-1.0), turn], (0, 0)).effect;
+        assert_eq!(at(effect, 0)[0].roll, 1.5);
     }
 
     #[test]

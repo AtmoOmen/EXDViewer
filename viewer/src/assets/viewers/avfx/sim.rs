@@ -15,7 +15,7 @@ use ironworks::file::avfx::{Avfx, Block, DirectionalLightSource, Item, Model as 
 
 use super::curve::{self, Curve};
 use super::find;
-use super::program::{self, UV_SETS};
+use super::program::{self, UV_REGISTERS, UV_SETS};
 
 /// Live particles and running emitters one effect may hold. Both counts come off the file unchecked
 /// and this ships to a browser, where an effect asking for millions takes the tab with it.
@@ -100,17 +100,113 @@ fn read(tracks: &[Track; 3], frame: f32) -> Vec3 {
     Vec3::from(tracks.each_ref().map(|track| track.at(frame)))
 }
 
+/// Which curve each axis reads, `ACT`. An axis tied to another is written no curve of its own, so
+/// leaving it at the idle value is what makes a sprite whose file animates only its width come out
+/// a fixed height.
+fn tied<const N: usize>(blocks: &[Block]) -> [usize; N] {
+    let mut out = std::array::from_fn(|axis| axis);
+    let (from, onto): (usize, &[usize]) = match (N, integer(blocks, "ACT").unwrap_or_default()) {
+        (2, 1) => (0, &[1]),
+        (2, 2) => (1, &[0]),
+        (_, 1) => (0, &[1, 2]),
+        (_, 2) => (0, &[1]),
+        (_, 3) => (0, &[2]),
+        (_, 4) => (1, &[0, 2]),
+        (_, 5) => (1, &[0]),
+        (_, 6) => (1, &[2]),
+        (_, 7) => (2, &[0, 1]),
+        (_, 8) => (2, &[0]),
+        (_, 9) => (2, &[1]),
+        _ => return out,
+    };
+    for &axis in onto.iter().filter(|&&axis| axis < N) {
+        out[axis] = from;
+    }
+    out
+}
+
 /// A value the file writes one curve an axis for, under a container of its own.
-struct Axes([Track; 3]);
+struct Axes {
+    tracks: [Track; 3],
+    tied: [usize; 3],
+}
 
 impl Axes {
     fn read(blocks: &[Block], name: &str, idle: f32) -> Self {
-        Self(triple(nested(blocks, name), ["X", "Y", "Z"], idle))
+        let inner = nested(blocks, name);
+        Self {
+            tracks: triple(inner, ["X", "Y", "Z"], idle),
+            tied: tied(inner),
+        }
     }
 
     fn at(&self, frame: f32) -> Vec3 {
-        read(&self.0, frame)
+        Vec3::from(self.tied.map(|axis| self.tracks[axis].at(frame)))
     }
+}
+
+/// The same over two axes, which is how a uv set writes its scale and its scroll.
+struct Pair {
+    tracks: [Track; 2],
+    tied: [usize; 2],
+}
+
+impl Pair {
+    fn read(blocks: &[Block], name: &str, idle: f32) -> Self {
+        let inner = nested(blocks, name);
+        Self {
+            tracks: ["X", "Y"].map(|axis| Track::read(inner, axis, idle)),
+            tied: tied(inner),
+        }
+    }
+
+    fn at(&self, frame: f32) -> [f32; 2] {
+        self.tied.map(|axis| self.tracks[axis].at(frame))
+    }
+}
+
+/// One of the up to four uv sets a particle carries, `UvSt`. The sprite packages read a coordinate
+/// the viewer has already transformed and the model packages read the transform itself, so both take
+/// the same two rows: `uv' = dot(vec3(uv, 1), row.xyw)`.
+struct UvSet {
+    scale: Pair,
+    scroll: Pair,
+    turn: Track,
+}
+
+impl UvSet {
+    fn read(block: &Block) -> Self {
+        let blocks = block.blocks();
+        Self {
+            scale: Pair::read(blocks, "Scl", 1.0),
+            scroll: Pair::read(blocks, "Scr", 0.0),
+            turn: Track::read(blocks, "Rot", 0.0),
+        }
+    }
+
+    fn at(&self, frame: f32) -> [[f32; 4]; UV_REGISTERS] {
+        let [width, height] = self.scale.at(frame);
+        let [across, down] = self.scroll.at(frame);
+        let (sin, cos) = self.turn.at(frame).sin_cos();
+        let (a, b) = (cos * width, -sin * height);
+        let (c, d) = (sin * width, cos * height);
+        // The turn and the scale are about the texture's own middle, so a set that only spins keeps
+        // what it was showing.
+        [
+            [a, b, 0.0, 0.5 - (a + b) * 0.5 + across],
+            [c, d, 0.0, 0.5 - (c + d) * 0.5 + down],
+        ]
+    }
+}
+
+/// Every set a particle carries, as the registers a draw hands over.
+fn transform(sets: &[UvSet], frame: f32) -> [[f32; 4]; UV_SETS * UV_REGISTERS] {
+    let mut out = program::UV_IDENTITY;
+    for (set, held) in sets.iter().take(UV_SETS).enumerate() {
+        let rows = held.at(frame);
+        out[set * UV_REGISTERS..][..UV_REGISTERS].copy_from_slice(&rows);
+    }
+    out
 }
 
 /// A color: three channels in one curve, with an alpha, a brightness and a per-channel scale
@@ -196,6 +292,29 @@ impl From<i32> for Blend {
     }
 }
 
+/// Which way a sprite is turned to be drawn, `RBDT`. The three the file names after a world axis and
+/// the two that read a velocity are drawn against the screen, since what a quad lies in for those is
+/// not settled: a kind that wants an axis of its own names one under its own tag.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Facing {
+    /// Set into the screen's own plane.
+    Screen,
+    /// Turned to look at the eye.
+    Camera,
+    /// Billed about the world's up axis, so it turns with the camera but never leans.
+    Upright,
+}
+
+impl From<i32> for Facing {
+    fn from(value: i32) -> Self {
+        match value {
+            4 | 8 | 9 => Self::Upright,
+            6 => Self::Camera,
+            _ => Self::Screen,
+        }
+    }
+}
+
 /// What a particle draws as.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Shape {
@@ -252,8 +371,10 @@ struct Particle {
     scale: Axes,
     spin: [Track; 3],
     color: Tint,
+    uv: Vec<UvSet>,
     texture: Option<usize>,
     shape: Shape,
+    facing: Facing,
     blend: Blend,
     shading: std::sync::Arc<Shading>,
 }
@@ -410,7 +531,14 @@ impl Particle {
             scale: Axes::read(blocks, "Scl", 1.0),
             spin: triple(blocks, ["VRX", "VRY", "VRZ"], 0.0),
             color: Tint::read(blocks, "Col"),
+            uv: blocks
+                .iter()
+                .filter(|block| block.name() == "UvSt")
+                .take(UV_SETS)
+                .map(UvSet::read)
+                .collect(),
             texture: index(nested(blocks, "TC1"), "TLst"),
+            facing: integer(blocks, "RBDT").unwrap_or_default().into(),
             blend: integer(blocks, "RMT").unwrap_or_default().into(),
         }
     }
@@ -669,9 +797,15 @@ pub struct Drawn {
     pub center: [f32; 3],
     pub scale: [f32; 3],
     pub turn: [f32; 4],
+    /// How far the sprite is spun in the plane it is billed onto, which is the one part of its turn
+    /// a quad facing the camera can carry.
+    pub roll: f32,
     pub color: [f32; 4],
+    /// What each uv set does to a texture coordinate, two registers a set.
+    pub uv: [[f32; 4]; UV_SETS * UV_REGISTERS],
     pub texture: Option<usize>,
     pub shape: Shape,
+    pub facing: Facing,
     pub blend: Blend,
     /// Which of the effect's particles this is one of, which is what its shading is read off.
     pub def: usize,
@@ -847,18 +981,22 @@ impl Effect {
             .map(|live| {
                 let def = &self.particles[live.def];
                 let age = (state.frame - live.born) as f32;
+                let angles = def.rotation.at(age) + read(&def.spin, age) * age;
                 let place = live.place.under(Place {
                     origin: live.at + def.position.at(age),
-                    turn: rotation(def.rotation.at(age) + read(&def.spin, age) * age),
+                    turn: rotation(angles),
                     scale: def.scale.at(age),
                 });
                 Drawn {
                     center: place.origin.to_array(),
                     scale: place.scale.to_array(),
                     turn: place.turn.to_array(),
+                    roll: angles.z,
                     color: (live.tint * def.color.at(age)).to_array(),
+                    uv: transform(&def.uv, age),
                     texture: def.texture,
                     shape: def.shape,
+                    facing: def.facing,
                     blend: def.blend,
                     def: live.def,
                 }
@@ -872,8 +1010,9 @@ impl Effect {
     }
 
     /// A sphere the whole run fits inside, for the camera to open on. A scale is not an extent: a
-    /// sprite is drawn one scale wide about its own center, and a model is drawn its own geometry
-    /// wide, so taking the scale for either stands the camera off by several times too far.
+    /// sprite is drawn one scale wide about its own center and only across the two axes it is billed
+    /// onto, and a model is drawn its own geometry wide, so taking the scale for either stands the
+    /// camera off by several times too far.
     pub fn fit(&self) -> (Vec3, f32) {
         let models: Vec<f32> = self
             .models
@@ -895,10 +1034,12 @@ impl Effect {
                 let age = (state.frame - live.born) as f32;
                 let at = live.place.origin
                     + live.place.turn * ((live.at + def.position.at(age)) * live.place.scale);
-                let scale = (def.scale.at(age) * live.place.scale).abs().max_element();
+                let scale = (def.scale.at(age) * live.place.scale).abs();
                 let reach = match def.shape {
-                    Shape::Sprite => scale * 0.5,
-                    Shape::Model(index) => scale * models.get(index).copied().unwrap_or(0.5),
+                    Shape::Sprite => scale.x.max(scale.y) * 0.5,
+                    Shape::Model(index) => {
+                        scale.max_element() * models.get(index).copied().unwrap_or(0.5)
+                    }
                 }
                 .max(0.05);
                 low = low.min(at - reach);

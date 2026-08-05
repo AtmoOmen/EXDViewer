@@ -87,8 +87,6 @@ pub struct Particles {
     programs: BTreeMap<usize, Linked>,
     /// The uniform blocks a draw binds, one per buffer the shader names.
     blocks: Vec<glow::Buffer>,
-    /// The second target, which is written and dropped.
-    spare: Option<(glow::Texture, (i32, i32))>,
     /// Why a shader would not build, kept so the viewer can say so rather than draw nothing.
     failure: Option<String>,
 }
@@ -102,7 +100,6 @@ impl Particles {
             capacity: 0,
             programs: BTreeMap::new(),
             blocks: Vec::new(),
-            spare: None,
             failure: None,
         }))
     }
@@ -134,13 +131,9 @@ impl Particles {
         painter: &egui_glow::Painter,
         frame: &Frame,
     ) -> Result<(), String> {
-        // Both packages write a second target nothing downstream reads. A shader declaring a
-        // location the framebuffer has no attachment for still runs, but what it writes is lost, and
-        // a context with one draw buffer would drop the color with it.
-        let size = (frame.scene.size.0 as i32, frame.scene.size.1 as i32);
-        let held = unsafe { gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING) };
-        self.attach(gl, size, held)?;
-
+        // Both packages write a second target: a depth of field coefficient and a weight, neither of
+        // which anything downstream of a viewer reads. What egui hands the callback may be
+        // multisampled, so nothing is attached to it and the write goes nowhere.
         unsafe {
             gl.disable(glow::DEPTH_TEST);
             gl.depth_mask(false);
@@ -165,7 +158,6 @@ impl Particles {
         }
 
         unsafe {
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, held);
             gl.bind_vertex_array(None);
             gl.bind_buffer(glow::ARRAY_BUFFER, None);
             gl.blend_equation(glow::FUNC_ADD);
@@ -379,46 +371,6 @@ impl Particles {
         Ok(())
     }
 
-    /// A framebuffer over what egui is drawing into and a spare the second target lands in. Nothing
-    /// here reads the spare; it exists so a shader writing two locations has two to write to.
-    fn attach(
-        &mut self,
-        gl: &glow::Context,
-        size: (i32, i32),
-        held: Option<glow::Framebuffer>,
-    ) -> Result<(), String> {
-        // egui draws straight into the default framebuffer, which cannot take a second attachment.
-        if held.is_none() {
-            return Ok(());
-        }
-        if self.spare.map(|(_, held)| held) != Some(size) {
-            if let Some((stale, _)) = self.spare.take() {
-                graveyard().lock().unwrap().push(Dead::Texture(stale));
-            }
-            unsafe {
-                let texture = gl.create_texture()?;
-                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                gl.tex_storage_2d(glow::TEXTURE_2D, 1, glow::RGBA8, size.0.max(1), size.1.max(1));
-                gl.bind_texture(glow::TEXTURE_2D, None);
-                self.spare = Some((texture, size));
-            }
-        }
-        let Some((spare, _)) = self.spare else {
-            return Ok(());
-        };
-        unsafe {
-            gl.framebuffer_texture_2d(
-                glow::DRAW_FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT1,
-                glow::TEXTURE_2D,
-                Some(spare),
-                0,
-            );
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
-        }
-        Ok(())
-    }
-
     fn upload_stream(&mut self, gl: &glow::Context, stream: &[Sprite]) -> Result<(), String> {
         unsafe {
             let (layout, buffer) = match self.stream {
@@ -471,7 +423,6 @@ impl Drop for Particles {
                         .flat_map(|(layout, buffer)| [Dead::Layout(layout), Dead::Buffer(buffer)]),
                 )
                 .chain(self.blocks.drain(..).map(Dead::Buffer))
-                .chain(self.spare.take().map(|(texture, _)| Dead::Texture(texture)))
                 .chain(
                     std::mem::take(&mut self.programs)
                         .into_values()
@@ -481,10 +432,13 @@ impl Drop for Particles {
     }
 }
 
-/// The pair a particle's own keys resolve to, falling back on the package's defaults where they
-/// reach no node: a key set the file states and the package does not carry is the file's own.
+/// The pair a particle's own keys resolve to. A package carries only the key combinations it was
+/// built with, so the lights the effect asks for are given up before the textures the particle names,
+/// and the package's own defaults are what is left.
 fn build(bytes: &[u8], shading: &Shading) -> Result<Program, String> {
-    Program::build(bytes, &shading.keys, shading.sprite)
+    let lit = [shading.keys.clone(), shading.lights.clone()].concat();
+    Program::build(bytes, &lit, shading.sprite)
+        .or_else(|_| Program::build(bytes, &shading.keys, shading.sprite))
         .or_else(|_| Program::build(bytes, &[], shading.sprite))
 }
 

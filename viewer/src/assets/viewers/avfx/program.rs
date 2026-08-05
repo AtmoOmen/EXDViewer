@@ -48,7 +48,7 @@ pub struct Attribute {
 
 pub struct Texture {
     pub name: String,
-    /// The package's own resource id, which is what a role is recognised by.
+    /// The package's own resource id, which is what a role is recognized by.
     pub id: u32,
 }
 
@@ -422,10 +422,10 @@ impl Buffer {
             .max(16);
         let mut out = vec![0u8; span.div_ceil(16) as usize * 16];
 
-        // A matrix reads as its rows, since a register of the buffer is a row and the machine takes
-        // a dot product against one.
-        let rows = |matrix: Mat4, count: usize| -> Vec<f32> {
-            matrix.transpose().to_cols_array()[..count * 4].to_vec()
+        // A matrix reads as its columns: apricot's vertex shaders scale each register by one lane of
+        // the position and add, where a drawing package dots the position against each register.
+        let columns = |matrix: Mat4, count: usize| -> Vec<f32> {
+            matrix.to_cols_array()[..count * 4].to_vec()
         };
         let view_projection = scene.projection * scene.view;
         let eye = scene.view.inverse().w_axis.truncate();
@@ -433,15 +433,15 @@ impl Buffer {
         // The buffers whose reflection names nothing are written by register.
         match self.name.as_str() {
             "g_VS_ViewProjectionMatrix" => {
-                write_rows(&mut out, 0, &rows(view_projection, 4));
+                write_rows(&mut out, 0, &columns(view_projection, 4));
                 return out;
             }
             "g_VS_ProjectionInverseMatrix" => {
-                write_rows(&mut out, 0, &rows(scene.projection.inverse(), 4));
+                write_rows(&mut out, 0, &columns(scene.projection.inverse(), 4));
                 return out;
             }
             "g_PS_ViewProjectionInverseMatrix" => {
-                write_rows(&mut out, 0, &rows(view_projection.inverse(), 4));
+                write_rows(&mut out, 0, &columns(view_projection.inverse(), 4));
                 return out;
             }
             // Two rows of an affine transform on each uv set, read as `dot(uv1, row.xyw)`.
@@ -473,7 +473,7 @@ impl Buffer {
             }
         };
 
-        put("WorldMatrix", rows(instance.transform, 4));
+        put("WorldMatrix", columns(instance.transform, 4));
         put(
             "Parameters",
             vec![instance.depth_offset, 0.0, 0.0, 0.0],

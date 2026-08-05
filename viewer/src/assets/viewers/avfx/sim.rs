@@ -233,6 +233,9 @@ const WRAPS: [u32; 3] = [glow::REPEAT, glow::CLAMP_TO_EDGE, glow::MIRRORED_REPEA
 /// of the effect's textures fills each role the package names.
 pub struct Shading {
     pub keys: Vec<(u32, u32)>,
+    /// The light keys, kept apart because they come off the effect's own settings rather than the
+    /// particle's, and a package that carries no such node should still draw the particle textured.
+    pub lights: Vec<(u32, u32)>,
     /// The package's own sampler id, the effect's texture behind it, and how it is sampled.
     pub textures: Vec<(u32, usize, u32, [u32; 2])>,
     /// Whether this is drawn from a stream the viewer places in the world rather than from one of
@@ -369,9 +372,9 @@ fn shading(block: &Block, lights: Option<Vec<(u32, u32)>>, sprite: bool) -> Shad
             [wrap("TBUT"), wrap("TBVT")],
         ));
     }
-    keys.extend(lights.into_iter().flatten());
     Shading {
         keys,
+        lights: lights.unwrap_or_default(),
         textures,
         sprite,
     }

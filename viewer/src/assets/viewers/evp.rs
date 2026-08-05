@@ -43,9 +43,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .sets()
         .iter()
         .filter_map(|set| {
-            let flags = file.flags(*set)?;
+            let positions = file.flags(*set)?;
             let mut values: Vec<(u8, usize)> = Vec::new();
-            for byte in flags {
+            for byte in positions {
                 match values.iter_mut().find(|(value, _)| value == byte) {
                     Some((_, count)) => *count += 1,
                     None => values.push((*byte, 1)),
@@ -53,7 +53,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
             }
             let summary = values
                 .iter()
-                .map(|(value, count)| format!("{count} {} ({value:#04x})", self::flags(*value)))
+                .map(|(value, count)| format!("{count} {} ({value:#04x})", flags(*value)))
                 .collect::<Vec<_>>()
                 .join(", ");
             Some((*set, summary))

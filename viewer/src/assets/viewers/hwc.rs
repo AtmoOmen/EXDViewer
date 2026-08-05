@@ -26,7 +26,7 @@ pub fn decode(
         .expect("the cursor is a whole image");
 
     let facts = vec![
-        ("Format", "BGRA, alpha first".to_owned()),
+        ("Format", "8 bits per channel, alpha first".to_owned()),
         ("Dimensions", format!("{} x {}", hwc::WIDTH, hwc::HEIGHT)),
         ("File size", Bytes(bytes.len()).to_string()),
     ];

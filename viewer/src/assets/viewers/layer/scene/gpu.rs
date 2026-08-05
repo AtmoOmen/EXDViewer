@@ -220,6 +220,8 @@ impl Renderer {
                 .filter_map(|shaded| shaded.buffer.first())
                 .find_map(|held| held.instancing());
             let Some((buffer, count)) = held else {
+                // A package that reads no instancing buffer is drawn one object at a time and
+                // takes no window of its own.
                 at.push((0, 0));
                 continue;
             };
@@ -318,7 +320,9 @@ impl Renderer {
                                 false => gl.disable(glow::CULL_FACE),
                             }
                         }
-                        self.buffers.bind(gl, program, held, &frame.scene, &[])?;
+                        if held.batch() > 1 {
+                            self.buffers.bind(gl, program, held, &frame.scene, &[])?;
+                        }
                         let mut unit = 0;
                         for texture in &held.textures {
                             let bound = match texture.id {
@@ -405,6 +409,27 @@ impl Renderer {
                                 );
                             }
                             gl.bind_vertex_array(None);
+                        }
+                        // A package that reads no instancing buffer draws one object at a time,
+                        // off the transform the scene carries.
+                        if held.batch() == 1 {
+                            for instance in &batch.instances {
+                                let scene = program::Scene {
+                                    model: instance.transform,
+                                    ..frame.scene
+                                };
+                                self.buffers.bind(gl, program, held, &scene, &[])?;
+                                unsafe {
+                                    gl.bind_vertex_array(Some(mesh.0));
+                                    gl.draw_elements(
+                                        glow::TRIANGLES,
+                                        mesh.2,
+                                        glow::UNSIGNED_SHORT,
+                                        0,
+                                    );
+                                    gl.bind_vertex_array(None);
+                                }
+                            }
                         }
                     }
                 }

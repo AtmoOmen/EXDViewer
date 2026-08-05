@@ -5,10 +5,8 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use egui::{RichText, ScrollArea, vec2};
-use ironworks::file::phyb::{
-    Chain, Collision, Name, Physics, Simulator,
-};
 use ironworks::file::File;
+use ironworks::file::phyb::{Chain, Collision, Name, Physics, Simulator};
 
 use super::{Preview, facts, headers, heading, section};
 use crate::assets::Bytes;
@@ -45,7 +43,12 @@ fn flags(simulator: &Simulator) -> String {
 }
 
 /// A striped table of strings, which every list here is.
-fn rows(ui: &mut egui::Ui, id: impl std::hash::Hash + std::fmt::Debug, names: &[&str], rows: &[Vec<String>]) {
+fn rows(
+    ui: &mut egui::Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    names: &[&str],
+    rows: &[Vec<String>],
+) {
     egui::Grid::new(id)
         .num_columns(names.len())
         .striped(true)
@@ -68,7 +71,11 @@ fn shapes(collision: &Collision) -> Vec<Vec<String>> {
             "capsule".to_owned(),
             named(shape.name()),
             format!("{}, {}", named(shape.start_bone()), named(shape.end_bone())),
-            format!("{} / {}", axes(shape.start_offset()), axes(shape.end_offset())),
+            format!(
+                "{} / {}",
+                axes(shape.start_offset()),
+                axes(shape.end_offset())
+            ),
             format!("radius {:.3}", shape.radius()),
         ]
     });
@@ -91,7 +98,11 @@ fn shapes(collision: &Collision) -> Vec<Vec<String>> {
             "plane".to_owned(),
             named(shape.name()),
             named(shape.bone()),
-            format!("{}, normal {}", axes(shape.bone_offset()), axes(shape.normal())),
+            format!(
+                "{}, normal {}",
+                axes(shape.bone_offset()),
+                axes(shape.normal())
+            ),
             format!("thickness {:.3}", shape.thickness()),
         ]
     });
@@ -257,7 +268,14 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
         rows(
             ui,
             ("phyb_connectors", index),
-            &["Chains", "Nodes", "Radius", "Friction", "Dampening", "Repulsion"],
+            &[
+                "Chains",
+                "Nodes",
+                "Radius",
+                "Friction",
+                "Dampening",
+                "Repulsion",
+            ],
             &simulator
                 .connectors()
                 .iter()

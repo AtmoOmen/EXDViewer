@@ -9,8 +9,8 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use egui::{RichText, ScrollArea};
-use ironworks::file::tmb::{Command, CommandKind, Item, Timeline};
 use ironworks::file::File;
+use ironworks::file::tmb::{Command, CommandKind, Item, Timeline};
 
 use super::{Preview, facts, link, section};
 use crate::utils::file_name;

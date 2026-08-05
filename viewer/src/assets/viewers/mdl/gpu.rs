@@ -1136,7 +1136,9 @@ impl Game {
             }
         }
 
-        if let Some(lighting) = &frame.lighting {
+        // Only where the lit frame is what is being shown: a raw channel is a page of the G-buffer
+        // and owes nothing to the passes past it.
+        if let Some(lighting) = frame.lighting.as_ref().filter(|_| frame.target >= TARGETS) {
             self.resolve(gl, lighting, &scene, size)?;
         }
 

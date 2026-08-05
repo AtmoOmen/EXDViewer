@@ -66,6 +66,12 @@ const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
 
+/// How far the placed light reaches, in radii of the model. A lamp is drawn as the box it covers
+/// and cut off at the sphere of its own reach, and both of those show as a hard edge where they
+/// cross what is drawn, so the box stands well outside it. The near and far planes have to hold the
+/// whole box: a face of it that the planes cut leaves a straight edge that moves with the camera.
+const LAMP_SPAN: f32 = 4.0;
+
 /// A vertex as the shader reads it. `#[repr(C)]` with no padding, so a mesh uploads as its own
 /// slice.
 ///
@@ -932,8 +938,10 @@ impl Rendered {
         // depth precision where it is actually drawn.
         let span = (eye - level.home.target).length();
         let near = (span - level.radius).max(level.radius * 0.005);
-        let projection =
-            Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, span + level.radius);
+        // Past the light box's own far corner rather than past the model, since the volume a lamp
+        // is drawn as is clipped by these planes whether or not anything depth tests against them.
+        let far = span + level.radius * (1.0 + LAMP_SPAN * 2.0);
+        let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
 
         // Fill and rim follow the camera; a fill weighted toward the eye is the whole of what keeps
         // a surface turned away from the key from reading as a silhouette. Both are built from the
@@ -1015,8 +1023,7 @@ impl Rendered {
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against. A projection built for GL
         // would go through that move a second time and lose the near half of the frame.
-        let held =
-            Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, span + level.radius);
+        let held = Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, far);
         let frame = gpu::Frame {
             view: view.to_cols_array(),
             projection: projection.to_cols_array(),
@@ -1030,8 +1037,8 @@ impl Rendered {
                     placement: Mat4::from_translation(
                         camera.target + Vec3::new(0.0, level.radius, level.radius),
                     ),
-                    min: Vec3::splat(-level.radius * 2.0),
-                    max: Vec3::splat(level.radius * 2.0),
+                    min: Vec3::splat(-level.radius * LAMP_SPAN),
+                    max: Vec3::splat(level.radius * LAMP_SPAN),
                     ..Default::default()
                 },
                 ..Default::default()

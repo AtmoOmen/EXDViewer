@@ -448,11 +448,12 @@ impl Game {
                 glow::HALF_FLOAT,
                 glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(values))),
             );
-            // Point sampled: the shader addresses texel centers and mixes the pair itself, so a
-            // filtered read would blend rows it never asked for.
+            // Filtered, because the shader addresses a row pair by landing between the two of them
+            // and leaves the mix to the sampler. Every other read it makes is of a texel center,
+            // which filtering answers exactly.
             for (name, value) in [
-                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
-                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
                 (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
                 (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
             ] {

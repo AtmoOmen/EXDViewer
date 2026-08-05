@@ -64,15 +64,18 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-At `b965b62` the full run reports six distinct problems. `--model-only` passes on the same
-build, so the harness is not stuck red.
+At `b965b62` the full run reports five distinct problems across 623 messages. `--model-only`
+passes on the same build, so the harness is not stuck red.
 
-- `glBlitFramebuffer: Invalid operation on multisampled framebuffer` in the model viewer, with
-  the matching `ERROR: [egui_glow] GL error ... (callback): GL_INVALID_OPERATION` beside it.
-- `glBlitFramebuffer: Blit feedback loop: the read and draw framebuffer are the same` in the
-  scene viewer, which is a different fault from the one above.
+- `glBlitFramebuffer: Invalid operation on multisampled framebuffer`, in the model viewer.
+- `ERROR: [egui_glow] GL error ... (callback): GL_INVALID_OPERATION`, which is egui reporting the
+  same faults from its side of the callback.
+- `glBlitFramebuffer: Blit feedback loop: the read and draw framebuffers are the same`, in the
+  scene viewer, which is a different fault from the first.
 - `glDrawArrays: Mismatch between texture format and sampler type`, once in each viewer.
-- `ERROR: [viewer::assets::viewers::layer::scene] scene/mod.rs:918`.
+- `ERROR: [viewer::assets::viewers::layer::scene] scene/mod.rs:918: this model draws nothing at
+  any detail level`, for 15 bgplate models. That one is an asset complaint rather than a GL
+  fault, and it fails the run only because the app logs it at `Error`.
 
 ## What it does not cover
 

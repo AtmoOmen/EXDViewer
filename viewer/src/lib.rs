@@ -34,6 +34,7 @@ mod goto;
 mod icons;
 mod music;
 mod pr_window;
+mod quests;
 mod router;
 mod schema;
 mod settings;

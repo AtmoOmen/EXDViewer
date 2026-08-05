@@ -24,6 +24,9 @@ const TERA_HEADER: usize = 52;
 /// The only `.tera` version the game ships. Earlier ones lay the header out differently.
 const TERA_VERSION: u32 = 0x0100_0003;
 
+/// A `.dic` header, which the character maps it counts follow immediately.
+const DIC_HEADER: usize = 0x8124;
+
 /// A format as its bytes identify it.
 #[derive(Clone, Copy)]
 pub enum Format {
@@ -98,6 +101,9 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if is_terrain(bytes) {
         return Some(Format::Shown(Viewer::Tera));
     }
+    if is_dictionary(bytes) {
+        return Some(Format::Shown(Viewer::Dic));
+    }
     is_text(bytes).then_some(Format::Shown(Viewer::Text))
 }
 
@@ -134,6 +140,23 @@ fn is_terrain(bytes: &[u8]) -> bool {
     let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
 
     word(0) == TERA_VERSION && word(20) <= 0b111 && header[24..].iter().all(|byte| *byte == 0)
+}
+
+/// A dictionary leads with a fixed header rather than a magic, so it is taken on two of its words
+/// agreeing: the count of character maps, and the offset of the first word list, which is where
+/// those maps end.
+fn is_dictionary(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..DIC_HEADER) else {
+        return false;
+    };
+    let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+
+    let maps = word(0x810c);
+    word(0) == 0
+        && word(4) == 0x3f
+        && word(8) == 1
+        && (1..=0x100).contains(&maps)
+        && word(0x8110) == DIC_HEADER as u32 + maps * 0x200
 }
 
 /// The text the game ships is ASCII, so a control byte that is not whitespace rules it out. Only the
@@ -249,6 +272,28 @@ mod tests {
         }
         // A header cut short is not a terrain file, however well the part that survived reads.
         assert!(label(&header[..TERA_HEADER - 1]) != Some("Terrain"));
+    }
+
+    /// The third guess with no magic behind it, and the one whose header is nearly all zeroes, so
+    /// what rejects a file matters more than what accepts one.
+    #[test]
+    fn reads_a_dictionary_header() {
+        let mut header = vec![0u8; DIC_HEADER];
+        header[4..8].copy_from_slice(&0x3fu32.to_le_bytes());
+        header[8..12].copy_from_slice(&1u32.to_le_bytes());
+        header[0x810c..0x8110].copy_from_slice(&3u32.to_le_bytes());
+        header[0x8110..0x8114].copy_from_slice(&0x8724u32.to_le_bytes());
+        assert_eq!(label(&header), Some("Word dictionary"));
+
+        for (at, word) in [(0, 1), (4, 0x40), (8, 0), (0x810c, 4), (0x8110, 0x8724 - 1)] {
+            let mut broken = header.clone();
+            broken[at..at + 4].copy_from_slice(&(word as u32).to_le_bytes());
+            assert!(
+                label(&broken) != Some("Word dictionary"),
+                "word {at} went unchecked"
+            );
+        }
+        assert!(label(&header[..DIC_HEADER - 1]) != Some("Word dictionary"));
     }
 
     #[test]

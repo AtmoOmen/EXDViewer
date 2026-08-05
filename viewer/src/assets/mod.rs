@@ -2023,6 +2023,7 @@ const EXTENSIONS: &[(&str, &str, Viewer)] = &[
     ("cmp", "Character make parameters", Viewer::Cmp),
     ("plt", "PAP load table", Viewer::Raw),
     ("spm", "Shader parameter map", Viewer::Spm),
+    ("dic", "Word dictionary", Viewer::Dic),
 ];
 
 /// `exd/item_0_en.exd` -> `Item`, `exd/content/foo_0_en.exd` -> `content/Foo`.

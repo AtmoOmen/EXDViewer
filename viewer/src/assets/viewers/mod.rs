@@ -13,6 +13,7 @@ pub mod atch;
 pub mod avfx;
 pub mod chara;
 pub mod cmp;
+pub mod dic;
 pub mod eid;
 pub mod est;
 pub mod exl;
@@ -339,6 +340,8 @@ pub enum Preview {
     GrassZone(Box<grass::Zone>),
     /// A parsed grass grid.
     GrassGrid(Box<grass::Grid>),
+    /// A parsed word dictionary.
+    Dic(Box<dic::Rendered>),
     /// Nothing to render; an empty message means the type simply has no viewer.
     Failed(String),
 }
@@ -391,6 +394,7 @@ impl Preview {
             Viewer::Cmp => cmp::decode(path, bytes),
             Viewer::Gzd => grass::zone(path, bytes),
             Viewer::Ggd => grass::grid(path, bytes),
+            Viewer::Dic => dic::decode(path, bytes),
             Viewer::Raw => return Self::Failed(String::new()),
         };
         result.unwrap_or_else(|e| Self::Failed(e.to_string()))
@@ -440,6 +444,7 @@ impl Preview {
             Self::Cmp(parameters) => cmp::ui(ui, parameters, deps, backend),
             Self::GrassZone(zone) => follow = grass::zone_ui(ui, zone, deps, backend),
             Self::GrassGrid(grid) => grass::grid_ui(ui, grid),
+            Self::Dic(dictionary) => dic::ui(ui, dictionary),
             Self::Stm(templates) => stm::ui(ui, templates, deps, backend),
             Self::Failed(e) if e.is_empty() => {
                 ui.centered_and_justified(|ui| {
@@ -533,7 +538,8 @@ impl Preview {
             | Self::Pcb(_)
             | Self::Cmp(_)
             | Self::GrassZone(_)
-            | Self::GrassGrid(_) => true,
+            | Self::GrassGrid(_)
+            | Self::Dic(_) => true,
             _ => false,
         }
     }
@@ -646,6 +652,10 @@ impl Preview {
         }
         if let Self::Cmp(parameters) = self {
             parameters.details_ui(ui, deps, backend);
+            return None;
+        }
+        if let Self::Dic(dictionary) = self {
+            dictionary.details_ui(ui);
             return None;
         }
         if let Self::GrassZone(zone) = self {
@@ -777,6 +787,7 @@ pub enum Viewer {
     Cmp,
     Gzd,
     Ggd,
+    Dic,
     Text,
     Raw,
 }
@@ -784,7 +795,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 36] = [
+    pub const RENDERED: [Self; 37] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -820,6 +831,7 @@ impl Viewer {
         Self::Cmp,
         Self::Gzd,
         Self::Ggd,
+        Self::Dic,
         Self::Text,
     ];
 
@@ -860,6 +872,7 @@ impl Viewer {
             Self::Cmp => "Character make",
             Self::Gzd => "Grass zone",
             Self::Ggd => "Grass grid",
+            Self::Dic => "Word dictionary",
             Self::Text => "Text",
             Self::Raw => "Bytes",
         }

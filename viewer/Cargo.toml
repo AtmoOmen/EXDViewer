@@ -47,6 +47,7 @@ ironworks = { version = "0.4.1", features = [
     "stm",
     "atch",
     "avfx",
+    "dic",
     "eid",
     "est",
     "skp",

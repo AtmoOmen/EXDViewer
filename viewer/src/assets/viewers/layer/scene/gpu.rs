@@ -17,7 +17,7 @@ use glow::HasContext;
 use super::super::super::mdl::deferred::{
     self, Buffers, Dead, LIT, Linked, TYPES, bury, graveyard, sampler,
 };
-use super::super::super::mdl::gpu::{FIELDS, Lighting, Shaded};
+use super::super::super::mdl::gpu::{Lighting, Shaded, attribute};
 use super::super::super::mdl::{Vertex, program};
 
 /// The color table, which the game's own shaders address as a texture of their own.
@@ -349,32 +349,8 @@ impl Renderer {
                             for location in 0..16 {
                                 gl.disable_vertex_attrib_array(location);
                             }
-                            for attribute in &held.attributes {
-                                let Some((_, lanes, at, kind)) = FIELDS
-                                    .iter()
-                                    .find(|(field, _, _, _)| *field == attribute.field)
-                                else {
-                                    continue;
-                                };
-                                gl.enable_vertex_attrib_array(attribute.location);
-                                let stride = size_of::<Vertex>() as i32;
-                                match attribute.integer {
-                                    true => gl.vertex_attrib_pointer_i32(
-                                        attribute.location,
-                                        *lanes,
-                                        *kind,
-                                        stride,
-                                        *at,
-                                    ),
-                                    false => gl.vertex_attrib_pointer_f32(
-                                        attribute.location,
-                                        *lanes,
-                                        *kind,
-                                        *kind == glow::UNSIGNED_BYTE,
-                                        stride,
-                                        *at,
-                                    ),
-                                }
+                            for held in &held.attributes {
+                                attribute(gl, held);
                             }
                             let count = held.batch() as i32;
                             for at in 0..*windows {

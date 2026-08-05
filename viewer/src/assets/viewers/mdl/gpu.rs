@@ -26,7 +26,7 @@ const COLOR_OFFSET: i32 = 88;
 
 /// Where each semantic a drawing package asks for sits in a [`Vertex`], and how wide it is. The
 /// bytes are read as integers where the shader's own signature declares them so.
-pub const FIELDS: [(program::Field, i32, i32, u32); 10] = [
+const FIELDS: [(program::Field, i32, i32, u32); 10] = [
     (program::Field::Position, 3, 0, glow::FLOAT),
     (program::Field::Normal, 3, 12, glow::FLOAT),
     (program::Field::Tangent, 4, 24, glow::FLOAT),
@@ -35,8 +35,8 @@ pub const FIELDS: [(program::Field, i32, i32, u32); 10] = [
     (program::Field::Uv1, 4, 72, glow::FLOAT),
     (program::Field::Color, 4, 88, glow::UNSIGNED_BYTE),
     (program::Field::Color1, 4, 92, glow::UNSIGNED_BYTE),
-    (program::Field::Weights, 4, 96, glow::UNSIGNED_BYTE),
-    (program::Field::Bones, 4, 100, glow::UNSIGNED_BYTE),
+    (program::Field::Weights, 4, 96, glow::UNSIGNED_SHORT),
+    (program::Field::Bones, 4, 104, glow::UNSIGNED_SHORT),
 ];
 
 /// The color table, which the game's own shaders address as a texture of their own.
@@ -169,6 +169,10 @@ struct Game {
     joints: Option<glow::Texture>,
     programs: BTreeMap<(usize, bool, usize), Linked>,
     tables: BTreeMap<usize, glow::Texture>,
+    /// The array these shaders bind their attributes into. An array holds the enable flags and the
+    /// pointers, and a mesh's own array holds the layout the preview path was uploaded with, so
+    /// laying a shader's own semantics over it would leave the preview reading the wrong fields.
+    layout: Option<glow::VertexArray>,
     failure: Option<String>,
 }
 
@@ -410,6 +414,15 @@ impl Game {
         Ok(held)
     }
 
+    fn layout(&mut self, gl: &glow::Context) -> Result<glow::VertexArray, String> {
+        if let Some(held) = self.layout {
+            return Ok(held);
+        }
+        let held = unsafe { gl.create_vertex_array()? };
+        self.layout = Some(held);
+        Ok(held)
+    }
+
     /// The material's color table, in the layout its own shaders address it in.
     fn table(
         &mut self,
@@ -486,6 +499,7 @@ impl Game {
         self.buffers.attach(gl, size)?;
         self.buffers.stand_ins(gl)?;
         let stand_in = self.buffers.stand_in(gl)?;
+        let layout = self.layout(gl)?;
         // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
         // has nothing else to turn a fragment into a texel with.
         let scene = program::Scene {
@@ -570,40 +584,14 @@ impl Game {
                             gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                         }
 
-                        gl.bind_vertex_array(Some(buffers.layout));
+                        gl.bind_vertex_array(Some(layout));
                         gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffers.vertices));
+                        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffers.indices));
                         for location in 0..16 {
                             gl.disable_vertex_attrib_array(location);
                         }
-                        for attribute in &held.attributes {
-                            let Some((_, lanes, offset, kind)) = FIELDS
-                                .iter()
-                                .find(|(field, _, _, _)| *field == attribute.field)
-                            else {
-                                continue;
-                            };
-                            gl.enable_vertex_attrib_array(attribute.location);
-                            let stride = size_of::<Vertex>() as i32;
-                            match attribute.integer {
-                                // A float pointer into an integer attribute is not a conversion, it
-                                // is a different value, and nothing between here and the shader
-                                // says so.
-                                true => gl.vertex_attrib_pointer_i32(
-                                    attribute.location,
-                                    *lanes,
-                                    *kind,
-                                    stride,
-                                    *offset,
-                                ),
-                                false => gl.vertex_attrib_pointer_f32(
-                                    attribute.location,
-                                    *lanes,
-                                    *kind,
-                                    *kind == glow::UNSIGNED_BYTE,
-                                    stride,
-                                    *offset,
-                                ),
-                            }
+                        for held in &held.attributes {
+                            attribute(gl, held);
                         }
                         for run in &surface.runs {
                             gl.draw_elements(
@@ -634,6 +622,7 @@ impl Drop for Game {
         let mut dead = graveyard().lock().unwrap();
         dead.extend(self.tables.values().copied().map(Dead::Texture));
         dead.extend(self.joints.take().map(Dead::Texture));
+        dead.extend(self.layout.take().map(Dead::Layout));
         dead.extend(
             std::mem::take(&mut self.programs)
                 .into_values()
@@ -661,6 +650,43 @@ impl Drop for Model {
                 )
                 .chain(self.program.take().map(Dead::Program)),
         );
+    }
+}
+
+/// Points one attribute at the field of a [`Vertex`] its semantic names. The mesh keeps its
+/// influences unsigned and a shader declares them either way, so the pointer's own type follows the
+/// signature: a draw is rejected outright where the two differ in class or in sign.
+pub fn attribute(gl: &glow::Context, held: &program::Attribute) {
+    let Some((_, lanes, offset, kind)) = FIELDS.iter().find(|(field, ..)| *field == held.field)
+    else {
+        return;
+    };
+    let stride = size_of::<Vertex>() as i32;
+    unsafe {
+        gl.enable_vertex_attrib_array(held.location);
+        match held.components {
+            program::Components::Float => gl.vertex_attrib_pointer_f32(
+                held.location,
+                *lanes,
+                *kind,
+                *kind == glow::UNSIGNED_BYTE,
+                stride,
+                *offset,
+            ),
+            program::Components::Unsigned => {
+                gl.vertex_attrib_pointer_i32(held.location, *lanes, *kind, stride, *offset)
+            }
+            program::Components::Signed => gl.vertex_attrib_pointer_i32(
+                held.location,
+                *lanes,
+                match *kind {
+                    glow::UNSIGNED_BYTE => glow::BYTE,
+                    _ => glow::SHORT,
+                },
+                stride,
+                *offset,
+            ),
+        }
     }
 }
 

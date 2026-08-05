@@ -77,7 +77,7 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"AMB\0", Format::Shown(Viewer::Amb)),
     (b" dgg", Format::Shown(Viewer::Ggd)),
     (b"dzg\0", Format::Shown(Viewer::Gzd)),
-    (b"pap ", Format::Named("Animation")),
+    (b"pap ", Format::Shown(Viewer::Pap)),
     (b"TMLB", Format::Shown(Viewer::Tmb)),
     (b"CUTB", Format::Named("Cutscene")),
     (b"XFVA", Format::Shown(Viewer::Avfx)),

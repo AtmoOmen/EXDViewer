@@ -23,6 +23,7 @@ pub mod layer;
 pub mod luab;
 pub mod material;
 pub mod mdl;
+pub mod pap;
 pub mod pbd;
 pub mod pcb;
 pub mod placed;
@@ -319,6 +320,8 @@ pub enum Preview {
     Stm(Box<stm::Rendered>),
     /// A parsed timeline.
     Tmb(Box<tmb::Rendered>),
+    /// A parsed animation pack.
+    Pap(Box<pap::Rendered>),
     /// A parsed layer group, from either of the two files that hold one.
     Layers(Box<layer::Rendered>),
     /// A parsed annotation of what a zone's layers placed.
@@ -375,6 +378,7 @@ impl Preview {
             Viewer::Tera => tera::decode(path, bytes),
             Viewer::Stm => stm::decode(path, bytes),
             Viewer::Tmb => tmb::decode(path, bytes),
+            Viewer::Pap => pap::decode(path, bytes),
             Viewer::Lgb => layer::lgb::decode(path, bytes),
             Viewer::Sgb => layer::sgb::decode(path, bytes),
             Viewer::Lvb => layer::lvb::decode(path, bytes),
@@ -430,6 +434,7 @@ impl Preview {
             Self::Skp(parameters) => follow = skp::ui(ui, parameters),
             Self::Tera(terrain) => follow = tera::ui(ui, terrain),
             Self::Tmb(timeline) => follow = tmb::ui(ui, timeline),
+            Self::Pap(pack) => follow = pap::ui(ui, pack),
             Self::Layers(layers) => follow = layer::ui(ui, layers, deps, backend),
             Self::Zone(annotations) => follow = zone::instanced::ui(ui, annotations),
             Self::Environments(set) => follow = zone::envs::ui(ui, set, deps, backend),
@@ -524,6 +529,7 @@ impl Preview {
             | Self::Skp(_)
             | Self::Tera(_)
             | Self::Tmb(_)
+            | Self::Pap(_)
             | Self::Layers(_)
             | Self::Zone(_)
             | Self::Environments(_)
@@ -614,6 +620,10 @@ impl Preview {
         }
         if let Self::Tmb(timeline) = self {
             timeline.details_ui(ui);
+            return None;
+        }
+        if let Self::Pap(pack) = self {
+            pack.details_ui(ui);
             return None;
         }
         if let Self::Layers(layers) = self {
@@ -761,6 +771,7 @@ pub enum Viewer {
     Skp,
     Tera,
     Tmb,
+    Pap,
     Lgb,
     Sgb,
     Lvb,
@@ -784,7 +795,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 36] = [
+    pub const RENDERED: [Self; 37] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -804,6 +815,7 @@ impl Viewer {
         Self::Skp,
         Self::Tera,
         Self::Tmb,
+        Self::Pap,
         Self::Lgb,
         Self::Sgb,
         Self::Lvb,
@@ -844,6 +856,7 @@ impl Viewer {
             Self::Skp => "Skeleton parameters",
             Self::Tera => "Terrain",
             Self::Tmb => "Timeline",
+            Self::Pap => "Animation",
             Self::Lgb => "Layer group",
             Self::Sgb => "Shared group",
             Self::Lvb => "Level",

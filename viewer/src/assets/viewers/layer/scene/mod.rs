@@ -14,6 +14,7 @@
 //! the same deferred frame the model viewer draws into, and the lights the zone places are drawn as
 //! the volumes its `.lcb` clips them against.
 
+mod ambient;
 mod gpu;
 
 use std::collections::{BTreeMap, HashMap};
@@ -86,9 +87,6 @@ const LOADED: f32 = 4000.0;
 
 /// How far the eye travels a second, before the user's multiplier.
 const SPEED: f32 = 100.0;
-
-/// Where the key light stands.
-const KEY: Vec3 = Vec3::new(-0.45, 0.82, 0.36);
 
 /// How much of the fitted reach the opening view stands back by.
 const MARGIN: f32 = 1.4;
@@ -265,6 +263,7 @@ pub struct Scene {
     translated: HashMap<usize, Translated>,
     tables: HashMap<usize, Arc<(Vec<u16>, usize, usize)>>,
     lighting: Option<Arc<mdl::gpu::Lighting>>,
+    ambient: ambient::Ambient,
     lights: Vec<Light>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
     clips: HashMap<(u32, [u8; 4]), (Vec3, Vec3)>,
@@ -377,6 +376,7 @@ impl Scene {
             translated: HashMap::new(),
             tables: HashMap::new(),
             lighting: None,
+            ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             clips: HashMap::new(),
             clip: match source.scene().map(|held| held.light_culling_path().clone()) {
@@ -487,6 +487,10 @@ impl Scene {
                                 layer: Some(at),
                                 depth: depth + 1,
                             });
+                        }
+                        InstanceData::EnvLocation(env) => {
+                            self.ambient
+                                .locate(instance.id(), env.ambient_light_asset_path());
                         }
                         InstanceData::Light(light) => {
                             let held = light.colour();
@@ -736,6 +740,7 @@ impl Scene {
     fn poll(&mut self, ui: &egui::Ui, backend: &Backend) {
         self.load_terrain(backend);
         self.load_clips(backend);
+        self.ambient.poll(backend);
         self.expand(backend);
         if self.fitted == 0 && !self.placements.is_empty() {
             self.fit();
@@ -750,6 +755,7 @@ impl Scene {
         // repaints while it is still in flight. Without this the last of a load stalls half drawn
         // until something else happens to redraw the browser.
         if !self.waiting.is_empty()
+            || self.ambient.pending()
             || self.renderer.lock().unwrap().pending() > 0
             || self
                 .files
@@ -1333,12 +1339,16 @@ impl Scene {
             }
         }
 
+        let (light, color) = self.ambient.light();
         let frame = gpu::Frame {
             scene: program::Scene {
                 view,
                 projection,
                 model: Mat4::IDENTITY,
-                light: KEY.normalize(),
+                light,
+                diffuse: color,
+                specular: color,
+                ambient: self.ambient.scene(),
                 ..Default::default()
             },
             lighting: self.lighting.clone(),
@@ -1451,6 +1461,10 @@ impl Scene {
                     ),
                 ],
             );
+
+            ui.add_space(8.0);
+            ui.separator();
+            changed |= self.ambient.ui(ui);
 
             ui.add_space(8.0);
             ui.separator();

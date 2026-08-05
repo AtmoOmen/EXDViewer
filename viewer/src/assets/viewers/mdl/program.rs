@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4};
 use ironworks::file::mtrl;
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
 
@@ -190,6 +190,61 @@ impl Lamp {
     }
 }
 
+/// The light a place stands in, as `g_AmbientParamArray` holds one entry of it.
+///
+/// Each set of harmonics is three rows a shader dots against a normal and a one. A zone states its
+/// own per time of day in the `.amb` its `EnvLocation` names, the sky's own come out of
+/// `skylight.amb`, and `scale` is what a zone's `.envb` calls `ambient_light_scale`. Nothing in any
+/// file states the rest of the entry.
+#[derive(Clone, Copy)]
+pub struct Ambient {
+    pub sky: [Vec4; 3],
+    /// What the sky's harmonics are taken back up by.
+    pub sky_scale: f32,
+    pub light: [Vec4; 3],
+    pub scale: f32,
+    /// How the ambient fades with depth: a scale, a bias and a floor.
+    pub fade: Vec3,
+    /// What a reflection is scaled and biased by, and how much of it reaches the frame. A scale of
+    /// nought against a bias of one leaves the ambient where it was: the shader blends the two by
+    /// the reflection's own alpha, so a bias of nought would take the ambient with it.
+    pub reflection: Vec3,
+    /// The roughness a reflection is sampled at, which the shader offsets by a tenth.
+    pub roughness: f32,
+    /// What the ambient is mixed toward, and how far that mix reaches.
+    pub haze: Vec4,
+}
+
+impl Default for Ambient {
+    fn default() -> Self {
+        Self {
+            sky: [Vec4::ZERO; 3],
+            sky_scale: 1.0,
+            light: [Vec4::new(0.0, 0.0, 0.0, 0.12); 3],
+            scale: 1.0,
+            fade: Vec3::new(0.0, 1.0, 0.0),
+            reflection: Vec3::new(0.0, 1.0, 0.0),
+            roughness: 0.0,
+            haze: Vec4::W,
+        }
+    }
+}
+
+impl Ambient {
+    /// The harmonics of one channel as the row a normal is dotted against, from the nine
+    /// coefficients a file states. The file runs constant, `y`, `z`, `x`, and the row is dotted
+    /// against `(normal, 1)`, so the three linear terms are the first three lanes and the constant
+    /// the last. What the shader does with the six second-order terms it never reads.
+    pub fn row(coefficients: &[f32; 9]) -> Vec4 {
+        Vec4::new(
+            coefficients[3],
+            coefficients[1],
+            coefficients[2],
+            coefficients[0],
+        )
+    }
+}
+
 /// What the engine decides rather than the files. Everything a constant buffer holds that is not the
 /// material's own comes from here, so a field that has to be reconstructed is reconstructed once.
 #[derive(Clone, Copy)]
@@ -206,7 +261,7 @@ pub struct Scene {
     pub diffuse: Vec3,
     pub specular: Vec3,
     /// What the composite lights a surface with where no light reaches it.
-    pub ambient: Vec3,
+    pub ambient: Ambient,
 }
 
 impl Default for Scene {
@@ -220,7 +275,7 @@ impl Default for Scene {
             lamp: Lamp::default(),
             diffuse: Vec3::ONE,
             specular: Vec3::ONE,
-            ambient: Vec3::splat(0.12),
+            ambient: Ambient::default(),
         }
     }
 }
@@ -738,11 +793,11 @@ impl Buffer {
             return out;
         }
         if self.name == "g_AmbientParamArray" {
-            ambient(scene, &mut out);
+            ambient(&scene.ambient, &mut out);
             return out;
         }
         if self.name == "g_BGAmbientParameter" {
-            write(&mut out, 0, &[0.0, 0.0, 0.0, 1.0]);
+            write(&mut out, 0, &scene.ambient.haze.to_array());
             return out;
         }
         let world_view = view * model;
@@ -917,31 +972,36 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
 /// register.
 ///
 /// One entry is filled and the count says one, which is what keeps the composite from walking the
-/// array at all: it takes entry `count - 1` at full weight and never enters the loop.
-fn ambient(scene: &Scene, out: &mut [u8]) {
-    /// Registers of the header the entries follow.
-    const HEADER: usize = 4;
-
+/// array at all: it takes entry `count - 1` at full weight and never enters the loop. The composite
+/// reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, so the one entry starts at four.
+fn ambient(held: &Ambient, out: &mut [u8]) {
     if out.len() < 8 {
         return;
     }
     // The count reads as a whole number rather than as the float that would print the same.
     out[..4].copy_from_slice(&1u32.to_le_bytes());
-    out[4..8].copy_from_slice(&1.0f32.to_le_bytes());
-    // Three rows dotted against a normal and a one, which a color the same in every direction
-    // reaches through each row's last lane alone. The sky the reflection falls back on is the same.
-    for (lane, value) in scene.ambient.to_array().iter().enumerate() {
-        write(out, 1 + lane, &[0.0, 0.0, 0.0, *value]);
-        write(out, HEADER + 4 + lane, &[0.0, 0.0, 0.0, *value]);
+    out[4..8].copy_from_slice(&held.sky_scale.to_le_bytes());
+    for (at, row) in held.sky.iter().enumerate() {
+        write(out, 1 + at, &row.to_array());
     }
-    write(out, HEADER + 7, &[0.0, 0.0, 0.0, 1.0]);
-    // A depth fade, off: the scale is nought and the bias one, so every distance answers the same.
-    write(out, HEADER + 8, &[0.0, 1.0, 0.0, 1.0]);
-    // Reflection scale, bias and mix, all nought: nothing here reconstructs the cube array.
-    write(out, HEADER + 9, &[0.0, 0.0, 0.0, 0.0]);
+    for (at, row) in held.light.iter().enumerate() {
+        write(out, 4 + at, &row.to_array());
+    }
+    write(out, 7, &[0.0, 0.0, 0.0, held.scale]);
+    write(out, 8, &[held.fade.x, held.fade.y, held.fade.z, 1.0]);
+    write(
+        out,
+        9,
+        &[
+            held.reflection.x,
+            held.reflection.y,
+            held.reflection.z,
+            held.roughness,
+        ],
+    );
     // No bounding shape, so the entry covers the frame rather than a room.
-    write(out, HEADER + 14, &[0.0, 0.0, 0.0, 0.0]);
-    write(out, HEADER + 15, &[0.0, 1.0, 0.0, 0.0]);
+    write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
+    write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
 }
 
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a
@@ -988,9 +1048,52 @@ pub fn table(held: &mtrl::ColorTable) -> Option<(&[u16], usize, usize)> {
 
 #[cfg(test)]
 mod test {
-    use glam::{Mat4, Vec3};
+    use glam::{Mat4, Vec3, Vec4};
 
-    use super::{JOINT, ROW, joints, selector};
+    use super::{Ambient, JOINT, ROW, ambient, joints, selector};
+
+    /// The composite reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, and its header
+    /// at nought through three. Nothing in the reflection lays the entry out, so this is the whole
+    /// statement of where each field goes.
+    #[test]
+    fn the_ambient_entry_starts_at_the_fourth_register() {
+        let held = Ambient {
+            sky: [Vec4::splat(1.0), Vec4::splat(2.0), Vec4::splat(3.0)],
+            sky_scale: 4.0,
+            light: [Vec4::splat(5.0), Vec4::splat(6.0), Vec4::splat(7.0)],
+            scale: 8.0,
+            fade: Vec3::new(9.0, 10.0, 11.0),
+            reflection: Vec3::new(12.0, 13.0, 14.0),
+            roughness: 15.0,
+            haze: Vec4::ZERO,
+        };
+        let mut out = vec![0u8; 16 * 16];
+        ambient(&held, &mut out);
+        let lane = |register: usize, at: usize| {
+            let start = register * 16 + at * 4;
+            f32::from_le_bytes(out[start..start + 4].try_into().unwrap())
+        };
+        assert_eq!(u32::from_le_bytes(out[..4].try_into().unwrap()), 1);
+        assert_eq!(lane(0, 1), 4.0);
+        assert_eq!([lane(1, 0), lane(2, 0), lane(3, 0)], [1.0, 2.0, 3.0]);
+        assert_eq!([lane(4, 0), lane(5, 0), lane(6, 0)], [5.0, 6.0, 7.0]);
+        assert_eq!(lane(7, 3), 8.0);
+        assert_eq!([lane(8, 0), lane(8, 1), lane(8, 2)], [9.0, 10.0, 11.0]);
+        assert_eq!(
+            [lane(9, 0), lane(9, 1), lane(9, 2), lane(9, 3)],
+            [12.0, 13.0, 14.0, 15.0]
+        );
+        // Past the entry's own twelve registers nothing is written: the next one along is entry one.
+        assert!(out[16 * 16..].is_empty());
+    }
+
+    /// The row is dotted against a normal and a one, and the file runs constant, `y`, `z`, `x`.
+    #[test]
+    fn a_harmonic_row_puts_the_constant_last() {
+        let row = Ambient::row(&[1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(row, Vec4::new(4.0, 2.0, 3.0, 1.0));
+        assert_eq!(row.dot(Vec4::new(0.0, 1.0, 0.0, 1.0)), 3.0);
+    }
 
     #[test]
     fn the_selector_is_a_polynomial_in_thirty_one() {

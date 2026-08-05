@@ -484,6 +484,7 @@ impl Game {
         size: (i32, i32),
     ) -> Result<(), String> {
         self.buffers.attach(gl, size)?;
+        self.buffers.stand_ins(gl)?;
         let stand_in = self.buffers.stand_in(gl)?;
         // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
         // has nothing else to turn a fragment into a texel with.

@@ -25,6 +25,9 @@ const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
 const OCCLUSION: u32 = 0x3266_7bd7;
 const ATTENUATION: u32 = 0x008c_d1ca;
 
+/// The reflection, the only sampler in the whole graph that is not two-dimensional.
+const REFLECTION: u32 = 0xc5c4_cb3c;
+
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
 /// once, and the channel past the last of them: the frame the composite resolved.
 pub const TARGETS: usize = 5;
@@ -39,6 +42,9 @@ const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 /// What a buffer nothing here fills answers with where a lighting pass wants a weight: nothing
 /// shadowed in the red the lighting reads, nothing faded in the alpha the composite reads.
 const UNOCCLUDED: [u8; 4] = [255, 255, 255, 0];
+
+/// What the composite takes a reflection against where nothing reconstructs the zone's own cube.
+const UNREFLECTED: [u8; 4] = [128, 128, 128, 0];
 
 /// One triangle covering clip space, which is the geometry a screen-wide pass draws: their vertex
 /// shaders pass the position straight through, and one of them reads it back as the place on screen
@@ -145,6 +151,7 @@ pub struct Buffers {
     types: Option<glow::Texture>,
     stand_in: Option<glow::Texture>,
     unoccluded: Option<glow::Texture>,
+    reflection: Option<glow::Texture>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
     volume: Option<(glow::VertexArray, glow::Buffer, glow::Buffer)>,
     resolvers: BTreeMap<usize, Linked>,
@@ -412,6 +419,30 @@ impl Buffers {
         Ok(held)
     }
 
+    /// The cube the composite takes reflections against, which nothing here reconstructs. The alpha
+    /// is the weight it is blended in at, so nought leaves the ambient it would otherwise replace.
+    fn reflection(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
+        if let Some(held) = self.reflection {
+            return Ok(held);
+        }
+        let held = flat_cube(gl, &UNREFLECTED)?;
+        self.reflection = Some(held);
+        Ok(held)
+    }
+
+    /// Every stand-in a draw may reach for, made before any of them is bound.
+    ///
+    /// Making a texture binds it to whichever unit happens to be active, so one made partway through
+    /// a binding loop takes over the unit the sampler before it was given, and that sampler then
+    /// reads a texture of the wrong format.
+    pub fn stand_ins(&mut self, gl: &glow::Context) -> Result<(), String> {
+        self.stand_in(gl)?;
+        self.unoccluded(gl)?;
+        self.types(gl)?;
+        self.reflection(gl)?;
+        Ok(())
+    }
+
     /// The buffers a screen-wide pass reads, by the name the package knows each by. One nothing here
     /// fills is the flat stand-in, which is what leaves its term out rather than crashing the draw.
     pub fn engine(&mut self, gl: &glow::Context, id: u32) -> Result<glow::Texture, String> {
@@ -524,10 +555,26 @@ impl Buffers {
             gl.color_mask(true, true, true, true);
         }
         self.bind(gl, program, held, scene, &[])?;
+        self.stand_ins(gl)?;
         let mut unit = 0;
         for texture in &held.textures {
-            let bound = self.engine(gl, texture.id)?;
-            sampler(gl, program, &texture.name, unit, bound);
+            match texture.id {
+                REFLECTION => {
+                    let bound = self.reflection(gl)?;
+                    bind(
+                        gl,
+                        program,
+                        &texture.name,
+                        unit,
+                        bound,
+                        glow::TEXTURE_CUBE_MAP,
+                    );
+                }
+                id => {
+                    let bound = self.engine(gl, id)?;
+                    sampler(gl, program, &texture.name, unit, bound);
+                }
+            }
             unit += 1;
         }
         for structured in &held.structured {
@@ -623,6 +670,7 @@ impl Drop for Buffers {
                 self.types.take(),
                 self.stand_in.take(),
                 self.unoccluded.take(),
+                self.reflection.take(),
                 self.depth.take(),
             ]
             .into_iter()
@@ -787,9 +835,22 @@ pub fn sampler(
     unit: u32,
     texture: glow::Texture,
 ) {
+    bind(gl, program, name, unit, texture, glow::TEXTURE_2D);
+}
+
+/// The same over whichever target the shader declared the sampler against. A draw only validates if
+/// the texture bound to a unit is of the sampler's own type, so the target follows the declaration.
+fn bind(
+    gl: &glow::Context,
+    program: glow::Program,
+    name: &str,
+    unit: u32,
+    texture: glow::Texture,
+    target: u32,
+) {
     unsafe {
         gl.active_texture(glow::TEXTURE0 + unit);
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.bind_texture(target, Some(texture));
         if let Some(location) = gl.get_uniform_location(program, name) {
             gl.uniform_1_i32(Some(&location), unit as i32);
         }
@@ -846,6 +907,36 @@ fn upload_volume(
         gl.bind_vertex_array(None);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
         Ok((layout, held, faces))
+    }
+}
+
+/// A one-texel cube answering with the same value on every face.
+fn flat_cube(gl: &glow::Context, value: &[u8; 4]) -> Result<glow::Texture, String> {
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(texture));
+        for face in 0..6 {
+            gl.tex_image_2d(
+                glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                0,
+                glow::RGBA as i32,
+                1,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(value)),
+            );
+        }
+        for (name, held) in [
+            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, name, held as i32);
+        }
+        Ok(texture)
     }
 }
 

@@ -235,6 +235,7 @@ impl Renderer {
         size: (i32, i32),
     ) -> Result<(), String> {
         self.buffers.attach(gl, size)?;
+        self.buffers.stand_ins(gl)?;
         let stand_in = self.buffers.stand_in(gl)?;
         let (offsets, window) = self.windows(gl, frame)?;
         let instances = self.instances.ok_or("no instance buffer")?;

@@ -202,7 +202,9 @@ fn program<'a>(
     index: u32,
 ) -> Option<(dxbc::shex::Program, &'a [u8])> {
     let shader = package.shaders().get(index as usize)?;
-    let start = package.blobs_offset() + usize::try_from(shader.blob_offset()).ok()?;
+    let start = package
+        .blobs_offset()
+        .checked_add(usize::try_from(shader.blob_offset()).ok()?)?;
     let end = start.checked_add(usize::try_from(shader.blob_size()).ok()?)?;
     let blob = bytes.get(start..end)?;
     let held = dxbc::scan_dxbc(blob)

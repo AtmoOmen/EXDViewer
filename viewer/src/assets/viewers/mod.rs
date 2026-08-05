@@ -35,6 +35,7 @@ pub mod spm;
 pub mod stm;
 pub mod tera;
 pub mod texture;
+pub mod tmb;
 pub mod uld;
 pub mod zone;
 
@@ -316,6 +317,8 @@ pub enum Preview {
     Tera(Box<tera::Rendered>),
     /// A parsed staining template file.
     Stm(Box<stm::Rendered>),
+    /// A parsed timeline.
+    Tmb(Box<tmb::Rendered>),
     /// A parsed layer group, from either of the two files that hold one.
     Layers(Box<layer::Rendered>),
     /// A parsed annotation of what a zone's layers placed.
@@ -371,6 +374,7 @@ impl Preview {
             Viewer::Skp => skp::decode(path, bytes),
             Viewer::Tera => tera::decode(path, bytes),
             Viewer::Stm => stm::decode(path, bytes),
+            Viewer::Tmb => tmb::decode(path, bytes),
             Viewer::Lgb => layer::lgb::decode(path, bytes),
             Viewer::Sgb => layer::sgb::decode(path, bytes),
             Viewer::Lvb => layer::lvb::decode(path, bytes),
@@ -425,6 +429,7 @@ impl Preview {
             Self::Est(templates) => follow = est::ui(ui, templates),
             Self::Skp(parameters) => follow = skp::ui(ui, parameters),
             Self::Tera(terrain) => follow = tera::ui(ui, terrain),
+            Self::Tmb(timeline) => follow = tmb::ui(ui, timeline),
             Self::Layers(layers) => follow = layer::ui(ui, layers, deps, backend),
             Self::Zone(annotations) => follow = zone::instanced::ui(ui, annotations),
             Self::Environments(set) => follow = zone::envs::ui(ui, set, deps, backend),
@@ -518,6 +523,7 @@ impl Preview {
             | Self::Est(_)
             | Self::Skp(_)
             | Self::Tera(_)
+            | Self::Tmb(_)
             | Self::Layers(_)
             | Self::Zone(_)
             | Self::Environments(_)
@@ -604,6 +610,10 @@ impl Preview {
         }
         if let Self::Tera(terrain) = self {
             terrain.details_ui(ui);
+            return None;
+        }
+        if let Self::Tmb(timeline) = self {
+            timeline.details_ui(ui);
             return None;
         }
         if let Self::Layers(layers) = self {
@@ -750,6 +760,7 @@ pub enum Viewer {
     Est,
     Skp,
     Tera,
+    Tmb,
     Lgb,
     Sgb,
     Lvb,
@@ -773,7 +784,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 35] = [
+    pub const RENDERED: [Self; 36] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -792,6 +803,7 @@ impl Viewer {
         Self::Est,
         Self::Skp,
         Self::Tera,
+        Self::Tmb,
         Self::Lgb,
         Self::Sgb,
         Self::Lvb,
@@ -831,6 +843,7 @@ impl Viewer {
             Self::Est => "Skeleton template",
             Self::Skp => "Skeleton parameters",
             Self::Tera => "Terrain",
+            Self::Tmb => "Timeline",
             Self::Lgb => "Layer group",
             Self::Sgb => "Shared group",
             Self::Lvb => "Level",

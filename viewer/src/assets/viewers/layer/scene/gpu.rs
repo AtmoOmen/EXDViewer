@@ -497,7 +497,7 @@ fn upload(gl: &glow::Context, pending: Pending) -> Result<Model, String> {
     Ok(Model { levels })
 }
 
-/// One mesh's buffers, with its own vertex array. The array is not an optimisation: egui leaves its
+/// One mesh's buffers, with its own vertex array. The array is not an optimization: egui leaves its
 /// own bound while a callback runs, so setting attribute pointers without one would rewrite egui's
 /// layout to point at scene geometry.
 fn upload_mesh(gl: &glow::Context, vertices: &[Vertex], indices: &[u16]) -> Result<Mesh, String> {

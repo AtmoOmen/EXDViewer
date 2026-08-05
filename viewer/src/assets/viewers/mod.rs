@@ -14,8 +14,10 @@ pub mod avfx;
 pub mod chara;
 pub mod cmp;
 pub mod eid;
+pub mod eqp;
 pub mod est;
 pub mod font;
+pub mod gmp;
 pub mod grass;
 pub mod icons;
 pub mod imc;
@@ -328,6 +330,10 @@ pub enum Preview {
     Phyb(Box<phyb::Rendered>),
     /// A parsed skeleton.
     Sklb(Box<sklb::Rendered>),
+    /// A parsed set of equipment parameters.
+    Eqp(Box<eqp::Rendered>),
+    /// A parsed set of gimmick parameters.
+    Gmp(Box<gmp::Rendered>),
     /// A parsed layer group, from either of the two files that hold one.
     Layers(Box<layer::Rendered>),
     /// A parsed annotation of what a zone's layers placed.
@@ -387,6 +393,8 @@ impl Preview {
             Viewer::Pap => pap::decode(path, bytes),
             Viewer::Phyb => phyb::decode(path, bytes),
             Viewer::Sklb => sklb::decode(path, bytes),
+            Viewer::Eqp => eqp::decode(path, bytes),
+            Viewer::Gmp => gmp::decode(path, bytes),
             Viewer::Lgb => layer::lgb::decode(path, bytes),
             Viewer::Sgb => layer::sgb::decode(path, bytes),
             Viewer::Lvb => layer::lvb::decode(path, bytes),
@@ -445,6 +453,8 @@ impl Preview {
             Self::Pap(pack) => follow = pap::ui(ui, pack),
             Self::Phyb(physics) => phyb::ui(ui, physics),
             Self::Sklb(skeleton) => sklb::ui(ui, skeleton),
+            Self::Eqp(parameters) => eqp::ui(ui, parameters),
+            Self::Gmp(parameters) => gmp::ui(ui, parameters),
             Self::Layers(layers) => follow = layer::ui(ui, layers, deps, backend),
             Self::Zone(annotations) => follow = zone::instanced::ui(ui, annotations),
             Self::Environments(set) => follow = zone::envs::ui(ui, set, deps, backend),
@@ -542,6 +552,8 @@ impl Preview {
             | Self::Pap(_)
             | Self::Phyb(_)
             | Self::Sklb(_)
+            | Self::Eqp(_)
+            | Self::Gmp(_)
             | Self::Layers(_)
             | Self::Zone(_)
             | Self::Environments(_)
@@ -644,6 +656,14 @@ impl Preview {
         }
         if let Self::Sklb(skeleton) = self {
             skeleton.details_ui(ui);
+            return None;
+        }
+        if let Self::Eqp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Gmp(parameters) = self {
+            parameters.details_ui(ui);
             return None;
         }
         if let Self::Layers(layers) = self {
@@ -794,6 +814,8 @@ pub enum Viewer {
     Pap,
     Phyb,
     Sklb,
+    Eqp,
+    Gmp,
     Lgb,
     Sgb,
     Lvb,
@@ -817,7 +839,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 39] = [
+    pub const RENDERED: [Self; 41] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -840,6 +862,8 @@ impl Viewer {
         Self::Pap,
         Self::Phyb,
         Self::Sklb,
+        Self::Eqp,
+        Self::Gmp,
         Self::Lgb,
         Self::Sgb,
         Self::Lvb,
@@ -883,6 +907,8 @@ impl Viewer {
             Self::Pap => "Animation",
             Self::Phyb => "Physics",
             Self::Sklb => "Skeleton",
+            Self::Eqp => "Equipment parameters",
+            Self::Gmp => "Gimmick parameters",
             Self::Lgb => "Layer group",
             Self::Sgb => "Shared group",
             Self::Lvb => "Level",

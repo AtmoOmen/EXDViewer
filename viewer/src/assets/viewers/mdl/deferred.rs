@@ -625,7 +625,14 @@ impl Buffers {
                 program::Kind::Plane => self.engine(gl, texture.id)?,
                 kind => self.absent(gl, kind)?,
             };
-            bind(gl, program, &texture.name, unit, bound, target(texture.kind));
+            bind(
+                gl,
+                program,
+                &texture.name,
+                unit,
+                bound,
+                target(texture.kind),
+            );
             unit += 1;
         }
         for structured in &held.structured {

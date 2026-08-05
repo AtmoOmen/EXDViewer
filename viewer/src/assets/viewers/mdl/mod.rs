@@ -177,12 +177,20 @@ enum Package {
 /// context allows decides how many of the G-buffer's targets fit in one reading.
 struct Translated {
     attachments: usize,
-    held: Result<Pair, String>,
+    held: Result<Passes, String>,
 }
 
-/// The buffer pass, one reading per page of its targets, and the depth pass that runs before it
-/// where the node names one.
-type Pair = (Vec<Arc<program::Program>>, Option<Arc<program::Program>>);
+/// What a material draws with. A semitransparent package declares no G pass at all: it is drawn
+/// over the frame the composite resolved rather than into the buffer that frame came from.
+#[derive(Default)]
+struct Passes {
+    /// The buffer pass, one reading per page of its targets.
+    buffer: Vec<Arc<program::Program>>,
+    depth: Option<Arc<program::Program>>,
+    /// What the material resolves itself into the frame with, drawn as its own geometry after the
+    /// lighting. A package with no buffer pass has only the semitransparent one.
+    resolve: Option<Arc<program::Program>>,
+}
 
 /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
 type Table = Arc<(Vec<u16>, usize, usize)>;
@@ -991,10 +999,11 @@ impl Rendered {
                     };
                 }
                 let shaded = self.shaded.get().then(|| {
-                    let (buffer, depth) = translated.get(&mesh.material)?.held.as_ref().ok()?;
+                    let passes = translated.get(&mesh.material)?.held.as_ref().ok()?;
                     Some(gpu::Shaded {
-                        buffer: buffer.clone(),
-                        depth: depth.clone(),
+                        buffer: passes.buffer.clone(),
+                        depth: passes.depth.clone(),
+                        resolve: passes.resolve.clone(),
                         table: tables.get(&mesh.material).cloned(),
                         textures: material
                             .bound()
@@ -1071,8 +1080,8 @@ impl Rendered {
             .translated
             .borrow()
             .values()
-            .find_map(|held| held.held.as_ref().ok())
-            .and_then(|(buffer, _)| buffer.first())
+            .filter_map(|held| held.held.as_ref().ok())
+            .find_map(|passes| passes.buffer.first())
             .map(|buffer| buffer.names.iter().cloned().enumerate().collect())
             .unwrap_or_default();
         if !held.is_empty() && self.lighting.borrow().is_some() {
@@ -1138,32 +1147,35 @@ impl Rendered {
             let Some(Package::Ready(bytes)) = packages.get(&material.package()) else {
                 continue;
             };
-            let page = |at| {
+            let build = |pass, at| {
                 program::Program::build(
                     bytes,
                     material,
                     set,
-                    program::Pass::Buffer,
+                    pass,
                     program::SUB_VIEW_MAIN,
                     at,
                     attachments,
                 )
             };
-            let held = page(0).map(|first| {
+            let mut passes = Passes::default();
+            if let Ok(first) = build(program::Pass::Buffer, 0) {
                 let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
-                let mut buffer = vec![Arc::new(first)];
-                buffer.extend((1..pages).filter_map(|at| page(at).ok().map(Arc::new)));
-                let depth = program::Program::build(
-                    bytes,
-                    material,
-                    set,
-                    program::Pass::Depth,
-                    program::SUB_VIEW_MAIN,
-                    0,
-                    attachments,
+                passes.buffer.push(Arc::new(first));
+                passes.buffer.extend(
+                    (1..pages).filter_map(|at| build(program::Pass::Buffer, at).ok().map(Arc::new)),
                 );
-                (buffer, depth.ok().map(Arc::new))
-            });
+                passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
+            }
+            // Only where the package writes no G-buffer. One that does is resolved by the pass that
+            // reads the whole frame, and drawing its own over that would resolve it twice.
+            if passes.buffer.is_empty() {
+                passes.resolve = build(program::Pass::CompositeBlended, 0).ok().map(Arc::new);
+            }
+            let held = match passes.buffer.is_empty() && passes.resolve.is_none() {
+                true => Err("this material's keys reach no pass that draws it".into()),
+                false => Ok(passes),
+            };
             if let Err(why) = &held {
                 log::warn!("assets/mdl: {}: {why}", material.package());
             }

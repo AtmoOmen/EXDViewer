@@ -72,6 +72,10 @@ pub struct Shaded {
     pub buffer: Vec<Arc<program::Program>>,
     /// The depth pass, which runs first so the buffer pass shades nothing it covers.
     pub depth: Option<Arc<program::Program>>,
+    /// What the material resolves itself into the frame with, drawn as its own geometry over what
+    /// the lighting left. A semitransparent package has only this: it writes no G-buffer at all,
+    /// and what it blends over is the frame the composite already resolved.
+    pub resolve: Option<Arc<program::Program>>,
     /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
     pub table: Option<Arc<(Vec<u16>, usize, usize)>>,
     /// The textures the material binds, by the resource id the package knows each by.
@@ -402,16 +406,12 @@ impl Model {
 impl Game {
     /// The joint palette, which every skinned shader reads through a texture of dwords. Rewritten
     /// each frame, since a joint carries the camera as well as the pose.
-    fn palette(
-        &mut self,
-        gl: &glow::Context,
-        transform: glam::Mat4,
-    ) -> Result<glow::Texture, String> {
+    fn palette(&mut self, gl: &glow::Context, transform: glam::Mat4) -> Result<(), String> {
         let held = dwords(gl, &program::joints(JOINTS, transform))?;
         if let Some(stale) = self.joints.replace(held) {
             graveyard().lock().unwrap().push(Dead::Texture(stale));
         }
-        Ok(held)
+        Ok(())
     }
 
     fn layout(&mut self, gl: &glow::Context) -> Result<glow::VertexArray, String> {
@@ -499,15 +499,13 @@ impl Game {
     ) -> Result<(), String> {
         self.buffers.attach(gl, size)?;
         self.buffers.stand_ins(gl)?;
-        let stand_in = self.buffers.stand_in(gl)?;
-        let layout = self.layout(gl)?;
         // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
         // has nothing else to turn a fragment into a texel with.
         let scene = program::Scene {
             size: (size.0 as f32, size.1 as f32),
             ..frame.scene
         };
-        let palette = self.palette(gl, scene.view * scene.model)?;
+        self.palette(gl, scene.view * scene.model)?;
 
         // The G-buffer a page at a time, and each page's depth pass before its buffer pass: the game
         // runs those as two passes over the whole draw rather than as two draws of one surface.
@@ -553,62 +551,7 @@ impl Game {
                             false => gl.disable(glow::CULL_FACE),
                         }
                     }
-                    self.buffers.bind(gl, program, held, &scene, &[])?;
-                    // Before anything is bound: making a texture binds it to whichever unit
-                    // happens to be active, so one made partway through the loop below takes over
-                    // the unit the sampler before it was just given.
-                    let table = match &shaded.table {
-                        Some(table) => Some(self.table(gl, surface.material, table)?),
-                        None => None,
-                    };
-                    let mut unit = 0;
-                    for texture in &held.textures {
-                        let bound = match texture.id {
-                            TABLE => table,
-                            id => shaded
-                                .textures
-                                .iter()
-                                .find(|(held, _)| *held == id)
-                                .and_then(|(_, held)| *held)
-                                .and_then(|held| painter.texture(held)),
-                        };
-                        sampler(gl, program, &texture.name, unit, bound.unwrap_or(stand_in));
-                        unit += 1;
-                    }
-                    // By name, not by position: a character's buffer pass reads the joint palette
-                    // and the shader-type table both, and they hold different things.
-                    for structured in &held.structured {
-                        let bound = match structured.name.as_str() {
-                            TYPES => self.buffers.types(gl)?,
-                            _ => palette,
-                        };
-                        sampler(gl, program, &structured.name, unit, bound);
-                        unit += 1;
-                    }
-                    unsafe {
-                        if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
-                            gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-                        }
-
-                        gl.bind_vertex_array(Some(layout));
-                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(buffers.vertices));
-                        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(buffers.indices));
-                        for location in 0..16 {
-                            gl.disable_vertex_attrib_array(location);
-                        }
-                        for held in &held.attributes {
-                            attribute(gl, held);
-                        }
-                        for run in &surface.runs {
-                            gl.draw_elements(
-                                glow::TRIANGLES,
-                                run.end - run.start,
-                                glow::UNSIGNED_SHORT,
-                                run.start * size_of::<u16>() as i32,
-                            );
-                        }
-                        gl.bind_vertex_array(None);
-                    }
+                    self.bind(gl, painter, program, held, surface, buffers, &scene)?;
                 }
             }
         }
@@ -618,6 +561,170 @@ impl Game {
         if let Some(lighting) = frame.lighting.as_ref().filter(|_| frame.target >= TARGETS) {
             self.buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
+            self.resolve(gl, painter, frame, meshes, &scene)?;
+        }
+        Ok(())
+    }
+
+    /// Every material resolved into the frame as its own geometry, after the lighting. What each
+    /// reads to write it is the copy of the frame taken before the first of them drew.
+    ///
+    /// Depth tested against what the G-buffer covered and writing none of its own, so the surfaces
+    /// in front of a piece of glass hide it and the pieces behind it do not.
+    fn resolve(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        meshes: &[Buffers],
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let drawn: Vec<usize> = frame
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter(|(_, surface)| {
+                surface
+                    .shaded
+                    .as_ref()
+                    .is_some_and(|shaded| shaded.resolve.is_some())
+                    && !surface.runs.is_empty()
+            })
+            .map(|(at, _)| at)
+            .collect();
+        if drawn.is_empty() {
+            return Ok(());
+        }
+        self.buffers.keep(gl)?;
+        let into = self.buffers.frame().ok_or("no lit frame")?;
+        let size = self.buffers.size();
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.viewport(0, 0, size.0, size.1);
+            gl.color_mask(true, true, true, true);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(false);
+            gl.disable(glow::BLEND);
+        }
+        for at in drawn {
+            let surface = &frame.surfaces[at];
+            let Some(mesh) = meshes.get(at) else {
+                continue;
+            };
+            let held = surface
+                .shaded
+                .as_ref()
+                .and_then(|shaded| shaded.resolve.as_deref())
+                .ok_or("no pass to resolve with")?;
+            let program =
+                deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
+            unsafe {
+                gl.use_program(Some(program));
+                match surface.cull {
+                    true => {
+                        gl.enable(glow::CULL_FACE);
+                        gl.cull_face(glow::BACK);
+                        gl.front_face(glow::CCW);
+                    }
+                    false => gl.disable(glow::CULL_FACE),
+                }
+            }
+            self.bind(gl, painter, program, held, surface, mesh, scene)?;
+        }
+        Ok(())
+    }
+
+    /// What one draw of one material binds, and the geometry it covers. A texture the material has
+    /// nothing for is the frame's own where the graph holds one under that name, and the flat
+    /// stand-in otherwise.
+    #[allow(clippy::too_many_arguments)]
+    fn bind(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        program: glow::Program,
+        held: &program::Program,
+        surface: &Surface,
+        mesh: &Buffers,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let shaded = surface.shaded.as_ref().ok_or("nothing to draw with")?;
+        let palette = self.joints.ok_or("no joint palette")?;
+        let layout = self.layout(gl)?;
+        let size = self.buffers.size();
+        self.buffers.bind(gl, program, held, scene, &[])?;
+        // Before anything is bound: making a texture binds it to whichever unit happens to be
+        // active, so one made partway through the loop below takes over the unit the sampler
+        // before it was just given.
+        let table = match &shaded.table {
+            Some(table) => Some(self.table(gl, surface.material, table)?),
+            None => None,
+        };
+        let mut unit = 0;
+        for texture in &held.textures {
+            let bound = match texture.id {
+                TABLE => table,
+                id => shaded
+                    .textures
+                    .iter()
+                    .find(|(held, _)| *held == id)
+                    .and_then(|(_, held)| *held)
+                    .and_then(|held| painter.texture(held)),
+            };
+            match (bound, texture.id) {
+                (None, deferred::REFLECTION) => {
+                    let held = self.buffers.reflection(gl)?;
+                    deferred::bind(
+                        gl,
+                        program,
+                        &texture.name,
+                        unit,
+                        held,
+                        glow::TEXTURE_CUBE_MAP,
+                    );
+                }
+                (None, id) => {
+                    let held = self.buffers.engine(gl, id)?;
+                    sampler(gl, program, &texture.name, unit, held);
+                }
+                (Some(held), _) => sampler(gl, program, &texture.name, unit, held),
+            }
+            unit += 1;
+        }
+        // By name, not by position: a character's buffer pass reads the joint palette and the
+        // shader-type table both, and they hold different things.
+        for structured in &held.structured {
+            let bound = match structured.name.as_str() {
+                TYPES => self.buffers.types(gl)?,
+                _ => palette,
+            };
+            sampler(gl, program, &structured.name, unit, bound);
+            unit += 1;
+        }
+        unsafe {
+            if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
+                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
+            }
+            gl.bind_vertex_array(Some(layout));
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.vertices));
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(mesh.indices));
+            for location in 0..16 {
+                gl.disable_vertex_attrib_array(location);
+            }
+            for held in &held.attributes {
+                attribute(gl, held);
+            }
+            for run in &surface.runs {
+                gl.draw_elements(
+                    glow::TRIANGLES,
+                    run.end - run.start,
+                    glow::UNSIGNED_SHORT,
+                    run.start * size_of::<u16>() as i32,
+                );
+            }
+            gl.bind_vertex_array(None);
         }
         Ok(())
     }

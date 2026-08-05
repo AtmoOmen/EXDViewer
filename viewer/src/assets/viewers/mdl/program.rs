@@ -763,7 +763,7 @@ fn ambient(scene: &Scene, out: &mut [u8]) {
     // The count reads as a whole number rather than as the float that would print the same.
     out[..4].copy_from_slice(&1u32.to_le_bytes());
     out[4..8].copy_from_slice(&1.0f32.to_le_bytes());
-    // Three rows dotted against a normal and a one, which a colour the same in every direction
+    // Three rows dotted against a normal and a one, which a color the same in every direction
     // reaches through each row's last lane alone. The sky the reflection falls back on is the same.
     for (lane, value) in scene.ambient.to_array().iter().enumerate() {
         write(out, 1 + lane, &[0.0, 0.0, 0.0, *value]);

@@ -531,7 +531,7 @@ impl Game {
     /// Every buffer of the graph, sized to what is being drawn into.
     ///
     /// The G-buffer is one framebuffer per page of its targets: a context is promised four draw
-    /// buffers and a framebuffer no more colour attachments than that, so five targets cannot all
+    /// buffers and a framebuffer no more color attachments than that, so five targets cannot all
     /// hang off one, and what a page cannot hold is written by a reading of its own.
     fn attach(&mut self, gl: &glow::Context, size: (i32, i32)) -> Result<(), String> {
         if self.attachments == 0 {
@@ -620,7 +620,7 @@ impl Game {
                 plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
             ];
             self.light = Some((frame_of(gl, &light)?, light));
-            // The composite answers with a colour already brought into the range a screen shows, so
+            // The composite answers with a color already brought into the range a screen shows, so
             // the frame it lands in is the one that can be blitted to the screen.
             let lit = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
             self.lit = Some((frame_of(gl, &[lit])?, lit));
@@ -668,7 +668,7 @@ impl Game {
     }
 
     /// What a lighting pass reads where nothing occluded the pixel. Nothing here computes occlusion,
-    /// so every pixel answers the same, and it is not the value a colour map would stand in with.
+    /// so every pixel answers the same, and it is not the value a color map would stand in with.
     fn unoccluded(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
         if let Some(held) = self.unoccluded {
             return Ok(held);
@@ -920,7 +920,7 @@ impl Game {
                 glow::HALF_FLOAT,
                 glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(values))),
             );
-            // Point sampled: the shader addresses texel centres and mixes the pair itself, so a
+            // Point sampled: the shader addresses texel centers and mixes the pair itself, so a
             // filtered read would blend rows it never asked for.
             for (name, value) in [
                 (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
@@ -1311,7 +1311,7 @@ fn upload_table(gl: &glow::Context, values: &[f32], rows: i32) -> Result<glow::T
 }
 
 /// Point sampling and no wrap, which is what every buffer of the graph is read with: a shader
-/// addresses texel centres and works out for itself what lies between them.
+/// addresses texel centers and works out for itself what lies between them.
 fn point(gl: &glow::Context) {
     for (name, value) in [
         (glow::TEXTURE_MIN_FILTER, glow::NEAREST),

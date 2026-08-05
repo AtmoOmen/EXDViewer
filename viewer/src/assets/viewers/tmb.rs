@@ -73,14 +73,14 @@ struct Row {
     depth: usize,
 }
 
-/// A timeline's items, in the order the ids nest them.
+/// A timeline's items, in the order the ids nest them. The timeline itself stays with whatever holds
+/// it, since a `.cutb` keeps dozens of them inside the one file they were read from.
 pub struct Items {
-    timeline: Timeline,
     rows: Vec<Row>,
 }
 
 impl Items {
-    pub fn new(timeline: Timeline) -> Self {
+    pub fn new(timeline: &Timeline) -> Self {
         let items = timeline.items();
         let mut by_id = HashMap::new();
         for (index, item) in items.iter().enumerate() {
@@ -108,37 +108,12 @@ impl Items {
             }
         }
 
-        Self { timeline, rows }
+        Self { rows }
     }
 
-    pub fn count(&self) -> usize {
-        self.timeline.items().len()
-    }
-
-    /// How many items of each magic the timeline holds, in the order they first appear.
-    pub fn magics(&self) -> Vec<(String, usize)> {
-        let mut counts: Vec<(String, usize)> = Vec::new();
-        for item in self.timeline.items() {
-            let magic = magic(item);
-            match counts.iter_mut().find(|(name, _)| *name == magic) {
-                Some((_, count)) => *count += 1,
-                None => counts.push((magic, 1)),
-            }
-        }
-        counts
-    }
-
-    /// How long the timeline runs, as its header states it.
-    pub fn duration(&self) -> Option<i16> {
-        self.timeline.items().iter().find_map(|item| match item {
-            Item::Header(header) => Some(header.duration()),
-            _ => None,
-        })
-    }
-
-    pub fn ui(&self, ui: &mut egui::Ui) -> Option<String> {
+    pub fn ui(&self, ui: &mut egui::Ui, timeline: &Timeline) -> Option<String> {
         let mut follow = None;
-        let items = self.timeline.items();
+        let items = timeline.items();
         for row in &self.rows {
             let item = &items[row.item];
             ui.horizontal(|ui| {
@@ -278,31 +253,45 @@ fn body(item: &Item) -> String {
 /// A timeline, decoded and ready to draw.
 pub struct Rendered {
     identity: Vec<(&'static str, String)>,
+    timeline: Timeline,
     items: Items,
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let timeline = Timeline::read(Cursor::new(bytes.to_vec()))?;
-    let items = Items::new(timeline);
+    let items = Items::new(&timeline);
 
-    log::info!("assets/tmb: {path} {} items", items.count());
+    log::info!("assets/tmb: {path} {} items", timeline.items().len());
 
     Ok(Preview::Tmb(Box::new(Rendered {
-        identity: identity(&items),
+        identity: identity(&timeline),
+        timeline,
         items,
     })))
 }
 
 /// What the timeline holds, for the details panel. The same rows sit under a `.pap`'s animations.
-pub fn identity(items: &Items) -> Vec<(&'static str, String)> {
-    let mut identity = vec![("Items", items.count().to_string())];
-    if let Some(duration) = items.duration() {
+pub fn identity(timeline: &Timeline) -> Vec<(&'static str, String)> {
+    let items = timeline.items();
+    let mut identity = vec![("Items", items.len().to_string())];
+    if let Some(duration) = items.iter().find_map(|item| match item {
+        Item::Header(header) => Some(header.duration()),
+        _ => None,
+    }) {
         identity.push(("Duration", duration.to_string()));
+    }
+
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for item in items {
+        let magic = magic(item);
+        match counts.iter_mut().find(|(name, _)| *name == magic) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((magic, 1)),
+        }
     }
     identity.push((
         "Kinds",
-        items
-            .magics()
+        counts
             .iter()
             .map(|(magic, count)| format!("{magic} {count}"))
             .collect::<Vec<_>>()
@@ -316,7 +305,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     section(ui, "Items");
     ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-        follow = file.items.ui(ui);
+        follow = file.items.ui(ui, &file.timeline);
     });
     follow
 }
@@ -388,10 +377,15 @@ mod tests {
     /// The file lists its items flat, and only the ids say which of them run under which.
     #[test]
     fn nests_the_items_the_ids_name() {
-        let items = Items::new(Timeline::read(std::io::Cursor::new(timeline())).unwrap());
+        let read = Timeline::read(std::io::Cursor::new(timeline())).unwrap();
+        let items = Items::new(&read);
 
-        assert_eq!(items.count(), 5);
-        assert_eq!(items.duration(), Some(100));
+        assert_eq!(read.items().len(), 5);
+        assert_eq!(
+            super::identity(&read)[1],
+            ("Duration", "100".to_owned()),
+            "the header's duration"
+        );
         assert_eq!(
             items
                 .rows

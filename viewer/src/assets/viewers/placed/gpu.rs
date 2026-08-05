@@ -65,16 +65,7 @@ pub struct Placements {
 
 impl Placements {
     pub fn new(batches: Vec<Batch>) -> Arc<Mutex<Self>> {
-        let mut runs = Vec::new();
-        let mut pending: Vec<Instance> = Vec::new();
-        for batch in batches {
-            runs.push((
-                batch.shape,
-                pending.len() as i32,
-                batch.instances.len() as i32,
-            ));
-            pending.extend(batch.instances);
-        }
+        let (runs, pending) = flatten(batches);
         Arc::new(Mutex::new(Self {
             program: None,
             solid: None,
@@ -84,6 +75,11 @@ impl Placements {
             pending,
             failure: None,
         }))
+    }
+
+    /// Swaps what is drawn, for the scenes whose things do move.
+    pub fn replace(&mut self, batches: Vec<Batch>) {
+        (self.runs, self.pending) = flatten(batches);
     }
 
     pub fn failure(&self) -> Option<&str> {
@@ -191,6 +187,21 @@ impl Drop for Placements {
             dead.push(Dead::Buffer(mesh.indices));
         }
     }
+}
+
+/// Every batch's instances end to end, and the shape, first instance and count of each.
+fn flatten(batches: Vec<Batch>) -> (Vec<(Shape, i32, i32)>, Vec<Instance>) {
+    let mut runs = Vec::new();
+    let mut instances: Vec<Instance> = Vec::new();
+    for batch in batches {
+        runs.push((
+            batch.shape,
+            instances.len() as i32,
+            batch.instances.len() as i32,
+        ));
+        instances.extend(batch.instances);
+    }
+    (runs, instances)
 }
 
 fn cast<T>(values: &[T]) -> &[u8] {

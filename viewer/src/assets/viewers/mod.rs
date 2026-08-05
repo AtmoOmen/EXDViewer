@@ -13,6 +13,7 @@ pub mod atch;
 pub mod avfx;
 pub mod chara;
 pub mod cmp;
+pub mod cutb;
 pub mod dic;
 pub mod eid;
 pub mod eqdp;
@@ -39,6 +40,7 @@ pub mod png;
 mod shader;
 pub mod shcd;
 pub mod shpk;
+pub mod skeleton;
 pub mod sklb;
 pub mod skp;
 pub mod spm;
@@ -367,6 +369,8 @@ pub enum Preview {
     GrassGrid(Box<grass::Grid>),
     /// A parsed word dictionary.
     Dic(Box<dic::Rendered>),
+    /// A parsed cutscene.
+    Cutb(Box<cutb::Rendered>),
     /// Nothing to render; an empty message means the type simply has no viewer.
     Failed(String),
 }
@@ -429,6 +433,7 @@ impl Preview {
             Viewer::Gzd => grass::zone(path, bytes),
             Viewer::Ggd => grass::grid(path, bytes),
             Viewer::Dic => dic::decode(path, bytes),
+            Viewer::Cutb => cutb::decode(path, bytes),
             Viewer::Raw => return Self::Failed(String::new()),
         };
         result.unwrap_or_else(|e| Self::Failed(e.to_string()))
@@ -469,7 +474,7 @@ impl Preview {
             Self::Skp(parameters) => follow = skp::ui(ui, parameters),
             Self::Tera(terrain) => follow = tera::ui(ui, terrain),
             Self::Tmb(timeline) => follow = tmb::ui(ui, timeline),
-            Self::Pap(pack) => follow = pap::ui(ui, pack),
+            Self::Pap(pack) => follow = pap::ui(ui, pack, backend),
             Self::Phyb(physics) => phyb::ui(ui, physics),
             Self::Sklb(skeleton) => sklb::ui(ui, skeleton),
             Self::Eqdp(parameters) => eqdp::ui(ui, parameters),
@@ -487,6 +492,7 @@ impl Preview {
             Self::GrassZone(zone) => follow = grass::zone_ui(ui, zone, deps, backend),
             Self::GrassGrid(grid) => grass::grid_ui(ui, grid),
             Self::Dic(dictionary) => dic::ui(ui, dictionary),
+            Self::Cutb(cutscene) => follow = cutb::ui(ui, cutscene),
             Self::Stm(templates) => stm::ui(ui, templates, deps, backend),
             Self::Failed(e) if e.is_empty() => {
                 ui.centered_and_justified(|ui| {
@@ -589,7 +595,8 @@ impl Preview {
             | Self::Cmp(_)
             | Self::GrassZone(_)
             | Self::GrassGrid(_)
-            | Self::Dic(_) => true,
+            | Self::Dic(_)
+            | Self::Cutb(_) => true,
             _ => false,
         }
     }
@@ -740,6 +747,10 @@ impl Preview {
             dictionary.details_ui(ui);
             return None;
         }
+        if let Self::Cutb(cutscene) = self {
+            cutscene.details_ui(ui);
+            return None;
+        }
         if let Self::GrassZone(zone) = self {
             zone.details_ui(ui);
             return None;
@@ -879,6 +890,7 @@ pub enum Viewer {
     Gzd,
     Ggd,
     Dic,
+    Cutb,
     Text,
     Raw,
 }
@@ -886,7 +898,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 46] = [
+    pub const RENDERED: [Self; 47] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -932,6 +944,7 @@ impl Viewer {
         Self::Gzd,
         Self::Ggd,
         Self::Dic,
+        Self::Cutb,
         Self::Text,
     ];
 
@@ -982,6 +995,7 @@ impl Viewer {
             Self::Gzd => "Grass zone",
             Self::Ggd => "Grass grid",
             Self::Dic => "Word dictionary",
+            Self::Cutb => "Cutscene",
             Self::Text => "Text",
             Self::Raw => "Bytes",
         }

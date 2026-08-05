@@ -76,6 +76,7 @@ ironworks = { version = "0.4.1", features = [
     "sklb",
     "pap",
     "tmb",
+    "cutb",
     "hwc",
 ] }
 dxbc = "0.1"

@@ -44,7 +44,7 @@ impl Camera {
 /// Everything one file placed, ready to draw.
 pub struct View {
     /// How many things it holds, kept once the batches themselves are on the card.
-    count: usize,
+    count: Cell<usize>,
     renderer: Arc<Mutex<gpu::Placements>>,
     camera: Cell<Camera>,
     home: Camera,
@@ -78,7 +78,7 @@ impl View {
             target,
         };
         Self {
-            count: batches.iter().map(|batch| batch.instances.len()).sum(),
+            count: Cell::new(batches.iter().map(|batch| batch.instances.len()).sum()),
             renderer: gpu::Placements::new(batches),
             camera: Cell::new(home),
             home,
@@ -88,7 +88,15 @@ impl View {
 
     /// How many things the view holds, for the caller to say so.
     pub fn count(&self) -> usize {
+        self.count.get()
+    }
+
+    /// Swaps what is drawn, leaving the camera where the user left it. The view is still framed on
+    /// whatever it was built with, so this is for things that move rather than things that arrive.
+    pub fn replace(&self, batches: Vec<Batch>) {
         self.count
+            .set(batches.iter().map(|batch| batch.instances.len()).sum());
+        self.renderer.lock().unwrap().replace(batches);
     }
 
     pub fn ui(&self, ui: &mut egui::Ui) {
@@ -98,7 +106,7 @@ impl View {
             });
             return;
         }
-        if self.count == 0 {
+        if self.count.get() == 0 {
             ui.centered_and_justified(|ui| {
                 ui.label(RichText::new("This file places nothing").weak());
             });

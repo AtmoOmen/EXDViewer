@@ -86,7 +86,7 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"dzg\0", Format::Shown(Viewer::Gzd)),
     (b"pap ", Format::Shown(Viewer::Pap)),
     (b"TMLB", Format::Shown(Viewer::Tmb)),
-    (b"CUTB", Format::Named("Cutscene")),
+    (b"CUTB", Format::Shown(Viewer::Cutb)),
     (b"XFVA", Format::Shown(Viewer::Avfx)),
 ];
 

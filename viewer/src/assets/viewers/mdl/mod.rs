@@ -83,8 +83,10 @@ pub struct Vertex {
     uv1: [f32; 4],
     color: [u8; 4],
     color1: [u8; 4],
-    weights: [u8; 4],
-    bones: [u8; 4],
+    /// Sixteen bits each, since a skinned shader reads the low byte as the first four influences
+    /// and the high byte as the next four.
+    weights: [u16; 4],
+    bones: [u16; 4],
 }
 
 /// Where the camera is looking from.
@@ -521,10 +523,8 @@ pub(super) fn build(
             uv1: uvs1.and_then(|held| uv(held, at)).unwrap_or_default(),
             color: colors.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
             color1: colors1.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
-            weights: weights
-                .and_then(|held| bytes(held, at))
-                .unwrap_or([255, 0, 0, 0]),
-            bones: bones.and_then(|held| bytes(held, at)).unwrap_or_default(),
+            weights: influences(weights, at, [255, 0, 0, 0]),
+            bones: influences(bones, at, [0; 4]),
         })
         .collect();
     Ok((vertices, indices))
@@ -564,6 +564,13 @@ fn uv(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
 
 /// Four bytes of an attribute the shader reads as bytes. An eight-byte element carries two sets
 /// interleaved, the low half first, so its own four are every other one.
+/// One vertex's four bone influences, widened into the sixteen bits a skinned shader reads them as.
+fn influences(values: Option<&VertexValues>, at: usize, missing: [u16; 4]) -> [u16; 4] {
+    values
+        .and_then(|held| bytes(held, at))
+        .map_or(missing, |held| held.map(u16::from))
+}
+
 fn bytes(values: &VertexValues, at: usize) -> Option<[u8; 4]> {
     match values {
         VertexValues::Vector4(held) => held

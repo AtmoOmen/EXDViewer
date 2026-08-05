@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use glow::HasContext;
 
 use super::super::super::mdl::deferred::{
-    self, Buffers, Dead, LIT, Linked, TYPES, bury, graveyard, sampler,
+    self, Buffers, Dead, LIT, Layered, Linked, TYPES, bury, graveyard, sampler,
 };
 use super::super::super::mdl::gpu::{Lighting, Shaded, attribute};
 use super::super::super::mdl::{Vertex, program};
@@ -87,6 +87,8 @@ pub struct Renderer {
     buffers: Buffers,
     models: Vec<Option<Model>>,
     pending: Vec<Pending>,
+    /// The game's own textures the shaders read that no material names, waiting for a context.
+    supplied: Vec<(u32, Layered)>,
     /// One linked pair per material, pass and page of the G-buffer.
     programs: BTreeMap<(usize, bool, usize), Linked>,
     tables: BTreeMap<usize, glow::Texture>,
@@ -103,6 +105,7 @@ impl Renderer {
             buffers: Buffers::default(),
             models: Vec::new(),
             pending: Vec::new(),
+            supplied: Vec::new(),
             programs: BTreeMap::new(),
             tables: BTreeMap::new(),
             instances: None,
@@ -130,6 +133,11 @@ impl Renderer {
         self.pending.push(pending);
     }
 
+    /// Hands one of the game's own textures over, under the resource id its shaders name it by.
+    pub fn queue_supplied(&mut self, id: u32, held: Layered) {
+        self.supplied.push((id, held));
+    }
+
     pub fn draw(
         &mut self,
         gl: &glow::Context,
@@ -155,6 +163,11 @@ impl Renderer {
                     self.models[at] = Some(model);
                 }
                 Err(why) => log::error!("assets/layer: model {at}: {why}"),
+            }
+        }
+        for (id, held) in std::mem::take(&mut self.supplied) {
+            if let Err(why) = self.buffers.layered(gl, id, &held) {
+                log::error!("assets/layer: texture {id:#x}: {why}");
             }
         }
         // egui draws into whatever it bound before the callback, and that has to be bound again

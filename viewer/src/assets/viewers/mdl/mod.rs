@@ -241,7 +241,7 @@ pub struct Rendered {
     textures: RefCell<BTreeMap<String, Texture>>,
     /// Shader packages the materials name, by path, since several materials share one.
     packages: RefCell<BTreeMap<String, Package>>,
-    /// The layered textures the shaders read that no material names, by resource id.
+    /// The textures the shaders read that no material names, by resource id.
     arrays: RefCell<BTreeMap<u32, Array>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
@@ -648,9 +648,9 @@ fn named(attributes: &[String], mask: u32) -> String {
         .join(", ")
 }
 
-/// One of the game's own arrays as the card takes it. Mip nought alone: nothing tells a translated
+/// One of the game's own textures as the card takes it. Mip nought alone: nothing tells a translated
 /// shader how many levels a texture has, and the graph answers that with one.
-fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
+pub(super) fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
     let texture = ironworks::file::tex::Texture::read(Cursor::new(bytes.to_vec()))?;
     let image = crate::utils::tex_loader::decode_stack(&texture, 0, path)?;
     let (width, height) = texture.mip_size(0);
@@ -842,7 +842,7 @@ impl Rendered {
             }
 
             let mut arrays = self.arrays.borrow_mut();
-            for (id, path) in deferred::ARRAYS {
+            for (id, path) in deferred::ENGINE {
                 let held = arrays.entry(id).or_insert_with(|| {
                     let files = backend.files().clone();
                     Array::Fetching(TrackedPromise::spawn_local(async move {

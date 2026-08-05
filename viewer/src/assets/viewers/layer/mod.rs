@@ -1005,8 +1005,6 @@ impl Rendered {
         rows.0
     }
 
-    /// The scene fetches from its own side of the viewer, so the backend only reaches here to keep
-    /// both halves of the layer viewer on one signature.
     pub fn details_ui(
         &self,
         ui: &mut egui::Ui,
@@ -1017,7 +1015,7 @@ impl Rendered {
         if self.placed.get()
             && let Some(scene) = self.scene.borrow_mut().as_mut()
         {
-            scene.details_ui(ui, follow);
+            scene.details_ui(ui, follow, deps, backend);
             return;
         }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {

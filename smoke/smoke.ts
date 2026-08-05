@@ -71,6 +71,10 @@ const SCENE_TAB = { x: 287, y: 116 };
 const SEEK = { y: 116, from: 415, to: 1085 };
 const PREVIEW = { x: 212, y: 132, width: 1020, height: 495 };
 
+// The model viewport, clear of the control row above it: the row itself carries different labels
+// with game shaders on than with them off, so a comparison of the frame has to leave it out.
+const VIEWPORT = { x: 215, y: 140, width: 1080, height: 840 };
+
 // Where a drag of the viewport starts, well clear of the control row.
 const ORBIT_FROM = { x: 800, y: 600 };
 const ORBIT_ANGLES = [220, 220, 220, 220];
@@ -221,6 +225,22 @@ async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
         writeFileSync(join(shotDir, `${name}.png`), Buffer.from(result.data, "base64"));
     }
     return Bun.hash(result.data).toString(16);
+}
+
+/// The preview frame, once two shots of it in a row come out the same. A model's textures arrive
+/// over several seconds and land on geometry already on screen, so a frame taken before the last of
+/// them is not the frame anything should be compared against.
+async function settled(cdp: Cdp): Promise<string> {
+    let held = await shot(cdp, "01-preview", VIEWPORT);
+    for (let at = 0; at < 20; at++) {
+        await sleep(1500);
+        const next = await shot(cdp, "01-preview", VIEWPORT);
+        if (next === held) {
+            return held;
+        }
+        held = next;
+    }
+    return held;
 }
 
 async function counters(cdp: Cdp) {
@@ -434,6 +454,9 @@ async function main() {
 
         phase = "shaders";
         console.log("\n== game shaders");
+        // Kept to compare the frame against once game shaders have been on and off again: a vertex
+        // array or a binding the deferred path leaves behind shows here and nowhere else.
+        const preview = await settled(cdp);
         await click(cdp, ROW_LEFT, ROW_Y);
         await sleep(1000);
         await shot(cdp, "02-shaded");
@@ -485,6 +508,18 @@ async function main() {
                     `the sweep never reached the targets, so this run proves nothing about them`,
             );
         }
+
+        phase = "preview";
+        console.log("\n== back to the preview");
+        await click(cdp, ROW_LEFT, ROW_Y);
+        await sleep(2000);
+        if ((await shot(cdp, "03-preview", VIEWPORT)) !== preview) {
+            throw new Error(
+                "the preview frame changed after game shaders were turned on and off again, so " +
+                    "the deferred path left state behind that the preview path reads",
+            );
+        }
+        console.log("   the preview frame came back the same");
 
         phase = "scene";
         report.scene = await walk(cdp, origin, SCENE, "04-scene");

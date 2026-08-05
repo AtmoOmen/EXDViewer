@@ -25,8 +25,11 @@ const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
 const OCCLUSION: u32 = 0x3266_7bd7;
 const ATTENUATION: u32 = 0x008c_d1ca;
 
+/// The frame as the composite left it, which is what a semitransparent pass blends over.
+const FINAL_COLOR: u32 = 0x8ea9_df48;
+
 /// The reflection, the only sampler in the whole graph that is not two-dimensional.
-const REFLECTION: u32 = 0xc5c4_cb3c;
+pub const REFLECTION: u32 = 0xc5c4_cb3c;
 
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
 /// once, and the channel past the last of them: the frame the composite resolved.
@@ -145,6 +148,9 @@ pub struct Buffers {
     position: Option<(glow::Framebuffer, glow::Texture)>,
     light: Option<(glow::Framebuffer, [glow::Texture; 2])>,
     lit: Option<(glow::Framebuffer, glow::Texture)>,
+    /// What the composite left, kept apart from the frame a semitransparent pass writes: that pass
+    /// reads the one and writes the other, and a texture cannot be both at once.
+    resolved: Option<glow::Texture>,
     size: (i32, i32),
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
@@ -256,6 +262,7 @@ impl Buffers {
         let mut dead = graveyard().lock().unwrap();
         dead.extend(self.color.drain(..).map(Dead::Texture));
         dead.extend(self.depth.take().map(Dead::Texture));
+        dead.extend(self.resolved.take().map(Dead::Texture));
         dead.extend(self.frames.drain(..).map(Dead::Frame));
         for (frame, textures) in [
             self.position
@@ -336,8 +343,40 @@ impl Buffers {
             // the frame it lands in is the one that can be blitted to the screen.
             let lit = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
             self.lit = Some((frame_of(gl, &[lit])?, lit));
+            self.resolved = Some(plane(
+                gl,
+                size,
+                glow::RGBA8,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+            )?);
         }
         Ok(())
+    }
+
+    /// Takes a copy of the resolved frame, which is what the passes drawn over it read. Bound as
+    /// the read framebuffer rather than blitted: the draw that follows writes the frame this was
+    /// copied from, and a texture being written cannot also be sampled.
+    pub fn keep(&self, gl: &glow::Context) -> Result<(), String> {
+        let (frame, _) = self.lit.ok_or("no lit frame")?;
+        let held = self.resolved.ok_or("no resolved frame")?;
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(frame));
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            // Onto the first unit rather than whichever happens to be active, which would be a
+            // sampler the pass before this one had just been given.
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_texture(glow::TEXTURE_2D, Some(held));
+            gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, self.size.0, self.size.1);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        Ok(())
+    }
+
+    /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
+    /// writes.
+    pub fn frame(&self) -> Option<glow::Framebuffer> {
+        self.lit.map(|(frame, _)| frame)
     }
 
     /// Clears one page of the G-buffer and points the draw buffers at every attachment it has.
@@ -421,7 +460,7 @@ impl Buffers {
 
     /// The cube the composite takes reflections against, which nothing here reconstructs. The alpha
     /// is the weight it is blended in at, so nought leaves the ambient it would otherwise replace.
-    fn reflection(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
+    pub fn reflection(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
         if let Some(held) = self.reflection {
             return Ok(held);
         }
@@ -458,6 +497,7 @@ impl Buffers {
             VIEW_POSITION => self.position.ok_or("no view position")?.1,
             LIGHT_DIFFUSE => self.light.ok_or("no light buffer")?.1[0],
             LIGHT_SPECULAR => self.light.ok_or("no light buffer")?.1[1],
+            FINAL_COLOR => self.resolved.ok_or("no resolved frame")?,
             OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
             _ => self.stand_in(gl)?,
         })
@@ -671,6 +711,7 @@ impl Drop for Buffers {
                 self.stand_in.take(),
                 self.unoccluded.take(),
                 self.reflection.take(),
+                self.resolved.take(),
                 self.depth.take(),
             ]
             .into_iter()
@@ -840,7 +881,7 @@ pub fn sampler(
 
 /// The same over whichever target the shader declared the sampler against. A draw only validates if
 /// the texture bound to a unit is of the sampler's own type, so the target follows the declaration.
-fn bind(
+pub fn bind(
     gl: &glow::Context,
     program: glow::Program,
     name: &str,

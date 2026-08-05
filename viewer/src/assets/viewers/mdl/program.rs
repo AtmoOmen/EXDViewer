@@ -103,13 +103,20 @@ pub enum Field {
     Bones,
 }
 
+/// What a signature declares an attribute's components as. A draw only validates where the pointer
+/// reads with a type of the same class, signedness and all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Components {
+    Float,
+    Signed,
+    Unsigned,
+}
+
 /// One vertex attribute, as the shader's own input signature asks for it.
 pub struct Attribute {
     pub location: u32,
     pub field: Field,
-    /// Whether the signature declares an integer component type, which takes an integer pointer: a
-    /// float one feeds a `uvec4` attribute values nothing checks.
-    pub integer: bool,
+    pub components: Components,
 }
 
 /// A texture the shader samples, named as GLSL has it and identified as the material names it.
@@ -617,7 +624,11 @@ impl Program {
                 Some(Attribute {
                     location: *register,
                     field: field(&entry.name)?,
-                    integer: entry.kind.starts_with("int") || entry.kind.starts_with("uint"),
+                    components: match entry.kind.as_str() {
+                        held if held.starts_with("uint") => Components::Unsigned,
+                        held if held.starts_with("int") => Components::Signed,
+                        _ => Components::Float,
+                    },
                 })
             })
             .collect();

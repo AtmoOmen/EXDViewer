@@ -51,9 +51,11 @@ It then walks the paths that broke:
    handed a `redirect`, so opening a model needs no clicking.
 2. Clicks **Game shaders** and waits for the deferred path to link programs and bind a G-buffer.
 3. Sweeps the channel row, covering `SV_Target`, `SV_Target1..4` and `Lit`.
-4. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
-5. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
-6. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
+4. Clicks **Game shaders** off again and compares the preview frame against the one taken before
+   any of that, which is what catches the deferred path leaving GL state behind.
+5. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
+6. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
+7. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
@@ -79,7 +81,11 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-Nothing. The full run passes.
+The effects. Every run since 2026-08-05 logs `assets/avfx: particle N: the package has not arrived`
+hundreds of times and then fails on `every effect looked identical at both points of its timeline`,
+because with no package nothing draws and the two shots of a frame match. Measured at both
+`3a74da1` and `b383a15` over the same one effect, so it is not the deferred path: the two apricot
+packages are 20 and 40 MiB and the twelve seconds the run waits for them are no longer enough.
 
 Both of the problems reported at `f8b3ecc` are fixed. `glDrawArrays: Mismatch between texture
 format and sampler type` was the stand-in textures being made lazily from inside the binding loop:

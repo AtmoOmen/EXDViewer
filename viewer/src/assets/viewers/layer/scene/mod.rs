@@ -1435,6 +1435,7 @@ impl Scene {
             .map(|(material, held)| mdl::gpu::Shaded {
                 buffer: held.buffer.clone(),
                 depth: held.depth.clone(),
+                resolve: None,
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()

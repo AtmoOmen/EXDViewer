@@ -66,6 +66,12 @@ const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
 
+/// How far the placed light reaches, in radii of the model. A lamp is drawn as the box it covers
+/// and cut off at the sphere of its own reach, and both of those show as a hard edge where they
+/// cross what is drawn, so the box stands well outside it. The near and far planes have to hold the
+/// whole box: a face of it that the planes cut leaves a straight edge that moves with the camera.
+const LAMP_SPAN: f32 = 4.0;
+
 /// A vertex as the shader reads it. `#[repr(C)]` with no padding, so a mesh uploads as its own
 /// slice.
 ///
@@ -83,8 +89,10 @@ pub struct Vertex {
     uv1: [f32; 4],
     color: [u8; 4],
     color1: [u8; 4],
-    weights: [u8; 4],
-    bones: [u8; 4],
+    /// Sixteen bits each, since a skinned shader reads the low byte as the first four influences
+    /// and the high byte as the next four.
+    weights: [u16; 4],
+    bones: [u16; 4],
 }
 
 /// Where the camera is looking from.
@@ -169,12 +177,20 @@ enum Package {
 /// context allows decides how many of the G-buffer's targets fit in one reading.
 struct Translated {
     attachments: usize,
-    held: Result<Pair, String>,
+    held: Result<Passes, String>,
 }
 
-/// The buffer pass, one reading per page of its targets, and the depth pass that runs before it
-/// where the node names one.
-type Pair = (Vec<Arc<program::Program>>, Option<Arc<program::Program>>);
+/// What a material draws with. A semitransparent package declares no G pass at all: it is drawn
+/// over the frame the composite resolved rather than into the buffer that frame came from.
+#[derive(Default)]
+struct Passes {
+    /// The buffer pass, one reading per page of its targets.
+    buffer: Vec<Arc<program::Program>>,
+    depth: Option<Arc<program::Program>>,
+    /// What the material resolves itself into the frame with, drawn as its own geometry after the
+    /// lighting. A package with no buffer pass has only the semitransparent one.
+    resolve: Option<Arc<program::Program>>,
+}
 
 /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
 type Table = Arc<(Vec<u16>, usize, usize)>;
@@ -521,10 +537,8 @@ pub(super) fn build(
             uv1: uvs1.and_then(|held| uv(held, at)).unwrap_or_default(),
             color: colors.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
             color1: colors1.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
-            weights: weights
-                .and_then(|held| bytes(held, at))
-                .unwrap_or([255, 0, 0, 0]),
-            bones: bones.and_then(|held| bytes(held, at)).unwrap_or_default(),
+            weights: influences(weights, at, [255, 0, 0, 0]),
+            bones: influences(bones, at, [0; 4]),
         })
         .collect();
     Ok((vertices, indices))
@@ -564,6 +578,13 @@ fn uv(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
 
 /// Four bytes of an attribute the shader reads as bytes. An eight-byte element carries two sets
 /// interleaved, the low half first, so its own four are every other one.
+/// One vertex's four bone influences, widened into the sixteen bits a skinned shader reads them as.
+fn influences(values: Option<&VertexValues>, at: usize, missing: [u16; 4]) -> [u16; 4] {
+    values
+        .and_then(|held| bytes(held, at))
+        .map_or(missing, |held| held.map(u16::from))
+}
+
 fn bytes(values: &VertexValues, at: usize) -> Option<[u8; 4]> {
     match values {
         VertexValues::Vector4(held) => held
@@ -925,8 +946,10 @@ impl Rendered {
         // depth precision where it is actually drawn.
         let span = (eye - level.home.target).length();
         let near = (span - level.radius).max(level.radius * 0.005);
-        let projection =
-            Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, span + level.radius);
+        // Past the light box's own far corner rather than past the model, since the volume a lamp
+        // is drawn as is clipped by these planes whether or not anything depth tests against them.
+        let far = span + level.radius * (1.0 + LAMP_SPAN * 2.0);
+        let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
 
         // Fill and rim follow the camera; a fill weighted toward the eye is the whole of what keeps
         // a surface turned away from the key from reading as a silhouette. Both are built from the
@@ -976,10 +999,11 @@ impl Rendered {
                     };
                 }
                 let shaded = self.shaded.get().then(|| {
-                    let (buffer, depth) = translated.get(&mesh.material)?.held.as_ref().ok()?;
+                    let passes = translated.get(&mesh.material)?.held.as_ref().ok()?;
                     Some(gpu::Shaded {
-                        buffer: buffer.clone(),
-                        depth: depth.clone(),
+                        buffer: passes.buffer.clone(),
+                        depth: passes.depth.clone(),
+                        resolve: passes.resolve.clone(),
                         table: tables.get(&mesh.material).cloned(),
                         textures: material
                             .bound()
@@ -1008,8 +1032,7 @@ impl Rendered {
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against. A projection built for GL
         // would go through that move a second time and lose the near half of the frame.
-        let held =
-            Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, span + level.radius);
+        let held = Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, far);
         let frame = gpu::Frame {
             view: view.to_cols_array(),
             projection: projection.to_cols_array(),
@@ -1023,8 +1046,8 @@ impl Rendered {
                     placement: Mat4::from_translation(
                         camera.target + Vec3::new(0.0, level.radius, level.radius),
                     ),
-                    min: Vec3::splat(-level.radius * 2.0),
-                    max: Vec3::splat(level.radius * 2.0),
+                    min: Vec3::splat(-level.radius * LAMP_SPAN),
+                    max: Vec3::splat(level.radius * LAMP_SPAN),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -1057,8 +1080,8 @@ impl Rendered {
             .translated
             .borrow()
             .values()
-            .find_map(|held| held.held.as_ref().ok())
-            .and_then(|(buffer, _)| buffer.first())
+            .filter_map(|held| held.held.as_ref().ok())
+            .find_map(|passes| passes.buffer.first())
             .map(|buffer| buffer.names.iter().cloned().enumerate().collect())
             .unwrap_or_default();
         if !held.is_empty() && self.lighting.borrow().is_some() {
@@ -1124,32 +1147,35 @@ impl Rendered {
             let Some(Package::Ready(bytes)) = packages.get(&material.package()) else {
                 continue;
             };
-            let page = |at| {
+            let build = |pass, at| {
                 program::Program::build(
                     bytes,
                     material,
                     set,
-                    program::Pass::Buffer,
+                    pass,
                     program::SUB_VIEW_MAIN,
                     at,
                     attachments,
                 )
             };
-            let held = page(0).map(|first| {
+            let mut passes = Passes::default();
+            if let Ok(first) = build(program::Pass::Buffer, 0) {
                 let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
-                let mut buffer = vec![Arc::new(first)];
-                buffer.extend((1..pages).filter_map(|at| page(at).ok().map(Arc::new)));
-                let depth = program::Program::build(
-                    bytes,
-                    material,
-                    set,
-                    program::Pass::Depth,
-                    program::SUB_VIEW_MAIN,
-                    0,
-                    attachments,
+                passes.buffer.push(Arc::new(first));
+                passes.buffer.extend(
+                    (1..pages).filter_map(|at| build(program::Pass::Buffer, at).ok().map(Arc::new)),
                 );
-                (buffer, depth.ok().map(Arc::new))
-            });
+                passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
+            }
+            // Only where the package writes no G-buffer. One that does is resolved by the pass that
+            // reads the whole frame, and drawing its own over that would resolve it twice.
+            if passes.buffer.is_empty() {
+                passes.resolve = build(program::Pass::CompositeBlended, 0).ok().map(Arc::new);
+            }
+            let held = match passes.buffer.is_empty() && passes.resolve.is_none() {
+                true => Err("this material's keys reach no pass that draws it".into()),
+                false => Ok(passes),
+            };
             if let Err(why) = &held {
                 log::warn!("assets/mdl: {}: {why}", material.package());
             }

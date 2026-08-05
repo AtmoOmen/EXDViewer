@@ -17,7 +17,7 @@ use glow::HasContext;
 use super::super::super::mdl::deferred::{
     self, Buffers, Dead, LIT, Linked, TYPES, bury, graveyard, sampler,
 };
-use super::super::super::mdl::gpu::{FIELDS, Lighting, Shaded};
+use super::super::super::mdl::gpu::{Lighting, Shaded, attribute};
 use super::super::super::mdl::{Vertex, program};
 
 /// The color table, which the game's own shaders address as a texture of their own.
@@ -309,13 +309,17 @@ impl Renderer {
                         if held.batch() > 1 {
                             self.buffers.bind(gl, program, held, &scene, &[])?;
                         }
+                        // Before anything is bound: making a texture binds it to whichever unit
+                        // happens to be active, so one made partway through the loop below takes
+                        // over the unit the sampler before it was just given.
+                        let table = match &shaded.table {
+                            Some(table) => Some(self.table(gl, surface.material, table)?),
+                            None => None,
+                        };
                         let mut unit = 0;
                         for texture in &held.textures {
                             let bound = match texture.id {
-                                TABLE => match &shaded.table {
-                                    Some(table) => Some(self.table(gl, surface.material, table)?),
-                                    None => None,
-                                },
+                                TABLE => table,
                                 id => shaded
                                     .textures
                                     .iter()
@@ -349,32 +353,8 @@ impl Renderer {
                             for location in 0..16 {
                                 gl.disable_vertex_attrib_array(location);
                             }
-                            for attribute in &held.attributes {
-                                let Some((_, lanes, at, kind)) = FIELDS
-                                    .iter()
-                                    .find(|(field, _, _, _)| *field == attribute.field)
-                                else {
-                                    continue;
-                                };
-                                gl.enable_vertex_attrib_array(attribute.location);
-                                let stride = size_of::<Vertex>() as i32;
-                                match attribute.integer {
-                                    true => gl.vertex_attrib_pointer_i32(
-                                        attribute.location,
-                                        *lanes,
-                                        *kind,
-                                        stride,
-                                        *at,
-                                    ),
-                                    false => gl.vertex_attrib_pointer_f32(
-                                        attribute.location,
-                                        *lanes,
-                                        *kind,
-                                        *kind == glow::UNSIGNED_BYTE,
-                                        stride,
-                                        *at,
-                                    ),
-                                }
+                            for held in &held.attributes {
+                                attribute(gl, held);
                             }
                             let count = held.batch() as i32;
                             for at in 0..*windows {

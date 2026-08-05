@@ -1,9 +1,9 @@
 //! What a file is, read from its bytes rather than from its name.
 //!
-//! Most of what the game ships leads with a magic. The three formats here that do not are `.tex`
-//! and `.tera`, recognized by the shape of their fixed headers, and `.mtrl`, which is small enough
-//! to read outright and names a shader package that gives it away. Anything left over that decodes
-//! cleanly is text.
+//! Most of what the game ships leads with a magic. The formats here that do not are `.tex` and
+//! `.tera`, recognized by the shape of their fixed headers, `.mtrl`, which is small enough to read
+//! outright and names a shader package that gives it away, and `.hwc`, which is a bare pixel buffer
+//! with nothing to go on but its length. Anything left over that decodes cleanly is text.
 
 use std::io::Cursor;
 
@@ -26,6 +26,9 @@ const TERA_VERSION: u32 = 0x0100_0003;
 
 /// A `.dic` header, which the character maps it counts follow immediately.
 const DIC_HEADER: usize = 0x8124;
+
+/// A `.hwc`, which is 64x64 pixels of four bytes and nothing else.
+const CURSOR: usize = 64 * 64 * 4;
 
 /// A format as its bytes identify it.
 #[derive(Clone, Copy)]
@@ -62,8 +65,9 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"ShPk", Format::Shown(Viewer::Shpk)),
     (b"ShCd", Format::Shown(Viewer::Shcd)),
     (b"die\0", Format::Shown(Viewer::Eid)),
+    (b"EVP", Format::Shown(Viewer::Evp)),
     (b"plks", Format::Shown(Viewer::Skp)),
-    (b"blks", Format::Named("Skeleton")),
+    (b"blks", Format::Shown(Viewer::Sklb)),
     (b"SEDBSSCF", Format::Named("Sound")),
     (b"EXHF", Format::Named("Sheet header")),
     (b"EXDF", Format::Named("Sheet page")),
@@ -80,14 +84,15 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"AMB\0", Format::Shown(Viewer::Amb)),
     (b" dgg", Format::Shown(Viewer::Ggd)),
     (b"dzg\0", Format::Shown(Viewer::Gzd)),
-    (b"pap ", Format::Named("Animation")),
-    (b"TMLB", Format::Named("Timeline")),
+    (b"pap ", Format::Shown(Viewer::Pap)),
+    (b"TMLB", Format::Shown(Viewer::Tmb)),
     (b"CUTB", Format::Named("Cutscene")),
     (b"XFVA", Format::Shown(Viewer::Avfx)),
 ];
 
 /// What the bytes say the file is, or `None` where they say nothing. Ordered strongest test first:
-/// a magic settles it outright, and the three guesses below only ever see what no magic claimed.
+/// a magic settles it outright, and the guesses below only ever see what no magic claimed. A cursor
+/// is last of all, since its length is the weakest test here and any binary of that size passes it.
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if let Some((_, format)) = MAGIC.iter().find(|(magic, _)| bytes.starts_with(magic)) {
         return Some(*format);
@@ -104,7 +109,10 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if is_dictionary(bytes) {
         return Some(Format::Shown(Viewer::Dic));
     }
-    is_text(bytes).then_some(Format::Shown(Viewer::Text))
+    if is_text(bytes) {
+        return Some(Format::Shown(Viewer::Text));
+    }
+    (bytes.len() == CURSOR).then_some(Format::Shown(Viewer::Hwc))
 }
 
 /// Read as a material and believed only if it names a shader package, which nothing else would.
@@ -198,6 +206,7 @@ mod tests {
         assert_eq!(label(b"SEDBSSCF\0\0\0\0"), Some("Sound"));
         assert_eq!(label(b"blks\0\0\0\0"), Some("Skeleton"));
         assert_eq!(label(b"die\0" as &[u8]), Some("Bind points"));
+        assert_eq!(label(b"EVP\x0b\0\0\0\0"), Some("Equipment VFX parameters"));
         assert_eq!(label(b"plks0031"), Some("Skeleton parameters"));
         assert_eq!(label(b"LGB1\0\0\0\0"), Some("Layer group"));
         assert_eq!(label(b"SGB1\0\0\0\0"), Some("Shared group"));
@@ -294,6 +303,19 @@ mod tests {
             );
         }
         assert!(label(&header[..DIC_HEADER - 1]) != Some("Word dictionary"));
+    }
+
+    /// The weakest test in the file, so it only ever sees what nothing else claimed, and it sees
+    /// that on its length alone.
+    #[test]
+    fn reads_a_cursor_by_its_length() {
+        assert_eq!(label(&[1u8; CURSOR]), Some("Cursor"));
+        assert!(label(&[1u8; CURSOR - 1]) != Some("Cursor"));
+        assert!(label(&[1u8; CURSOR + 1]) != Some("Cursor"));
+        // A file of that length that says what it is keeps saying it.
+        let mut named = vec![0u8; CURSOR];
+        named[..4].copy_from_slice(b"TMLB");
+        assert_eq!(label(&named), Some("Timeline"));
     }
 
     #[test]

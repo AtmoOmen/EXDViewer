@@ -68,6 +68,15 @@ ironworks = { version = "0.4.1", features = [
     "cmp",
     "gzd",
     "ggd",
+    "eqdp",
+    "eqp",
+    "gmp",
+    "evp",
+    "phyb",
+    "sklb",
+    "pap",
+    "tmb",
+    "hwc",
 ] }
 dxbc = "0.1"
 hlsl = "0.1"

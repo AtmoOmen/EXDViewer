@@ -27,8 +27,8 @@ const TABLE: u32 = 0x2005_679f;
 /// a single frame can be handed on top of it.
 const UPLOADS: usize = 4;
 
-/// What a uniform buffer's bound window has to start on. The specification's own floor is 256, and a
-/// context is free to ask for more, so the frame asks it once.
+/// What a uniform buffer's bound window has to start on until a context has been asked, which is the
+/// largest any implementation is allowed to want.
 const ALIGNMENT: i32 = 256;
 
 /// One mesh's geometry.
@@ -205,6 +205,10 @@ impl Renderer {
         gl: &glow::Context,
         frame: &Frame,
     ) -> Result<(Vec<(i32, i32)>, i32), String> {
+        if self.alignment == ALIGNMENT {
+            let held = unsafe { gl.get_parameter_i32(glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT) };
+            self.alignment = held.clamp(1, ALIGNMENT);
+        }
         let mut blob: Vec<u8> = Vec::new();
         let mut at: Vec<(i32, i32)> = Vec::new();
         let mut window = 0i32;

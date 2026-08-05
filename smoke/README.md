@@ -14,8 +14,8 @@ Flags: `--no-build` reuses the existing `viewer/dist`, `--shots` writes screensh
 is `--model-only` with screenshots (use it to recalibrate the click coordinates in `smoke.ts`
 after a UI change). Every run writes `smoke/last-run.json`.
 
-**`main` is red right now, for real reasons.** See "Known red" below. A red run here is not a
-broken harness; read the deduped list it prints.
+**`main` is red right now, for real reasons.** See "Known red" below for the three it still
+reports. A red run here is not a broken harness; read the deduped list it prints.
 
 ## Why it exists
 
@@ -64,18 +64,27 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-At `b965b62` the full run reports five distinct problems across 623 messages. `--model-only`
-passes on the same build, so the harness is not stuck red.
+At `f8b3ecc` the full run reports three distinct problems across 19 messages:
 
-- `glBlitFramebuffer: Invalid operation on multisampled framebuffer`, in the model viewer.
-- `ERROR: [egui_glow] GL error ... (callback): GL_INVALID_OPERATION`, which is egui reporting the
-  same faults from its side of the callback.
-- `glBlitFramebuffer: Blit feedback loop: the read and draw framebuffers are the same`, in the
-  scene viewer, which is a different fault from the first.
-- `glDrawArrays: Mismatch between texture format and sampler type`, once in each viewer.
+- `glDrawArrays: Mismatch between texture format and sampler type`, once in each viewer, with
+  `ERROR: [egui_glow] GL error ... (callback): GL_INVALID_OPERATION` beside it. This is a real
+  fault and nobody has claimed it yet.
 - `ERROR: [viewer::assets::viewers::layer::scene] scene/mod.rs:918: this model draws nothing at
-  any detail level`, for 15 bgplate models. That one is an asset complaint rather than a GL
-  fault, and it fails the run only because the app logs it at `Error`.
+  any detail level`, for 15 bgplate models. That is an asset complaint rather than a GL fault,
+  and it fails the run only because the app logs it at `Error`. It wants fixing in the app by
+  dropping the level to `warn`; do not mute it here, or the gate stops catching the log level
+  it exists to catch.
+
+The two blit faults it used to report are gone. Measured at `b965b62`, before
+`0e66465 Show the frame with a pass instead of a blit` and
+`46463b9 Keep egui's clip rect off the frame's own buffers`:
+
+| | `b965b62` | `f8b3ecc` |
+|---|---|---|
+| `glBlitFramebuffer: Invalid operation on multisampled framebuffer` | 251 | 0 |
+| `glBlitFramebuffer: Blit feedback loop` | 49 | 0 |
+| `ERROR: [egui_glow] GL error` | 306 | 2 |
+| total messages | 623 | 19 |
 
 ## What it does not cover
 
@@ -84,6 +93,10 @@ Only the two 3D viewers and only one asset each. It does not check that anything
 over the row rather than a lookup of each label, so it counts distinct selections rather than
 naming them. The click coordinates are calibrated against a 1600x1000 viewport and need
 `--explore` and a fresh look if the layout moves.
+
+It cannot catch the `Send + Sync` bug at all. That one is a wasm *compile* error, so its gate is
+`cargo check -p viewer --target wasm32-unknown-unknown --lib`; nothing that runs a built app can
+see it. Of the three bugs this exists for, the browser is the only place the other two show up.
 
 It needs the network: the app reads from `https://exd.camora.dev`, and the run uses the live API
 so that the real decode path is what gets exercised.

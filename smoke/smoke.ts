@@ -1,0 +1,355 @@
+#!/usr/bin/env bun
+// Drives the real wasm build in a real browser and fails on GL errors, panics and ERROR logs.
+// Run it through smoke/run.sh, which resolves chromium and builds the app first.
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+
+import { Cdp } from "./cdp.ts";
+
+const here = dirname(new URL(import.meta.url).pathname);
+const root = resolve(here, "..");
+const dist = resolve(root, "viewer/dist");
+
+const args = new Set(Bun.argv.slice(2));
+const shots = args.has("--shots") || args.has("--explore");
+const explore = args.has("--explore");
+const shotDir = join(root, "smoke/shots");
+
+const MODEL = "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl";
+const SCENE = "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb";
+
+const WIDTH = 1600;
+const HEIGHT = 1000;
+
+// The control row sits at the top of the viewer pane. `ROW_LEFT` is where "Game shaders" is, and the
+// sweep walks right from `SWEEP_FROM` across the channel labels that appear beside it. Recalibrate
+// with `--explore`, which writes annotated screenshots to smoke/shots.
+const ROW_Y = 116;
+const ROW_LEFT = 268;
+const SWEEP_FROM = 325;
+const SWEEP_TO = 900;
+const SWEEP_STEP = 16;
+
+// The lgb viewer opens on its Tree tab; the 3D scene is the tab beside it.
+const SCENE_TAB = { x: 287, y: 116 };
+
+// SV_Target, SV_Target1..4 and Lit.
+const CHANNELS = 6;
+
+type Message = { where: string; source: string; level: string; text: string };
+
+const failures: Message[] = [];
+const muted: Message[] = [];
+let phase = "startup";
+
+const MUTED_TEXT = [
+    /Failed to load resource.*favicon/i,
+    /manifest\.json/i,
+    /Automatic fallback to software WebGL/i,
+    /WEBGL_debug_renderer_info is deprecated/i,
+    /GPU stall due to ReadPixels/i,
+];
+
+// eframe's WebLogger maps Rust's Error level onto console.warn with an "ERROR:" prefix rather than
+// console.error, so watching console.error alone would miss every egui_glow GL error.
+const FATAL_TEXT = [
+    /\bpanicked at\b/,
+    /\bERROR:/,
+    /GL_INVALID/,
+    /GL_OUT_OF_MEMORY/,
+    /\bGL error\b/,
+    /INVALID_FRAMEBUFFER_OPERATION/,
+    /unreachable executed/,
+    /RuntimeError: /,
+    /The app has crashed/,
+];
+
+function record(where: string, source: string, level: string, text: string) {
+    const message: Message = { where: phase, source, level, text };
+    if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
+        muted.push(message);
+        return;
+    }
+    const fatal =
+        FATAL_TEXT.some((pattern) => pattern.test(text)) ||
+        where === "exception" ||
+        (level === "error" && source !== "network");
+    if (fatal) {
+        failures.push(message);
+        console.log(`  [fail:${phase}] ${text.split("\n")[0].slice(0, 240)}`);
+    } else {
+        muted.push(message);
+    }
+}
+
+const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+
+async function waitFor(what: string, timeoutMs: number, probe: () => Promise<boolean>) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (await probe()) return;
+        await sleep(250);
+    }
+    throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+}
+
+function serve() {
+    return Bun.serve({
+        port: 0,
+        async fetch(request) {
+            const url = new URL(request.url);
+            const asked = join(dist, decodeURIComponent(url.pathname));
+            if (asked.startsWith(dist) && !asked.endsWith("/")) {
+                const file = Bun.file(asked);
+                if (await file.exists()) return new Response(file);
+            }
+            // Every unknown path is a client route, so hand back the shell.
+            return new Response(Bun.file(join(dist, "index.html")), {
+                headers: { "content-type": "text/html; charset=utf-8" },
+            });
+        },
+    });
+}
+
+async function launch(profile: string) {
+    const chromium = process.env.CHROMIUM ?? "chromium";
+    const child = Bun.spawn(
+        [
+            chromium,
+            "--headless",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            // Software WebGL2 through ANGLE/SwiftShader. Never pass --disable-gpu here: it takes
+            // WebGL away and the renderer silently stops being tested.
+            "--enable-unsafe-swiftshader",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-component-extensions-with-background-pages",
+            "--hide-scrollbars",
+            "--mute-audio",
+            `--window-size=${WIDTH},${HEIGHT}`,
+            `--user-data-dir=${profile}`,
+            "--remote-debugging-port=0",
+            "about:blank",
+        ],
+        { stdout: "pipe", stderr: "pipe" },
+    );
+
+    const portFile = join(profile, "DevToolsActivePort");
+    await waitFor("chromium's debugging port", 60_000, async () => existsSync(portFile));
+    await sleep(300);
+    const port = readFileSync(portFile, "utf8").split("\n")[0].trim();
+    return { child, port };
+}
+
+async function page(port: string) {
+    const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
+    const target = targets.find((t: any) => t.type === "page");
+    if (!target) throw new Error("chromium exposed no page target");
+    return Cdp.connect(target.webSocketDebuggerUrl);
+}
+
+function text(argument: any): string {
+    if (argument === undefined || argument === null) return "";
+    if (argument.value !== undefined) return String(argument.value);
+    if (argument.description !== undefined) return String(argument.description);
+    if (argument.unserializableValue !== undefined) return String(argument.unserializableValue);
+    return argument.type ?? "";
+}
+
+async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
+    const params: Record<string, unknown> = { format: "png" };
+    if (clip) params.clip = { ...clip, scale: 1 };
+    const result = await cdp.send("Page.captureScreenshot", params);
+    if (shots) {
+        mkdirSync(shotDir, { recursive: true });
+        writeFileSync(join(shotDir, `${name}.png`), Buffer.from(result.data, "base64"));
+    }
+    return Bun.hash(result.data).toString(16);
+}
+
+async function counters(cdp: Cdp) {
+    return await cdp.eval("JSON.parse(JSON.stringify(window.__smoke ?? {}))");
+}
+
+async function click(cdp: Cdp, x: number, y: number) {
+    const base = { x, y, button: "left", clickCount: 1, buttons: 1 };
+    await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mouseMoved", buttons: 0 });
+    await sleep(60);
+    await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mousePressed" });
+    await sleep(40);
+    await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
+    await sleep(160);
+}
+
+async function main() {
+    if (!existsSync(join(dist, "index.html"))) {
+        throw new Error(`no build at ${dist} (run smoke/run.sh, which builds first)`);
+    }
+
+    const server = serve();
+    const origin = `http://127.0.0.1:${server.port}`;
+    const profile = mkdtempSync(join(tmpdir(), "exdviewer-smoke-"));
+    const { child, port } = await launch(profile);
+    const cdp = await page(port);
+
+    let crashed = false;
+    cdp.on("Runtime.consoleAPICalled", (p) =>
+        record("console", "console", p.type, p.args.map(text).join(" ")),
+    );
+    cdp.on("Log.entryAdded", (p) => record("log", p.entry.source, p.entry.level, p.entry.text));
+    cdp.on("Runtime.exceptionThrown", (p) =>
+        record(
+            "exception",
+            "exception",
+            "error",
+            p.exceptionDetails.exception?.description ?? p.exceptionDetails.text,
+        ),
+    );
+    cdp.on("Inspector.targetCrashed", () => {
+        crashed = true;
+    });
+
+    await cdp.send("Runtime.enable");
+    await cdp.send("Log.enable");
+    await cdp.send("Page.enable");
+    await cdp.send("Inspector.enable");
+    await cdp.send("Emulation.setDeviceMetricsOverride", {
+        width: WIDTH,
+        height: HEIGHT,
+        deviceScaleFactor: 1,
+        mobile: false,
+    });
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+        source: readFileSync(join(here, "instrument.js"), "utf8"),
+    });
+
+    const report: Record<string, unknown> = {};
+
+    try {
+        phase = "boot";
+        console.log(`\n== boot: ${origin}/assets/${MODEL}`);
+        await cdp.send("Page.navigate", { url: `${origin}/assets/${MODEL}` });
+
+        await waitFor("the wasm app to take a GL context", 180_000, async () => {
+            const c = await counters(cdp).catch(() => ({}) as any);
+            return (c.contexts ?? 0) > 0 && (c.draws ?? 0) > 0;
+        });
+        const booted = await counters(cdp);
+        console.log(`   renderer: ${booted.renderer}`);
+        console.log(`   samples: ${booted.samples}  antialias: ${booted.antialias}`);
+        report.renderer = booted.renderer;
+        report.samples = booted.samples;
+
+        if (!booted.samples || booted.samples < 2) {
+            throw new Error(
+                `canvas is single-sampled (SAMPLES=${booted.samples}); the multisample blit bug ` +
+                    `cannot reproduce here, so this run would not be a real gate`,
+            );
+        }
+
+        phase = "model";
+        await waitFor("the model to be titled", 180_000, async () => {
+            const title = await cdp.eval<string>("document.title");
+            return title.includes("yam04") || title.includes(".mdl");
+        });
+        await sleep(6000);
+        await shot(cdp, "01-model");
+        const plain = await counters(cdp);
+        console.log(`   after load: draws=${plain.draws} links=${plain.links} blits=${plain.blits}`);
+        report.plain = plain;
+
+        if (explore) {
+            console.log("\n== explore: screenshots written, stopping before any click");
+            return;
+        }
+
+        phase = "shaders";
+        console.log("\n== game shaders");
+        await click(cdp, ROW_LEFT, ROW_Y);
+        await sleep(1000);
+        await shot(cdp, "02-shaded");
+
+        // The G-buffer binding is what says the deferred path ran, and unlike the blit it survives
+        // whatever the composite ends up doing.
+        await waitFor("the game shaders to link and bind a G-buffer", 180_000, async () => {
+            const c = await counters(cdp);
+            return c.links > plain.links && c.drawBuffers > plain.drawBuffers;
+        });
+        const shaded = await counters(cdp);
+        console.log(
+            `   after shading: links +${shaded.links - plain.links}` +
+                ` blits +${shaded.blits - plain.blits}` +
+                ` drawBuffers +${shaded.drawBuffers - plain.drawBuffers}`,
+        );
+        report.shaded = shaded;
+
+        phase = "channels";
+        console.log("\n== channels");
+        const rowClip = { x: 0, y: ROW_Y - 14, width: WIDTH, height: 28 };
+        const seen = new Set<string>();
+        let index = 0;
+        for (let x = SWEEP_FROM; x <= SWEEP_TO; x += SWEEP_STEP) {
+            await click(cdp, x, ROW_Y);
+            seen.add(await shot(cdp, `03-channel-${String(index++).padStart(2, "0")}`, rowClip));
+        }
+        console.log(`   distinct selections: ${seen.size}`);
+        report.channels = seen.size;
+        if (seen.size < CHANNELS) {
+            throw new Error(
+                `the channel row only ever showed ${seen.size} selections, wanted ${CHANNELS}; ` +
+                    `the sweep never reached the targets, so this run proves nothing about them`,
+            );
+        }
+
+        phase = "scene";
+        console.log(`\n== scene: ${SCENE}`);
+        await cdp.send("Page.navigate", { url: `${origin}/assets/${SCENE}` });
+        await waitFor("the scene file to be titled", 180_000, async () => {
+            const title = await cdp.eval<string>("document.title").catch(() => "");
+            return title.includes("bg.lgb");
+        });
+        await sleep(3000);
+        await click(cdp, SCENE_TAB.x, SCENE_TAB.y);
+        await waitFor("the scene to draw its instances", 300_000, async () => {
+            const c = await counters(cdp).catch(() => ({}) as any);
+            return (c.instanced ?? 0) > 0;
+        });
+        await sleep(8000);
+        await shot(cdp, "04-scene");
+        const scene = await counters(cdp);
+        console.log(`   instanced draws: ${scene.instanced}  links: ${scene.links}`);
+        report.scene = scene;
+    } finally {
+        if (crashed) failures.push({ where: phase, source: "browser", level: "error", text: "the renderer process crashed" });
+        writeFileSync(join(root, "smoke/last-run.json"), JSON.stringify({ report, failures, muted }, null, 2));
+        cdp.close();
+        child.kill();
+        await server.stop(true);
+        rmSync(profile, { recursive: true, force: true });
+    }
+
+    console.log(`\n${"=".repeat(60)}`);
+    if (failures.length) {
+        console.log(`FAIL: ${failures.length} browser message(s) the gate treats as fatal\n`);
+        for (const f of failures.slice(0, 30)) {
+            console.log(`[${f.where}] ${f.source}/${f.level}`);
+            console.log(`  ${f.text.split("\n").slice(0, 6).join("\n  ")}\n`);
+        }
+        process.exit(1);
+    }
+    console.log("PASS: no GL errors, panics or ERROR logs");
+}
+
+main().catch((error) => {
+    console.log(`\n${"=".repeat(60)}`);
+    console.log(`FAIL: ${error.message}`);
+    if (failures.length) {
+        console.log(`\nbrowser messages before the failure:`);
+        for (const f of failures.slice(0, 20)) console.log(`  [${f.where}] ${f.text.split("\n")[0]}`);
+    }
+    process.exit(1);
+});

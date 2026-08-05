@@ -1604,6 +1604,19 @@ mod tests {
         assert_eq!(at(effect, 200).len(), 1);
     }
 
+    fn scale(value: f32) -> Vec<u8> {
+        let axes = ["X", "Y", "Z"].map(|axis| curve(axis, 0, 0, &scalars(&[(0, 1, value)])));
+        nest("Scl", &axes)
+    }
+
+    /// A sprite is drawn one scale across about its own center, so that is the reach the camera opens
+    /// on: taking the scale for a half extent stands it off at several times the distance.
+    #[test]
+    fn a_sprite_is_framed_on_the_quad_it_draws() {
+        let effect = &playing(&[life(-1.0), scale(4.0)], (0, 0)).effect;
+        assert_eq!(effect.fit(), (Vec3::ZERO, 2.0));
+    }
+
     #[test]
     fn a_model_kind_draws_the_model_it_names() {
         let mut vertex = vec![0; 36];

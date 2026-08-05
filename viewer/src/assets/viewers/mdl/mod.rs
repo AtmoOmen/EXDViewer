@@ -56,6 +56,12 @@ const MARGIN: f32 = 1.25;
 const TRANSFORM_VIEW: u32 = 0xa5a1_910d;
 const TRANSFORM_VIEW_SKIN: u32 = 0x9c14_c8e9;
 
+/// The scene key deciding whether a background shader reads the normal map at all. A package
+/// defaults it to off, and the variant that answer selects samples no normal map, so the frame it
+/// writes is the geometry's own.
+const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
+const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
+
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
@@ -1096,11 +1102,14 @@ impl Rendered {
         let packages = self.packages.borrow();
         let mut translated = self.translated.borrow_mut();
         let mut tables = self.tables.borrow_mut();
-        // The key the engine sets rather than the material: a mesh carrying bone indices is one the
+        // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
         // game would draw through the skinning variant.
         let set: &[(u32, u32)] = match skinned {
-            true => &[(TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN)],
-            false => &[],
+            true => &[
+                (TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN),
+                (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
+            ],
+            false => &[(GET_NORMAL_MAP, GET_NORMAL_MAP_ON)],
         };
         for (index, slot) in slots.iter().enumerate() {
             let Some(Slot::Ready(material)) = slot else {

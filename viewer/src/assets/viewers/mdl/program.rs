@@ -119,11 +119,22 @@ pub struct Attribute {
     pub components: Components,
 }
 
+/// What a sampler is declared over. A draw only validates where the texture bound to the unit is of
+/// the declaration's own kind, so this is what decides the target it is bound at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Plane,
+    Array,
+    Volume,
+    Cube,
+}
+
 /// A texture the shader samples, named as GLSL has it and identified as the material names it.
 pub struct Texture {
     pub name: String,
     /// The package's own resource id, which is the crc a material's samplers use.
     pub id: u32,
+    pub kind: Kind,
 }
 
 /// A constant buffer the shader binds, and the fields the reflection describes it with.
@@ -492,6 +503,16 @@ fn field(semantic: &str) -> Option<Field> {
     })
 }
 
+/// What target a sampler the translation declared has to be bound at.
+fn kind(declaration: &str) -> Kind {
+    match declaration {
+        "sampler2DArray" | "sampler2DArrayShadow" => Kind::Array,
+        "sampler3D" => Kind::Volume,
+        "samplerCube" | "samplerCubeShadow" => Kind::Cube,
+        _ => Kind::Plane,
+    }
+}
+
 /// The parameter buffer as this draw sees it: the package's own defaults, with the material's
 /// constants written over the spans the package says they occupy.
 fn parameters(package: &ShaderPackage, material: &mtrl::Material) -> Vec<u8> {
@@ -643,6 +664,7 @@ impl Program {
                 .get(shader as usize)
                 .map(shpk::Shader::textures)
                 .unwrap_or_default();
+            let declared = hlsl::glsl::declarations(program);
             for (slot, _, name) in hlsl::glsl::textures(program, names) {
                 let Some(resource) = resources.iter().find(|held| held.slot() == slot) else {
                     continue;
@@ -651,6 +673,7 @@ impl Program {
                     textures.push(Texture {
                         name,
                         id: resource.id(),
+                        kind: kind(declared.get(&slot).copied().unwrap_or_default()),
                     });
                 }
             }

@@ -81,7 +81,11 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-Nothing. The full run passes.
+The effects. Every run since 2026-08-05 logs `assets/avfx: particle N: the package has not arrived`
+hundreds of times and then fails on `every effect looked identical at both points of its timeline`,
+because with no package nothing draws and the two shots of a frame match. Measured at both
+`3a74da1` and `b383a15` over the same one effect, so it is not the deferred path: the two apricot
+packages are 20 and 40 MiB and the twelve seconds the run waits for them are no longer enough.
 
 Both of the problems reported at `f8b3ecc` are fixed. `glDrawArrays: Mismatch between texture
 format and sampler type` was the stand-in textures being made lazily from inside the binding loop:

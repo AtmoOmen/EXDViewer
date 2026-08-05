@@ -363,6 +363,9 @@ impl Buffers {
         unsafe {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(frame));
             gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            // Onto the first unit rather than whichever happens to be active, which would be a
+            // sampler the pass before this one had just been given.
+            gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(held));
             gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, self.size.0, self.size.1);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);

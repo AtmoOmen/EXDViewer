@@ -1760,6 +1760,38 @@ mod tests {
         assert_eq!(uv[2], [1.0, 0.0, 0.0, 0.0]);
     }
 
+    /// Naming no rotation base leaves a sprite in its own plane rather than against the screen, and
+    /// a decal in the one it is cast onto.
+    #[test]
+    fn a_sprite_with_no_rotation_base_stays_in_its_own_plane() {
+        let unbased = |kind: i32| {
+            let effect = &playing(
+                &[
+                    life(-1.0),
+                    block("PrVT", &integer(kind)),
+                    block("RBDT", &integer(10)),
+                ],
+                (0, 0),
+            )
+            .effect;
+            at(effect, 0)[0].facing
+        };
+        assert_eq!(unbased(1), sim::Facing::Still(sim::Axis::Z));
+        assert_eq!(unbased(2), sim::Facing::Still(sim::Axis::Z));
+        assert_eq!(unbased(11), sim::Facing::Still(sim::Axis::Y));
+        // The screen billboard is a base of its own, and still reads as one.
+        let effect = &playing(
+            &[
+                life(-1.0),
+                block("PrVT", &integer(8)),
+                block("RBDT", &integer(5)),
+            ],
+            (0, 0),
+        )
+        .effect;
+        assert_eq!(at(effect, 0)[0].facing, sim::Facing::Screen);
+    }
+
     /// A quad billed against the camera can carry the turn about its own normal, and that is the one
     /// the file writes as `Rot/Z`.
     #[test]

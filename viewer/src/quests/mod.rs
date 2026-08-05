@@ -222,7 +222,18 @@ impl QuestBrowser {
                         icons.clone(),
                     );
                     let index = Index::new(global, loaded);
-                    self.outline = Some(Outline::build(&index.sections, &index.uncategorized));
+                    let outline = Outline::build(&index.sections, &index.uncategorized);
+                    if self.expanded.is_empty() {
+                        self.expanded.extend(
+                            outline
+                                .groups
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, group)| group.depth == 0)
+                                .map(|(at, _)| at as u32),
+                        );
+                    }
+                    self.outline = Some(outline);
                     self.index = Some(index);
                     self.matched_for = None;
                     self.rows_stale = true;

@@ -28,6 +28,14 @@ const ATTENUATION: u32 = 0x008c_d1ca;
 /// The frame as the composite left it, which is what a semitransparent pass blends over.
 const FINAL_COLOR: u32 = 0x8ea9_df48;
 
+/// The layered textures a character's shaders read that no material names: the tiles its surface
+/// detail is taken from, and the spheres its resolve pass shades against.
+pub const ARRAYS: [(u32, &str); 3] = [
+    (0x92f0_3e53, "chara/common/texture/tile_norm_array.tex"),
+    (0x800b_e99b, "chara/common/texture/tile_orb_array.tex"),
+    (0x3334_d3ca, "chara/common/texture/sphere_d_array.tex"),
+];
+
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
 /// once, and the channel past the last of them: the frame the composite resolved.
 pub const TARGETS: usize = 5;
@@ -126,6 +134,13 @@ pub struct Lighting {
     pub composite: std::sync::Arc<program::Program>,
 }
 
+/// A layered texture as the card takes one: its slices one after the next, in RGBA bytes.
+pub struct Layered {
+    pub size: (i32, i32),
+    pub layers: i32,
+    pub pixels: Vec<u8>,
+}
+
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
 /// it rather than a stale program drawing on.
 pub struct Linked {
@@ -156,6 +171,8 @@ pub struct Buffers {
     /// outright where what is bound to a unit is not of the declaration's own kind, so a plane
     /// cannot stand in for the rest.
     blanks: BTreeMap<u32, glow::Texture>,
+    /// The layered textures the shaders read off the game's own files, by resource id.
+    arrays: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
@@ -474,14 +491,51 @@ impl Buffers {
         Ok(held)
     }
 
-    /// What stands in for a sampler of this kind that nothing bound a texture to.
+    /// Takes one of the game's own layered textures onto the card. Repeated rather than clamped:
+    /// the shaders that read these scale the coordinate up by a tile factor and expect the tile to
+    /// come round again.
+    pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
+        unsafe {
+            let texture = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(texture));
+            gl.tex_image_3d(
+                glow::TEXTURE_2D_ARRAY,
+                0,
+                glow::RGBA8 as i32,
+                held.size.0,
+                held.size.1,
+                held.layers,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&held.pixels)),
+            );
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::REPEAT),
+                (glow::TEXTURE_WRAP_T, glow::REPEAT),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, name, value as i32);
+            }
+            if let Some(stale) = self.arrays.insert(id, texture) {
+                graveyard().lock().unwrap().push(Dead::Texture(stale));
+            }
+        }
+        Ok(())
+    }
+
+    /// What stands in for a sampler of this kind that nothing bound a texture to. An array is the
+    /// file the resource id names once that has arrived, since nothing else answers as one.
     pub fn absent(
         &mut self,
         gl: &glow::Context,
         kind: program::Kind,
+        id: u32,
     ) -> Result<glow::Texture, String> {
         match kind {
             program::Kind::Cube => self.reflection(gl),
+            program::Kind::Array if self.arrays.contains_key(&id) => Ok(self.arrays[&id]),
             held => self.blank(gl, target(held)),
         }
     }
@@ -494,13 +548,13 @@ impl Buffers {
     pub fn stand_ins(&mut self, gl: &glow::Context) -> Result<(), String> {
         self.unoccluded(gl)?;
         self.types(gl)?;
+        self.reflection(gl)?;
         for kind in [
             program::Kind::Plane,
             program::Kind::Array,
             program::Kind::Volume,
-            program::Kind::Cube,
         ] {
-            self.absent(gl, kind)?;
+            self.blank(gl, target(kind))?;
         }
         Ok(())
     }
@@ -623,7 +677,7 @@ impl Buffers {
         for texture in &held.textures {
             let bound = match texture.kind {
                 program::Kind::Plane => self.engine(gl, texture.id)?,
-                kind => self.absent(gl, kind)?,
+                kind => self.absent(gl, kind, texture.id)?,
             };
             bind(
                 gl,
@@ -734,6 +788,7 @@ impl Drop for Buffers {
             .into_iter()
             .flatten()
             .chain(std::mem::take(&mut self.blanks).into_values())
+            .chain(std::mem::take(&mut self.arrays).into_values())
             .map(Dead::Texture),
         );
         dead.extend(self.frames.drain(..).map(Dead::Frame));

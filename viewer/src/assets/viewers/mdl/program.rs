@@ -882,7 +882,6 @@ impl Buffer {
         });
         put("m_TransformMatrix", rows(world_view, 3));
         put("m_MulColor", vec![1.0; 4]);
-        put("m_Param", vec![1.0; 4]);
         put("m_Params", vec![1.0; 4]);
         put("m_SkyVisibility", vec![1.0]);
         put("m_DitherAlpha", vec![1.0]);

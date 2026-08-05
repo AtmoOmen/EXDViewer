@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use egui::TextureId;
 use glow::HasContext;
 
-use super::deferred::{self, Linked, TARGETS, TYPES, build_pair, dwords, sampler};
+use super::deferred::{self, Layered, Linked, TARGETS, TYPES, build_pair, dwords, sampler};
 use super::material::Family;
 use super::{Vertex, program};
 
@@ -191,6 +191,8 @@ pub struct Model {
     queued: Vec<(usize, Vec<f32>)>,
     /// Meshes whose indices a shape key rewrote, waiting for a context to upload them under.
     rewritten: Vec<(usize, Vec<u16>)>,
+    /// The game's own layered textures, waiting for the same.
+    arrays: Vec<(u32, Layered)>,
     tables: BTreeMap<usize, (glow::Texture, f32)>,
     /// Why the shader would not build, kept so the viewer can say so rather than draw nothing.
     failure: Option<String>,
@@ -205,6 +207,7 @@ impl Model {
             meshes: Vec::new(),
             queued: Vec::new(),
             rewritten: Vec::new(),
+            arrays: Vec::new(),
             tables: BTreeMap::new(),
             failure: None,
         }))
@@ -228,6 +231,12 @@ impl Model {
     /// Hands a mesh's indices over for the next draw to upload, replacing the ones it holds.
     pub fn queue_indices(&mut self, mesh: usize, indices: Vec<u16>) {
         self.rewritten.push((mesh, indices));
+    }
+
+    /// Hands one of the game's own layered textures over, under the resource id its shaders name it
+    /// by.
+    pub fn queue_array(&mut self, id: u32, held: Layered) {
+        self.arrays.push((id, held));
     }
 
     pub fn draw(
@@ -262,6 +271,11 @@ impl Model {
                     glow::STATIC_DRAW,
                 );
                 gl.bind_vertex_array(None);
+            }
+        }
+        for (id, held) in std::mem::take(&mut self.arrays) {
+            if let Err(why) = self.game.buffers.layered(gl, id, &held) {
+                log::error!("assets/mdl: texture array {id:#010x}: {why}");
             }
         }
         for (material, values) in std::mem::take(&mut self.queued) {
@@ -682,7 +696,7 @@ impl Game {
                         None => self.buffers.engine(gl, texture.id)?,
                     }
                 }
-                kind => self.buffers.absent(gl, kind)?,
+                kind => self.buffers.absent(gl, kind, texture.id)?,
             };
             deferred::bind(
                 gl,

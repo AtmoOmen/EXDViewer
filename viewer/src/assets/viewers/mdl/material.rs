@@ -22,8 +22,8 @@ pub enum Role {
 /// slots, so the slot a texture arrives in does not say what its channels are.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Family {
-    /// A mask map: red scales the diffuse color, green the specular color, blue its strength. The
-    /// color table is indexed by the index map.
+    /// A mask map: red scales the specular color, green states the roughness, blue an occlusion.
+    /// The color table is indexed by the index map.
     Character,
     /// The three-texture set the game keeps a compatibility path for. The mask slot holds a
     /// specular map, whose green scales the specular color and blue its strength, and the color

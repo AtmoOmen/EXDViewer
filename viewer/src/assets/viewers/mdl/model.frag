@@ -228,9 +228,6 @@ void main() {
 			strength *= mask.r;
 		} else {
 			vec3 squared = mask * mask;
-			if (u_family == CHARACTER) {
-				albedo *= squared.r;
-			}
 			specular *= squared.g;
 			strength *= squared.b;
 		}

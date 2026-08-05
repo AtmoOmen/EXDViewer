@@ -27,8 +27,9 @@ use crate::utils::TrackedPromise;
 /// Seconds in a day.
 const DAY: f32 = 86_400.0;
 
-/// Every sky the game holds, which its own id indexes.
+/// Every sky the game holds, which its own id indexes, and the first id it holds samples for.
 const SKY_LIGHT: &str = "bgcommon/nature/sky/ambient/skylight.amb";
+const FIRST_SKY: u16 = 1;
 
 /// Where the key light stands until the user moves it.
 const AZIMUTH: f32 = -50.0;
@@ -451,12 +452,12 @@ impl Ambient {
         ui.horizontal(|ui| {
             let mut lit = self.sky.is_some();
             if ui.checkbox(&mut lit, "").changed() {
-                self.sky = lit.then_some(0);
+                self.sky = lit.then_some(FIRST_SKY);
                 changed = true;
             }
-            let mut id = self.sky.unwrap_or(0);
+            let mut id = self.sky.unwrap_or(FIRST_SKY);
             if ui
-                .add_enabled(lit, egui::DragValue::new(&mut id).range(0..=599))
+                .add_enabled(lit, egui::DragValue::new(&mut id).range(FIRST_SKY..=599))
                 .on_hover_text("no file says which sky a zone stands under")
                 .changed()
             {

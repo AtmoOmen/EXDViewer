@@ -180,6 +180,7 @@ impl Renderer {
         &mut self,
         gl: &glow::Context,
         frame: &Frame,
+        scene: &program::Scene,
     ) -> Result<(Vec<(i32, i32)>, i32), String> {
         if self.alignment == ALIGNMENT {
             let held = unsafe { gl.get_parameter_i32(glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT) };
@@ -206,7 +207,7 @@ impl Renderer {
                 batch.instances.len().div_ceil(count) as i32,
             ));
             for held in batch.instances.chunks(count) {
-                let mut bytes = buffer.fill(&frame.scene, program::Pass::Buffer, held);
+                let mut bytes = buffer.fill(scene, program::Pass::Buffer, held);
                 window = window.max(bytes.len() as i32);
                 bytes.resize(aligned(bytes.len() as i32, self.alignment) as usize, 0);
                 blob.extend(bytes);
@@ -237,7 +238,13 @@ impl Renderer {
         self.buffers.attach(gl, size)?;
         self.buffers.stand_ins(gl)?;
         let stand_in = self.buffers.stand_in(gl)?;
-        let (offsets, window) = self.windows(gl, frame)?;
+        // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
+        // has nothing else to turn a fragment into a texel with.
+        let scene = program::Scene {
+            size: (size.0 as f32, size.1 as f32),
+            ..frame.scene
+        };
+        let (offsets, window) = self.windows(gl, frame, &scene)?;
         let instances = self.instances.ok_or("no instance buffer")?;
 
         for page in 0..self.buffers.pages() {
@@ -300,7 +307,7 @@ impl Renderer {
                             }
                         }
                         if held.batch() > 1 {
-                            self.buffers.bind(gl, program, held, &frame.scene, &[])?;
+                            self.buffers.bind(gl, program, held, &scene, &[])?;
                         }
                         let mut unit = 0;
                         for texture in &held.textures {
@@ -393,11 +400,11 @@ impl Renderer {
                         // off the transform the scene carries.
                         if held.batch() == 1 {
                             for instance in &batch.instances {
-                                let scene = program::Scene {
+                                let held_scene = program::Scene {
                                     model: instance.transform,
-                                    ..frame.scene
+                                    ..scene
                                 };
-                                self.buffers.bind(gl, program, held, &scene, &[])?;
+                                self.buffers.bind(gl, program, held, &held_scene, &[])?;
                                 unsafe {
                                     gl.bind_vertex_array(Some(mesh.0));
                                     gl.draw_elements(
@@ -416,8 +423,7 @@ impl Renderer {
         }
 
         if let Some(lighting) = frame.lighting.as_ref() {
-            self.buffers
-                .resolve(gl, lighting, &frame.scene, &frame.lamps)?;
+            self.buffers.resolve(gl, lighting, &scene, &frame.lamps)?;
         }
         Ok(())
     }

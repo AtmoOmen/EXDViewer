@@ -9,14 +9,14 @@ smoke/run.sh
 That is the whole command. It builds `viewer/dist` with trunk, serves it, drives headless
 chromium over it, and exits non-zero with the browser messages that failed it.
 
-Flags: `--no-build` reuses the existing `viewer/dist`, `--shots` writes screenshots to
-`smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--avfx-only`
-runs the effects and nothing else, `--explore` is `--model-only` with screenshots (use it to
-recalibrate the click coordinates in `smoke.ts` after a UI change). `--model=` and `--scene=` each
-take one path and `--avfx=` takes a comma-separated list. `--orbit` turns the camera between shots,
-which is what makes an ordering fault show rather than depending on the one angle a model happens
-to open at; `--views` walks the preview path's own debug row. Every run writes
-`smoke/last-run.json`.
+Flags: `--model=`, `--scene=` and `--level=` each name one asset to walk and `--avfx=` takes a
+comma-separated list. `--no-build` reuses the existing `viewer/dist`, `--shots` writes screenshots
+to `smoke/shots/`, `--model-only` stops after the model renders and skips every click,
+`--avfx-only` runs the effects and nothing else, `--explore` is `--model-only` with screenshots
+(use it to recalibrate the click coordinates in `smoke.ts` after a UI change). `--orbit` turns the
+camera between shots, which is what makes an ordering fault show rather than depending on the one
+angle a model happens to open at; `--views` walks the preview path's own debug row. Every run
+writes `smoke/last-run.json`.
 
 A full run opens **nine effects** after the scene and takes around twenty minutes. Each one is a
 fresh page, so each one pulls the two apricot packages again, and they are 20 and 40 MiB.
@@ -52,7 +52,8 @@ It then walks the paths that broke:
 2. Clicks **Game shaders** and waits for the deferred path to link programs and bind a G-buffer.
 3. Sweeps the channel row, covering `SV_Target`, `SV_Target1..4` and `Lit`.
 4. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
-5. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
+5. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
+6. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
@@ -102,8 +103,9 @@ The two blit faults are gone too. Measured at `b965b62`, before
 
 ## What it does not cover
 
-Only the three 3D viewers, and only one asset each for the model and the scene. It does not check
-that anything is drawn *correctly*: no reference images, no pixel comparison. Channel coverage is a positional sweep
+Only the three 3D viewers, and one asset each for the model, the scene and the level (the `.lgb`
+and the `.lvb` share a viewer). It does not check that anything is drawn *correctly*: no reference
+images, no pixel comparison. Channel coverage is a positional sweep
 over the row rather than a lookup of each label, so it counts distinct selections rather than
 naming them. The click coordinates are calibrated against a 1600x1000 viewport and need
 `--explore` and a fresh look if the layout moves.

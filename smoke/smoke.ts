@@ -29,6 +29,9 @@ function flag(name: string, fallback: string): string {
 
 const MODEL = flag("model", "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl");
 const SCENE = flag("scene", "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb");
+// A level names the layer groups a zone is built from and the environment it stands under, and it
+// opens through the same tabs an lgb does.
+const LEVEL = flag("level", "bg/ex1/01_roc_r2/dun/r2d1/level/r2d1.lvb");
 
 // A spread of effects picked off the corpus: quad sprites only, models only under each of the two
 // model kinds, files whose keys reach no node, a powder file, and one that spawns nothing.
@@ -484,23 +487,10 @@ async function main() {
         }
 
         phase = "scene";
-        console.log(`\n== scene: ${SCENE}`);
-        await cdp.send("Page.navigate", { url: `${origin}/assets/${SCENE}` });
-        await waitFor("the scene file to be titled", 180_000, async () => {
-            const title = await cdp.eval<string>("document.title").catch(() => "");
-            return title.includes(SCENE.split("/").pop()!);
-        });
-        await sleep(3000);
-        await click(cdp, SCENE_TAB.x, SCENE_TAB.y);
-        await waitFor("the scene to draw its instances", 300_000, async () => {
-            const c = await counters(cdp).catch(() => ({}) as any);
-            return (c.instanced ?? 0) > 0;
-        });
-        await sleep(8000);
-        await shot(cdp, "04-scene");
-        const scene = await counters(cdp);
-        console.log(`   instanced draws: ${scene.instanced}  links: ${scene.links}`);
-        report.scene = scene;
+        report.scene = await walk(cdp, origin, SCENE, "04-scene");
+
+        phase = "level";
+        report.level = await walk(cdp, origin, LEVEL, "05-level");
 
         await effects();
     } finally {
@@ -514,6 +504,29 @@ async function main() {
         await server.stop(true);
         rmSync(profile, { recursive: true, force: true });
     }
+}
+
+/// A layer file opened, switched to its 3D tab, and left drawing long enough to have loaded
+/// something. The same walk serves an lgb and the lvb naming it.
+async function walk(cdp: Cdp, origin: string, path: string, name: string) {
+    console.log(`\n== ${phase}: ${path}`);
+    await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
+    await waitFor(`${path} to be titled`, 180_000, async () => {
+        const title = await cdp.eval<string>("document.title").catch(() => "");
+        return title.includes(path.split("/").pop()!);
+    });
+    await sleep(3000);
+    const before = await counters(cdp);
+    await click(cdp, SCENE_TAB.x, SCENE_TAB.y);
+    await waitFor("the scene to draw its instances", 300_000, async () => {
+        const c = await counters(cdp).catch(() => ({}) as any);
+        return (c.instanced ?? 0) > before.instanced;
+    });
+    await sleep(8000);
+    await shot(cdp, name);
+    const held = await counters(cdp);
+    console.log(`   instanced draws: ${held.instanced}  links: ${held.links}`);
+    return held;
 }
 
 /// One entry per distinct message, since a GL error in a paint callback repeats every frame and the

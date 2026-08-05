@@ -119,7 +119,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let params = params::rows(&package);
     let registers = params::registers(&package);
 
-    let [subview_one, subview_two] = package.subview_defaults();
+    let [technique, subview] = package.subview_defaults();
     let identity = vec![
         ("Version", format!("{:#06X}", package.version())),
         (
@@ -142,8 +142,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         ),
         ("Selector nodes", package.nodes().len().to_string()),
         ("Aliases", package.aliases().len().to_string()),
-        ("Subview 1", shader::named(subview_one)),
-        ("Subview 2", shader::named(subview_two)),
+        ("Technique", shader::named(technique)),
+        ("Subview", shader::named(subview)),
     ];
 
     let naming = Naming {

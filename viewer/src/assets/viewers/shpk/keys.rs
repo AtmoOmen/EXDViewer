@@ -120,7 +120,7 @@ pub fn read(package: &shpk::ShaderPackage) -> Keys {
     })
     .collect();
 
-    // A node lists a value for each key the package declares, then the two subview keys.
+    // A node lists a value for each key the package declares, then the technique and the subview.
     let mut columns: Vec<KeyColumn> = package
         .system_keys()
         .iter()
@@ -136,9 +136,10 @@ pub fn read(package: &shpk::ShaderPackage) -> Keys {
             package
                 .subview_defaults()
                 .into_iter()
-                .enumerate()
-                .map(|(index, default)| KeyColumn {
-                    name: format!("Subview {}", index + 1),
+                .into_iter()
+                .zip(["Technique", "Subview"])
+                .map(|(default, name)| KeyColumn {
+                    name: name.to_owned(),
                     id: 0,
                     default,
                     values: Vec::new(),
@@ -464,7 +465,7 @@ mod test {
     /// than a long label.
     #[test]
     fn a_value_named_otherwise_is_left_alone() {
-        assert_eq!(shorten("Subview 2", "SUB_VIEW_MAIN"), "SUB_VIEW_MAIN");
+        assert_eq!(shorten("Subview", "SUB_VIEW_MAIN"), "SUB_VIEW_MAIN");
         assert_eq!(
             shorten("ApplyDitherClip", "ApplyDitherClip"),
             "ApplyDitherClip"

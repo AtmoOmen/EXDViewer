@@ -1015,7 +1015,9 @@ impl Rendered {
                 lamp: program::Lamp {
                     placement: Mat4::from_translation(
                         camera.target + Vec3::new(0.0, level.radius, level.radius),
-                    ) * Mat4::from_scale(Vec3::splat(level.radius * 2.0)),
+                    ),
+                    min: Vec3::splat(-level.radius * 2.0),
+                    max: Vec3::splat(level.radius * 2.0),
                     ..Default::default()
                 },
                 ..Default::default()

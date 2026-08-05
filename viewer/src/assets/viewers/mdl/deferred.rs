@@ -518,6 +518,14 @@ impl Buffers {
             gl.blend_func(glow::ONE, glow::ONE);
         }
         self.pass(gl, 1, &lighting.directional, light, scene, false)?;
+        // One face of the volume, not both. The pass adds what it computes to the buffer, so a box
+        // shaded front and back would light every pixel it covers twice over. The far face is the
+        // one kept, since it still covers the frame when the camera stands inside the light.
+        unsafe {
+            gl.enable(glow::CULL_FACE);
+            gl.cull_face(glow::FRONT);
+            gl.front_face(glow::CCW);
+        }
         // Every lamp is the same pass over a volume of its own, so the program is linked once and
         // only the buffer it reads is written again.
         for lamp in lamps {
@@ -527,7 +535,10 @@ impl Buffers {
             };
             self.pass(gl, 2, &lighting.point, light, &held, true)?;
         }
-        unsafe { gl.disable(glow::BLEND) };
+        unsafe {
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+        };
         self.pass(gl, 3, &lighting.composite, lit, scene, false)
     }
 }

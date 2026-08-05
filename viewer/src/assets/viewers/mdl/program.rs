@@ -152,12 +152,12 @@ impl Default for Instance {
     }
 }
 
-/// One placed light, as `g_LightParam` reads it. The box is stated in the light's own space, which
-/// is where a zone's `.lcb` states it, and the vertex shader clamps its volume to it before
-/// projecting.
+/// One placed light, as `g_LightParam` reads it. The box is the one a zone's `.lcb` clips the light
+/// against: stated in the light's own space, in the same units the placement stands in, which is
+/// what makes its extent the distance the light carries.
 #[derive(Clone, Copy)]
 pub struct Lamp {
-    /// Takes the light's own space into the world.
+    /// Takes the light's own space into the world, without scaling it.
     pub placement: Mat4,
     pub min: Vec3,
     pub max: Vec3,
@@ -178,7 +178,15 @@ impl Default for Lamp {
 impl Lamp {
     /// How far the light carries, which is what its own falloff is scaled by.
     fn reach(&self) -> f32 {
-        ((self.max - self.min) * 0.5).max_element().max(0.001)
+        self.min.abs().max(self.max.abs()).max_element().max(0.001)
+    }
+
+    /// The box in units of that reach. The vertex shader clamps a unit cube against it, so a box
+    /// stated any larger would leave the corners where they were and the light would draw the cube
+    /// rather than the box.
+    fn clip(&self) -> (Vec3, Vec3) {
+        let reach = self.reach();
+        (self.min / reach, self.max / reach)
     }
 }
 
@@ -831,23 +839,25 @@ impl Buffer {
         put("m_LightFadeValueDynamic", vec![1.0]);
 
         // A lamp is drawn as the volume it reaches: its own vertex shader clamps a unit box to the
-        // extents the zone clips it against and then projects, so the transform carries where the
-        // light stands and the extents say how far it goes.
+        // extents the zone clips it against and then projects, so the transform carries the light's
+        // whole reach and the extents cut the box back out of it.
+        let volume = lamp.placement * Mat4::from_scale(Vec3::splat(reach));
+        let (min, max) = lamp.clip();
         put(
             "m_Position",
             (view * lamp.placement * Vec3::ZERO.extend(1.0))
                 .to_array()
                 .to_vec(),
         );
-        put("m_ClipMin", lamp.min.to_array().to_vec());
-        put("m_ClipMax", lamp.max.to_array().to_vec());
+        put("m_ClipMin", min.to_array().to_vec());
+        put("m_ClipMax", max.to_array().to_vec());
         put(
             "m_WorldViewProjectionMatrix",
-            rows(view_projection * lamp.placement, 4),
+            rows(view_projection * volume, 4),
         );
         put(
             "m_WorldViewInversMatrix",
-            rows((view * lamp.placement).inverse(), 3),
+            rows((view * volume).inverse(), 3),
         );
         out
     }

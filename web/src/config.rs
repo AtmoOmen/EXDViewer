@@ -22,6 +22,17 @@ pub struct PathList {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+pub struct Report {
+    /// Whether submissions reach ResLogger. Off until a deployment says otherwise, so a dev server
+    /// collects and logs without a third party hearing about it.
+    pub enabled: bool,
+    pub forward_url: String,
+    pub max_paths: usize,
+    pub per_hour: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub server_addr: String,
     pub metrics_server_addr: Option<String>,
@@ -34,6 +45,18 @@ pub struct Config {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub path_list: PathList,
+    pub report: Report,
+}
+
+impl Default for Report {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            forward_url: "https://rl2.perchbird.dev/api/upload".to_string(),
+            max_paths: 250,
+            per_hour: 60,
+        }
+    }
 }
 
 impl Default for AssetCache {
@@ -77,6 +100,7 @@ impl Default for Config {
             github_client_id: String::new(),
             github_client_secret: String::new(),
             path_list: PathList::default(),
+            report: Report::default(),
         }
     }
 }

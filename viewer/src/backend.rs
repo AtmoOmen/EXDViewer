@@ -4,6 +4,7 @@ use std::{cell::OnceCell, num::NonZeroUsize, rc::Rc};
 use crate::{
     data::{FileProvider, IconIndex, web::WebFileProvider},
     excel::base::CachedProvider,
+    report::{Recording, Reporter},
     schema::{boxed::BoxedSchemaProvider, web::WebProvider},
     settings::{BackendConfig, InstallLocation, SchemaLocation},
 };
@@ -16,10 +17,12 @@ struct BackendImpl {
     excel_provider: CachedProvider,
     schema_provider: BoxedSchemaProvider,
     icons: OnceCell<IconIndex>,
+    reporter: Rc<Reporter>,
 }
 
 impl Backend {
     pub async fn new(config: BackendConfig) -> Result<Self> {
+        let reporter = Rc::new(Reporter::new(&config.api_url));
         let excel = async {
             let (files, cache_size): (Rc<dyn FileProvider>, usize) = match config.location {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -49,6 +52,7 @@ impl Backend {
                     (files, 256)
                 }
             };
+            let files: Rc<dyn FileProvider> = Rc::new(Recording::new(files, reporter.clone()));
             let excel_provider =
                 CachedProvider::new(files.clone(), NonZeroUsize::new(cache_size).unwrap()).await?;
             anyhow::Result::<_>::Ok((files, excel_provider))
@@ -86,6 +90,7 @@ impl Backend {
             excel_provider,
             schema_provider: schema,
             icons: OnceCell::new(),
+            reporter,
         })))
     }
 
@@ -111,6 +116,11 @@ impl Backend {
 
     pub fn set_icons(&self, icons: IconIndex) {
         let _ = self.0.icons.set(icons);
+    }
+
+    /// Paths this install carries that the community list does not name, waiting on the user.
+    pub fn reporter(&self) -> &Rc<crate::report::Reporter> {
+        &self.0.reporter
     }
 }
 

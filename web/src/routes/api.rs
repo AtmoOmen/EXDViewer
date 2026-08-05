@@ -10,7 +10,7 @@ use actix_web::{
     HttpRequest, HttpResponse, Result,
     body::{EitherBody, MessageBody},
     dev::{HttpServiceFactory, ServiceResponse},
-    error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound},
+    error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorTooManyRequests},
     get,
     http::header::{self, ContentDisposition, ETag, EntityTag, Header, IfNoneMatch},
     middleware::{ErrorHandlerResponse, ErrorHandlers},
@@ -25,6 +25,7 @@ use xiv_core::file::{slug::Slug, version::GameVersion};
 use crate::{
     config::Config,
     data::{Region, RepositoryInfo, Target},
+    paths::report::{Collector, Submission},
     queue::MessageQueue,
 };
 
@@ -40,6 +41,7 @@ pub fn service() -> impl HttpServiceFactory {
         .service(get_repositories)
         .service(get_regions)
         .service(get_list_id)
+        .service(post_report)
         .service(get_global_paths)
         .service(get_songs)
         .service(get_versions_repo)
@@ -186,6 +188,50 @@ async fn get_list_id(data: web::Data<MessageQueue>, request: HttpRequest) -> Res
     Ok(response.json(ListInfo {
         list: format!("{current:016x}"),
     }))
+}
+
+/// Who submitted, as far as the edge will say. The peer address is Cloudflare's, so on its own it
+/// would limit every client as one; a header can be forged, which makes this a nuisance limiter
+/// rather than a control.
+fn client_key(request: &HttpRequest) -> String {
+    let header = |name| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
+    header("cf-connecting-ip")
+        .or_else(|| header("x-forwarded-for").and_then(|value| value.split(',').next()))
+        .map(|ip| ip.trim().to_owned())
+        .or_else(|| request.peer_addr().map(|addr| addr.ip().to_string()))
+        .unwrap_or_default()
+}
+
+#[post("/report/")]
+async fn post_report(
+    collector: web::Data<Collector>,
+    request: HttpRequest,
+    body: web::Json<Submission>,
+) -> Result<HttpResponse> {
+    let body = body.into_inner();
+    if body.paths.is_empty() {
+        return Err(ErrorBadRequest("No paths submitted"));
+    }
+    if body.paths.len() > collector.batch_limit() {
+        return Err(ErrorBadRequest(format!(
+            "At most {} paths per submission",
+            collector.batch_limit()
+        )));
+    }
+    if !collector.allow(&client_key(&request)) {
+        return Err(ErrorTooManyRequests("Too many submissions"));
+    }
+
+    let outcome = collector
+        .submit(body)
+        .await
+        .map_err(ErrorInternalServerError)?;
+    Ok(HttpResponse::Accepted().json(outcome))
 }
 
 #[get("/paths/{list_id}/")]
@@ -736,4 +782,58 @@ async fn log_error2<B: MessageBody + 'static>(
         .map_into_right_body();
 
     Ok(res)
+}
+
+/// Every case here is refused before the list is consulted, so no test fetches one. A 429 rather
+/// than a 404 is also what says the route is reachable past `/paths/{list_id}/`.
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{config::Report, paths::PathIndex};
+
+    fn collector() -> web::Data<Collector> {
+        web::Data::new(Collector::new(
+            std::sync::Arc::new(PathIndex::new(crate::config::PathList::default())),
+            Report {
+                enabled: false,
+                forward_url: String::new(),
+                max_paths: 2,
+                per_hour: 0,
+            },
+        ))
+    }
+
+    #[actix_web::test]
+    async fn a_submission_is_refused_before_it_can_cost_anything() {
+        let app = test::init_service(App::new().app_data(collector()).service(service())).await;
+
+        for (body, want) in [
+            (json!({ "paths": [] }), StatusCode::BAD_REQUEST),
+            (
+                json!({ "paths": ["ui/a.uld", "ui/b.uld", "ui/c.uld"] }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({ "entries": ["ui/uld/a.uld"] }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({ "paths": ["ui/uld/a.uld"] }),
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ] {
+            let request = test::TestRequest::post()
+                .uri("/api/report/")
+                .set_json(&body)
+                .to_request();
+            assert_eq!(
+                test::call_service(&app, request).await.status(),
+                want,
+                "{body}"
+            );
+        }
+    }
 }

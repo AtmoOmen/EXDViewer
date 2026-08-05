@@ -21,7 +21,11 @@ use shadow_rs::shadow;
 use std::{io, sync::Arc};
 use thiserror::Error;
 
-use crate::{paths::PathIndex, queue::MessageQueue, routes::api::STREAM_KIND};
+use crate::{
+    paths::{PathIndex, report::Collector},
+    queue::MessageQueue,
+    routes::api::STREAM_KIND,
+};
 
 shadow!(build);
 
@@ -86,6 +90,7 @@ async fn main() -> Result<(), ServerError> {
         })?;
     let server_config = config.clone();
     let path_index = Arc::new(PathIndex::new(config.path_list.clone()));
+    let collector = Data::new(Collector::new(path_index.clone(), config.report.clone()));
     let server_game_data = MessageQueue::new(game_data.clone(), path_index, config.api_workers)?;
 
     log::info!("Binding to {}", config.server_addr);
@@ -118,6 +123,7 @@ async fn main() -> Result<(), ServerError> {
             )
             .app_data(Data::new(server_config.clone()))
             .app_data(Data::new(server_game_data.clone()))
+            .app_data(collector.clone())
             .service(routes::api::service())
             .service(routes::assets::service())
     })

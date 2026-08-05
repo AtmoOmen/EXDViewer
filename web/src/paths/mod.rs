@@ -1,3 +1,5 @@
+pub mod report;
+
 use std::{
     collections::{HashMap, HashSet},
     hash::Hasher,
@@ -83,6 +85,22 @@ impl MasterList {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// Whether the list already carries this path, spelled exactly this way. Directories and each
+    /// directory's names are sorted, so both halves are a binary search.
+    pub fn contains(&self, path: &str) -> bool {
+        let (dir, name) = match path.rfind('/') {
+            Some(i) => (&path[..i], &path[i + 1..]),
+            None => ("", path),
+        };
+        let Ok(index) = self.dirs.binary_search_by(|listed| (**listed).cmp(dir)) else {
+            return false;
+        };
+        let run = self.starts[index] as usize..self.starts[index + 1] as usize;
+        self.names[run]
+            .binary_search_by(|listed| (**listed).cmp(name))
+            .is_ok()
     }
 
     pub fn dir_count(&self) -> usize {
@@ -174,7 +192,7 @@ impl PathIndex {
         Ok(Fetched::Body(text, etag))
     }
 
-    async fn master(&self) -> Result<Arc<MasterList>> {
+    pub async fn master(&self) -> Result<Arc<MasterList>> {
         let mut freshness = self.freshness.lock().await;
         let ttl = Duration::from_secs(self.config.ttl_minutes * 60);
         let cached = self.list.read().await.clone();
@@ -446,6 +464,25 @@ mod tests {
             "a path both sources carry is listed once"
         );
         assert_eq!(together.path_count(), 2);
+    }
+
+    /// A submitted name is only worth forwarding when the list does not already carry it. Casing
+    /// is part of the key, so a name listed with a capital reads as absent when asked in lowercase.
+    #[test]
+    fn membership_is_exact() {
+        let list =
+            parse(&["ui/uld/a.uld\nui/uld/b.uld\nsound/voice/Vo_Emote/c.scd\nlone/one.mdl\n"]);
+        assert!(list.contains("ui/uld/a.uld"));
+        assert!(list.contains("ui/uld/b.uld"));
+        assert!(
+            list.contains("lone/one.mdl"),
+            "a directory holding one name"
+        );
+        assert!(list.contains("sound/voice/Vo_Emote/c.scd"));
+        assert!(!list.contains("sound/voice/vo_emote/c.scd"));
+        assert!(!list.contains("ui/uld/c.uld"));
+        assert!(!list.contains("ui/uld"));
+        assert!(!list.contains("zz/never.uld"));
     }
 
     /// The extra list is hand-maintained, so it has to tolerate comments and blank lines.

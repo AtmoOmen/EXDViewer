@@ -305,6 +305,7 @@ impl App {
         self.pr_window.poll(&ctx);
         about::draw(&ctx, &mut self.about_open);
         self.draw_menubar(ui, tab);
+        crate::report::notice(ui, self.backend.as_ref());
         self.draw_logger(ui.ctx());
         self.draw_pr_window(ui.ctx());
 
@@ -640,6 +641,8 @@ impl App {
                                 ui.close();
                             }
                         }
+
+                        crate::report::menu_item(ui);
 
                         {
                             let mut logger_shown = LOGGER_SHOWN.get(ctx);

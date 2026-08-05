@@ -19,3 +19,10 @@ file_readahead: 8388608 # 8 MiB
 path_list:
   # Presence maps are immutable once built.
   cache_directory: cache/paths
+report:
+  # forward_url is the live ResLogger, so this alone starts submitting to it. Until then names are
+  # collected and logged and nothing leaves the box.
+  enabled: false
+  # forward_url: https://rl2.perchbird.dev/api/upload
+  # max_paths: 250
+  # per_hour: 60

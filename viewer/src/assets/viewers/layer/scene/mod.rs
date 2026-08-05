@@ -10,8 +10,9 @@
 //! rather than appearing at once. What is asked for at all is bounded by a load distance the user
 //! sets: past it an instance is neither drawn nor fetched.
 //!
-//! The shading is deliberately not the game's. One key light, a hemisphere for whatever is turned
-//! away from it, and the material's own diffuse map is all of it.
+//! The shading is the game's own. Every surface goes through the package its material names, into
+//! the same deferred frame the model viewer draws into, and the lights the zone places are drawn as
+//! the volumes its `.lcb` clips them against.
 
 mod gpu;
 
@@ -25,7 +26,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use ironworks::file::layer::{InstanceData, LayerGroup, Transform};
 use ironworks::file::mdl::{MeshKind, ModelContainer};
-use ironworks::file::{File, lgb::LayerGroupFile, sgb::SharedGroupFile, tera};
+use ironworks::file::{File, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, tera};
 
 use super::super::mdl;
 use super::super::{facts, section};
@@ -34,7 +35,8 @@ use crate::backend::Backend;
 use crate::data::DecodedTexture;
 use crate::utils::TrackedPromise;
 
-use mdl::material::{Material, Role};
+use mdl::material::Material;
+use mdl::program;
 
 /// Vertical field of view.
 const FOV: f32 = 55.0_f32.to_radians();
@@ -50,8 +52,17 @@ const TEXTURE_SIZE: u16 = 256;
 /// Decoded texture bytes one scene may hold. Past it the rest of its surfaces draw untextured.
 const TEXTURE_BUDGET: usize = 128 << 20;
 
+/// Lights the frame draws at once. Every one is a pass of its own over the volume it reaches, so a
+/// zone's whole set would cost more than it shows; the nearest are kept.
+const LAMPS: usize = 48;
+
+/// What a light is worth where the zone states no box for it. Nothing in the placement carries the
+/// reach: the file's own `range` is one in nearly every light a zone places.
+const REACH: f32 = 6.0;
+
 /// Requests of each kind in flight at once.
 const FILES: usize = 12;
+const PACKAGES: usize = 4;
 const MODELS: usize = 6;
 const MATERIALS: usize = 16;
 const TEXTURES: usize = 16;
@@ -72,9 +83,6 @@ const DETAIL: [f32; 2] = [0.04, 0.012];
 const NEAREST: f32 = 400.0;
 const FURTHEST: f32 = 16000.0;
 const LOADED: f32 = 4000.0;
-
-/// The share of the load distance spent fading into the background.
-const FADE: f32 = 0.25;
 
 /// How far the eye travels a second, before the user's multiplier.
 const SPEED: f32 = 100.0;
@@ -148,6 +156,41 @@ enum Slot {
     Failed,
 }
 
+/// A shader package, which many materials name the same one of.
+enum Package {
+    Wanted,
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready(Vec<u8>),
+    Failed,
+}
+
+/// One material's shaders, and how much of the G-buffer they were translated for.
+struct Translated {
+    attachments: usize,
+    buffer: Vec<Arc<program::Program>>,
+    depth: Option<Arc<program::Program>>,
+}
+
+/// One light the zone places. The box it is clipped against is stated in its own space, so the
+/// placement carries where it stands and the box how far it carries.
+struct Light {
+    placement: Mat4,
+    center: Vec3,
+    min: Vec3,
+    max: Vec3,
+    color: Vec3,
+    /// How the zone's own `.lcb` reaches this light: the instance at the top of the tree, then an
+    /// index per shared group under it.
+    key: (u32, [u8; 4]),
+}
+
+/// The boxes a zone clips its lights against, which its scene names a file for.
+enum Clip {
+    Wanted(String),
+    Fetching(String, TrackedPromise<Result<Vec<u8>>>),
+    Done,
+}
+
 enum Texture {
     Fetching(TrackedPromise<Result<DecodedTexture>>),
     Ready(TextureHandle),
@@ -174,6 +217,8 @@ enum Terrain {
 struct Expand {
     path: String,
     transform: Mat4,
+    /// How an `.lcb` entry reaches into this subtree.
+    key: (u32, [u8; 4]),
     /// The largest the transform above scales by, which the bounding spheres underneath it grow by.
     scale: f32,
     /// The layer everything found belongs to. A level names whole layer groups rather than placing
@@ -216,6 +261,14 @@ pub struct Scene {
     model_at: HashMap<String, usize>,
     materials: Vec<(String, Slot)>,
     material_at: HashMap<String, usize>,
+    packages: HashMap<String, Package>,
+    translated: HashMap<usize, Translated>,
+    tables: HashMap<usize, Arc<(Vec<u16>, usize, usize)>>,
+    lighting: Option<Arc<mdl::gpu::Lighting>>,
+    lights: Vec<Light>,
+    /// The box each light is clipped against, by the key its `.lcb` entry uses.
+    clips: HashMap<(u32, [u8; 4]), (Vec3, Vec3)>,
+    clip: Clip,
     textures: BTreeMap<String, Texture>,
     resident: usize,
     files: HashMap<String, Held>,
@@ -225,8 +278,8 @@ pub struct Scene {
     /// its first file lands rather than leaving the camera at the origin.
     fitted: usize,
     renderer: Arc<Mutex<gpu::Renderer>>,
-    /// Instances each model draws at each detail level, as the last rebuild left them.
-    counts: Vec<[i32; 3]>,
+    /// Where each model stands at each detail level, as the last rebuild left them.
+    placed: Vec<[Vec<program::Instance>; 3]>,
     /// Placements the last rebuild would have drawn had their model arrived.
     absent: usize,
 }
@@ -235,6 +288,19 @@ fn rotation(angles: [f32; 3]) -> Mat3 {
     Mat3::from_rotation_z(angles[2])
         * Mat3::from_rotation_y(angles[1])
         * Mat3::from_rotation_x(angles[0])
+}
+
+/// How an `.lcb` entry reaches one instance: the key of whatever stands at the top of the tree, then
+/// an index per shared group under it.
+fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
+    if depth == 0 {
+        return (id, [0; 4]);
+    }
+    let mut held = key.1;
+    if let Some(slot) = held.get_mut(usize::from(depth) - 1) {
+        *slot = id as u8;
+    }
+    (key.0, held)
 }
 
 fn matrix(transform: Transform) -> Mat4 {
@@ -307,6 +373,16 @@ impl Scene {
             model_at: HashMap::new(),
             materials: Vec::new(),
             material_at: HashMap::new(),
+            packages: HashMap::new(),
+            translated: HashMap::new(),
+            tables: HashMap::new(),
+            lighting: None,
+            lights: Vec::new(),
+            clips: HashMap::new(),
+            clip: match source.scene().map(|held| held.light_culling_path().clone()) {
+                Some(path) if !path.is_empty() => Clip::Wanted(path),
+                _ => Clip::Done,
+            },
             textures: BTreeMap::new(),
             resident: 0,
             files: HashMap::new(),
@@ -317,7 +393,7 @@ impl Scene {
             },
             fitted: 0,
             renderer: gpu::Renderer::new(),
-            counts: Vec::new(),
+            placed: Vec::new(),
             absent: 0,
         };
         match source.scene() {
@@ -328,23 +404,34 @@ impl Scene {
                     scene.waiting.push(Expand {
                         path: path.clone(),
                         transform: Mat4::IDENTITY,
+                        key: (0, [0; 4]),
                         scale: 1.0,
                         layer: None,
                         depth: 0,
                     });
                 }
             }
-            _ => scene.walk(source.groups(), Mat4::IDENTITY, 1.0, None, 0, None),
+            _ => scene.walk(
+                source.groups(),
+                Mat4::IDENTITY,
+                (0, [0; 4]),
+                1.0,
+                None,
+                0,
+                None,
+            ),
         }
         scene.fit();
         scene
     }
 
     /// Reads placements out of a file's layers, queueing every shared group it names.
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
         groups: &[LayerGroup],
         transform: Mat4,
+        key: (u32, [u8; 4]),
         scale: f32,
         under: Option<usize>,
         depth: u8,
@@ -391,6 +478,7 @@ impl Scene {
                             self.waiting.push(Expand {
                                 path: shared.asset_path().clone(),
                                 transform: here,
+                                key: reach(key, depth, instance.id()),
                                 scale: scale
                                     * Vec3::from_array(placed.scale())
                                         .abs()
@@ -398,6 +486,22 @@ impl Scene {
                                         .max(0.001),
                                 layer: Some(at),
                                 depth: depth + 1,
+                            });
+                        }
+                        InstanceData::Light(light) => {
+                            let held = light.colour();
+                            let color = Vec3::new(
+                                f32::from(held.red()),
+                                f32::from(held.green()),
+                                f32::from(held.blue()),
+                            ) / 255.0;
+                            self.lights.push(Light {
+                                placement: here,
+                                center: here.transform_point3(Vec3::ZERO),
+                                min: Vec3::splat(-REACH),
+                                max: Vec3::splat(REACH),
+                                color: color * held.intensity(),
+                                key: reach(key, depth, instance.id()),
                             });
                         }
                         _ => {}
@@ -420,7 +524,6 @@ impl Scene {
             instances: 0,
             nearest: f32::INFINITY,
         });
-        self.counts.push([0; 3]);
         self.model_at.insert(path.to_owned(), self.models.len() - 1);
         self.models.len() - 1
     }
@@ -516,10 +619,11 @@ impl Scene {
         }
     }
 
-    /// Writes every model's instance buffer for where the eye now stands.
+    /// Where every model stands for where the eye now is. The transforms go to the card each frame
+    /// rather than here, since a record carries the object into view space and the camera turns.
     fn rebuild(&mut self) {
         let eye = self.camera.position;
-        let mut matrices: Vec<[Vec<f32>; 3]> = (0..self.models.len())
+        let mut placed: Vec<[Vec<program::Instance>; 3]> = (0..self.models.len())
             .map(|_| std::array::from_fn(|_| Vec::new()))
             .collect();
         for model in &mut self.models {
@@ -545,33 +649,102 @@ impl Scene {
             let Some(level) = level(model.drawn, placement.radius / span.max(0.01)) else {
                 continue;
             };
-            matrices[placement.model][level]
-                .extend_from_slice(&placement.transform.to_cols_array());
+            placed[placement.model][level].push(program::Instance {
+                transform: placement.transform,
+                sky_visibility: 1.0,
+            });
         }
-
-        let mut renderer = self.renderer.lock().unwrap();
-        for (at, levels) in matrices.into_iter().enumerate() {
-            for (level, values) in levels.into_iter().enumerate() {
-                self.counts[at][level] = (values.len() / 16) as i32;
-                if !values.is_empty() {
-                    renderer.queue_instances(at, level, values);
-                }
-            }
-        }
+        self.placed = placed;
         self.written = eye;
         self.dirty = false;
+    }
+
+    /// The lights the frame draws, nearest first. Each is clipped against the box its zone states
+    /// for it, in the light's own space.
+    fn lamps(&self) -> Vec<program::Lamp> {
+        let eye = self.camera.position;
+        let mut near: Vec<(f32, &Light)> = self
+            .lights
+            .iter()
+            .map(|light| ((light.center - eye).length(), light))
+            .filter(|(span, _)| *span <= self.load)
+            .collect();
+        near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        near.into_iter()
+            .take(LAMPS)
+            .map(|(_, light)| {
+                let (min, max) = self
+                    .clips
+                    .get(&light.key)
+                    .copied()
+                    .unwrap_or((light.min, light.max));
+                program::Lamp {
+                    placement: light.placement,
+                    min,
+                    max,
+                    color: light.color,
+                }
+            })
+            .collect()
+    }
+
+    /// The boxes the zone clips its lights against, keyed the way a walk reaches a light.
+    fn load_clips(&mut self, backend: &Backend) {
+        let mut arrived = None;
+        let next = match &self.clip {
+            Clip::Wanted(path) => {
+                let files = backend.files().clone();
+                let wanted = path.clone();
+                Some(Clip::Fetching(
+                    path.clone(),
+                    TrackedPromise::spawn_local(async move { files.read(&wanted).await }),
+                ))
+            }
+            Clip::Fetching(path, promise) => match promise.try_get() {
+                Some(Ok(bytes)) => {
+                    arrived = Some((path.clone(), bytes.clone()));
+                    Some(Clip::Done)
+                }
+                Some(Err(_)) => Some(Clip::Done),
+                None => None,
+            },
+            Clip::Done => None,
+        };
+        if let Some(next) = next {
+            self.clip = next;
+        }
+        let Some((path, bytes)) = arrived else {
+            return;
+        };
+        match lcb::ClipBoxes::read(Cursor::new(bytes)) {
+            Ok(held) => {
+                for group in held.groups() {
+                    for entry in group.entries() {
+                        self.clips.insert(
+                            (entry.instance(), entry.members()),
+                            (Vec3::from_array(entry.min()), Vec3::from_array(entry.max())),
+                        );
+                    }
+                }
+                self.dirty = true;
+            }
+            Err(why) => log::error!("assets/layer: {path}: {why}"),
+        }
     }
 
     /// Asks for whatever the scene still needs and takes in whatever arrived. Runs every frame.
     fn poll(&mut self, ui: &egui::Ui, backend: &Backend) {
         self.load_terrain(backend);
+        self.load_clips(backend);
         self.expand(backend);
         if self.fitted == 0 && !self.placements.is_empty() {
             self.fit();
         }
         self.load_models(backend);
         self.load_materials(backend);
+        self.load_packages(backend);
         self.load_textures(ui, backend);
+        self.translate();
 
         // Parsing, decoding and uploading are all spread over frames, and a promise only asks for
         // repaints while it is still in flight. Without this the last of a load stalls half drawn
@@ -665,6 +838,7 @@ impl Scene {
                 ready.push((
                     source.clone(),
                     expand.transform,
+                    expand.key,
                     expand.scale,
                     expand.layer,
                     expand.depth,
@@ -677,8 +851,8 @@ impl Scene {
             _ => true,
         });
         self.waiting = waiting;
-        for (source, transform, scale, layer, depth) in ready {
-            self.walk(source.groups(), transform, scale, layer, depth, None);
+        for (source, transform, key, scale, layer, depth) in ready {
+            self.walk(source.groups(), transform, key, scale, layer, depth, None);
         }
     }
 
@@ -778,14 +952,12 @@ impl Scene {
         if drawn.iter().all(|held| !held) {
             anyhow::bail!("this model draws nothing at any detail level");
         }
-        let instances = self.models[at].instances;
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
-        self.renderer.lock().unwrap().queue_model(gpu::Pending {
-            model: at,
-            levels,
-            instances,
-        });
+        self.renderer
+            .lock()
+            .unwrap()
+            .queue_model(gpu::Pending { model: at, levels });
         Ok(())
     }
 
@@ -841,37 +1013,189 @@ impl Scene {
         }
     }
 
-    /// Only the diffuse map of each material, which is all this shading reads. Held for the whole
-    /// scene rather than per model, since a zone's models share theirs heavily.
+    /// The packages the ready materials name, plus the four the frame is lit and resolved with.
+    fn load_packages(&mut self, backend: &Backend) {
+        let mut wanted: Vec<String> = [
+            program::VIEW_POSITION,
+            program::DIRECTIONAL,
+            program::POINT,
+            program::COMPOSITE,
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        wanted.extend(self.materials.iter().filter_map(|(_, slot)| match slot {
+            Slot::Ready(material) => Some(material.package()),
+            _ => None,
+        }));
+        for path in wanted {
+            self.packages.entry(path).or_insert(Package::Wanted);
+        }
+
+        let mut fetching = self
+            .packages
+            .values()
+            .filter(|held| matches!(held, Package::Fetching(_)))
+            .count();
+        for (path, held) in &mut self.packages {
+            if fetching >= PACKAGES {
+                break;
+            }
+            if !matches!(held, Package::Wanted) {
+                continue;
+            }
+            let files = backend.files().clone();
+            let wanted = path.clone();
+            *held = Package::Fetching(TrackedPromise::spawn_local(async move {
+                files.read(&wanted).await
+            }));
+            fetching += 1;
+        }
+
+        for (path, held) in &mut self.packages {
+            let Package::Fetching(promise) = held else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *held = match result {
+                Ok(bytes) => Package::Ready(bytes.clone()),
+                Err(why) => {
+                    log::error!("assets/layer: {path}: {why}");
+                    Package::Failed
+                }
+            };
+        }
+    }
+
+    /// Every ready material's shaders, translated once its package has arrived. A context that
+    /// turned out to write fewer of the G-buffer's targets at once has them translated again.
+    fn translate(&mut self) {
+        let attachments = self.renderer.lock().unwrap().attachments();
+        if self.lighting.is_none() {
+            let held = |path: &str, pass| {
+                let Some(Package::Ready(bytes)) = self.packages.get(path) else {
+                    return None;
+                };
+                program::Program::screen(bytes, pass, attachments)
+                    .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+                    .ok()
+                    .map(Arc::new)
+            };
+            if let (Some(position), Some(directional), Some(point), Some(composite)) = (
+                held(program::VIEW_POSITION, program::Pass::Lighting),
+                held(program::DIRECTIONAL, program::Pass::Lighting),
+                held(program::POINT, program::Pass::Lamp),
+                held(program::COMPOSITE, program::Pass::Composite),
+            ) {
+                self.lighting = Some(Arc::new(mdl::gpu::Lighting {
+                    position,
+                    directional,
+                    point,
+                    composite,
+                }));
+            }
+        }
+
+        for (at, (_, slot)) in self.materials.iter().enumerate() {
+            let Slot::Ready(material) = slot else {
+                continue;
+            };
+            if self
+                .translated
+                .get(&at)
+                .is_some_and(|held| held.attachments == attachments)
+            {
+                continue;
+            }
+            let Some(Package::Ready(bytes)) = self.packages.get(&material.package()) else {
+                continue;
+            };
+            let page = |page| {
+                program::Program::build(
+                    bytes,
+                    material,
+                    &[],
+                    program::Pass::Buffer,
+                    program::SUB_VIEW_MAIN,
+                    page,
+                    attachments,
+                )
+            };
+            let Ok(first) = page(0).inspect_err(|why| {
+                log::warn!("assets/layer: {}: {why}", material.package());
+            }) else {
+                continue;
+            };
+            let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
+            let mut buffer = vec![Arc::new(first)];
+            buffer.extend((1..pages).filter_map(|held| page(held).ok().map(Arc::new)));
+            let depth = program::Program::build(
+                bytes,
+                material,
+                &[],
+                program::Pass::Depth,
+                program::SUB_VIEW_MAIN,
+                0,
+                attachments,
+            );
+            self.translated.insert(
+                at,
+                Translated {
+                    attachments,
+                    buffer,
+                    depth: depth.ok().map(Arc::new),
+                },
+            );
+            if let Some((values, columns, rows)) =
+                material.held().color_table().and_then(program::table)
+            {
+                self.tables
+                    .entry(at)
+                    .or_insert_with(|| Arc::new((values.to_vec(), columns, rows)));
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// Every texture the ready materials name, since the game's own shaders read all of them. Held
+    /// for the whole scene rather than per model, since a zone's models share theirs heavily.
     fn load_textures(&mut self, ui: &egui::Ui, backend: &Backend) {
         let mut fetching = self
             .textures
             .values()
             .filter(|texture| matches!(texture, Texture::Fetching(_)))
             .count();
-        for (_, slot) in &self.materials {
+        let wanted: Vec<String> = self
+            .materials
+            .iter()
+            .enumerate()
+            .filter(|(at, _)| self.translated.contains_key(at))
+            .filter_map(|(_, (_, slot))| match slot {
+                Slot::Ready(material) => Some(material),
+                _ => None,
+            })
+            .flat_map(|material| material.textures())
+            .filter(|path| !self.textures.contains_key(*path))
+            .cloned()
+            .collect();
+        for path in wanted {
             if fetching >= TEXTURES {
                 break;
             }
-            let Slot::Ready(material) = slot else {
-                continue;
-            };
-            let Some(path) = material.texture(Role::Diffuse) else {
-                continue;
-            };
-            if self.textures.contains_key(path) {
+            if self.textures.contains_key(&path) {
                 continue;
             }
             if self.resident >= TEXTURE_BUDGET {
-                self.textures.insert(path.clone(), Texture::Absent);
+                self.textures.insert(path, Texture::Absent);
                 continue;
             }
             let files = backend.files().clone();
-            let wanted = path.clone();
+            let held = path.clone();
             self.textures.insert(
-                path.clone(),
+                path,
                 Texture::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read_texture(&wanted, Some(TEXTURE_SIZE)).await
+                    files.read_texture(&held, Some(TEXTURE_SIZE)).await
                 })),
             );
             fetching += 1;
@@ -986,15 +1310,18 @@ impl Scene {
         // Capped as well as scaled: at the largest load distance a proportional near plane would
         // sit further out than the walls of an interior.
         let near = (far * 0.0002).min(0.2);
-        let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
-        let background = ui.visuals().extreme_bg_color;
-        let linear = |channel: u8| (f32::from(channel) / 255.0).powf(2.2);
+        // The game's own shaders were compiled for a clip depth running from nought to one, and the
+        // backend moves what they compute into the range GL clips against.
+        let projection = Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, far);
 
         let mut batches = Vec::new();
         for (at, model) in self.models.iter().enumerate() {
             for level in 0..3 {
-                let instances = self.counts[at][level];
-                let Some(meshes) = model.meshes.get(level).filter(|_| instances > 0) else {
+                let instances = match self.placed.get(at) {
+                    Some(held) if !held[level].is_empty() => held[level].clone(),
+                    _ => continue,
+                };
+                let Some(meshes) = model.meshes.get(level) else {
                     continue;
                 };
                 batches.push(gpu::Batch {
@@ -1007,14 +1334,15 @@ impl Scene {
         }
 
         let frame = gpu::Frame {
-            view_projection: (projection * view).to_cols_array(),
-            key: KEY.normalize().to_array(),
-            horizon: [
-                linear(background.r()),
-                linear(background.g()),
-                linear(background.b()),
-            ],
-            fade: [self.load * (1.0 - FADE), self.load],
+            scene: program::Scene {
+                view,
+                projection,
+                model: Mat4::IDENTITY,
+                light: KEY.normalize(),
+                ..Default::default()
+            },
+            lighting: self.lighting.clone(),
+            lamps: self.lamps(),
             batches,
         };
 
@@ -1023,38 +1351,42 @@ impl Scene {
         let renderer = self.renderer.clone();
         ui.painter().add(egui::PaintCallback {
             rect,
-            callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                renderer.lock().unwrap().draw(painter.gl(), painter, &frame);
+            callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
+                renderer
+                    .lock()
+                    .unwrap()
+                    .draw(painter.gl(), painter, &frame, &info);
             })),
         });
     }
 
     fn surface(&self, slot: usize) -> gpu::Surface {
-        let Some((_, Slot::Ready(material))) = self.materials.get(slot) else {
-            // Bare geometry until the material arrives, rather than a hole where it will be.
-            return gpu::Surface {
-                diffuse: None,
-                diffuse_color: [0.6; 3],
-                emissive_color: [0.0; 3],
-                alpha_threshold: 0.0,
-                cull: false,
-                hidden: false,
-            };
-        };
-        let diffuse = match material
-            .texture(Role::Diffuse)
-            .and_then(|path| self.textures.get(path))
-        {
+        let held = self.materials.get(slot).and_then(|(_, held)| match held {
+            Slot::Ready(material) => Some(material),
+            _ => None,
+        });
+        let bind = |path: &str| match self.textures.get(path) {
             Some(Texture::Ready(handle)) => Some(handle.id()),
             _ => None,
         };
+        // Bare geometry until the material and its package arrive, rather than a hole where they
+        // will be.
+        let shaded = held
+            .zip(self.translated.get(&slot))
+            .map(|(material, held)| mdl::gpu::Shaded {
+                buffer: held.buffer.clone(),
+                depth: held.depth.clone(),
+                table: self.tables.get(&slot).cloned(),
+                textures: material
+                    .bound()
+                    .map(|(id, path)| (id, bind(path)))
+                    .collect(),
+            });
         gpu::Surface {
-            diffuse,
-            diffuse_color: material.diffuse(),
-            emissive_color: material.emissive(),
-            alpha_threshold: material.alpha_threshold(),
-            cull: material.cull(),
-            hidden: !material.drawn(),
+            material: slot,
+            shaded,
+            cull: held.is_some_and(|material| material.cull()),
+            hidden: held.is_some_and(|material| !material.drawn()),
         }
     }
 
@@ -1086,7 +1418,7 @@ impl Scene {
 
             ui.add_space(8.0);
             ui.separator();
-            let drawn: i32 = self.counts.iter().flatten().sum();
+            let drawn: usize = self.placed.iter().flatten().map(Vec::len).sum();
             let ready = self
                 .models
                 .iter()
@@ -1101,7 +1433,14 @@ impl Scene {
                     ("Waiting on a model", self.absent.to_string()),
                     ("Models", format!("{ready} of {}", self.models.len())),
                     ("Groups to read", self.waiting.len().to_string()),
-                    ("Materials", self.materials.len().to_string()),
+                    (
+                        "Materials",
+                        format!("{} of {}", self.translated.len(), self.materials.len()),
+                    ),
+                    (
+                        "Lights",
+                        format!("{} of {}", self.lamps().len(), self.lights.len()),
+                    ),
                     (
                         "Textures",
                         format!(

@@ -26,7 +26,7 @@ const COLOR_OFFSET: i32 = 88;
 
 /// Where each semantic a drawing package asks for sits in a [`Vertex`], and how wide it is. The
 /// bytes are read as integers where the shader's own signature declares them so.
-const FIELDS: [(program::Field, i32, i32, u32); 10] = [
+pub const FIELDS: [(program::Field, i32, i32, u32); 10] = [
     (program::Field::Position, 3, 0, glow::FLOAT),
     (program::Field::Normal, 3, 12, glow::FLOAT),
     (program::Field::Tangent, 4, 24, glow::FLOAT),

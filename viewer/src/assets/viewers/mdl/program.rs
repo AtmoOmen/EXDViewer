@@ -648,14 +648,17 @@ impl Program {
         self.targets.iter().position(|held| held == register)
     }
 
-    /// How many objects one draw of this pass covers. A package with no instancing buffer draws one.
-    pub fn batch(&self) -> usize {
+    /// The buffer this pass reads one record of per object drawn, and how many records it holds.
+    pub fn instancing(&self) -> Option<(&Buffer, usize)> {
         self.buffers
             .iter()
-            .map(Buffer::instances)
-            .max()
-            .unwrap_or(1)
-            .max(1)
+            .map(|buffer| (buffer, buffer.instances()))
+            .find(|(_, count)| *count > 1)
+    }
+
+    /// How many objects one draw of this pass covers. A package with no instancing buffer draws one.
+    pub fn batch(&self) -> usize {
+        self.instancing().map_or(1, |(_, count)| count)
     }
 }
 

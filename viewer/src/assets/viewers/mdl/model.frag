@@ -37,6 +37,7 @@ const int HAVE_TABLE = 16;
 const int CHARACTER = 0;
 const int LEGACY = 1;
 const int BACKGROUND = 2;
+const int HAIR = 3;
 
 const int SHOW_NORMAL = 1;
 const int SHOW_UV = 2;
@@ -148,9 +149,10 @@ void main() {
 	float opacity = v_color.a;
 	// Only a character normal map carries opacity here; a background one keeps a height map in the
 	// same place and its cutout in the diffuse map's alpha instead, which is what clips a leaf out
-	// of the quad it is painted on.
+	// of the quad it is painted on. Hair keeps a highlight mask in the blue and its cutout in the
+	// alpha, which is the way round the rest of the tree does not.
 	if (has(HAVE_NORMAL) && u_family != BACKGROUND) {
-		opacity *= sampled.b;
+		opacity *= u_family == HAIR ? sampled.a : sampled.b;
 	}
 	if (has(HAVE_DIFFUSE) && u_family == BACKGROUND) {
 		opacity *= painted.a;

@@ -31,6 +31,9 @@ pub enum Family {
     Legacy,
     /// A specular map, of which only the red channel means what a mask's does.
     Background,
+    /// The normal map carries its cutout in the alpha channel, where every other character family
+    /// keeps it in the blue, and the mask's alpha is what shades a strand.
+    Hair,
 }
 
 const ROLES: [(u32, Role); 7] = [
@@ -127,8 +130,10 @@ impl Material {
         let family =
             if shader == "characterlegacy.shpk" && textures[Role::Diffuse as usize].is_some() {
                 Family::Legacy
+            } else if shader == "hair.shpk" {
+                Family::Hair
             } else if shader.starts_with("character")
-                || matches!(shader.as_str(), "hair.shpk" | "skin.shpk" | "iris.shpk")
+                || matches!(shader.as_str(), "skin.shpk" | "iris.shpk")
             {
                 Family::Character
             } else {

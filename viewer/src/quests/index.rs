@@ -318,7 +318,9 @@ impl Index {
                 let param = derive::param_of(&instruction)?;
                 let arg = integer(
                     row,
-                    self.fields.at(&format!("QuestParams[{slot}].ScriptArg")).ok()?,
+                    self.fields
+                        .at(&format!("QuestParams[{slot}].ScriptArg"))
+                        .ok()?,
                 );
                 Some((param, arg))
             })

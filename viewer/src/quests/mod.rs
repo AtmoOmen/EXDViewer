@@ -41,17 +41,13 @@ enum View {
     Chains,
 }
 
+#[derive(Default)]
 enum Load<T: Send + 'static> {
+    #[default]
     Idle,
     Loading(TrackedPromise<Result<T>>),
     Ready(T),
     Failed(String),
-}
-
-impl<T: Send + 'static> Default for Load<T> {
-    fn default() -> Self {
-        Self::Idle
-    }
 }
 
 impl<T: Send + 'static> Load<T> {
@@ -205,13 +201,7 @@ impl QuestBrowser {
         }
     }
 
-    fn poll(
-        &mut self,
-        ui: &egui::Ui,
-        backend: &Backend,
-        icons: &IconManager,
-        language: Language,
-    ) {
+    fn poll(&mut self, ui: &egui::Ui, backend: &Backend, icons: &IconManager, language: Language) {
         if self.loading_for != Some(language) {
             self.loading_for = Some(language);
             self.index = None;
@@ -355,6 +345,7 @@ impl QuestBrowser {
                     .clicked()
                 {
                     self.view = view;
+                    self.reveal = self.selected;
                 }
             }
             if self.view == View::Journal
@@ -570,10 +561,8 @@ impl QuestBrowser {
 fn indented(ui: &mut egui::Ui, depth: f32, button: Button<'_>) -> egui::Response {
     ui.horizontal(|ui| {
         ui.add_space(depth * ui.spacing().indent);
-        ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
-            button.ui(ui)
-        })
-        .inner
+        ui.with_layout(Layout::top_down_justified(Align::Min), |ui| button.ui(ui))
+            .inner
     })
     .inner
 }

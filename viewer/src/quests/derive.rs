@@ -69,7 +69,10 @@ mod tests {
 
     #[test]
     fn per_quest_files_bucket_by_hundreds() {
-        assert_eq!(text_sheet(65575, "ManFst001_00039"), "quest/000/ManFst001_00039");
+        assert_eq!(
+            text_sheet(65575, "ManFst001_00039"),
+            "quest/000/ManFst001_00039"
+        );
         assert_eq!(
             script_path(70000, "AktKmg115_04464"),
             "game_script/quest/044/AktKmg115_04464.luab"

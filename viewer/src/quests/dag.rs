@@ -1,6 +1,4 @@
-use egui::{
-    Color32, Rect, ScrollArea, Sense, Shape, Stroke, Vec2, pos2, text::LayoutJob, vec2,
-};
+use egui::{Color32, Rect, ScrollArea, Sense, Shape, Stroke, Vec2, pos2, text::LayoutJob, vec2};
 
 use crate::quests::{graph::Graph, index::Index};
 
@@ -22,10 +20,7 @@ pub fn ui(
     let focus = selected.and_then(|row_id| index.node_of(row_id));
     let component = focus.map_or(0, |node| graph.component(node));
     let (last_rank, last_slot) = graph.extent(component);
-    let content = vec2(
-        (last_rank + 1) as f32 * RANK,
-        (last_slot + 1) as f32 * SLOT,
-    );
+    let content = vec2((last_rank + 1) as f32 * RANK, (last_slot + 1) as f32 * SLOT);
 
     let mut area = ScrollArea::both().auto_shrink(false);
     if let Some(node) = reveal.take().and_then(|row_id| index.node_of(row_id)) {
@@ -55,8 +50,8 @@ pub fn ui(
             }
             for dependent in graph.dependents(*node) {
                 if !(first..last).contains(&graph.rank(*dependent)) {
-                    let dependent_optional = index.quest(*dependent).join == 2
-                        && graph.prereqs(*dependent).len() > 1;
+                    let dependent_optional =
+                        index.quest(*dependent).join == 2 && graph.prereqs(*dependent).len() > 1;
                     edge(
                         painter,
                         to,
@@ -129,7 +124,10 @@ pub fn ui(
 
 fn at_of(origin: Vec2, graph: &Graph, node: u32) -> Rect {
     Rect::from_min_size(
-        pos2(graph.rank(node) as f32 * RANK, graph.slot(node) as f32 * SLOT) + origin,
+        pos2(
+            graph.rank(node) as f32 * RANK,
+            graph.slot(node) as f32 * SLOT,
+        ) + origin,
         NODE,
     )
 }

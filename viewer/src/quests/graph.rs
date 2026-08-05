@@ -125,7 +125,10 @@ impl Graph {
             group.clear();
             group.extend(order[at..end].iter().map(|node| {
                 let prereqs = &prereq_items[csr(&prereq_starts, *node as usize)];
-                let mean = prereqs.iter().map(|p| slot[*p as usize] as f32).sum::<f32>()
+                let mean = prereqs
+                    .iter()
+                    .map(|p| slot[*p as usize] as f32)
+                    .sum::<f32>()
                     / prereqs.len().max(1) as f32;
                 (mean, *node)
             }));
@@ -293,8 +296,16 @@ mod tests {
         );
 
         assert_eq!((graph.slot(1), graph.slot(2)), (0, 1));
-        assert_eq!((graph.slot(3), graph.slot(4)), (1, 0), "children follow their parent across");
-        assert_eq!(graph.extent(0), (2, 1), "and no rank is wider than its own nodes");
+        assert_eq!(
+            (graph.slot(3), graph.slot(4)),
+            (1, 0),
+            "children follow their parent across"
+        );
+        assert_eq!(
+            graph.extent(0),
+            (2, 1),
+            "and no rank is wider than its own nodes"
+        );
     }
 
     #[test]

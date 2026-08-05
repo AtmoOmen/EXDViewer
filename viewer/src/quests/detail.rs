@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use compact_str::ToCompactString;
 use egui::{CollapsingHeader, Color32, Label, RichText, ScrollArea, Sense};
 use ironworks::{excel::Language, sestring::SeStr};
 
@@ -71,10 +72,15 @@ const FLOW: &[&str] = &[
 /// `Reward[i]` resolves through `ItemRewardType`, so it is a link to an item, a class-job reward or
 /// a beast-tribe bonus depending on the row.
 fn reward_fields() -> Vec<String> {
-    let mut names: Vec<String> = ["GilReward", "ExpFactor", "CurrencyReward", "CurrencyRewardCount"]
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
+    let mut names: Vec<String> = [
+        "GilReward",
+        "ExpFactor",
+        "CurrencyReward",
+        "CurrencyRewardCount",
+    ]
+    .iter()
+    .map(|name| (*name).to_string())
+    .collect();
     for i in 0..7 {
         names.push(format!("Reward[{i}]"));
         names.push(format!("ItemCountReward[{i}]"));
@@ -174,11 +180,9 @@ impl Detail {
         );
         ui.add_space(6.0);
 
-        ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| {
-                action = self.body(ui, index, node);
-            });
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            action = self.body(ui, index, node);
+        });
         action
     }
 
@@ -187,15 +191,25 @@ impl Detail {
             ui.colored_label(Color32::RED, "The quest's row went away");
             return None;
         };
-        let mut action = fields(ui, index, row, IDENTITY.iter().map(|name| (*name).to_string()));
+        let mut action = fields(
+            ui,
+            index,
+            row,
+            IDENTITY.iter().map(|name| (*name).to_string()),
+        );
 
-        action = action.or(section(ui, "Requirements", |ui| {
-            fields(ui, index, row, REQUIREMENTS.iter().map(|n| (*n).to_string()))
+        action = action.or(section(ui, "Requirements", false, |ui| {
+            fields(
+                ui,
+                index,
+                row,
+                REQUIREMENTS.iter().map(|n| (*n).to_string()),
+            )
         }));
-        action = action.or(section(ui, "Progression", |ui| {
+        action = action.or(section(ui, "Progression", false, |ui| {
             fields(ui, index, row, FLOW.iter().map(|n| (*n).to_string()))
         }));
-        action = action.or(section(ui, "Rewards", |ui| {
+        action = action.or(section(ui, "Rewards", true, |ui| {
             fields(ui, index, row, reward_fields().into_iter())
         }));
 
@@ -215,13 +229,13 @@ impl Detail {
             } else {
                 "Requires"
             };
-            action = action.or(section(ui, title, |ui| {
+            action = action.or(section(ui, title, true, |ui| {
                 quest_list(ui, index, prereqs)
             }));
         }
         let dependents = index.graph.dependents(node);
         if !dependents.is_empty() {
-            action = action.or(section(ui, "Unlocks", |ui| {
+            action = action.or(section(ui, "Unlocks", true, |ui| {
                 quest_list(ui, index, dependents)
             }));
         }
@@ -232,7 +246,7 @@ impl Detail {
             .filter_map(|row_id| index.node_of(*row_id))
             .collect();
         if !locks.is_empty() {
-            action = action.or(section(ui, "Alternatives", |ui| {
+            action = action.or(section(ui, "Alternatives", true, |ui| {
                 ui.label(
                     RichText::new("Taking one of these puts the others out of reach.")
                         .weak()
@@ -246,13 +260,12 @@ impl Detail {
 
     fn files(&self, ui: &mut egui::Ui) -> Option<Action> {
         let title = match &self.links {
-            Load::Ready(links) => format!(
-                "Files ({})",
-                1 + links.music.len() + links.cutscenes.len()
-            ),
+            Load::Ready(links) => {
+                format!("Files ({})", 1 + links.music.len() + links.cutscenes.len())
+            }
             _ => "Files".to_string(),
         };
-        section(ui, &title, |ui| match &self.links {
+        section(ui, &title, true, |ui| match &self.links {
             Load::Idle | Load::Loading(_) => {
                 ui.spinner();
                 None
@@ -276,7 +289,7 @@ impl Detail {
             Load::Ready(dialogue) => format!("Dialogue ({})", dialogue.lines),
             _ => "Dialogue".to_string(),
         };
-        section(ui, &title, |ui| {
+        section(ui, &title, false, |ui| {
             match &self.dialogue {
                 Load::Idle | Load::Loading(_) => {
                     ui.spinner();
@@ -303,10 +316,12 @@ impl Detail {
 fn section(
     ui: &mut egui::Ui,
     title: &str,
+    open: bool,
     body: impl FnOnce(&mut egui::Ui) -> Option<Action>,
 ) -> Option<Action> {
     CollapsingHeader::new(title)
         .id_salt(title)
+        .default_open(open)
         .show(ui, body)
         .body_returned
         .flatten()
@@ -326,7 +341,7 @@ fn fields(
         let Ok((_, column)) = index.table.get_column_by_offset(at) else {
             continue;
         };
-        if blank(row, &column) {
+        if blank(row, column) {
             continue;
         }
         let Ok(cell) = index.table.cell_by_offset(row, at) else {
@@ -381,8 +396,12 @@ fn quest_list(ui: &mut egui::Ui, index: &Index, nodes: &[u32]) -> Option<Action>
 fn asset_link(ui: &mut egui::Ui, path: &str) -> Option<Action> {
     let response = ui
         .add(
-            Label::new(RichText::new(path).color(ui.visuals().hyperlink_color).small())
-                .sense(Sense::click()),
+            Label::new(
+                RichText::new(path)
+                    .color(ui.visuals().hyperlink_color)
+                    .small(),
+            )
+            .sense(Sense::click()),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     response
@@ -390,14 +409,19 @@ fn asset_link(ui: &mut egui::Ui, path: &str) -> Option<Action> {
         .then(|| Action::Navigate(format!("/assets/{path}")))
 }
 
+/// Dialogue leans on more payload kinds than most sheets, so a player-name macro reads as a gap in
+/// the sentence. That is the formatter having nothing to put there, not a decode failure.
 fn sestring(ui: &egui::Ui, bytes: &[u8]) -> String {
     let text: &SeStr = bytes.into();
-    let formatted = if EVALUATE_STRINGS.get(ui.ctx()) {
-        text.format().to_string()
+    if EVALUATE_STRINGS.get(ui.ctx()) {
+        text.format()
+            .try_to_compact_string()
+            .map_or_else(|_| String::new(), Into::into)
     } else {
-        text.macro_string().to_string()
-    };
-    formatted
+        text.macro_string()
+            .try_to_compact_string()
+            .map_or_else(|_| String::new(), Into::into)
+    }
 }
 
 async fn dialogue(

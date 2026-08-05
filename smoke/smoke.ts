@@ -17,10 +17,17 @@ const args = new Set(Bun.argv.slice(2));
 const shots = args.has("--shots") || args.has("--explore");
 const explore = args.has("--explore");
 const modelOnly = explore || args.has("--model-only");
+const orbit = args.has("--orbit");
+const views = args.has("--views");
 const shotDir = join(root, "smoke/shots");
 
-const MODEL = "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl";
-const SCENE = "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb";
+function flag(name: string, fallback: string): string {
+    const held = Bun.argv.find((argument) => argument.startsWith(`--${name}=`));
+    return held ? held.slice(name.length + 3) : fallback;
+}
+
+const MODEL = flag("model", "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl");
+const SCENE = flag("scene", "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb");
 
 const WIDTH = 1600;
 const HEIGHT = 1000;
@@ -36,6 +43,20 @@ const SWEEP_STEP = 16;
 
 // The lgb viewer opens on its Tree tab; the 3D scene is the tab beside it.
 const SCENE_TAB = { x: 287, y: 116 };
+
+// Where a drag of the viewport starts, well clear of the control row.
+const ORBIT_FROM = { x: 800, y: 600 };
+const ORBIT_ANGLES = [220, 220, 220, 220];
+
+// The preview path's own debug row, which stands where the channel row does once game shaders are
+// on. Recalibrate these with --explore alongside the ones above.
+const VIEWS: [string, number][] = [
+    ["normals", 349],
+    ["geometric", 420],
+    ["tangents", 492],
+    ["bitangents", 566],
+    ["handedness", 648],
+];
 
 // SV_Target, SV_Target1..4 and Lit.
 const CHANNELS = 6;
@@ -186,6 +207,42 @@ async function click(cdp: Cdp, x: number, y: number) {
     await sleep(160);
 }
 
+/// Drags the viewport, which is how the camera is turned. The move is stepped: the viewer reads a
+/// pointer delta per frame, and one jump would be a single frame's worth of turn.
+async function drag(cdp: Cdp, by: number) {
+    const base = { button: "left", clickCount: 1 };
+    await cdp.send("Input.dispatchMouseEvent", {
+        ...base,
+        type: "mouseMoved",
+        ...ORBIT_FROM,
+        buttons: 0,
+    });
+    await cdp.send("Input.dispatchMouseEvent", {
+        ...base,
+        type: "mousePressed",
+        ...ORBIT_FROM,
+        buttons: 1,
+    });
+    for (let step = 1; step <= 10; step++) {
+        await cdp.send("Input.dispatchMouseEvent", {
+            ...base,
+            type: "mouseMoved",
+            x: ORBIT_FROM.x + (by * step) / 10,
+            y: ORBIT_FROM.y,
+            buttons: 1,
+        });
+        await sleep(40);
+    }
+    await cdp.send("Input.dispatchMouseEvent", {
+        ...base,
+        type: "mouseReleased",
+        x: ORBIT_FROM.x + by,
+        y: ORBIT_FROM.y,
+        buttons: 0,
+    });
+    await sleep(400);
+}
+
 async function main() {
     if (!existsSync(join(dist, "index.html"))) {
         throw new Error(`no build at ${dist} (run smoke/run.sh, which builds first)`);
@@ -263,6 +320,27 @@ async function main() {
         console.log(`   after load: draws=${plain.draws} links=${plain.links} blits=${plain.blits}`);
         report.plain = plain;
 
+        if (orbit) {
+            phase = "orbit";
+            console.log("\n== orbit");
+            for (const [at, by] of ORBIT_ANGLES.entries()) {
+                await drag(cdp, by);
+                await shot(cdp, `01-orbit-${at}`);
+            }
+        }
+
+        if (views) {
+            phase = "views";
+            console.log("\n== preview views");
+            for (const [name, x] of VIEWS) {
+                await click(cdp, x, ROW_Y);
+                await sleep(250);
+                await shot(cdp, `01-view-${name}`);
+            }
+            // Off again, so whatever runs after this sees the shaded frame rather than a debug one.
+            await click(cdp, VIEWS[VIEWS.length - 1][1], ROW_Y);
+        }
+
         if (modelOnly) {
             console.log("\n== stopping after the model, before any click");
             return;
@@ -304,7 +382,11 @@ async function main() {
                 buttons: 0,
             });
             await sleep(250);
-            seen.add(await shot(cdp, `03-channel-${String(index++).padStart(2, "0")}`, rowClip));
+            const at = String(index++).padStart(2, "0");
+            seen.add(await shot(cdp, `03-channel-${at}`, rowClip));
+            // The row clip is what counts distinct selections; the whole frame is what says whether
+            // the channel drew anything worth looking at.
+            if (shots) await shot(cdp, `03-frame-${at}`);
         }
         console.log(`   distinct selections: ${seen.size}`);
         report.channels = seen.size;
@@ -320,7 +402,7 @@ async function main() {
         await cdp.send("Page.navigate", { url: `${origin}/assets/${SCENE}` });
         await waitFor("the scene file to be titled", 180_000, async () => {
             const title = await cdp.eval<string>("document.title").catch(() => "");
-            return title.includes("bg.lgb");
+            return title.includes(SCENE.split("/").pop()!);
         });
         await sleep(3000);
         await click(cdp, SCENE_TAB.x, SCENE_TAB.y);

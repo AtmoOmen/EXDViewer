@@ -379,11 +379,11 @@ impl Model {
 
     fn upload(&mut self, gl: &glow::Context, pending: Pending) -> Result<(), String> {
         // `antialias` on the canvas is a hint the implementation may ignore, and nothing short of a
-        // live context says whether it did.
+        // live context says whether it did. DEPTH_BITS is not asked alongside it: a core profile
+        // dropped that query, and asking raises an error the frame is then blamed for.
         let samples = unsafe { gl.get_parameter_i32(glow::SAMPLES) };
-        let depth = unsafe { gl.get_parameter_i32(glow::DEPTH_BITS) };
         log::info!(
-            "assets/mdl: {} meshes on {:?}, {samples} samples, {depth} depth bits",
+            "assets/mdl: {} meshes on {:?}, {samples} samples",
             pending.meshes.len(),
             gl.version()
         );

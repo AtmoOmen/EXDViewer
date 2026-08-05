@@ -19,7 +19,19 @@ const PASS_0: u32 = 0xc5a5_389c;
 
 /// UV sets a particle may carry, and the registers one takes of the transform buffer.
 pub const UV_SETS: usize = 4;
-const UV_REGISTERS: usize = 2;
+pub const UV_REGISTERS: usize = 2;
+
+/// Two rows of an affine on each uv set, read as `dot(vec3(uv, 1), row.xyw)`, transforming nothing.
+pub const UV_IDENTITY: [[f32; 4]; UV_SETS * UV_REGISTERS] = [
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.0],
+    [0.0, 1.0, 0.0, 0.0],
+];
 
 /// What the sprite packages read an integer attribute as: the shader scales by a thousandth.
 pub const FIXED: f32 = 1000.0;
@@ -92,6 +104,8 @@ pub struct Instance {
     /// How far towards the camera the depth is pulled, which is what keeps an effect off a surface
     /// it sits against.
     pub depth_offset: f32,
+    /// What each of the object's uv sets does to a texture coordinate, two registers a set.
+    pub uv: [[f32; 4]; UV_SETS * UV_REGISTERS],
 }
 
 impl Default for Instance {
@@ -100,6 +114,7 @@ impl Default for Instance {
             transform: Mat4::IDENTITY,
             color: Vec4::ONE,
             depth_offset: 0.0,
+            uv: UV_IDENTITY,
         }
     }
 }
@@ -457,9 +472,8 @@ impl Buffer {
             }
             // Two rows of an affine transform on each uv set, read as `dot(uv1, row.xyw)`.
             "g_PS_UvTransform" => {
-                for set in 0..UV_SETS {
-                    write_rows(&mut out, set * UV_REGISTERS, &[1.0, 0.0, 0.0, 0.0]);
-                    write_rows(&mut out, set * UV_REGISTERS + 1, &[0.0, 1.0, 0.0, 0.0]);
+                for (register, row) in instance.uv.iter().enumerate() {
+                    write_rows(&mut out, register, row);
                 }
                 return out;
             }

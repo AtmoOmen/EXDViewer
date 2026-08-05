@@ -9,8 +9,8 @@ smoke/run.sh
 That is the whole command. It builds `viewer/dist` with trunk, serves it, drives headless
 chromium over it, and exits non-zero with the browser messages that failed it.
 
-Flags: `--no-build` reuses the existing `viewer/dist`, `--shots` writes screenshots to
-`smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--explore`
+Flags: `--model=`, `--scene=` and `--level=` name the assets to walk, `--no-build` reuses the
+existing `viewer/dist`, `--shots` writes screenshots to `smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--explore`
 is `--model-only` with screenshots (use it to recalibrate the click coordinates in `smoke.ts`
 after a UI change). Every run writes `smoke/last-run.json`.
 
@@ -42,6 +42,7 @@ It then walks the paths that broke:
 2. Clicks **Game shaders** and waits for the deferred path to link programs and bind a G-buffer.
 3. Sweeps the channel row, covering `SV_Target`, `SV_Target1..4` and `Lit`.
 4. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
+5. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
 
 `smoke/instrument.js` is injected before the app loads and counts draws, instanced draws, blits,
 `drawBuffers` calls and program links. Those counters are asserted, so a click that lands in the
@@ -88,7 +89,7 @@ The two blit faults are gone too. Measured at `b965b62`, before
 
 ## What it does not cover
 
-Only the two 3D viewers and only one asset each. It does not check that anything is drawn
+Only the two 3D viewers and only one asset each (the `.lgb` and the `.lvb` share a viewer). It does not check that anything is drawn
 *correctly*: no reference images, no pixel comparison. Channel coverage is a positional sweep
 over the row rather than a lookup of each label, so it counts distinct selections rather than
 naming them. The click coordinates are calibrated against a 1600x1000 viewport and need

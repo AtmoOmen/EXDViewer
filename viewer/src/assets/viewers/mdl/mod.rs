@@ -173,6 +173,13 @@ enum Package {
     Failed(String),
 }
 
+/// One of the game's own texture arrays. Nothing is kept once it has been handed over: the card
+/// holds it from there, and a second model asks for it again rather than through this.
+enum Array {
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Done,
+}
+
 /// One material's translated shaders, and what they were translated for: how many attachments the
 /// context allows decides how many of the G-buffer's targets fit in one reading.
 struct Translated {
@@ -234,6 +241,8 @@ pub struct Rendered {
     textures: RefCell<BTreeMap<String, Texture>>,
     /// Shader packages the materials name, by path, since several materials share one.
     packages: RefCell<BTreeMap<String, Package>>,
+    /// The layered textures the shaders read that no material names, by resource id.
+    arrays: RefCell<BTreeMap<u32, Array>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
     /// The passes that light the G-buffer, which belong to the frame rather than to a material.
@@ -271,6 +280,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         level: RefCell::new(level),
         textures: Default::default(),
         packages: Default::default(),
+        arrays: Default::default(),
         translated: Default::default(),
         lighting: Default::default(),
         tables: Default::default(),
@@ -638,6 +648,19 @@ fn named(attributes: &[String], mask: u32) -> String {
         .join(", ")
 }
 
+/// One of the game's own arrays as the card takes it. Mip nought alone: nothing tells a translated
+/// shader how many levels a texture has, and the graph answers that with one.
+fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
+    let texture = ironworks::file::tex::Texture::read(Cursor::new(bytes.to_vec()))?;
+    let image = crate::utils::tex_loader::decode_stack(&texture, 0, path)?;
+    let (width, height) = texture.mip_size(0);
+    Ok(deferred::Layered {
+        size: (width.into(), height.into()),
+        layers: texture.layers(0).into(),
+        pixels: image.into_rgba8().into_raw(),
+    })
+}
+
 /// The parts still showing, as the fewest runs that cover them. A file lists a mesh's parts in
 /// index order, so two neighbours that both draw are one call rather than two.
 fn shown(parts: &[Part]) -> Vec<Range<i32>> {
@@ -816,6 +839,31 @@ impl Rendered {
                         Package::Failed(why.to_string())
                     }
                 };
+            }
+
+            let mut arrays = self.arrays.borrow_mut();
+            for (id, path) in deferred::ARRAYS {
+                let held = arrays.entry(id).or_insert_with(|| {
+                    let files = backend.files().clone();
+                    Array::Fetching(TrackedPromise::spawn_local(async move {
+                        files.read(path).await
+                    }))
+                });
+                let Array::Fetching(promise) = held else {
+                    continue;
+                };
+                let Some(result) = promise.try_get() else {
+                    continue;
+                };
+                match result
+                    .as_ref()
+                    .map_err(ToString::to_string)
+                    .and_then(|bytes| layered(bytes, path).map_err(|why| why.to_string()))
+                {
+                    Ok(decoded) => level.gpu.lock().unwrap().queue_array(id, decoded),
+                    Err(why) => log::error!("assets/mdl: {path}: {why}"),
+                }
+                *held = Array::Done;
             }
         }
 

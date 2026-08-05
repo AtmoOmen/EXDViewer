@@ -59,6 +59,18 @@ pub fn decode(texture: tex::Texture, path: &str) -> Result<DynamicImage> {
 /// Decode one mipmap level. A volume, cube or array texture comes back with its slices tiled into a
 /// grid; picking one is a matter of which cell the caller draws, not of decoding again.
 pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<DynamicImage> {
+    let (_, slice_height) = texture.mip_size(level);
+    let layers = texture.layers(level);
+    Ok(retile(
+        decode_stack(texture, level, path)?,
+        slice_height,
+        layers,
+    ))
+}
+
+/// The same, with the slices left one below the next. That is the layout the card takes a layered
+/// texture in, so an upload reads it straight through rather than picking the grid apart again.
+pub fn decode_stack(texture: &tex::Texture, level: u8, path: &str) -> Result<DynamicImage> {
     if matches!(
         texture.kind(),
         tex::TextureKind::Unknown | tex::TextureKind::D1
@@ -116,7 +128,7 @@ pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<Dynam
         }
     };
 
-    Ok(retile(buffer, slice_height, texture.layers(level)))
+    Ok(buffer)
 }
 
 /// A layer count's grid layout, roughly square. Shared between decoding (to build the grid) and

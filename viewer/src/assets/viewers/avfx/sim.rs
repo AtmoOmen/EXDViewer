@@ -14,8 +14,8 @@ use glam::{Quat, Vec3, Vec4};
 use ironworks::file::avfx::{Avfx, Block, DirectionalLightSource, Item, Model as Geometry};
 
 use super::curve::{self, Curve};
-use super::program::{self, UV_SETS};
 use super::find;
+use super::program::{self, UV_SETS};
 
 /// Live particles and running emitters one effect may hold. Both counts come off the file unchecked
 /// and this ships to a browser, where an effect asking for millions takes the tab with it.
@@ -397,7 +397,11 @@ impl Particle {
         let sprite = shape == Shape::Sprite;
         Self {
             life: life(blocks),
-            shading: std::sync::Arc::new(shading(block, (!sprite).then(|| lights.to_vec()), sprite)),
+            shading: std::sync::Arc::new(shading(
+                block,
+                (!sprite).then(|| lights.to_vec()),
+                sprite,
+            )),
             shape,
             gravity: Track::read(blocks, "Gra", 0.0),
             drag: Track::read(blocks, "ARs", 0.0),
@@ -426,7 +430,12 @@ fn lights(file: &Avfx) -> Vec<(u32, u32)> {
     let held = file
         .point_light_sources()
         .iter()
-        .filter(|source| !matches!(source, None | Some(ironworks::file::avfx::PointLightSource::None)))
+        .filter(|source| {
+            !matches!(
+                source,
+                None | Some(ironworks::file::avfx::PointLightSource::None)
+            )
+        })
         .count();
     if held > 0 {
         key(
@@ -862,8 +871,21 @@ impl Effect {
         self.particles.get(def).map(|held| held.shading.clone())
     }
 
-    /// A sphere the whole run fits inside, for the camera to open on.
+    /// A sphere the whole run fits inside, for the camera to open on. A scale is not an extent: a
+    /// sprite is drawn one scale wide about its own center, and a model is drawn its own geometry
+    /// wide, so taking the scale for either stands the camera off by several times too far.
     pub fn fit(&self) -> (Vec3, f32) {
+        let models: Vec<f32> = self
+            .models
+            .iter()
+            .map(|mesh| {
+                mesh.vertices
+                    .iter()
+                    .map(|vertex| Vec3::from_slice(&vertex.position).length())
+                    .fold(0.0f32, f32::max)
+            })
+            .collect();
+
         let mut state = State::default();
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for _ in 0..self.length.min(FITTED) {
@@ -873,16 +895,21 @@ impl Effect {
                 let age = (state.frame - live.born) as f32;
                 let at = live.place.origin
                     + live.place.turn * ((live.at + def.position.at(age)) * live.place.scale);
-                let reach = (def.scale.at(age) * live.place.scale)
-                    .abs()
-                    .max_element()
-                    .max(0.05);
+                let scale = (def.scale.at(age) * live.place.scale).abs().max_element();
+                let reach = match def.shape {
+                    Shape::Sprite => scale * 0.5,
+                    Shape::Model(index) => scale * models.get(index).copied().unwrap_or(0.5),
+                }
+                .max(0.05);
                 low = low.min(at - reach);
                 high = high.max(at + reach);
             }
         }
         match low.cmple(high).all() {
-            true => ((low + high) * 0.5, ((high - low).length() * 0.5).max(0.1)),
+            true => (
+                (low + high) * 0.5,
+                ((high - low) * 0.5).max_element().max(0.1),
+            ),
             false => (Vec3::ZERO, 1.0),
         }
     }

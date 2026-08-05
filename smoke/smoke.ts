@@ -294,6 +294,15 @@ async function main() {
         let index = 0;
         for (let x = SWEEP_FROM; x <= SWEEP_TO; x += SWEEP_STEP) {
             await click(cdp, x, ROW_Y);
+            // Park the pointer away from the row first, or its hover highlight lands in the clip
+            // and two shots of the same selection come out different.
+            await cdp.send("Input.dispatchMouseEvent", {
+                type: "mouseMoved",
+                x: 700,
+                y: 600,
+                buttons: 0,
+            });
+            await sleep(250);
             seen.add(await shot(cdp, `03-channel-${String(index++).padStart(2, "0")}`, rowClip));
         }
         console.log(`   distinct selections: ${seen.size}`);
@@ -334,22 +343,38 @@ async function main() {
 
     console.log(`\n${"=".repeat(60)}`);
     if (failures.length) {
-        console.log(`FAIL: ${failures.length} browser message(s) the gate treats as fatal\n`);
-        for (const f of failures.slice(0, 30)) {
-            console.log(`[${f.where}] ${f.source}/${f.level}`);
-            console.log(`  ${f.text.split("\n").slice(0, 6).join("\n  ")}\n`);
-        }
+        report_failures();
         process.exit(1);
     }
     console.log("PASS: no GL errors, panics or ERROR logs");
 }
 
+/// One entry per distinct message, since a GL error in a paint callback repeats every frame.
+function report_failures() {
+    const kinds = new Map<string, { count: number; phases: Set<string>; sample: Message }>();
+    for (const failure of failures) {
+        const key = failure.text.split("\n")[0].trim();
+        let kind = kinds.get(key);
+        if (!kind) kinds.set(key, (kind = { count: 0, phases: new Set(), sample: failure }));
+        kind.count++;
+        kind.phases.add(failure.where);
+    }
+    console.log(
+        `FAIL: ${kinds.size} distinct problem(s) across ${failures.length} browser message(s)\n`,
+    );
+    const worst = [...kinds.values()].sort((a, b) => b.count - a.count);
+    for (const kind of worst) {
+        console.log(
+            `${kind.count}x in ${[...kind.phases].join(", ")} ` +
+                `(${kind.sample.source}/${kind.sample.level})`,
+        );
+        console.log(`  ${kind.sample.text.split("\n").slice(0, 6).join("\n  ")}\n`);
+    }
+}
+
 main().catch((error) => {
     console.log(`\n${"=".repeat(60)}`);
-    console.log(`FAIL: ${error.message}`);
-    if (failures.length) {
-        console.log(`\nbrowser messages before the failure:`);
-        for (const f of failures.slice(0, 20)) console.log(`  [${f.where}] ${f.text.split("\n")[0]}`);
-    }
+    console.log(`FAIL: ${error.message}\n`);
+    if (failures.length) report_failures();
     process.exit(1);
 });

@@ -251,21 +251,18 @@ fn pack(table: &mtrl::ColorTable) -> Option<Vec<f32>> {
     if rows == 0 {
         return None;
     }
-    // Neither layout stores the specular exponent where the other does, and only the wider one
-    // states a roughness at all.
-    let exponent = match table.kind() {
-        mtrl::ColorTableKind::Extended => 3,
-        _ => 7,
-    };
+    let extended = table.kind() == mtrl::ColorTableKind::Extended;
     let mut values = Vec::with_capacity(rows * TABLE_COLUMNS as usize * 4);
     for index in 0..rows {
         let row = table.row_values(index)?;
-        let shininess = match row.roughness {
-            0.0 => f32::from(f16::from_bits(*table.row(index)?.get(exponent)?)),
-            roughness => ((1.0 - roughness) * 7.0).exp2(),
+        // A compatibility row has no roughness field and states a specular exponent in its place;
+        // the conversion is the one the game's own compatibility pass makes.
+        let roughness = match extended {
+            true => row.roughness,
+            false => (-f32::from(f16::from_bits(*table.row(index)?.get(7)?)) / 15.0).exp2(),
         };
         values.extend(row.diffuse);
-        values.push(shininess.clamp(1.0, 128.0));
+        values.push(roughness.clamp(0.0, 1.0));
         values.extend(row.specular);
         values.push(row.metalness);
         values.extend(row.emissive);

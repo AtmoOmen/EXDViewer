@@ -872,9 +872,9 @@ impl Rendered {
         for path in [program::SHAPE, program::MODEL] {
             packages.entry(path).or_insert_with(|| {
                 let files = backend.files().clone();
-                Package::Fetching(TrackedPromise::spawn_local(
-                    async move { files.read(path).await },
-                ))
+                Package::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(path).await
+                }))
             });
         }
         let mut arrived = false;

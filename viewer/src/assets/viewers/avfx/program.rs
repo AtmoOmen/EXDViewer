@@ -187,6 +187,15 @@ fn pair(package: &ShaderPackage, set: &[(u32, u32)]) -> Option<(u32, u32)> {
     ))
 }
 
+/// The pair these keys draw with. A package carries only the combinations it was built with, so a
+/// set reaching no node gives keys up one at a time rather than all at once; they arrive in the
+/// order they matter in, so the last is the first to go.
+fn resolve(package: &ShaderPackage, set: &[(u32, u32)]) -> Option<(u32, u32)> {
+    (0..=set.len())
+        .rev()
+        .find_map(|held| pair(package, &set[..held]))
+}
+
 fn program<'a>(
     package: &ShaderPackage,
     bytes: &'a [u8],
@@ -305,7 +314,7 @@ impl Program {
     /// declares no material keys, so a particle's own texture sets and lights are scene keys.
     pub fn build(bytes: &[u8], set: &[(u32, u32)], sprite: bool) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
-        let (vs, ps) = pair(&package, set).ok_or("these keys reach no node")?;
+        let (vs, ps) = resolve(&package, set).ok_or("these keys reach no node")?;
         let (vertex, vs_blob) =
             program(&package, bytes, vs).ok_or("no vertex shader in the blob")?;
         let (fragment, ps_blob) =
@@ -474,10 +483,7 @@ impl Buffer {
         };
 
         put("WorldMatrix", columns(instance.transform, 4));
-        put(
-            "Parameters",
-            vec![instance.depth_offset, 0.0, 0.0, 0.0],
-        );
+        put("Parameters", vec![instance.depth_offset, 0.0, 0.0, 0.0]);
         put("Color", instance.color.to_array().to_vec());
 
         let (width, height) = (scene.size.0.max(1.0), scene.size.1.max(1.0));
@@ -491,7 +497,13 @@ impl Buffer {
         put("EyePosition", vec![eye.x, eye.y, eye.z, 1.0]);
         put(
             "FresnelParameter",
-            [eye.to_array().to_vec(), vec![1.0], vec![1.0; 4], vec![1.0; 4]].concat(),
+            [
+                eye.to_array().to_vec(),
+                vec![1.0],
+                vec![1.0; 4],
+                vec![1.0; 4],
+            ]
+            .concat(),
         );
         put("WorldPosition", vec![0.0, 0.0, 0.0, 1.0]);
         put("ViewportPosition", vec![0.0, 0.0, width, height]);
@@ -510,8 +522,14 @@ impl Buffer {
 
         // The light model apricot carries itself, which is not the deferred graph's.
         let light = scene.light.normalize_or_zero();
-        put("Scene_AmbientColor", scene.ambient.extend(1.0).to_array().to_vec());
-        put("AmbientColor", scene.ambient.extend(1.0).to_array().to_vec());
+        put(
+            "Scene_AmbientColor",
+            scene.ambient.extend(1.0).to_array().to_vec(),
+        );
+        put(
+            "AmbientColor",
+            scene.ambient.extend(1.0).to_array().to_vec(),
+        );
         for name in ["DirectionalLight_Direction", "DirectionalLightDirection"] {
             put(name, light.extend(0.0).to_array().to_vec());
         }

@@ -299,8 +299,10 @@ async function main() {
         const booted = await counters(cdp);
         console.log(`   renderer: ${booted.renderer}`);
         console.log(`   samples: ${booted.samples}  antialias: ${booted.antialias}`);
+        console.log(`   canvas depth: ${booted.depth}  bits: ${booted.depthBits}`);
         report.renderer = booted.renderer;
         report.samples = booted.samples;
+        report.depthBits = booted.depthBits;
 
         if (!booted.samples || booted.samples < 2) {
             throw new Error(
@@ -358,6 +360,9 @@ async function main() {
             const c = await counters(cdp);
             return c.links > plain.links && c.drawBuffers > plain.drawBuffers;
         });
+        // Before any channel is clicked, so the shot is of whichever the viewer starts on.
+        await sleep(1500);
+        await shot(cdp, "02-started");
         const shaded = await counters(cdp);
         console.log(
             `   after shading: links +${shaded.links - plain.links}` +

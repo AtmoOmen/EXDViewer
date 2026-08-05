@@ -1663,6 +1663,18 @@ mod tests {
     fn a_sprite_is_framed_on_the_quad_it_draws() {
         let effect = &playing(&[life(-1.0), scale(4.0)], (0, 0)).effect;
         assert_eq!(effect.fit(), (Vec3::ZERO, 2.0));
+
+        // Left lying across x and z, the height it is framed on is the one it is deep by.
+        let flat = nest(
+            "Scl",
+            &["X", "Y", "Z"]
+                .iter()
+                .zip([1.0, 1.0, 8.0])
+                .map(|(axis, value)| curve(axis, 0, 0, &scalars(&[(0, 1, value)])))
+                .collect::<Vec<_>>(),
+        );
+        let effect = &playing(&[life(-1.0), block("RBDT", &integer(1)), flat], (0, 0)).effect;
+        assert_eq!(effect.fit(), (Vec3::ZERO, 4.0));
     }
 
     #[test]

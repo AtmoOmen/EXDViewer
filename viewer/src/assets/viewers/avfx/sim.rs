@@ -1055,7 +1055,13 @@ impl Effect {
                     + live.place.turn * ((live.at + def.position.at(age)) * live.place.scale);
                 let scale = (def.scale.at(age) * live.place.scale).abs();
                 let reach = match def.shape {
-                    Shape::Sprite => scale.x.max(scale.y) * 0.5,
+                    Shape::Sprite => {
+                        0.5 * match def.facing {
+                            Facing::Still(Axis::X) => scale.y.max(scale.z),
+                            Facing::Still(Axis::Y) => scale.x.max(scale.z),
+                            _ => scale.x.max(scale.y),
+                        }
+                    }
                     Shape::Model(index) => {
                         scale.max_element() * models.get(index).copied().unwrap_or(0.5)
                     }

@@ -160,3 +160,105 @@ impl Outline {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample() -> Outline {
+        Outline::build(
+            &[Section {
+                name: "Sidequests".into(),
+                categories: vec![
+                    Category {
+                        name: "Weapon Enhancement".into(),
+                        genres: vec![
+                            Genre {
+                                name: "Zodiac".into(),
+                                quests: vec![0, 1],
+                            },
+                            Genre {
+                                name: "Relic".into(),
+                                quests: vec![2],
+                            },
+                        ],
+                    },
+                    Category {
+                        name: "Housing".into(),
+                        genres: vec![Genre {
+                            name: "Estates".into(),
+                            quests: vec![3],
+                        }],
+                    },
+                ],
+            }],
+            &[4],
+        )
+    }
+
+    fn labels(outline: &Outline, rows: &[(Row, u32)]) -> Vec<String> {
+        rows.iter()
+            .map(|(row, count)| match row {
+                Row::Group(at) => format!("{} ({count})", outline.groups[*at as usize].label),
+                Row::Quest { node, depth } => format!("q{node}@{depth}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn groups_span_exactly_their_children() {
+        let outline = sample();
+        assert_eq!(outline.order, [0, 1, 2, 3, 4]);
+        assert_eq!(
+            outline.groups[0].quests,
+            0..4,
+            "the section, minus the leftovers"
+        );
+        assert_eq!(outline.groups[1].quests, 0..3);
+        assert_eq!(outline.groups[6].quests, 4..5);
+        assert_eq!(outline.uncategorized, Some(6));
+        assert_eq!(outline.path_to(2), [0, 1, 3]);
+    }
+
+    #[test]
+    fn collapsed_groups_hide_their_subtrees() {
+        let outline = sample();
+        let matched = [true; 5];
+        let mut rows = Vec::new();
+
+        outline.rows(&HashSet::new(), &matched, false, &mut rows);
+        assert_eq!(labels(&outline, &rows), ["Sidequests (4)"]);
+
+        outline.rows(&HashSet::from([0, 6]), &matched, true, &mut rows);
+        assert_eq!(
+            labels(&outline, &rows),
+            [
+                "Sidequests (4)",
+                "Weapon Enhancement (3)",
+                "Housing (1)",
+                "Uncategorized (1)",
+                "q4@1"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_filter_drops_the_groups_it_empties() {
+        let outline = sample();
+        let mut matched = [false; 5];
+        matched[3] = true;
+        let mut rows = Vec::new();
+
+        outline.rows(
+            &HashSet::from([0, 1, 2, 3, 4, 5, 6]),
+            &matched,
+            true,
+            &mut rows,
+        );
+        assert_eq!(
+            labels(&outline, &rows),
+            ["Sidequests (1)", "Housing (1)", "Estates (1)", "q3@3"],
+            "the empty category and the leftover bucket are gone, not just their quests"
+        );
+    }
+}

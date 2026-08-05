@@ -158,17 +158,16 @@ enum Package {
     Failed(String),
 }
 
-/// One material's translated shaders, and what they were translated for: which channel is being
-/// shown decides which of the shader's targets a reading writes, and how many attachments the
-/// context allows decides how many of them fit in one.
+/// One material's translated shaders, and what they were translated for: how many attachments the
+/// context allows decides how many of the G-buffer's targets fit in one reading.
 struct Translated {
-    target: usize,
     attachments: usize,
     held: Result<Pair, String>,
 }
 
-/// The buffer pass, and the depth pass that runs before it where the node names one.
-type Pair = (Arc<program::Program>, Option<Arc<program::Program>>);
+/// The buffer pass, one reading per page of its targets, and the depth pass that runs before it
+/// where the node names one.
+type Pair = (Vec<Arc<program::Program>>, Option<Arc<program::Program>>);
 
 /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
 type Table = Arc<(Vec<u16>, usize, usize)>;
@@ -214,6 +213,8 @@ pub struct Rendered {
     packages: RefCell<BTreeMap<String, Package>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
+    /// The passes that light the G-buffer, which belong to the frame rather than to a material.
+    lighting: RefCell<Option<Arc<gpu::Lighting>>>,
     /// The color table in the game's own layout, by material.
     tables: RefCell<BTreeMap<usize, Table>>,
     camera: Cell<Camera>,
@@ -247,6 +248,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         textures: Default::default(),
         packages: Default::default(),
         translated: Default::default(),
+        lighting: Default::default(),
         tables: Default::default(),
         camera: Cell::new(camera),
         resident: Cell::new(0),
@@ -646,8 +648,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         }
         match shaded {
             true => {
-                let names = model.channels();
-                for (at, name) in names.iter().enumerate() {
+                for (at, name) in model.channels() {
                     if ui
                         .selectable_label(model.target.get() == at, name)
                         .clicked()
@@ -741,11 +742,25 @@ impl Rendered {
 
         if self.shaded.get() {
             let mut packages = self.packages.borrow_mut();
-            for slot in slots.iter().flatten() {
-                let Slot::Ready(material) = slot else {
-                    continue;
-                };
-                let path = material.package();
+            // The packages that light the frame belong to no material, so they are asked for
+            // alongside the ones the materials name.
+            let wanted = slots
+                .iter()
+                .flatten()
+                .filter_map(|slot| match slot {
+                    Slot::Ready(material) => Some(material.package()),
+                    _ => None,
+                })
+                .chain(
+                    [
+                        program::VIEW_POSITION,
+                        program::DIRECTIONAL,
+                        program::POINT,
+                        program::COMPOSITE,
+                    ]
+                    .map(str::to_owned),
+                );
+            for path in wanted {
                 if packages.contains_key(&path) {
                     continue;
                 }
@@ -919,9 +934,13 @@ impl Rendered {
         }
 
         let attachments = level.gpu.lock().unwrap().attachments();
-        if self.shaded.get() {
-            self.translate(level.skinned, attachments);
-        }
+        let lighting = match self.shaded.get() {
+            true => {
+                self.translate(level.skinned, attachments);
+                self.lighting(attachments)
+            }
+            false => None,
+        };
         let translated = self.translated.borrow();
         let tables = self.tables.borrow();
         let slots = self.slots.borrow();
@@ -978,10 +997,25 @@ impl Rendered {
             })
             .collect();
 
+        // The game's own shaders were compiled for a clip depth running from nought to one, and the
+        // backend moves what they compute into the range GL clips against. A projection built for GL
+        // would go through that move a second time and lose the near half of the frame.
+        let held =
+            Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, span + level.radius);
         let frame = gpu::Frame {
             view: view.to_cols_array(),
             projection: projection.to_cols_array(),
             target: self.target.get(),
+            scene: program::Scene {
+                view,
+                projection: held,
+                model: Mat4::IDENTITY,
+                light: KEY,
+                point: camera.target + Vec3::new(0.0, level.radius, level.radius),
+                range: level.radius * 2.0,
+                ..Default::default()
+            },
+            lighting,
             eye: eye.to_array(),
             lights,
             surfaces,
@@ -1002,20 +1036,54 @@ impl Rendered {
         });
     }
 
-    /// What the translated shaders call their targets, which is what the channel row offers.
-    fn channels(&self) -> Vec<String> {
-        self.translated
+    /// What the channel row offers: the translated shaders' own names for their targets, and the
+    /// frame the composite resolves once the passes that make it have arrived.
+    fn channels(&self) -> Vec<(usize, String)> {
+        let mut held: Vec<(usize, String)> = self
+            .translated
             .borrow()
             .values()
             .find_map(|held| held.held.as_ref().ok())
-            .map(|(buffer, _)| buffer.names.clone())
-            .unwrap_or_default()
+            .and_then(|(buffer, _)| buffer.first())
+            .map(|buffer| buffer.names.iter().cloned().enumerate().collect())
+            .unwrap_or_default();
+        if !held.is_empty() && self.lighting.borrow().is_some() {
+            held.push((gpu::LIT, "Lit".to_owned()));
+        }
+        held
     }
 
-    /// Translates every ready material's pair, again where the channel being shown or the context's
-    /// own limit changed what the translation would be.
+    /// The passes that light the G-buffer, translated once their packages have arrived. They are the
+    /// same whatever is being drawn, so they are built once and kept.
+    fn lighting(&self, attachments: usize) -> Option<Arc<gpu::Lighting>> {
+        if let Some(held) = self.lighting.borrow().as_ref() {
+            return Some(held.clone());
+        }
+        let packages = self.packages.borrow();
+        let held = |path: &str, pass| {
+            let Some(Package::Ready(bytes)) = packages.get(path) else {
+                return None;
+            };
+            program::Program::screen(bytes, pass, attachments)
+                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let built = gpu::Lighting {
+            position: held(program::VIEW_POSITION, program::Pass::Lighting)?,
+            directional: held(program::DIRECTIONAL, program::Pass::Lighting)?,
+            point: held(program::POINT, program::Pass::Lighting)?,
+            composite: held(program::COMPOSITE, program::Pass::Composite)?,
+        };
+        drop(packages);
+        let built = Arc::new(built);
+        *self.lighting.borrow_mut() = Some(built.clone());
+        Some(built)
+    }
+
+    /// Translates every ready material's passes, again where the context's own limit changed how
+    /// many of the G-buffer's targets one reading can write.
     fn translate(&self, skinned: bool, attachments: usize) {
-        let target = self.target.get();
         let slots = self.slots.borrow();
         let packages = self.packages.borrow();
         let mut translated = self.translated.borrow_mut();
@@ -1032,43 +1100,41 @@ impl Rendered {
             };
             if translated
                 .get(&index)
-                .is_some_and(|held| held.target == target && held.attachments == attachments)
+                .is_some_and(|held| held.attachments == attachments)
             {
                 continue;
             }
             let Some(Package::Ready(bytes)) = packages.get(&material.package()) else {
                 continue;
             };
-            let held = program::Program::build(
-                bytes,
-                material,
-                set,
-                program::Pass::Buffer,
-                target,
-                attachments,
-            )
-            .map(|buffer| {
+            let page = |at| {
+                program::Program::build(
+                    bytes,
+                    material,
+                    set,
+                    program::Pass::Buffer,
+                    at,
+                    attachments,
+                )
+            };
+            let held = page(0).map(|first| {
+                let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
+                let mut buffer = vec![Arc::new(first)];
+                buffer.extend((1..pages).filter_map(|at| page(at).ok().map(Arc::new)));
                 let depth = program::Program::build(
                     bytes,
                     material,
                     set,
                     program::Pass::Depth,
-                    target,
+                    0,
                     attachments,
                 );
-                (Arc::new(buffer), depth.ok().map(Arc::new))
+                (buffer, depth.ok().map(Arc::new))
             });
             if let Err(why) = &held {
                 log::warn!("assets/mdl: {}: {why}", material.package());
             }
-            translated.insert(
-                index,
-                Translated {
-                    target,
-                    attachments,
-                    held,
-                },
-            );
+            translated.insert(index, Translated { attachments, held });
             if let Some((values, columns, rows)) =
                 material.held().color_table().and_then(program::table)
             {

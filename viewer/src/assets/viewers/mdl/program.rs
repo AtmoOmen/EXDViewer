@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use ironworks::file::mtrl;
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
 
@@ -20,7 +20,27 @@ use super::material::Material;
 /// The passes a model is drawn with, and the subview they are drawn under.
 const PASS_G_OPAQUE: u32 = 0x03ac_862e;
 const PASS_Z_OPAQUE: u32 = 0xe412_a2d4;
+const PASS_LIGHTING_OPAQUE: u32 = 0xfbde_0a8f;
+const PASS_COMPOSITE_OPAQUE: u32 = 0x955c_0b73;
 const SUB_VIEW_MAIN: u32 = 0xf43b_2f35;
+
+/// The packages the frame is lit and resolved with, in the order they run, and the pass each is run
+/// under. What each reads is what the one before it wrote.
+pub const VIEW_POSITION: &str = "shader/sm5/shpk/createviewposition.shpk";
+pub const DIRECTIONAL: &str = "shader/sm5/shpk/directionallighting.shpk";
+pub const POINT: &str = "shader/sm5/shpk/pointlighting.shpk";
+pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
+
+/// `GetDirectionalLight`, and the value that draws a light rather than nothing. The package defaults
+/// it to `_Disable`, whose shader writes no light at all.
+const GET_DIRECTIONAL_LIGHT: u32 = 0x8115_916d;
+const GET_DIRECTIONAL_LIGHT_ENABLE: u32 = 0x51ed_d496;
+
+/// Records of `g_ShaderTypeParameter`, which `SV_Target.w` indexes as `(32 + type) / 255`.
+const SHADER_TYPES: usize = 256;
+
+/// Dwords of one `g_ShaderTypeParameter` record.
+const SHADER_TYPE: usize = 32;
 
 /// Dwords in a row of the texture a structured buffer is read through, which the backend fixes so
 /// that a shader and whatever fills the texture agree without either having to say so.
@@ -34,6 +54,19 @@ const JOINT: usize = 12;
 pub enum Pass {
     Depth,
     Buffer,
+    Lighting,
+    Composite,
+}
+
+impl Pass {
+    fn id(self) -> u32 {
+        match self {
+            Self::Depth => PASS_Z_OPAQUE,
+            Self::Buffer => PASS_G_OPAQUE,
+            Self::Lighting => PASS_LIGHTING_OPAQUE,
+            Self::Composite => PASS_COMPOSITE_OPAQUE,
+        }
+    }
 }
 
 /// Where in a vertex an attribute reads from. The mesh supplies every semantic a drawing package
@@ -83,6 +116,43 @@ pub struct Structured {
     pub stride: usize,
 }
 
+/// What the engine decides rather than the files. Everything a constant buffer holds that is not the
+/// material's own comes from here, so a field that has to be reconstructed is reconstructed once.
+#[derive(Clone, Copy)]
+pub struct Scene {
+    pub view: Mat4,
+    pub projection: Mat4,
+    pub model: Mat4,
+    /// The frame in pixels, which is what a screen-wide pass turns a fragment into a texel with.
+    pub size: (f32, f32),
+    /// Which way the sun comes from, in world space.
+    pub light: Vec3,
+    /// Where the point light stands, in world space, and how far it reaches.
+    pub point: Vec3,
+    pub range: f32,
+    pub diffuse: Vec3,
+    pub specular: Vec3,
+    /// What the composite lights a surface with where no light reaches it.
+    pub ambient: Vec3,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            view: Mat4::IDENTITY,
+            projection: Mat4::IDENTITY,
+            model: Mat4::IDENTITY,
+            size: (1.0, 1.0),
+            light: Vec3::Y,
+            point: Vec3::ZERO,
+            range: 1.0,
+            diffuse: Vec3::ONE,
+            specular: Vec3::ONE,
+            ambient: Vec3::splat(0.12),
+        }
+    }
+}
+
 /// Everything one draw of one material needs, worked out off the files rather than held on the card.
 pub struct Program {
     pub vertex: String,
@@ -97,6 +167,9 @@ pub struct Program {
     pub targets: Vec<u32>,
     /// What each of `outputs` is called.
     pub names: Vec<String>,
+    /// Which pass this is, since two packages read the same buffer differently: a sun's attenuation
+    /// fades with depth and a lamp's with the square of the distance.
+    pub pass: Pass,
 }
 
 /// The positional polynomial a package identifies a node by, applied over each group of keys and
@@ -329,18 +402,45 @@ impl Program {
     ) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         let held = material.held();
-        let want = match pass {
-            Pass::Depth => PASS_Z_OPAQUE,
-            Pass::Buffer => PASS_G_OPAQUE,
-        };
-        let (vs, ps) = pair(&package, held.shader_keys(), set, want)
+        let (vs, ps) = pair(&package, held.shader_keys(), set, pass.id())
             .ok_or("this material's keys reach no such pass")?;
+        Self::assemble(
+            &package,
+            bytes,
+            (vs, ps),
+            Some(held),
+            pass,
+            target,
+            attachments,
+        )
+    }
+
+    /// Translates a pass of a package no material names: the ones that light and resolve what the
+    /// G-buffer holds, which the engine runs over the whole frame rather than over one draw.
+    pub fn screen(bytes: &[u8], pass: Pass, attachments: usize) -> Result<Self, String> {
+        let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
+        // The package defaults `GetDirectionalLight` to the shader that writes no light at all.
+        let set = [(GET_DIRECTIONAL_LIGHT, GET_DIRECTIONAL_LIGHT_ENABLE)];
+        let (vs, ps) =
+            pair(&package, &[], &set, pass.id()).ok_or("this package reaches no such pass")?;
+        Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
+    }
+
+    fn assemble(
+        package: &ShaderPackage,
+        bytes: &[u8],
+        (vs, ps): (u32, u32),
+        material: Option<&mtrl::Material>,
+        pass: Pass,
+        target: usize,
+        attachments: usize,
+    ) -> Result<Self, String> {
         let (vertex, vs_blob) =
-            program(&package, bytes, vs).ok_or("no vertex shader in the blob")?;
+            program(package, bytes, vs).ok_or("no vertex shader in the blob")?;
         let (fragment, ps_blob) =
-            program(&package, bytes, ps).ok_or("no pixel shader in the blob")?;
-        let vs_names = names(&package, vs, vs_blob);
-        let ps_names = names(&package, ps, ps_blob);
+            program(package, bytes, ps).ok_or("no pixel shader in the blob")?;
+        let vs_names = names(package, vs, vs_blob);
+        let ps_names = names(package, ps, ps_blob);
         let mut described = HashMap::new();
         layouts(vs_blob, &mut described);
         layouts(ps_blob, &mut described);
@@ -416,7 +516,7 @@ impl Program {
             }
         }
 
-        let parameters = parameters(&package, held);
+        let parameters = material.map(|held| parameters(package, held));
         let mut structured: Vec<Structured> = Vec::new();
         let mut buffers: Vec<Buffer> = Vec::new();
         for (program, names) in [(&vertex, &vs_names), (&fragment, &ps_names)] {
@@ -432,7 +532,9 @@ impl Program {
                 if buffers.iter().any(|held| held.name == name) {
                     continue;
                 }
-                let fixed = (name == "g_MaterialParameter").then(|| parameters.clone());
+                let fixed = (name == "g_MaterialParameter")
+                    .then(|| parameters.clone())
+                    .flatten();
                 buffers.push(Buffer {
                     members: described.get(&name).cloned().unwrap_or_default(),
                     name,
@@ -462,6 +564,7 @@ impl Program {
             outputs,
             targets,
             names,
+            pass,
         })
     }
 
@@ -474,9 +577,16 @@ impl Program {
 
 impl Buffer {
     /// The bytes this buffer holds, filled by field name off the reflection. What the files decide
-    /// is worked out once; everything else is the camera this viewer controls, and whatever nothing
-    /// names stays zero.
-    pub fn fill(&self, view: Mat4, projection: Mat4, model: Mat4) -> Vec<u8> {
+    /// is worked out once; everything else is the camera and the light this viewer controls, and
+    /// whatever nothing names stays zero.
+    pub fn fill(&self, scene: &Scene, pass: Pass) -> Vec<u8> {
+        let Scene {
+            view,
+            projection,
+            model,
+            size,
+            ..
+        } = *scene;
         let span = self
             .members
             .iter()
@@ -501,13 +611,28 @@ impl Buffer {
             let Some(member) = self.members.iter().find(|held| held.name == name) else {
                 return;
             };
+            // A field the reflection calls a dword is read back through the bit pattern, so a whole
+            // number goes in as one rather than as the float that reads the same.
+            let whole = member.kind == "dword" || member.kind.starts_with("uint");
             for (at, value) in values.iter().enumerate() {
                 let offset = member.offset as usize + at * 4;
+                let bits = match whole {
+                    true => (*value as u32).to_le_bytes(),
+                    false => value.to_le_bytes(),
+                };
                 if offset + 4 <= out.len() {
-                    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                    out[offset..offset + 4].copy_from_slice(&bits);
                 }
             }
         };
+        if self.name == "g_AmbientParamArray" {
+            ambient(scene, &mut out);
+            return out;
+        }
+        if self.name == "g_BGAmbientParameter" {
+            write(&mut out, 0, &[0.0, 0.0, 0.0, 1.0]);
+            return out;
+        }
         let world_view = view * model;
         let view_projection = projection * view;
         // Nothing here moves between frames, so every previous-frame matrix is the current one and
@@ -558,8 +683,100 @@ impl Buffer {
         put("m_Params", vec![1.0; 4]);
         put("m_SkyVisibility", vec![1.0]);
         put("m_DitherAlpha", vec![1.0]);
+
+        // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a
+        // texture coordinate names counts from the far side of the one a fragment coordinate does,
+        // so the height goes in negative and the offset takes it back.
+        let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+        put("m_RenderTarget", vec![1.0 / width, -1.0 / height, 0.0, 1.0]);
+        put("m_Viewport", vec![2.0 / width, -2.0 / height, -1.0, 1.0]);
+        put("m_Misc", vec![1.0, 1.0, 0.0, 0.0]);
+        put("m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
+
+        // A light is read in view space: the shader dots its direction against a normal it has just
+        // brought out of the G-buffer and through the view matrix.
+        let axes = glam::Mat3::from_mat4(view);
+        put(
+            "m_Direction",
+            (axes * scene.light).normalize_or_zero().to_array().to_vec(),
+        );
+        put("m_DiffuseColor", scene.diffuse.to_array().to_vec());
+        put("m_SpecularColor", scene.specular.to_array().to_vec());
+        // The two lighting packages read this buffer differently. A sun fades with the depth of the
+        // pixel, and the fade is off here: the scale is cubed and clamped, so a constant one leaves
+        // it alone. A lamp is clipped at the square of its own reach and scaled by it.
+        put(
+            "m_Attenuation",
+            match pass {
+                Pass::Composite => vec![0.0, 0.0, 1.0, 0.0],
+                _ => vec![0.0, 0.0, 1.0 / (scene.range * scene.range), scene.range],
+            },
+        );
+        put("m_LightFadeValueStatic", vec![1.0]);
+        put("m_LightFadeValueDynamic", vec![1.0]);
+
+        // A point light is drawn as the volume it reaches, which its own vertex shader clamps and
+        // then projects, so the transform carries where the light stands and how far it goes.
+        let placed =
+            Mat4::from_translation(scene.point) * Mat4::from_scale(Vec3::splat(scene.range));
+        put(
+            "m_Position",
+            (view * scene.point.extend(1.0)).to_array().to_vec(),
+        );
+        put("m_ClipMin", vec![-1.0, -1.0, -1.0, 0.0]);
+        put("m_ClipMax", vec![1.0, 1.0, 1.0, 0.0]);
+        put(
+            "m_WorldViewProjectionMatrix",
+            rows(view_projection * placed, 4),
+        );
+        put(
+            "m_WorldViewInversMatrix",
+            rows((view * placed).inverse(), 3),
+        );
         out
     }
+}
+
+/// One register of a buffer written as floats.
+fn write(out: &mut [u8], register: usize, values: &[f32]) {
+    for (at, value) in values.iter().enumerate() {
+        let offset = register * 16 + at * 4;
+        if offset + 4 <= out.len() {
+            out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+}
+
+/// The ambient array, whose header the reflection describes and whose entries it does not: past the
+/// spherical harmonics the buffer is an array of a struct named but not laid out, so it goes in by
+/// register.
+///
+/// One entry is filled and the count says one, which is what keeps the composite from walking the
+/// array at all: it takes entry `count - 1` at full weight and never enters the loop.
+fn ambient(scene: &Scene, out: &mut [u8]) {
+    /// Registers of the header the entries follow.
+    const HEADER: usize = 4;
+
+    if out.len() < 8 {
+        return;
+    }
+    // The count reads as a whole number rather than as the float that would print the same.
+    out[..4].copy_from_slice(&1u32.to_le_bytes());
+    out[4..8].copy_from_slice(&1.0f32.to_le_bytes());
+    // Three rows dotted against a normal and a one, which a colour the same in every direction
+    // reaches through each row's last lane alone. The sky the reflection falls back on is the same.
+    for (lane, value) in scene.ambient.to_array().iter().enumerate() {
+        write(out, 1 + lane, &[0.0, 0.0, 0.0, *value]);
+        write(out, HEADER + 4 + lane, &[0.0, 0.0, 0.0, *value]);
+    }
+    write(out, HEADER + 7, &[0.0, 0.0, 0.0, 1.0]);
+    // A depth fade, off: the scale is nought and the bias one, so every distance answers the same.
+    write(out, HEADER + 8, &[0.0, 1.0, 0.0, 1.0]);
+    // Reflection scale, bias and mix, all nought: nothing here reconstructs the cube array.
+    write(out, HEADER + 9, &[0.0, 0.0, 0.0, 0.0]);
+    // No bounding shape, so the entry covers the frame rather than a room.
+    write(out, HEADER + 14, &[0.0, 0.0, 0.0, 0.0]);
+    write(out, HEADER + 15, &[0.0, 1.0, 0.0, 0.0]);
 }
 
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a
@@ -580,6 +797,17 @@ pub fn joints(count: usize, transform: Mat4) -> Vec<u32> {
         }
     }
     out
+}
+
+/// The table `SV_Target.w` indexes, as the dwords of the texture standing in for a structured
+/// buffer. A record's first field is the lighting model the shader branches on; nothing in any file
+/// says what the rest hold, so they are left at nought, which is the branch a plain surface takes.
+///
+/// Every index a G pass can write has a record, since the one it writes is `(32 + type) / 255` and
+/// what a material makes of that is the material's own business.
+pub fn shader_types() -> Vec<u32> {
+    let rows = (SHADER_TYPES * SHADER_TYPE).div_ceil(ROW);
+    vec![0u32; rows * ROW]
 }
 
 /// The color table as the game's own shaders read it: the rows exactly as the material states them,

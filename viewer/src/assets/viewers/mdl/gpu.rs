@@ -545,14 +545,19 @@ impl Game {
         Ok(held)
     }
 
-    /// The joint palette, which every skinned shader reads through a texture of dwords.
-    fn palette(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
-        if let Some(held) = self.joints {
-            return Ok(held);
-        }
-        let values = program::joints(JOINTS);
+    /// The joint palette, which every skinned shader reads through a texture of dwords. Rewritten
+    /// each frame, since a joint carries the camera as well as the pose.
+    fn palette(&mut self, gl: &glow::Context, transform: glam::Mat4) -> Result<glow::Texture, String> {
+        let values = program::joints(JOINTS, transform);
         unsafe {
-            let held = gl.create_texture()?;
+            let held = match self.joints {
+                Some(held) => held,
+                None => {
+                    let held = gl.create_texture()?;
+                    self.joints = Some(held);
+                    held
+                }
+            };
             gl.bind_texture(glow::TEXTURE_2D, Some(held));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -573,7 +578,6 @@ impl Game {
             ] {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
             }
-            self.joints = Some(held);
             Ok(held)
         }
     }
@@ -779,7 +783,7 @@ impl Game {
                         unit += 1;
                     }
                     if !held.structured.is_empty() {
-                        let palette = self.palette(gl)?;
+                        let palette = self.palette(gl, view * glam::Mat4::IDENTITY)?;
                         for structured in &held.structured {
                             gl.active_texture(glow::TEXTURE0 + unit);
                             gl.bind_texture(glow::TEXTURE_2D, Some(palette));

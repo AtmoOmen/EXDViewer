@@ -560,14 +560,20 @@ impl Buffer {
 }
 
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a
-/// structured buffer. Each is four columns of three floats, and each is the identity, which is what
-/// poses a model into the bind pose it is stored in.
-pub fn joints(count: usize) -> Vec<u32> {
+/// structured buffer. Each is four columns of three floats.
+///
+/// A joint's transform is the object's own, composed with what the pose moved that bone by; a model
+/// stands in the pose it is stored in until something animates it, and that composes to the object's
+/// own transform for every bone alike.
+pub fn joints(count: usize, transform: Mat4) -> Vec<u32> {
+    let columns = transform.to_cols_array();
     let rows = (count.max(1) * JOINT).div_ceil(ROW);
     let mut out = vec![0u32; rows * ROW];
     for at in 0..count {
-        for lane in 0..3 {
-            out[at * JOINT + lane * 4] = 1.0f32.to_bits();
+        for column in 0..4 {
+            for lane in 0..3 {
+                out[at * JOINT + column * 3 + lane] = columns[column * 4 + lane].to_bits();
+            }
         }
     }
     out
@@ -586,6 +592,8 @@ pub fn table(held: &mtrl::ColorTable) -> Option<(&[u16], usize, usize)> {
 
 #[cfg(test)]
 mod test {
+    use glam::{Mat4, Vec3};
+
     use super::{JOINT, ROW, joints, selector};
 
     #[test]
@@ -597,13 +605,17 @@ mod test {
         assert_eq!(selector(&[u32::MAX, 2]), u32::MAX.wrapping_add(62));
     }
 
-    /// Four columns of three floats each, the first three of which carry the diagonal.
+    /// Four columns of three floats each, which is how the shader rebuilds a row: it takes the first
+    /// component of each of its four reads.
     #[test]
     fn a_joint_is_four_columns_of_three() {
-        let held = joints(2);
+        let held = joints(2, Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0)));
         assert_eq!(held.len(), ROW);
-        let one = 1.0f32.to_bits();
-        assert_eq!(&held[..JOINT], &[one, 0, 0, 0, one, 0, 0, 0, one, 0, 0, 0]);
+        let value = |lane: usize| f32::from_bits(held[lane]);
+        assert_eq!(
+            (0..JOINT).map(value).collect::<Vec<_>>(),
+            [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 4.0, 5.0, 6.0]
+        );
         assert_eq!(&held[JOINT..JOINT * 2], &held[..JOINT]);
     }
 }

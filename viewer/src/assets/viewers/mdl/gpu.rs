@@ -855,7 +855,12 @@ impl Game {
             gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
             gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, bound);
-            gl.draw_buffers(&[glow::BACK]);
+            // The default framebuffer draws to the back buffer and one of its own draws to its
+            // first attachment; naming the wrong one is an error rather than a no-op.
+            match bound {
+                Some(_) => gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]),
+                None => gl.draw_buffers(&[glow::BACK]),
+            }
         }
         Ok(())
     }

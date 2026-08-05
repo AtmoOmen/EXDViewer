@@ -19,8 +19,13 @@ const explore = args.has("--explore");
 const modelOnly = explore || args.has("--model-only");
 const shotDir = join(root, "smoke/shots");
 
-const MODEL = "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl";
-const SCENE = "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb";
+function flag(name: string, fallback: string): string {
+    const held = Bun.argv.find((argument) => argument.startsWith(`--${name}=`));
+    return held ? held.slice(name.length + 3) : fallback;
+}
+
+const MODEL = flag("model", "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl");
+const SCENE = flag("scene", "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb");
 
 const WIDTH = 1600;
 const HEIGHT = 1000;
@@ -304,7 +309,11 @@ async function main() {
                 buttons: 0,
             });
             await sleep(250);
-            seen.add(await shot(cdp, `03-channel-${String(index++).padStart(2, "0")}`, rowClip));
+            const at = String(index++).padStart(2, "0");
+            seen.add(await shot(cdp, `03-channel-${at}`, rowClip));
+            // The row clip is what counts distinct selections; the whole frame is what says whether
+            // the channel drew anything worth looking at.
+            if (shots) await shot(cdp, `03-frame-${at}`);
         }
         console.log(`   distinct selections: ${seen.size}`);
         report.channels = seen.size;
@@ -320,7 +329,7 @@ async function main() {
         await cdp.send("Page.navigate", { url: `${origin}/assets/${SCENE}` });
         await waitFor("the scene file to be titled", 180_000, async () => {
             const title = await cdp.eval<string>("document.title").catch(() => "");
-            return title.includes("bg.lgb");
+            return title.includes(SCENE.split("/").pop()!);
         });
         await sleep(3000);
         await click(cdp, SCENE_TAB.x, SCENE_TAB.y);

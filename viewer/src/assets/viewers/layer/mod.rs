@@ -1017,7 +1017,7 @@ impl Rendered {
         if self.placed.get()
             && let Some(scene) = self.scene.borrow_mut().as_mut()
         {
-            scene.details_ui(ui);
+            scene.details_ui(ui, follow);
             return;
         }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {

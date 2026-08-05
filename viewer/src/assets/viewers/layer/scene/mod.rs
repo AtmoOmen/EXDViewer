@@ -256,6 +256,7 @@ pub struct Scene {
     dirty: bool,
     load: f32,
     speed: f32,
+    fov: f32,
     layers: Vec<Layer>,
     placements: Vec<Placement>,
     models: Vec<Model>,
@@ -380,6 +381,7 @@ impl Scene {
             dirty: true,
             load: LOADED,
             speed: 1.0,
+            fov: FOV.to_degrees(),
             layers: Vec::new(),
             placements: Vec::new(),
             models: Vec::new(),
@@ -1354,7 +1356,12 @@ impl Scene {
         let near = (far * 0.0002).min(0.2);
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against.
-        let projection = Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, far);
+        let projection = Mat4::perspective_rh(
+            self.fov.to_radians(),
+            rect.width() / rect.height(),
+            near,
+            far,
+        );
 
         let mut batches = Vec::new();
         for (at, model) in self.models.iter().enumerate() {
@@ -1436,7 +1443,7 @@ impl Scene {
         }
     }
 
-    pub fn details_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn details_ui(&mut self, ui: &mut egui::Ui, follow: &mut Option<String>) {
         let mut refit = false;
         let mut changed = false;
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1461,6 +1468,10 @@ impl Scene {
                 .changed();
             ui.label(RichText::new("Speed").weak());
             ui.add(egui::Slider::new(&mut self.speed, 0.1..=20.0).logarithmic(true));
+            ui.label(RichText::new("Field of view").weak());
+            changed |= ui
+                .add(egui::Slider::new(&mut self.fov, 20.0..=120.0).suffix("\u{b0}"))
+                .changed();
 
             ui.add_space(8.0);
             ui.separator();
@@ -1500,7 +1511,7 @@ impl Scene {
 
             ui.add_space(8.0);
             ui.separator();
-            changed |= self.ambient.ui(ui);
+            changed |= self.ambient.ui(ui, follow);
 
             ui.add_space(8.0);
             ui.separator();

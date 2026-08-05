@@ -20,7 +20,7 @@ use ironworks::file::envs::{Keyframe, Value};
 use ironworks::file::{File, envb, layer};
 
 use super::super::super::mdl::program;
-use super::super::super::{facts, section};
+use super::super::super::{link, section};
 use crate::backend::Backend;
 use crate::utils::TrackedPromise;
 
@@ -381,7 +381,7 @@ impl Ambient {
         ))
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui) -> bool {
+    pub fn ui(&mut self, ui: &mut egui::Ui, follow: &mut Option<String>) -> bool {
         let mut changed = false;
         section(ui, "Environment");
         if self.environments.len() > 1 {
@@ -527,24 +527,20 @@ impl Ambient {
 
         ui.add_space(8.0);
         let env = self.environments.get(self.at);
-        let named = |state: &'static str, path: Option<&String>| match state {
-            "read" => path.cloned().unwrap_or_default(),
-            held => held.to_owned(),
-        };
-        let mut rows = vec![
+        let files = [
             (
                 "Ambient",
-                named(
-                    self.location.state(),
-                    env.and_then(|held| held.amb.as_ref()),
-                ),
+                self.location.state(),
+                env.and_then(|held| held.amb.clone()),
             ),
             (
                 "Weather",
-                named(self.weather_file.state(), env.map(|held| &held.envb)),
+                self.weather_file.state(),
+                env.map(|held| held.envb.clone()),
             ),
         ];
         let held = self.lighting();
+        let mut rows = Vec::new();
         if held.stated {
             let spell = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
             rows.extend([
@@ -555,7 +551,32 @@ impl Ambient {
                 ("Attenuation", format!("{:.3}", held.attenuation)),
             ]);
         }
-        facts(ui, "scene_environment_files", &rows);
+        egui::Grid::new("scene_environment_files")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                for (label, state, path) in files {
+                    ui.label(RichText::new(label).weak());
+                    match &path {
+                        Some(path) => {
+                            if link(ui, path, path) {
+                                *follow = Some(path.clone());
+                            }
+                        }
+                        None => {
+                            ui.label(RichText::new(state).monospace());
+                        }
+                    }
+                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                    ui.end_row();
+                }
+                for (label, value) in &rows {
+                    ui.label(RichText::new(*label).weak());
+                    ui.label(RichText::new(value).monospace());
+                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                    ui.end_row();
+                }
+            });
         changed
     }
 }

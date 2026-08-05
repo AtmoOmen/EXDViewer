@@ -27,7 +27,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use ironworks::file::layer::{InstanceData, LayerGroup, Transform};
 use ironworks::file::mdl::{MeshKind, ModelContainer};
-use ironworks::file::{File, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, tera};
+use ironworks::file::{File, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera};
 
 use super::super::mdl;
 use super::super::{facts, section};
@@ -122,6 +122,8 @@ struct Placement {
     /// Past this an instance stops drawing whatever the load distance is. Zero means never.
     fade: f32,
     layer: usize,
+    /// How the zone's own `.svb` reaches this part, the way an `.lcb` reaches a light.
+    key: (u32, [u8; 4]),
 }
 
 enum State {
@@ -182,8 +184,9 @@ struct Light {
     key: (u32, [u8; 4]),
 }
 
-/// The boxes a zone clips its lights against, which its scene names a file for.
-enum Clip {
+/// A file the scene names beside itself and reads once: the boxes its lights are clipped against,
+/// and how much of the sky reaches each of its parts.
+enum Aside {
     Wanted(String),
     Fetching(String, TrackedPromise<Result<Vec<u8>>>),
     Done,
@@ -267,7 +270,10 @@ pub struct Scene {
     lights: Vec<Light>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
     clips: HashMap<(u32, [u8; 4]), (Vec3, Vec3)>,
-    clip: Clip,
+    clip: Aside,
+    /// How much of the sky reaches each part, by the key its `.svb` entry uses.
+    visibility: HashMap<(u32, [u8; 4]), f32>,
+    sky: Aside,
     textures: BTreeMap<String, Texture>,
     resident: usize,
     files: HashMap<String, Held>,
@@ -300,6 +306,14 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
         *slot = id as u8;
     }
     (key.0, held)
+}
+
+/// A file the scene names beside itself, wanted where it names one.
+fn aside(path: Option<&String>) -> Aside {
+    match path {
+        Some(path) if !path.is_empty() => Aside::Wanted(path.clone()),
+        _ => Aside::Done,
+    }
 }
 
 fn matrix(transform: Transform) -> Mat4 {
@@ -379,10 +393,9 @@ impl Scene {
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             clips: HashMap::new(),
-            clip: match source.scene().map(|held| held.light_culling_path().clone()) {
-                Some(path) if !path.is_empty() => Clip::Wanted(path),
-                _ => Clip::Done,
-            },
+            clip: aside(source.scene().map(layer::Scene::light_culling_path)),
+            visibility: HashMap::new(),
+            sky: aside(source.scene().map(layer::Scene::sky_visibility_path)),
             textures: BTreeMap::new(),
             resident: 0,
             files: HashMap::new(),
@@ -470,6 +483,7 @@ impl Scene {
                                 radius: part.bounding_sphere_size() * scale,
                                 fade: part.fade_out_distance(),
                                 layer: at,
+                                key: reach(key, depth, instance.id()),
                             });
                         }
                         InstanceData::SharedGroup(shared)
@@ -588,6 +602,7 @@ impl Scene {
                 radius: PLATE,
                 fade: 0.0,
                 layer: at,
+                key: (0, [0; 4]),
             });
         }
         self.dirty = true;
@@ -655,7 +670,7 @@ impl Scene {
             };
             placed[placement.model][level].push(program::Instance {
                 transform: placement.transform,
-                sky_visibility: 1.0,
+                sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
             });
         }
         self.placed = placed;
@@ -692,54 +707,76 @@ impl Scene {
             .collect()
     }
 
-    /// The boxes the zone clips its lights against, keyed the way a walk reaches a light.
-    fn load_clips(&mut self, backend: &Backend) {
-        let mut arrived = None;
-        let next = match &self.clip {
-            Clip::Wanted(path) => {
-                let files = backend.files().clone();
-                let wanted = path.clone();
-                Some(Clip::Fetching(
-                    path.clone(),
-                    TrackedPromise::spawn_local(async move { files.read(&wanted).await }),
-                ))
-            }
-            Clip::Fetching(path, promise) => match promise.try_get() {
-                Some(Ok(bytes)) => {
-                    arrived = Some((path.clone(), bytes.clone()));
-                    Some(Clip::Done)
+    /// The two files a scene names beside itself, read as they arrive: the boxes its lights are
+    /// clipped against, and how much of the sky reaches each of its parts.
+    fn load_asides(&mut self, backend: &Backend) {
+        for held in [&mut self.clip, &mut self.sky] {
+            *held = match std::mem::replace(held, Aside::Done) {
+                Aside::Wanted(path) => {
+                    let files = backend.files().clone();
+                    let wanted = path.clone();
+                    Aside::Fetching(
+                        path,
+                        TrackedPromise::spawn_local(async move { files.read(&wanted).await }),
+                    )
                 }
-                Some(Err(_)) => Some(Clip::Done),
+                held => held,
+            };
+        }
+        let taken = |held: &mut Aside| match held {
+            Aside::Fetching(path, promise) => match promise.try_get() {
+                Some(Ok(bytes)) => {
+                    let arrived = (path.clone(), bytes.clone());
+                    *held = Aside::Done;
+                    Some(arrived)
+                }
+                Some(Err(_)) => {
+                    *held = Aside::Done;
+                    None
+                }
                 None => None,
             },
-            Clip::Done => None,
+            _ => None,
         };
-        if let Some(next) = next {
-            self.clip = next;
-        }
-        let Some((path, bytes)) = arrived else {
-            return;
-        };
-        match lcb::ClipBoxes::read(Cursor::new(bytes)) {
-            Ok(held) => {
-                for group in held.groups() {
-                    for entry in group.entries() {
-                        self.clips.insert(
-                            (entry.instance(), entry.members()),
-                            (Vec3::from_array(entry.min()), Vec3::from_array(entry.max())),
-                        );
+        let clip = taken(&mut self.clip);
+        let sky = taken(&mut self.sky);
+
+        if let Some((path, bytes)) = clip {
+            match lcb::ClipBoxes::read(Cursor::new(bytes)) {
+                Ok(held) => {
+                    for group in held.groups() {
+                        for entry in group.entries() {
+                            self.clips.insert(
+                                (entry.instance(), entry.members()),
+                                (Vec3::from_array(entry.min()), Vec3::from_array(entry.max())),
+                            );
+                        }
                     }
+                    self.dirty = true;
                 }
-                self.dirty = true;
+                Err(why) => log::error!("assets/layer: {path}: {why}"),
             }
-            Err(why) => log::error!("assets/layer: {path}: {why}"),
+        }
+        if let Some((path, bytes)) = sky {
+            match svb::SkyVisibility::read(Cursor::new(bytes)) {
+                Ok(held) => {
+                    for group in held.groups() {
+                        for entry in group.entries() {
+                            self.visibility
+                                .insert((entry.instance(), entry.members()), entry.visibility());
+                        }
+                    }
+                    self.dirty = true;
+                }
+                Err(why) => log::error!("assets/layer: {path}: {why}"),
+            }
         }
     }
 
     /// Asks for whatever the scene still needs and takes in whatever arrived. Runs every frame.
     fn poll(&mut self, ui: &egui::Ui, backend: &Backend) {
         self.load_terrain(backend);
-        self.load_clips(backend);
+        self.load_asides(backend);
         self.ambient.poll(backend);
         self.expand(backend);
         if self.fitted == 0 && !self.placements.is_empty() {

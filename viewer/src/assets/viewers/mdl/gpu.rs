@@ -57,16 +57,6 @@ pub const TABLE_COLUMNS: i32 = 4;
 
 const VERTEX_SOURCE: &str = include_str!("model.vert");
 const FRAGMENT_SOURCE: &str = include_str!("model.frag");
-const PRESENT_VERTEX: &str = include_str!("present.vert");
-const PRESENT_FRAGMENT: &str = include_str!("present.frag");
-
-/// One triangle covering clip space, which is the geometry the pass that puts the frame on screen
-/// draws.
-const SCREEN: [f32; 12] = [
-    -1.0, -1.0, 0.0, 1.0, //
-    3.0, -1.0, 0.0, 1.0, //
-    -1.0, 3.0, 0.0, 1.0,
-];
 
 /// A mesh's geometry, once it is on the card.
 struct Buffers {
@@ -182,28 +172,10 @@ struct Game {
     failure: Option<String>,
 }
 
-/// What this viewer's own shaders draw into.
-///
-/// Not the buffer eframe hands a callback: nothing asks that one for depth, so what it carries is
-/// whatever the platform gives away, which on native is none at all. A frame depth testing against
-/// nothing is ordered by the order its meshes happen to be drawn in.
-#[derive(Default)]
-struct Offscreen {
-    frame: Option<glow::Framebuffer>,
-    color: Option<glow::Texture>,
-    /// A texture rather than a renderbuffer: the pass that puts the frame on screen reads it back to
-    /// tell the pixels the model covered from the ones egui keeps.
-    depth: Option<glow::Texture>,
-    size: (i32, i32),
-    present: Option<glow::Program>,
-    screen: Option<(glow::VertexArray, glow::Buffer)>,
-}
-
 /// Everything the callback owns, shared with the viewer that built it.
 pub struct Model {
     pending: Option<Pending>,
     program: Option<glow::Program>,
-    offscreen: Offscreen,
     game: Game,
     meshes: Vec<Buffers>,
     /// Color tables arrive with their materials, which is long after the geometry, so they queue
@@ -221,7 +193,6 @@ impl Model {
         Arc::new(Mutex::new(Self {
             pending: Some(pending),
             program: None,
-            offscreen: Offscreen::default(),
             game: Game::default(),
             meshes: Vec::new(),
             queued: Vec::new(),
@@ -313,18 +284,12 @@ impl Model {
             return;
         }
 
-        let held = info.viewport_in_pixels();
-        let size = (held.width_px.max(1), held.height_px.max(1));
-        // Asking the painter rather than the context is what makes this work on the web: glow keeps
-        // its own map of the resources it created, and a framebuffer read back out of WebGL is a JS
-        // object it cannot find in there.
-        let bound = painter.intermediate_fbo();
-        if let Err(why) = self.offscreen.open(gl, size) {
-            self.failure = Some(why);
-            return;
-        }
-
         unsafe {
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LESS);
+            gl.depth_mask(true);
+            gl.clear(glow::DEPTH_BUFFER_BIT);
+            gl.disable(glow::BLEND);
             gl.use_program(Some(program));
 
             let view = gl.get_uniform_location(program, "u_view");
@@ -408,14 +373,7 @@ impl Model {
             }
 
             gl.bind_vertex_array(None);
-        }
-
-        if let Err(why) = self.offscreen.show(
-            gl,
-            bound,
-            (held.left_px, held.from_bottom_px, size.0, size.1),
-        ) {
-            self.failure = Some(why);
+            gl.depth_mask(false);
         }
     }
 
@@ -434,166 +392,6 @@ impl Model {
             self.meshes.push(upload_mesh(gl, vertices, indices)?);
         }
         Ok(())
-    }
-}
-
-impl Offscreen {
-    /// The frame, made at the size the widget covers, and cleared ready to be drawn into.
-    fn open(&mut self, gl: &glow::Context, size: (i32, i32)) -> Result<(), String> {
-        if self.frame.is_none() || self.size != size {
-            self.attach(gl, size)?;
-        }
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, self.frame);
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            gl.viewport(0, 0, size.0, size.1);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.clear_depth_f32(1.0);
-            // egui leaves the scissor set to the widget's rect in the window's own coordinates, and
-            // this is a buffer of its own that starts at nought: leaving it on clips the clear and
-            // every draw after it to whatever part of the frame the rect happens to overlap.
-            gl.disable(glow::SCISSOR_TEST);
-            gl.color_mask(true, true, true, true);
-            gl.enable(glow::DEPTH_TEST);
-            gl.depth_func(glow::LESS);
-            gl.depth_mask(true);
-            gl.disable(glow::BLEND);
-            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
-        }
-        Ok(())
-    }
-
-    fn attach(&mut self, gl: &glow::Context, size: (i32, i32)) -> Result<(), String> {
-        let mut dead = graveyard().lock().unwrap();
-        dead.extend(self.frame.take().map(Dead::Frame));
-        dead.extend(self.color.take().map(Dead::Texture));
-        dead.extend(self.depth.take().map(Dead::Texture));
-        drop(dead);
-        self.size = size;
-
-        unsafe {
-            let color = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(color));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::RGBA8 as i32,
-                size.0,
-                size.1,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(None),
-            );
-            deferred::point(gl);
-            let depth = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(depth));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::DEPTH_COMPONENT24 as i32,
-                size.0,
-                size.1,
-                0,
-                glow::DEPTH_COMPONENT,
-                glow::UNSIGNED_INT,
-                glow::PixelUnpackData::Slice(None),
-            );
-            deferred::point(gl);
-
-            let frame = gl.create_framebuffer()?;
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(frame));
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::COLOR_ATTACHMENT0,
-                glow::TEXTURE_2D,
-                Some(color),
-                0,
-            );
-            gl.framebuffer_texture_2d(
-                glow::FRAMEBUFFER,
-                glow::DEPTH_ATTACHMENT,
-                glow::TEXTURE_2D,
-                Some(depth),
-                0,
-            );
-            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
-            if status != glow::FRAMEBUFFER_COMPLETE {
-                return Err(format!("the frame would not complete: {status:#x}"));
-            }
-            self.frame = Some(frame);
-            self.color = Some(color);
-            self.depth = Some(depth);
-        }
-        Ok(())
-    }
-
-    /// Draws the frame over the widget and leaves egui's own framebuffer bound behind it.
-    ///
-    /// A pass rather than a blit: the framebuffer a browser hands a callback is multisampled, and
-    /// blitting into one of those is an error rather than a resolve.
-    fn show(
-        &mut self,
-        gl: &glow::Context,
-        into: Option<glow::Framebuffer>,
-        viewport: (i32, i32, i32, i32),
-    ) -> Result<(), String> {
-        let color = self.color.ok_or("no frame to show")?;
-        let depth = self.depth.ok_or("no depth buffer")?;
-        let program = match self.present {
-            Some(held) => held,
-            None => {
-                let held = build_pair(gl, PRESENT_VERTEX, PRESENT_FRAGMENT)?;
-                self.present = Some(held);
-                held
-            }
-        };
-        let layout = match self.screen {
-            Some((layout, _)) => layout,
-            None => {
-                let held = upload_screen(gl)?;
-                self.screen = Some(held);
-                held.0
-            }
-        };
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, into);
-            // The default framebuffer draws to the back buffer and one of its own draws to its
-            // first attachment; naming the wrong one is an error rather than a no-op.
-            match into {
-                Some(_) => gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]),
-                None => gl.draw_buffers(&[glow::BACK]),
-            }
-            gl.viewport(viewport.0, viewport.1, viewport.2, viewport.3);
-            // Back on for the widget, which is drawn in the window's own coordinates, where that
-            // clip rect means what it says.
-            gl.enable(glow::SCISSOR_TEST);
-            gl.depth_mask(false);
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
-            gl.use_program(Some(program));
-            sampler(gl, program, "u_frame", 0, color);
-            sampler(gl, program, "u_depth", 1, depth);
-            gl.bind_vertex_array(Some(layout));
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
-            gl.bind_vertex_array(None);
-        }
-        Ok(())
-    }
-}
-
-impl Drop for Offscreen {
-    fn drop(&mut self) {
-        let mut dead = graveyard().lock().unwrap();
-        dead.extend(self.frame.take().map(Dead::Frame));
-        dead.extend(self.color.take().map(Dead::Texture));
-        dead.extend(self.depth.take().map(Dead::Texture));
-        dead.extend(self.present.take().map(Dead::Program));
-        if let Some((layout, held)) = self.screen.take() {
-            dead.push(Dead::Layout(layout));
-            dead.push(Dead::Buffer(held));
-        }
     }
 }
 
@@ -911,25 +709,6 @@ fn upload_mesh(
             vertices: held,
             indices: drawn,
         })
-    }
-}
-
-fn upload_screen(gl: &glow::Context) -> Result<(glow::VertexArray, glow::Buffer), String> {
-    unsafe {
-        let layout = gl.create_vertex_array()?;
-        gl.bind_vertex_array(Some(layout));
-        let held = gl.create_buffer()?;
-        gl.bind_buffer(glow::ARRAY_BUFFER, Some(held));
-        gl.buffer_data_u8_slice(
-            glow::ARRAY_BUFFER,
-            bytemuck::cast_slice(&SCREEN),
-            glow::STATIC_DRAW,
-        );
-        gl.enable_vertex_attrib_array(0);
-        gl.vertex_attrib_pointer_f32(0, 4, glow::FLOAT, false, 16, 0);
-        gl.bind_vertex_array(None);
-        gl.bind_buffer(glow::ARRAY_BUFFER, None);
-        Ok((layout, held))
     }
 }
 

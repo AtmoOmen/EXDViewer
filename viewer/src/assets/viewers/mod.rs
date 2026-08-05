@@ -15,6 +15,7 @@ pub mod chara;
 pub mod cmp;
 pub mod eid;
 pub mod est;
+pub mod exl;
 pub mod font;
 pub mod grass;
 pub mod icons;
@@ -310,6 +311,8 @@ pub enum Preview {
     Eid(Box<eid::Rendered>),
     /// A parsed skeleton template file.
     Est(Box<est::Rendered>),
+    /// A parsed sheet list.
+    Exl(Box<exl::Rendered>),
     /// A parsed skeleton parameter file.
     Skp(Box<skp::Rendered>),
     /// A parsed terrain file.
@@ -368,6 +371,7 @@ impl Preview {
             Viewer::Avfx => avfx::decode(path, bytes),
             Viewer::Eid => eid::decode(path, bytes),
             Viewer::Est => est::decode(path, bytes),
+            Viewer::Exl => exl::decode(path, bytes),
             Viewer::Skp => skp::decode(path, bytes),
             Viewer::Tera => tera::decode(path, bytes),
             Viewer::Stm => stm::decode(path, bytes),
@@ -423,6 +427,7 @@ impl Preview {
             Self::Avfx(effect) => follow = avfx::ui(ui, effect, backend),
             Self::Eid(points) => follow = eid::ui(ui, points),
             Self::Est(templates) => follow = est::ui(ui, templates),
+            Self::Exl(list) => follow = exl::ui(ui, list),
             Self::Skp(parameters) => follow = skp::ui(ui, parameters),
             Self::Tera(terrain) => follow = tera::ui(ui, terrain),
             Self::Layers(layers) => follow = layer::ui(ui, layers, deps, backend),
@@ -516,6 +521,7 @@ impl Preview {
             | Self::Avfx(_)
             | Self::Eid(_)
             | Self::Est(_)
+            | Self::Exl(_)
             | Self::Skp(_)
             | Self::Tera(_)
             | Self::Layers(_)
@@ -596,6 +602,10 @@ impl Preview {
         }
         if let Self::Est(templates) = self {
             templates.details_ui(ui);
+            return None;
+        }
+        if let Self::Exl(list) = self {
+            list.details_ui(ui);
             return None;
         }
         if let Self::Skp(parameters) = self {
@@ -748,6 +758,7 @@ pub enum Viewer {
     Avfx,
     Eid,
     Est,
+    Exl,
     Skp,
     Tera,
     Lgb,
@@ -773,7 +784,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 35] = [
+    pub const RENDERED: [Self; 36] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -790,6 +801,7 @@ impl Viewer {
         Self::Avfx,
         Self::Eid,
         Self::Est,
+        Self::Exl,
         Self::Skp,
         Self::Tera,
         Self::Lgb,
@@ -829,6 +841,7 @@ impl Viewer {
             Self::Avfx => "Visual effect",
             Self::Eid => "Bind points",
             Self::Est => "Skeleton template",
+            Self::Exl => "Sheet list",
             Self::Skp => "Skeleton parameters",
             Self::Tera => "Terrain",
             Self::Lgb => "Layer group",

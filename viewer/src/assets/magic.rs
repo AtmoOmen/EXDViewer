@@ -64,7 +64,7 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"SEDBSSCF", Format::Named("Sound")),
     (b"EXHF", Format::Named("Sheet header")),
     (b"EXDF", Format::Named("Sheet page")),
-    (b"EXLT", Format::Named("Sheet list")),
+    (b"EXLT", Format::Shown(Viewer::Exl)),
     (b"LGB1", Format::Shown(Viewer::Lgb)),
     (b"SGB1", Format::Shown(Viewer::Sgb)),
     (b"LVB1", Format::Shown(Viewer::Lvb)),

@@ -1969,7 +1969,7 @@ impl Kind {
 const EXTENSIONS: &[(&str, &str, Viewer)] = &[
     ("exd", "Excel sheet data", Viewer::Raw),
     ("exh", "Excel sheet header", Viewer::Raw),
-    ("exl", "Excel sheet list", Viewer::Raw),
+    ("exl", "Excel sheet list", Viewer::Exl),
     ("tex", "Texture", Viewer::Texture),
     ("atex", "Animated texture", Viewer::Texture),
     ("png", "PNG image", Viewer::Image),

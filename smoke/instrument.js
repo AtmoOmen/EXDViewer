@@ -5,6 +5,8 @@
         contexts: 0,
         samples: null,
         antialias: null,
+        depthBits: null,
+        depth: null,
         draws: 0,
         instanced: 0,
         blits: 0,
@@ -48,6 +50,10 @@
             try {
                 counters.samples = gl.getParameter(gl.SAMPLES);
                 counters.antialias = gl.getContextAttributes().antialias;
+                // What the canvas itself was given, which is what the model viewer used to depth
+                // test against: eframe asks for no attributes, so this is the WebGL default.
+                counters.depthBits = gl.getParameter(gl.DEPTH_BITS);
+                counters.depth = gl.getContextAttributes().depth;
                 const info = gl.getExtension("WEBGL_debug_renderer_info");
                 counters.renderer = info
                     ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL)

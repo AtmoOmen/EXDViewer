@@ -13,13 +13,16 @@ Flags: `--no-build` reuses the existing `viewer/dist`, `--shots` writes screensh
 `smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--avfx-only`
 runs the effects and nothing else, `--explore` is `--model-only` with screenshots (use it to
 recalibrate the click coordinates in `smoke.ts` after a UI change). `--model=` and `--scene=` each
-take one path and `--avfx=` takes a comma-separated list. Every run writes `smoke/last-run.json`.
+take one path and `--avfx=` takes a comma-separated list. `--orbit` turns the camera between shots,
+which is what makes an ordering fault show rather than depending on the one angle a model happens
+to open at; `--views` walks the preview path's own debug row. Every run writes
+`smoke/last-run.json`.
 
 A full run opens **nine effects** after the scene and takes around twenty minutes. Each one is a
 fresh page, so each one pulls the two apricot packages again, and they are 20 and 40 MiB.
 
-**`main` is red right now, for real reasons.** See "Known red" below for the three it still
-reports. A red run here is not a broken harness; read the deduped list it prints.
+A red run here is not a broken harness; read the deduped list it prints, and check it against
+"Known red" below before assuming you caused it.
 
 ## Why it exists
 
@@ -37,7 +40,10 @@ bugs reached the user anyway, all of which compiled and passed every one of thos
 Chromium is fetched from the nix binary cache (no source build) and run headless, where WebGL2
 comes from ANGLE over Vulkan/SwiftShader. **The canvas reports `SAMPLES=4`**, which is what makes
 the multisample blit reproduce; the run aborts if it ever comes up single-sampled, because a
-single-sampled run would pass without testing what this gate is for.
+single-sampled run would pass without testing what this gate is for. It also reports the canvas's
+own depth, which eframe asks for no attributes about and so comes out at WebGL's default of 24
+bits here; a machine that answers otherwise is one where a viewer drawing into the canvas would
+depth test against nothing.
 
 It then walks the paths that broke:
 

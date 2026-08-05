@@ -18,6 +18,8 @@ const shots = args.has("--shots") || args.has("--explore");
 const explore = args.has("--explore");
 const modelOnly = explore || args.has("--model-only");
 const effectsOnly = args.has("--avfx-only");
+const orbit = args.has("--orbit");
+const views = args.has("--views");
 const shotDir = join(root, "smoke/shots");
 
 function flag(name: string, fallback: string): string {
@@ -65,6 +67,20 @@ const SCENE_TAB = { x: 287, y: 116 };
 // the tree, which is the only part of the window worth looking at.
 const SEEK = { y: 116, from: 415, to: 1085 };
 const PREVIEW = { x: 212, y: 132, width: 1020, height: 495 };
+
+// Where a drag of the viewport starts, well clear of the control row.
+const ORBIT_FROM = { x: 800, y: 600 };
+const ORBIT_ANGLES = [220, 220, 220, 220];
+
+// The preview path's own debug row, which stands where the channel row does once game shaders are
+// on. Recalibrate these with --explore alongside the ones above.
+const VIEWS: [string, number][] = [
+    ["normals", 349],
+    ["geometric", 420],
+    ["tangents", 492],
+    ["bitangents", 566],
+    ["handedness", 648],
+];
 
 // SV_Target, SV_Target1..4 and Lit.
 const CHANNELS = 6;
@@ -218,6 +234,42 @@ async function click(cdp: Cdp, x: number, y: number) {
     await sleep(160);
 }
 
+/// Drags the viewport, which is how the camera is turned. The move is stepped: the viewer reads a
+/// pointer delta per frame, and one jump would be a single frame's worth of turn.
+async function drag(cdp: Cdp, by: number) {
+    const base = { button: "left", clickCount: 1 };
+    await cdp.send("Input.dispatchMouseEvent", {
+        ...base,
+        type: "mouseMoved",
+        ...ORBIT_FROM,
+        buttons: 0,
+    });
+    await cdp.send("Input.dispatchMouseEvent", {
+        ...base,
+        type: "mousePressed",
+        ...ORBIT_FROM,
+        buttons: 1,
+    });
+    for (let step = 1; step <= 10; step++) {
+        await cdp.send("Input.dispatchMouseEvent", {
+            ...base,
+            type: "mouseMoved",
+            x: ORBIT_FROM.x + (by * step) / 10,
+            y: ORBIT_FROM.y,
+            buttons: 1,
+        });
+        await sleep(40);
+    }
+    await cdp.send("Input.dispatchMouseEvent", {
+        ...base,
+        type: "mouseReleased",
+        x: ORBIT_FROM.x + by,
+        y: ORBIT_FROM.y,
+        buttons: 0,
+    });
+    await sleep(400);
+}
+
 async function main() {
     if (!existsSync(join(dist, "index.html"))) {
         throw new Error(`no build at ${dist} (run smoke/run.sh, which builds first)`);
@@ -323,8 +375,10 @@ async function main() {
         const booted = await counters(cdp);
         console.log(`   renderer: ${booted.renderer}`);
         console.log(`   samples: ${booted.samples}  antialias: ${booted.antialias}`);
+        console.log(`   canvas depth: ${booted.depth}  bits: ${booted.depthBits}`);
         report.renderer = booted.renderer;
         report.samples = booted.samples;
+        report.depthBits = booted.depthBits;
 
         if (!booted.samples || booted.samples < 2) {
             throw new Error(
@@ -349,6 +403,27 @@ async function main() {
         console.log(`   after load: draws=${plain.draws} links=${plain.links} blits=${plain.blits}`);
         report.plain = plain;
 
+        if (orbit) {
+            phase = "orbit";
+            console.log("\n== orbit");
+            for (const [at, by] of ORBIT_ANGLES.entries()) {
+                await drag(cdp, by);
+                await shot(cdp, `01-orbit-${at}`);
+            }
+        }
+
+        if (views) {
+            phase = "views";
+            console.log("\n== preview views");
+            for (const [name, x] of VIEWS) {
+                await click(cdp, x, ROW_Y);
+                await sleep(250);
+                await shot(cdp, `01-view-${name}`);
+            }
+            // Off again, so whatever runs after this sees the shaded frame rather than a debug one.
+            await click(cdp, VIEWS[VIEWS.length - 1][1], ROW_Y);
+        }
+
         if (modelOnly) {
             console.log("\n== stopping after the model, before any click");
             return;
@@ -366,6 +441,9 @@ async function main() {
             const c = await counters(cdp);
             return c.links > plain.links && c.drawBuffers > plain.drawBuffers;
         });
+        // Before any channel is clicked, so the shot is of whichever the viewer starts on.
+        await sleep(1500);
+        await shot(cdp, "02-started");
         const shaded = await counters(cdp);
         console.log(
             `   after shading: links +${shaded.links - plain.links}` +

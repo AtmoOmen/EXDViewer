@@ -119,18 +119,23 @@ void main() {
 	}
 	vec3 view = normalize(u_eye - v_position);
 
+	// The frame a mesh declares is the binormal, not the tangent; the tangent comes back off it and
+	// the handedness the fourth channel carries.
 	vec3 across = v_tangent.xyz - geometric * dot(geometric, v_tangent.xyz);
 	bool framed = dot(across, across) > 1e-6;
-	vec3 tangent = framed ? normalize(across) : vec3(0.0);
-	vec3 bitangent = cross(geometric, tangent) * sign(v_tangent.w);
+	vec3 bitangent = framed ? normalize(across) : vec3(0.0);
+	vec3 tangent = cross(bitangent, geometric) * sign(v_tangent.w);
 
 	vec3 normal = geometric;
 	vec4 sampled = vec4(0.5, 0.5, 1.0, 0.0);
 	if (has(HAVE_NORMAL)) {
 		sampled = texture(u_normal_map, v_uv);
 		if (framed) {
-			vec2 xy = (sampled.xy * 2.0 - 1.0) * u_normal_scale;
+			vec2 xy = sampled.xy * 2.0 - 1.0;
+			// The scale reaches the two channels the map states and not the one derived from them,
+			// which is where the game's own shaders apply it.
 			float z = sqrt(max(1.0 - dot(xy, xy), 1e-4));
+			xy *= u_normal_scale;
 			normal = normalize(tangent * xy.x + bitangent * xy.y + geometric * z);
 		}
 	}
@@ -141,9 +146,9 @@ void main() {
 	}
 
 	float opacity = v_color.a;
-	// Only a character normal map carries opacity here; a background one has a third normal channel
-	// in the same place and keeps its cutout in the diffuse map's alpha instead, which is what clips
-	// a leaf out of the quad it is painted on.
+	// Only a character normal map carries opacity here; a background one keeps a height map in the
+	// same place and its cutout in the diffuse map's alpha instead, which is what clips a leaf out
+	// of the quad it is painted on.
 	if (has(HAVE_NORMAL) && u_family != BACKGROUND) {
 		opacity *= sampled.b;
 	}

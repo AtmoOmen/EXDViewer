@@ -71,6 +71,9 @@ const VOLUME_FACES: [u16; 36] = [
     1, 2, 6, 1, 6, 5, // right
 ];
 
+const PRESENT_VERTEX: &str = include_str!("present.vert");
+const PRESENT_FRAGMENT: &str = include_str!("present.frag");
+
 /// GL objects with nothing left to draw them, waiting for a context to delete them under. A viewer
 /// is dropped between frames, where there is no context, so its objects outlive it by one callback.
 static GRAVEYARD: std::sync::OnceLock<std::sync::Mutex<Vec<Dead>>> = std::sync::OnceLock::new();
@@ -145,6 +148,7 @@ pub struct Buffers {
     screen: Option<(glow::VertexArray, glow::Buffer)>,
     volume: Option<(glow::VertexArray, glow::Buffer, glow::Buffer)>,
     resolvers: BTreeMap<usize, Linked>,
+    present: Option<glow::Program>,
     blocks: Vec<glow::Buffer>,
 }
 
@@ -166,12 +170,63 @@ impl Buffers {
         self.frames.len()
     }
 
-    pub fn page(&self, at: usize) -> Option<glow::Framebuffer> {
-        self.frames.get(at).copied()
+    /// What a viewer puts on screen: one channel of the G-buffer, or the frame the composite
+    /// resolved past the last of them.
+    fn channel(&self, at: usize) -> Option<glow::Texture> {
+        match at >= TARGETS {
+            true => self.lit.map(|(_, texture)| texture),
+            false => self.color.get(at).copied(),
+        }
     }
 
-    pub fn lit(&self) -> Option<glow::Framebuffer> {
-        self.lit.map(|(frame, _)| frame)
+    /// Draws one of those over the widget and leaves egui's own framebuffer bound behind it.
+    ///
+    /// A pass rather than a blit: the framebuffer a browser hands a callback is multisampled, and
+    /// blitting into one of those is an error rather than a resolve.
+    pub fn show(
+        &mut self,
+        gl: &glow::Context,
+        at: usize,
+        into: Option<glow::Framebuffer>,
+        viewport: (i32, i32, i32, i32),
+    ) -> Result<(), String> {
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, into);
+            // The default framebuffer draws to the back buffer and one of its own draws to its
+            // first attachment; naming the wrong one is an error rather than a no-op.
+            match into {
+                Some(_) => gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]),
+                None => gl.draw_buffers(&[glow::BACK]),
+            }
+            gl.viewport(viewport.0, viewport.1, viewport.2, viewport.3);
+            gl.color_mask(true, true, true, true);
+            gl.depth_mask(false);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+        }
+        let texture = self
+            .channel(at)
+            .ok_or_else(|| format!("the frame has no buffer {at}"))?;
+        let depth = self.depth.ok_or("no depth buffer")?;
+        let program = match self.present {
+            Some(held) => held,
+            None => {
+                let held = build_pair(gl, PRESENT_VERTEX, PRESENT_FRAGMENT)?;
+                self.present = Some(held);
+                held
+            }
+        };
+        let layout = self.screen(gl)?;
+        unsafe {
+            gl.use_program(Some(program));
+            sampler(gl, program, "u_frame", 0, texture);
+            sampler(gl, program, "u_depth", 1, depth);
+            gl.bind_vertex_array(Some(layout));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.bind_vertex_array(None);
+        }
+        Ok(())
     }
 
     /// Every buffer of the graph, sized to what is being drawn into.
@@ -298,6 +353,16 @@ impl Buffers {
             gl.color_mask(true, true, true, true);
             gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
         }
+    }
+
+    /// The screen-wide triangle's array, uploaded the first time something draws it.
+    fn screen(&mut self, gl: &glow::Context) -> Result<glow::VertexArray, String> {
+        if let Some((layout, _)) = self.screen {
+            return Ok(layout);
+        }
+        let held = upload_screen(gl)?;
+        self.screen = Some(held);
+        Ok(held.0)
     }
 
     /// The one texture standing in for whatever a material binds nothing to.
@@ -430,17 +495,7 @@ impl Buffers {
                 };
                 held.0
             }
-            false => {
-                let held = match self.screen {
-                    Some(held) => held,
-                    None => {
-                        let held = upload_screen(gl)?;
-                        self.screen = Some(held);
-                        held
-                    }
-                };
-                held.0
-            }
+            false => self.screen(gl)?,
         };
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
@@ -584,6 +639,7 @@ impl Drop for Buffers {
             dead.push(Dead::Buffer(faces));
         }
         dead.extend(self.blocks.drain(..).map(Dead::Buffer));
+        dead.extend(self.present.take().map(Dead::Program));
         dead.extend(
             std::mem::take(&mut self.resolvers)
                 .into_values()

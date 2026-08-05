@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use glow::HasContext;
 
 use super::super::super::mdl::deferred::{
-    self, Buffers, Dead, Linked, TARGETS, TYPES, bury, graveyard, sampler,
+    self, Buffers, Dead, LIT, Linked, TYPES, bury, graveyard, sampler,
 };
 use super::super::super::mdl::gpu::{FIELDS, Lighting, Shaded};
 use super::super::super::mdl::{Vertex, program};
@@ -157,47 +157,21 @@ impl Renderer {
                 Err(why) => log::error!("assets/layer: model {at}: {why}"),
             }
         }
-        // egui draws into whatever it bound before the callback, and the frame has to go back to
-        // it once the scene is on screen. Asking the painter rather than the context is what makes
+        // egui draws into whatever it bound before the callback, and that has to be bound again
+        // whether or not the frame drew. Asking the painter rather than the context is what makes
         // this work on the web: glow keeps its own map of the resources it created, and a
         // framebuffer read back out of WebGL is a JS object it cannot find in there.
         let bound = painter.intermediate_fbo();
         let held = info.viewport_in_pixels();
         let size = (held.width_px.max(1), held.height_px.max(1));
-        if let Err(why) = self.render(gl, painter, frame, size) {
-            self.failure = Some(why);
-            return;
-        }
-        let read = self.buffers.lit();
-        unsafe {
-            gl.color_mask(true, true, true, true);
-            gl.depth_mask(false);
-            gl.disable(glow::DEPTH_TEST);
-            gl.disable(glow::CULL_FACE);
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, read);
-            gl.read_buffer(glow::COLOR_ATTACHMENT0);
-            gl.blit_framebuffer(
-                0,
-                0,
-                size.0,
-                size.1,
-                held.left_px,
-                held.from_bottom_px,
-                held.left_px + size.0,
-                held.from_bottom_px + size.1,
-                glow::COLOR_BUFFER_BIT,
-                glow::NEAREST,
-            );
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, bound);
-            // The default framebuffer draws to the back buffer and one of its own draws to its
-            // first attachment; naming the wrong one is an error rather than a no-op.
-            match bound {
-                Some(_) => gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]),
-                None => gl.draw_buffers(&[glow::BACK]),
-            }
-            gl.viewport(held.left_px, held.from_bottom_px, size.0, size.1);
-        }
+        let drawn = self.render(gl, painter, frame, size);
+        let shown = self.buffers.show(
+            gl,
+            LIT,
+            bound,
+            (held.left_px, held.from_bottom_px, size.0, size.1),
+        );
+        self.failure = drawn.and(shown).err();
     }
 
     /// Every object of every batch, laid out so that one draw can be pointed at its own window.
@@ -307,7 +281,9 @@ impl Renderer {
                         )?;
                         unsafe {
                             gl.use_program(Some(program));
-                            gl.depth_mask(depth);
+                            // A material with no depth pass writes its own, since the depth buffer
+                            // is what says which pixels the frame covered.
+                            gl.depth_mask(depth || shaded.depth.is_none());
                             gl.color_mask(!depth, !depth, !depth, !depth);
                             let written: Vec<u32> = (0..held.targets.len().max(1))
                                 .map(|at| glow::COLOR_ATTACHMENT0 + at as u32)
@@ -501,7 +477,6 @@ impl Drop for Renderer {
                         .map(|held| Dead::Program(held.program)),
                 ),
         );
-        let _ = TARGETS;
     }
 }
 

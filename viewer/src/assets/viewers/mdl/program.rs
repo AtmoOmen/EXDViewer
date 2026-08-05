@@ -119,11 +119,22 @@ pub struct Attribute {
     pub components: Components,
 }
 
+/// What a sampler is declared over. A draw only validates where the texture bound to the unit is of
+/// the declaration's own kind, so this is what decides the target it is bound at.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Plane,
+    Array,
+    Volume,
+    Cube,
+}
+
 /// A texture the shader samples, named as GLSL has it and identified as the material names it.
 pub struct Texture {
     pub name: String,
     /// The package's own resource id, which is the crc a material's samplers use.
     pub id: u32,
+    pub kind: Kind,
 }
 
 /// A constant buffer the shader binds, and the fields the reflection describes it with.
@@ -492,6 +503,16 @@ fn field(semantic: &str) -> Option<Field> {
     })
 }
 
+/// What target a sampler the translation declared has to be bound at.
+fn kind(declaration: &str) -> Kind {
+    match declaration {
+        "sampler2DArray" | "sampler2DArrayShadow" => Kind::Array,
+        "sampler3D" => Kind::Volume,
+        "samplerCube" | "samplerCubeShadow" => Kind::Cube,
+        _ => Kind::Plane,
+    }
+}
+
 /// The parameter buffer as this draw sees it: the package's own defaults, with the material's
 /// constants written over the spans the package says they occupy.
 fn parameters(package: &ShaderPackage, material: &mtrl::Material) -> Vec<u8> {
@@ -643,6 +664,7 @@ impl Program {
                 .get(shader as usize)
                 .map(shpk::Shader::textures)
                 .unwrap_or_default();
+            let declared = hlsl::glsl::declarations(program);
             for (slot, _, name) in hlsl::glsl::textures(program, names) {
                 let Some(resource) = resources.iter().find(|held| held.slot() == slot) else {
                     continue;
@@ -651,6 +673,7 @@ impl Program {
                     textures.push(Texture {
                         name,
                         id: resource.id(),
+                        kind: kind(declared.get(&slot).copied().unwrap_or_default()),
                     });
                 }
             }
@@ -788,13 +811,16 @@ impl Buffer {
             // A field the reflection calls a dword is read back through the bit pattern, so a whole
             // number goes in as one rather than as the float that reads the same.
             let whole = member.kind == "dword" || member.kind.starts_with("uint");
+            // The same name is declared at different extents across packages, so a write is cut to
+            // the one this buffer states: anything past it is the next field along.
+            let end = out.len().min((member.offset + member.size) as usize);
             for (at, value) in values.iter().enumerate() {
                 let offset = member.offset as usize + at * 4;
                 let bits = match whole {
                     true => (*value as u32).to_le_bytes(),
                     false => value.to_le_bytes(),
                 };
-                if offset + 4 <= out.len() {
+                if offset + 4 <= end {
                     out[offset..offset + 4].copy_from_slice(&bits);
                 }
             }
@@ -844,9 +870,8 @@ impl Buffer {
         for name in ["m_InverseProjectionMatrix", "m_InverseProjectionMatrixPrev"] {
             put(name, rows(projection.inverse(), 4));
         }
-        for name in ["m_ProjToProjPrevMatrix", "m_ViewToViewPrevMatrix"] {
-            put(name, rows(Mat4::IDENTITY, 4));
-        }
+        put("m_ProjToProjPrevMatrix", rows(Mat4::IDENTITY, 4));
+        put("m_ViewToViewPrevMatrix", rows(Mat4::IDENTITY, 3));
         // The transform a vertex shader multiplies by before the projection alone, with nothing
         // between the two: it takes an object into view space rather than into the world. The buffer
         // holds this frame's and the last one's.

@@ -664,33 +664,34 @@ impl Game {
         };
         let mut unit = 0;
         for texture in &held.textures {
-            let bound = match texture.id {
-                TABLE => table,
-                id => shaded
-                    .textures
-                    .iter()
-                    .find(|(held, _)| *held == id)
-                    .and_then(|(_, held)| *held)
-                    .and_then(|held| painter.texture(held)),
+            // Only a plane can come from the material: what it binds is an egui texture, and egui
+            // has nothing but two-dimensional ones.
+            let bound = match texture.kind {
+                program::Kind::Plane => {
+                    let held = match texture.id {
+                        TABLE => table,
+                        id => shaded
+                            .textures
+                            .iter()
+                            .find(|(held, _)| *held == id)
+                            .and_then(|(_, held)| *held)
+                            .and_then(|held| painter.texture(held)),
+                    };
+                    match held {
+                        Some(held) => held,
+                        None => self.buffers.engine(gl, texture.id)?,
+                    }
+                }
+                kind => self.buffers.absent(gl, kind)?,
             };
-            match (bound, texture.id) {
-                (None, deferred::REFLECTION) => {
-                    let held = self.buffers.reflection(gl)?;
-                    deferred::bind(
-                        gl,
-                        program,
-                        &texture.name,
-                        unit,
-                        held,
-                        glow::TEXTURE_CUBE_MAP,
-                    );
-                }
-                (None, id) => {
-                    let held = self.buffers.engine(gl, id)?;
-                    sampler(gl, program, &texture.name, unit, held);
-                }
-                (Some(held), _) => sampler(gl, program, &texture.name, unit, held),
-            }
+            deferred::bind(
+                gl,
+                program,
+                &texture.name,
+                unit,
+                bound,
+                deferred::target(texture.kind),
+            );
             unit += 1;
         }
         // By name, not by position: a character's buffer pass reads the joint palette and the

@@ -28,9 +28,6 @@ const ATTENUATION: u32 = 0x008c_d1ca;
 /// The frame as the composite left it, which is what a semitransparent pass blends over.
 const FINAL_COLOR: u32 = 0x8ea9_df48;
 
-/// The reflection, the only sampler in the whole graph that is not two-dimensional.
-pub const REFLECTION: u32 = 0xc5c4_cb3c;
-
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
 /// once, and the channel past the last of them: the frame the composite resolved.
 pub const TARGETS: usize = 5;
@@ -155,7 +152,10 @@ pub struct Buffers {
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
     types: Option<glow::Texture>,
-    stand_in: Option<glow::Texture>,
+    /// One texel of the same value per target a sampler can be declared over. A draw is rejected
+    /// outright where what is bound to a unit is not of the declaration's own kind, so a plane
+    /// cannot stand in for the rest.
+    blanks: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
@@ -429,11 +429,16 @@ impl Buffers {
 
     /// The one texture standing in for whatever a material binds nothing to.
     pub fn stand_in(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
-        if let Some(held) = self.stand_in {
-            return Ok(held);
+        self.blank(gl, glow::TEXTURE_2D)
+    }
+
+    /// The same, at whichever target a sampler was declared over.
+    fn blank(&mut self, gl: &glow::Context, target: u32) -> Result<glow::Texture, String> {
+        if let Some(held) = self.blanks.get(&target) {
+            return Ok(*held);
         }
-        let held = flat(gl, &STAND_IN)?;
-        self.stand_in = Some(held);
+        let held = flat(gl, target, &STAND_IN)?;
+        self.blanks.insert(target, held);
         Ok(held)
     }
 
@@ -443,7 +448,7 @@ impl Buffers {
         if let Some(held) = self.unoccluded {
             return Ok(held);
         }
-        let held = flat(gl, &UNOCCLUDED)?;
+        let held = flat(gl, glow::TEXTURE_2D, &UNOCCLUDED)?;
         self.unoccluded = Some(held);
         Ok(held)
     }
@@ -464,9 +469,21 @@ impl Buffers {
         if let Some(held) = self.reflection {
             return Ok(held);
         }
-        let held = flat_cube(gl, &UNREFLECTED)?;
+        let held = flat(gl, glow::TEXTURE_CUBE_MAP, &UNREFLECTED)?;
         self.reflection = Some(held);
         Ok(held)
+    }
+
+    /// What stands in for a sampler of this kind that nothing bound a texture to.
+    pub fn absent(
+        &mut self,
+        gl: &glow::Context,
+        kind: program::Kind,
+    ) -> Result<glow::Texture, String> {
+        match kind {
+            program::Kind::Cube => self.reflection(gl),
+            held => self.blank(gl, target(held)),
+        }
     }
 
     /// Every stand-in a draw may reach for, made before any of them is bound.
@@ -475,10 +492,16 @@ impl Buffers {
     /// a binding loop takes over the unit the sampler before it was given, and that sampler then
     /// reads a texture of the wrong format.
     pub fn stand_ins(&mut self, gl: &glow::Context) -> Result<(), String> {
-        self.stand_in(gl)?;
         self.unoccluded(gl)?;
         self.types(gl)?;
-        self.reflection(gl)?;
+        for kind in [
+            program::Kind::Plane,
+            program::Kind::Array,
+            program::Kind::Volume,
+            program::Kind::Cube,
+        ] {
+            self.absent(gl, kind)?;
+        }
         Ok(())
     }
 
@@ -598,23 +621,18 @@ impl Buffers {
         self.stand_ins(gl)?;
         let mut unit = 0;
         for texture in &held.textures {
-            match texture.id {
-                REFLECTION => {
-                    let bound = self.reflection(gl)?;
-                    bind(
-                        gl,
-                        program,
-                        &texture.name,
-                        unit,
-                        bound,
-                        glow::TEXTURE_CUBE_MAP,
-                    );
-                }
-                id => {
-                    let bound = self.engine(gl, id)?;
-                    sampler(gl, program, &texture.name, unit, bound);
-                }
-            }
+            let bound = match texture.kind {
+                program::Kind::Plane => self.engine(gl, texture.id)?,
+                kind => self.absent(gl, kind)?,
+            };
+            bind(
+                gl,
+                program,
+                &texture.name,
+                unit,
+                bound,
+                target(texture.kind),
+            );
             unit += 1;
         }
         for structured in &held.structured {
@@ -708,7 +726,6 @@ impl Drop for Buffers {
         dead.extend(
             [
                 self.types.take(),
-                self.stand_in.take(),
                 self.unoccluded.take(),
                 self.reflection.take(),
                 self.resolved.take(),
@@ -716,6 +733,7 @@ impl Drop for Buffers {
             ]
             .into_iter()
             .flatten()
+            .chain(std::mem::take(&mut self.blanks).into_values())
             .map(Dead::Texture),
         );
         dead.extend(self.frames.drain(..).map(Dead::Frame));
@@ -781,6 +799,16 @@ pub fn link<K: Ord>(
             .push(Dead::Program(stale.program));
     }
     Ok(built)
+}
+
+/// The target a texture a sampler of this kind reads has to be bound at.
+pub fn target(kind: program::Kind) -> u32 {
+    match kind {
+        program::Kind::Plane => glow::TEXTURE_2D,
+        program::Kind::Array => glow::TEXTURE_2D_ARRAY,
+        program::Kind::Volume => glow::TEXTURE_3D,
+        program::Kind::Cube => glow::TEXTURE_CUBE_MAP,
+    }
 }
 
 /// Point sampling and no wrap, which is what every buffer of the graph is read with: a shader
@@ -951,14 +979,42 @@ fn upload_volume(
     }
 }
 
-/// A one-texel cube answering with the same value on every face.
-fn flat_cube(gl: &glow::Context, value: &[u8; 4]) -> Result<glow::Texture, String> {
+/// A one-texel texture of the given target, answering with the same value everywhere. A cube states
+/// each of its faces and the targets that take a depth state one slice.
+fn flat(gl: &glow::Context, target: u32, value: &[u8; 4]) -> Result<glow::Texture, String> {
     unsafe {
         let texture = gl.create_texture()?;
-        gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(texture));
-        for face in 0..6 {
-            gl.tex_image_2d(
-                glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+        gl.bind_texture(target, Some(texture));
+        match target {
+            glow::TEXTURE_CUBE_MAP => {
+                for face in 0..6 {
+                    gl.tex_image_2d(
+                        glow::TEXTURE_CUBE_MAP_POSITIVE_X + face,
+                        0,
+                        glow::RGBA as i32,
+                        1,
+                        1,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(value)),
+                    );
+                }
+            }
+            glow::TEXTURE_2D_ARRAY | glow::TEXTURE_3D => gl.tex_image_3d(
+                target,
+                0,
+                glow::RGBA as i32,
+                1,
+                1,
+                1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(value)),
+            ),
+            _ => gl.tex_image_2d(
+                target,
                 0,
                 glow::RGBA as i32,
                 1,
@@ -967,7 +1023,7 @@ fn flat_cube(gl: &glow::Context, value: &[u8; 4]) -> Result<glow::Texture, Strin
                 glow::RGBA,
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(Some(value)),
-            );
+            ),
         }
         for (name, held) in [
             (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
@@ -975,33 +1031,7 @@ fn flat_cube(gl: &glow::Context, value: &[u8; 4]) -> Result<glow::Texture, Strin
             (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
             (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
         ] {
-            gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, name, held as i32);
-        }
-        Ok(texture)
-    }
-}
-
-/// A one-texel texture answering with the same value everywhere.
-fn flat(gl: &glow::Context, value: &[u8; 4]) -> Result<glow::Texture, String> {
-    unsafe {
-        let texture = gl.create_texture()?;
-        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-        gl.tex_image_2d(
-            glow::TEXTURE_2D,
-            0,
-            glow::RGBA as i32,
-            1,
-            1,
-            0,
-            glow::RGBA,
-            glow::UNSIGNED_BYTE,
-            glow::PixelUnpackData::Slice(Some(value)),
-        );
-        for (name, held) in [
-            (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-            (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-        ] {
-            gl.tex_parameter_i32(glow::TEXTURE_2D, name, held as i32);
+            gl.tex_parameter_i32(target, name, held as i32);
         }
         Ok(texture)
     }

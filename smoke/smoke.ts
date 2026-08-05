@@ -17,10 +17,35 @@ const args = new Set(Bun.argv.slice(2));
 const shots = args.has("--shots") || args.has("--explore");
 const explore = args.has("--explore");
 const modelOnly = explore || args.has("--model-only");
+const effectsOnly = args.has("--avfx-only");
 const shotDir = join(root, "smoke/shots");
 
-const MODEL = "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl";
-const SCENE = "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb";
+function flag(name: string, fallback: string): string {
+    for (const arg of args) {
+        if (arg.startsWith(`--${name}=`)) return arg.slice(name.length + 3);
+    }
+    return fallback;
+}
+
+const MODEL = flag("model", "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl");
+const SCENE = flag("scene", "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb");
+
+// A spread of effects picked off the corpus: quad sprites only, models only under each of the two
+// model kinds, files whose keys reach no node, a powder file, and one that spawns nothing.
+const EFFECTS = flag(
+    "avfx",
+    [
+        "vfx/common/eff/m0617_stlp_atkup_c0p.avfx",
+        "vfx/common/eff/astro_mk0f.avfx",
+        "vfx/common/eff/m0920_cast05_c0k1.avfx",
+        "vfx/common/eff/mks_pet_en0t.avfx",
+        "vfx/common/eff/ab_2kt024_zetsu_c0x.avfx",
+        "vfx/common/eff/ab_chk012c0c.avfx",
+        "vfx/common/eff/b1271bom01_o.avfx",
+        "vfx/common/eff/ab_2sw031depop0t.avfx",
+        "vfx/common/eff/rrp_soulbuff_c0x.avfx",
+    ].join(","),
+).split(",");
 
 const WIDTH = 1600;
 const HEIGHT = 1000;
@@ -36,6 +61,12 @@ const SWEEP_STEP = 16;
 
 // The lgb viewer opens on its Tree tab; the 3D scene is the tab beside it.
 const SCENE_TAB = { x: 287, y: 116 };
+
+// The effect viewer's playback bar sits on the same row. Clicking its slider both pauses and seeks,
+// which is what makes an effect shot land on the same frame every run. `PREVIEW` is the pane above
+// the tree, which is the only part of the window worth looking at.
+const SEEK = { y: 116, from: 415, to: 1085 };
+const PREVIEW = { x: 212, y: 132, width: 1020, height: 495 };
 
 // SV_Target, SV_Target1..4 and Lit.
 const CHANNELS = 6;
@@ -68,8 +99,11 @@ const FATAL_TEXT = [
     /The app has crashed/,
 ];
 
+const noted: Message[] = [];
+
 function record(where: string, source: string, level: string, text: string) {
     const message: Message = { where: phase, source, level, text };
+    if (/assets\/avfx:/.test(text)) noted.push(message);
     if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
         muted.push(message);
         return;
@@ -230,10 +264,42 @@ async function main() {
 
     const report: Record<string, unknown> = {};
 
+    // One effect: opened by URL, given time to fetch its textures and packages, then shot whole. The
+    // preview draws on its own, so nothing here clicks.
+    async function effect(path: string, index: number) {
+        const name = path.split("/").pop() ?? path;
+        phase = `avfx:${name}`;
+        console.log(`\n== effect: ${path}`);
+        const before = await counters(cdp).catch(() => ({}) as any);
+        await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
+        await waitFor("the effect to be titled", 180_000, async () => {
+            const title = await cdp.eval<string>("document.title").catch(() => "");
+            return title.includes(name);
+        });
+        // Long enough for the two apricot packages, which are 20 and 40 MiB, and for the textures.
+        await sleep(12000);
+        const held = `05-avfx-${String(index).padStart(2, "0")}-${name.replace(/\.avfx$/, "")}`;
+        for (const part of [0.3, 0.6]) {
+            await click(cdp, SEEK.from + (SEEK.to - SEEK.from) * part, SEEK.y);
+            await sleep(1500);
+            await shot(cdp, `${held}-${part}`, PREVIEW);
+        }
+        const after = await counters(cdp);
+        console.log(
+            `   draws +${(after.draws ?? 0) - (before.draws ?? 0)}` +
+                ` links +${(after.links ?? 0) - (before.links ?? 0)}`,
+        );
+        for (const message of noted.filter((held) => held.where === phase)) {
+            console.log(`   ${message.text.split("\n")[0].slice(0, 200)}`);
+        }
+        return { path, draws: (after.draws ?? 0) - (before.draws ?? 0), links: (after.links ?? 0) - (before.links ?? 0) };
+    }
+
     try {
         phase = "boot";
-        console.log(`\n== boot: ${origin}/assets/${MODEL}`);
-        await cdp.send("Page.navigate", { url: `${origin}/assets/${MODEL}` });
+        const first = effectsOnly ? `${origin}/assets/${EFFECTS[0]}` : `${origin}/assets/${MODEL}`;
+        console.log(`\n== boot: ${first}`);
+        await cdp.send("Page.navigate", { url: first });
 
         await waitFor("the wasm app to take a GL context", 180_000, async () => {
             const c = await counters(cdp).catch(() => ({}) as any);
@@ -250,6 +316,14 @@ async function main() {
                 `canvas is single-sampled (SAMPLES=${booted.samples}); the multisample blit bug ` +
                     `cannot reproduce here, so this run would not be a real gate`,
             );
+        }
+
+        if (effectsOnly) {
+            report.effects = [];
+            for (const [index, path] of EFFECTS.entries()) {
+                (report.effects as unknown[]).push(await effect(path, index));
+            }
+            return;
         }
 
         phase = "model";
@@ -333,9 +407,17 @@ async function main() {
         const scene = await counters(cdp);
         console.log(`   instanced draws: ${scene.instanced}  links: ${scene.links}`);
         report.scene = scene;
+
+        report.effects = [];
+        for (const [index, path] of EFFECTS.entries()) {
+            (report.effects as unknown[]).push(await effect(path, index));
+        }
     } finally {
         if (crashed) failures.push({ where: phase, source: "browser", level: "error", text: "the renderer process crashed" });
-        writeFileSync(join(root, "smoke/last-run.json"), JSON.stringify({ report, failures, muted }, null, 2));
+        writeFileSync(
+            join(root, "smoke/last-run.json"),
+            JSON.stringify({ report, failures, noted, muted }, null, 2),
+        );
         cdp.close();
         child.kill();
         await server.stop(true);

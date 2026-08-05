@@ -992,9 +992,8 @@ impl Scene {
             levels.push(built);
             meshes.push(used);
         }
-        if drawn.iter().all(|held| !held) {
-            anyhow::bail!("this model draws nothing at any detail level");
-        }
+        // A model may carry no standard mesh at any level, which plenty of terrain plates do not.
+        // That is what the model holds rather than a failure to read it, and `drawn` already says so.
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
         self.renderer

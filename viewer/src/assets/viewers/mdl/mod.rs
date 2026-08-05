@@ -12,6 +12,7 @@
 //! Shape keys are applied by rewriting the indices they name, which is what the file states rather
 //! than a blend, so a shape is either on or off.
 
+pub(super) mod deferred;
 pub(super) mod gpu;
 pub(super) mod material;
 pub(super) mod program;
@@ -1011,8 +1012,12 @@ impl Rendered {
                 projection: held,
                 model: Mat4::IDENTITY,
                 light: KEY,
-                point: camera.target + Vec3::new(0.0, level.radius, level.radius),
-                range: level.radius * 2.0,
+                lamp: program::Lamp {
+                    placement: Mat4::from_translation(
+                        camera.target + Vec3::new(0.0, level.radius, level.radius),
+                    ) * Mat4::from_scale(Vec3::splat(level.radius * 2.0)),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             lighting,
@@ -1113,6 +1118,7 @@ impl Rendered {
                     material,
                     set,
                     program::Pass::Buffer,
+                    program::SUB_VIEW_MAIN,
                     at,
                     attachments,
                 )
@@ -1126,6 +1132,7 @@ impl Rendered {
                     material,
                     set,
                     program::Pass::Depth,
+                    program::SUB_VIEW_MAIN,
                     0,
                     attachments,
                 );

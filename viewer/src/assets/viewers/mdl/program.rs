@@ -17,12 +17,21 @@ use ironworks::file::shpk::{self, ShaderPackage, Stage};
 
 use super::material::Material;
 
-/// The passes a model is drawn with, and the subview they are drawn under.
+/// The passes a model is drawn with.
 const PASS_G_OPAQUE: u32 = 0x03ac_862e;
+const PASS_G_SEMITRANSPARENCY: u32 = 0x6006_067f;
 const PASS_Z_OPAQUE: u32 = 0xe412_a2d4;
 const PASS_LIGHTING_OPAQUE: u32 = 0xfbde_0a8f;
 const PASS_COMPOSITE_OPAQUE: u32 = 0x955c_0b73;
-const SUB_VIEW_MAIN: u32 = 0xf43b_2f35;
+const PASS_COMPOSITE_SEMITRANSPARENCY: u32 = 0xc885_bbd3;
+
+/// The render pass a node is selected under. Holding everything else fixed, a drawing package
+/// answers `SUB_VIEW_SHADOW_0` with its depth pass alone, which is what a shadow map is.
+pub const SUB_VIEW_MAIN: u32 = 0xf43b_2f35;
+pub const SUB_VIEW_SHADOW_0: u32 = 0x99b2_2d1c;
+pub const SUB_VIEW_CUBE_0: u32 = 0x6624_4231;
+pub const SUB_VIEW_ROOF: u32 = 0xae5e_6a42;
+pub const SUB_VIEW_MAIN_SELECT: u32 = 0x0c01_20ca;
 
 /// The packages the frame is lit and resolved with, in the order they run, and the pass each is run
 /// under. What each reads is what the one before it wrote.
@@ -49,13 +58,20 @@ pub const ROW: usize = hlsl::glsl::ROW as usize;
 /// Dwords of one joint's transform: four columns of three floats, densely packed.
 const JOINT: usize = 12;
 
-/// Which pass of the node to take.
+/// The buffer a drawing package reads one record of per object drawn.
+const INSTANCING: &str = "g_InstancingData";
+
+/// Which pass of the node to take. `Lighting` and `Lamp` take the same one: the sun and a placed
+/// light are separate packages reading one buffer differently.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
     Depth,
     Buffer,
+    Blended,
     Lighting,
+    Lamp,
     Composite,
+    CompositeBlended,
 }
 
 impl Pass {
@@ -63,8 +79,10 @@ impl Pass {
         match self {
             Self::Depth => PASS_Z_OPAQUE,
             Self::Buffer => PASS_G_OPAQUE,
-            Self::Lighting => PASS_LIGHTING_OPAQUE,
+            Self::Blended => PASS_G_SEMITRANSPARENCY,
+            Self::Lighting | Self::Lamp => PASS_LIGHTING_OPAQUE,
             Self::Composite => PASS_COMPOSITE_OPAQUE,
+            Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
         }
     }
 }
@@ -116,6 +134,54 @@ pub struct Structured {
     pub stride: usize,
 }
 
+/// One object of a batch, as `g_InstancingData` holds one.
+#[derive(Clone, Copy)]
+pub struct Instance {
+    /// Where the object stands, in world space.
+    pub transform: Mat4,
+    /// How much sky reaches it, which a zone states per instance in its `.svb`.
+    pub sky_visibility: f32,
+}
+
+impl Default for Instance {
+    fn default() -> Self {
+        Self {
+            transform: Mat4::IDENTITY,
+            sky_visibility: 1.0,
+        }
+    }
+}
+
+/// One placed light, as `g_LightParam` reads it. The box is stated in the light's own space, which
+/// is where a zone's `.lcb` states it, and the vertex shader clamps its volume to it before
+/// projecting.
+#[derive(Clone, Copy)]
+pub struct Lamp {
+    /// Takes the light's own space into the world.
+    pub placement: Mat4,
+    pub min: Vec3,
+    pub max: Vec3,
+    pub color: Vec3,
+}
+
+impl Default for Lamp {
+    fn default() -> Self {
+        Self {
+            placement: Mat4::IDENTITY,
+            min: Vec3::splat(-1.0),
+            max: Vec3::ONE,
+            color: Vec3::ONE,
+        }
+    }
+}
+
+impl Lamp {
+    /// How far the light carries, which is what its own falloff is scaled by.
+    fn reach(&self) -> f32 {
+        ((self.max - self.min) * 0.5).max_element().max(0.001)
+    }
+}
+
 /// What the engine decides rather than the files. Everything a constant buffer holds that is not the
 /// material's own comes from here, so a field that has to be reconstructed is reconstructed once.
 #[derive(Clone, Copy)]
@@ -127,9 +193,8 @@ pub struct Scene {
     pub size: (f32, f32),
     /// Which way the sun comes from, in world space.
     pub light: Vec3,
-    /// Where the point light stands, in world space, and how far it reaches.
-    pub point: Vec3,
-    pub range: f32,
+    /// The light a lamp pass is drawing.
+    pub lamp: Lamp,
     pub diffuse: Vec3,
     pub specular: Vec3,
     /// What the composite lights a surface with where no light reaches it.
@@ -144,8 +209,7 @@ impl Default for Scene {
             model: Mat4::IDENTITY,
             size: (1.0, 1.0),
             light: Vec3::Y,
-            point: Vec3::ZERO,
-            range: 1.0,
+            lamp: Lamp::default(),
             diffuse: Vec3::ONE,
             specular: Vec3::ONE,
             ambient: Vec3::splat(0.12),
@@ -208,6 +272,7 @@ fn pair(
     material: &[mtrl::ShaderKey],
     set: &[(u32, u32)],
     pass: u32,
+    subview: u32,
 ) -> Option<(u32, u32)> {
     let mut parts: Vec<u32> = [
         package.system_keys(),
@@ -217,7 +282,7 @@ fn pair(
     .iter()
     .map(|keys| selector(&values(keys, material, set)))
     .collect();
-    parts.push(selector(&[package.subview_defaults()[0], SUB_VIEW_MAIN]));
+    parts.push(selector(&[package.subview_defaults()[0], subview]));
     let id = selector(&parts);
 
     // Lookup is by node id, falling back to the alias table: skin and hair only resolve through it.
@@ -397,12 +462,13 @@ impl Program {
         material: &Material,
         set: &[(u32, u32)],
         pass: Pass,
+        subview: u32,
         target: usize,
         attachments: usize,
     ) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         let held = material.held();
-        let (vs, ps) = pair(&package, held.shader_keys(), set, pass.id())
+        let (vs, ps) = pair(&package, held.shader_keys(), set, pass.id(), subview)
             .ok_or("this material's keys reach no such pass")?;
         Self::assemble(
             &package,
@@ -421,8 +487,8 @@ impl Program {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         // The package defaults `GetDirectionalLight` to the shader that writes no light at all.
         let set = [(GET_DIRECTIONAL_LIGHT, GET_DIRECTIONAL_LIGHT_ENABLE)];
-        let (vs, ps) =
-            pair(&package, &[], &set, pass.id()).ok_or("this package reaches no such pass")?;
+        let (vs, ps) = pair(&package, &[], &set, pass.id(), SUB_VIEW_MAIN)
+            .ok_or("this package reaches no such pass")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
     }
 
@@ -573,13 +639,44 @@ impl Program {
         let register = self.outputs.get(target)?;
         self.targets.iter().position(|held| held == register)
     }
+
+    /// How many objects one draw of this pass covers. A package with no instancing buffer draws one.
+    pub fn batch(&self) -> usize {
+        self.buffers
+            .iter()
+            .map(Buffer::instances)
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
 }
 
 impl Buffer {
+    /// Bytes of one record, where the reflection describes one and the buffer holds many.
+    fn stride(&self) -> u32 {
+        self.members
+            .iter()
+            .map(|member| member.offset + member.size)
+            .max()
+            .unwrap_or(0)
+            .max(16)
+            .div_ceil(16)
+            * 16
+    }
+
+    /// How many objects one draw covers, which is the instancing buffer's own extent over the
+    /// record the reflection describes.
+    pub fn instances(&self) -> usize {
+        match self.name == INSTANCING {
+            true => (self.registers * 16 / self.stride()).max(1) as usize,
+            false => 1,
+        }
+    }
+
     /// The bytes this buffer holds, filled by field name off the reflection. What the files decide
-    /// is worked out once; everything else is the camera and the light this viewer controls, and
-    /// whatever nothing names stays zero.
-    pub fn fill(&self, scene: &Scene, pass: Pass) -> Vec<u8> {
+    /// is worked out once; everything else is the camera, the objects being drawn and the light this
+    /// pass carries, and whatever nothing names stays zero.
+    pub fn fill(&self, scene: &Scene, pass: Pass, instances: &[Instance]) -> Vec<u8> {
         let Scene {
             view,
             projection,
@@ -625,6 +722,10 @@ impl Buffer {
                 }
             }
         };
+        if self.name == INSTANCING {
+            self.instancing(scene, instances, &mut out);
+            return out;
+        }
         if self.name == "g_AmbientParamArray" {
             ambient(scene, &mut out);
             return out;
@@ -700,40 +801,91 @@ impl Buffer {
             "m_Direction",
             (axes * scene.light).normalize_or_zero().to_array().to_vec(),
         );
-        put("m_DiffuseColor", scene.diffuse.to_array().to_vec());
-        put("m_SpecularColor", scene.specular.to_array().to_vec());
+        let lamp = scene.lamp;
+        let color = match pass {
+            Pass::Lamp => lamp.color,
+            _ => scene.diffuse,
+        };
+        put("m_DiffuseColor", color.to_array().to_vec());
+        put(
+            "m_SpecularColor",
+            match pass {
+                Pass::Lamp => lamp.color,
+                _ => scene.specular,
+            }
+            .to_array()
+            .to_vec(),
+        );
         // The two lighting packages read this buffer differently. A sun fades with the depth of the
         // pixel, and the fade is off here: the scale is cubed and clamped, so a constant one leaves
         // it alone. A lamp is clipped at the square of its own reach and scaled by it.
+        let reach = lamp.reach();
         put(
             "m_Attenuation",
             match pass {
-                Pass::Composite => vec![0.0, 0.0, 1.0, 0.0],
-                _ => vec![0.0, 0.0, 1.0 / (scene.range * scene.range), scene.range],
+                Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.0],
+                _ => vec![0.0, 0.0, 1.0 / (reach * reach), reach],
             },
         );
         put("m_LightFadeValueStatic", vec![1.0]);
         put("m_LightFadeValueDynamic", vec![1.0]);
 
-        // A point light is drawn as the volume it reaches, which its own vertex shader clamps and
-        // then projects, so the transform carries where the light stands and how far it goes.
-        let placed =
-            Mat4::from_translation(scene.point) * Mat4::from_scale(Vec3::splat(scene.range));
+        // A lamp is drawn as the volume it reaches: its own vertex shader clamps a unit box to the
+        // extents the zone clips it against and then projects, so the transform carries where the
+        // light stands and the extents say how far it goes.
         put(
             "m_Position",
-            (view * scene.point.extend(1.0)).to_array().to_vec(),
+            (view * lamp.placement * Vec3::ZERO.extend(1.0))
+                .to_array()
+                .to_vec(),
         );
-        put("m_ClipMin", vec![-1.0, -1.0, -1.0, 0.0]);
-        put("m_ClipMax", vec![1.0, 1.0, 1.0, 0.0]);
+        put("m_ClipMin", lamp.min.to_array().to_vec());
+        put("m_ClipMax", lamp.max.to_array().to_vec());
         put(
             "m_WorldViewProjectionMatrix",
-            rows(view_projection * placed, 4),
+            rows(view_projection * lamp.placement, 4),
         );
         put(
             "m_WorldViewInversMatrix",
-            rows((view * placed).inverse(), 3),
+            rows((view * lamp.placement).inverse(), 3),
         );
         out
+    }
+
+    /// One record per object drawn, at the stride the reflection's own record takes. The transform
+    /// takes an object into view space rather than into the world: what a shader multiplies by after
+    /// it is the projection alone.
+    fn instancing(&self, scene: &Scene, instances: &[Instance], out: &mut [u8]) {
+        let stride = self.stride() as usize;
+        let mut put = |at: usize, name: &str, values: &[f32]| {
+            let Some(member) = self.members.iter().find(|held| held.name == name) else {
+                return;
+            };
+            for (lane, value) in values.iter().enumerate() {
+                let offset = at * stride + member.offset as usize + lane * 4;
+                if offset + 4 <= out.len() {
+                    out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        };
+        let held = [Instance {
+            transform: scene.model,
+            ..Instance::default()
+        }];
+        let instances = match instances.is_empty() {
+            true => &held[..],
+            false => instances,
+        };
+        for (at, instance) in instances.iter().enumerate().take(self.instances()) {
+            let world_view = scene.view * instance.transform;
+            put(
+                at,
+                "m_TransformMatrix",
+                &world_view.transpose().to_cols_array()[..12],
+            );
+            put(at, "m_SkyVisibility", &[instance.sky_visibility]);
+            put(at, "m_DitherAlpha", &[1.0]);
+        }
     }
 }
 

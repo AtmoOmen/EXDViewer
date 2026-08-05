@@ -1085,12 +1085,11 @@ impl Rendered {
                 for (_, drawn) in &held {
                     match shape {
                         sim::Shape::Sprite => {
-                            let scale = Vec3::from(drawn.scale);
                             let (across, down) = facing(drawn, eye, right, up);
                             gpu::quad(
                                 Vec3::from(drawn.center),
-                                across * scale.x,
-                                down * scale.y,
+                                across,
+                                down,
                                 drawn.color,
                                 &drawn.uv,
                                 &mut vertices,
@@ -1192,15 +1191,19 @@ impl Rendered {
     }
 }
 
-/// The two world axes one sprite's quad spans, in the frame its file asks for. The shape package
+/// The two edges one sprite's quad spans, each as long as the scale along it. The shape package
 /// reads a stream the viewer has already placed in the world, so which way a particle is turned is
 /// settled here rather than in the shader.
 fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) {
+    let scale = Vec3::from(drawn.scale);
     // A quad in the screen's plane can carry only the turn about its own normal, and the file writes
     // that one as the last of its Euler angles.
     let spun = |across: Vec3, down: Vec3| {
         let (sin, cos) = drawn.roll.sin_cos();
-        (across * cos + down * sin, down * cos - across * sin)
+        (
+            (across * cos + down * sin) * scale.x,
+            (down * cos - across * sin) * scale.y,
+        )
     };
     match drawn.facing {
         sim::Facing::Camera => {
@@ -1214,7 +1217,18 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
             let across = Vec3::Y
                 .cross(eye - Vec3::from(drawn.center))
                 .normalize_or(right);
-            (across, Vec3::Y)
+            (across * scale.x, Vec3::Y * scale.y)
+        }
+        // A quad the camera has no say in carries the whole of its own turn rather than the roll, and
+        // spans the two axes it is scaled along rather than the first two.
+        sim::Facing::Still(axis) => {
+            let (across, down) = match axis {
+                sim::Axis::X => (Vec3::Z * scale.z, Vec3::Y * scale.y),
+                sim::Axis::Y => (Vec3::X * scale.x, Vec3::Z * scale.z),
+                sim::Axis::Z => (Vec3::X * scale.x, Vec3::Y * scale.y),
+            };
+            let turn = glam::Quat::from_array(drawn.turn);
+            (turn * across, turn * down)
         }
         sim::Facing::Screen => spun(right, up),
     }

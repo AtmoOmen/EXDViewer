@@ -79,6 +79,11 @@ const VIEWPORT = { x: 215, y: 140, width: 1080, height: 840 };
 const ORBIT_FROM = { x: 800, y: 600 };
 const ORBIT_ANGLES = [220, 220, 220, 220];
 
+// A whole turn in eighths, for the effects. The viewer turns a hundredth of a radian per pixel, and
+// a quad lying in a world plane loses its coverage as the camera swings into that plane, so the step
+// has to be small enough to land near the minimum.
+const SWEEP = { steps: 8, by: 79 };
+
 // The preview path's own debug row, which stands where the channel row does once game shaders are
 // on. Recalibrate these with --explore alongside the ones above.
 const VIEWS: [string, number][] = [
@@ -347,6 +352,10 @@ async function main() {
         phase = `avfx:${name}`;
         console.log(`\n== effect: ${path}`);
         await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
+        // eframe writes egui's memory out as the page unloads, and the details panel's width is in
+        // it: an earlier phase leaves the panel wide enough to move the playback bar out from under
+        // `SEEK`. The store is gone by the time the wasm has loaded and read it.
+        await cdp.eval("localStorage.clear()").catch(() => {});
         await waitFor("the effect to be titled", 180_000, async () => {
             const title = await cdp.eval<string>("document.title").catch(() => "");
             return title.includes(name);
@@ -362,6 +371,14 @@ async function main() {
             // The clip is what the comparison runs on; the whole window is what says where the
             // playback bar actually is when the clip stops moving.
             if (shots) await shot(cdp, `${held}-${part}-window`);
+        }
+        // Turned after the seek, so the run is paused and every shot is of the same frame from a
+        // different angle.
+        if (orbit) {
+            for (let at = 0; at < SWEEP.steps; at++) {
+                await drag(cdp, SWEEP.by);
+                await shot(cdp, `${held}-turn-${at}`, PREVIEW);
+            }
         }
         // A navigation resets the counters, so what is drawn is the absolute count, not a delta.
         const after = await counters(cdp);

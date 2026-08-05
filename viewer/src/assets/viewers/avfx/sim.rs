@@ -292,9 +292,16 @@ impl From<i32> for Blend {
     }
 }
 
-/// Which way a sprite is turned to be drawn, `RBDT`. The three the file names after a world axis and
-/// the two that read a velocity are drawn against the screen, since what a quad lies in for those is
-/// not settled: a kind that wants an axis of its own names one under its own tag.
+/// A world axis, as `RBDT` names one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+/// Which way a sprite is turned to be drawn, `RBDT`. The two that read a velocity are drawn against
+/// the screen.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Facing {
     /// Set into the screen's own plane.
@@ -303,13 +310,22 @@ pub enum Facing {
     Camera,
     /// Billed about the world's up axis, so it turns with the camera but never leans.
     Upright,
+    /// Left lying in the world, across the two axes the one it names stands out of.
+    Still(Axis),
 }
 
-impl From<i32> for Facing {
-    fn from(value: i32) -> Self {
-        match value {
-            4 | 8 | 9 => Self::Upright,
-            6 => Self::Camera,
+impl Facing {
+    /// What `RBDT` reads as for a particle of `kind`. A decal is cast onto what lies under it, so
+    /// the axis it names settles nothing: it is scaled across x and z, where every other kind is
+    /// scaled across the two axes the one it names leaves.
+    fn read(kind: i32, base: i32) -> Self {
+        match (kind, base) {
+            (10..=12, 0..=2) => Self::Still(Axis::Y),
+            (_, 0) => Self::Still(Axis::X),
+            (_, 1) => Self::Still(Axis::Y),
+            (_, 2) => Self::Still(Axis::Z),
+            (_, 4 | 8 | 9) => Self::Upright,
+            (_, 6) => Self::Camera,
             _ => Self::Screen,
         }
     }
@@ -509,8 +525,9 @@ impl Particle {
             Some(model) if model < models => Shape::Model(model),
             _ => Shape::Sprite,
         };
+        let kind = integer(blocks, "PrVT").unwrap_or_default();
         // The kinds that draw geometry name it under a tag of their own.
-        let shape = match integer(blocks, "PrVT").unwrap_or_default() {
+        let shape = match kind {
             5 | 14 => model("MdNo"),
             13 => model("MNO"),
             _ => Shape::Sprite,
@@ -538,7 +555,7 @@ impl Particle {
                 .map(UvSet::read)
                 .collect(),
             texture: index(nested(blocks, "TC1"), "TLst"),
-            facing: integer(blocks, "RBDT").unwrap_or_default().into(),
+            facing: Facing::read(kind, integer(blocks, "RBDT").unwrap_or_default()),
             blend: integer(blocks, "RMT").unwrap_or_default().into(),
         }
     }

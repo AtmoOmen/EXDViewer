@@ -15,8 +15,9 @@ to `smoke/shots/`, `--model-only` stops after the model renders and skips every 
 `--avfx-only` runs the effects and nothing else, `--explore` is `--model-only` with screenshots
 (use it to recalibrate the click coordinates in `smoke.ts` after a UI change). `--orbit` turns the
 camera between shots, which is what makes an ordering fault show rather than depending on the one
-angle a model happens to open at; `--views` walks the preview path's own debug row. Every run
-writes `smoke/last-run.json`.
+angle a model happens to open at, and takes each effect a whole turn in eighths once it is paused,
+which is what a quad lying in a world plane has to lose its coverage across; `--views` walks the
+preview path's own debug row. Every run writes `smoke/last-run.json`.
 
 A full run opens **nine effects** after the scene and takes around twenty minutes. Each one is a
 fresh page, so each one pulls the two apricot packages again, and they are 20 and 40 MiB.
@@ -55,7 +56,8 @@ It then walks the paths that broke:
    any of that, which is what catches the deferred path leaving GL state behind.
 5. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
 6. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
-7. Opens each `.avfx` in turn, and clicks its playback slider at two points of its own timeline,
+7. Opens each `.avfx` in turn, dropping local storage behind the navigation since eframe writes
+   egui's panel widths into it, and clicks its playback slider at two points of its own timeline,
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
@@ -81,20 +83,19 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-The effects seek, but only in a **full** run: it fails on `every effect looked identical at both
-points of its timeline` for all nine at once, while `--avfx-only` over the same effects seeks
-correctly and their two shots differ. So the effects themselves draw and the twelve-second wait is
-adequate; what breaks is where the run clicks.
+Nothing at present.
 
-`SEEK` and `PREVIEW` are absolute window coordinates, and **the details panel is resizable and egui
-remembers its width across a navigation**. An earlier phase leaves it wide (a character model's
-material list is the widest thing the panel holds), which squeezes the viewer pane and moves the
-playback bar out from under `SEEK`. Measured on the same build: the panel's left edge sits at about
-x=1240 in an `--avfx-only` run and about x=842 after the model, scene and level phases have run.
-
-Fixing it means not depending on a persisted layout: reset the panel width before the effects
-phase, or find the bar rather than assuming where it is. Do **not** weaken the assertion, which is
-the only thing standing between this and shots of an arbitrary frame.
+The effects seek used to fail in a **full** run and only there, on `every effect looked identical at
+both points of its timeline` for all nine at once. `SEEK` and `PREVIEW` are absolute window
+coordinates, and **the details panel is resizable and egui remembers its width across a
+navigation**: an earlier phase left it wide (a character model's material list is the widest thing
+the panel holds), which squeezed the viewer pane and moved the playback bar out from under `SEEK`.
+Measured on one build, the panel's left edge sat at about x=1240 in an `--avfx-only` run and about
+x=828 after the model, scene and level phases. **eframe writes that memory out as the page unloads**,
+not on a timer, so local storage is empty for the whole of a phase and the width only lands as the
+next navigation commits; clearing the store before the effects start therefore did nothing. Each
+effect now clears it just behind its own navigation, which is before the wasm has loaded and read
+it.
 
 Both of the problems reported at `f8b3ecc` are fixed. `glDrawArrays: Mismatch between texture
 format and sampler type` was the stand-in textures being made lazily from inside the binding loop:

@@ -14,6 +14,7 @@
 
 pub(super) mod gpu;
 pub(super) mod material;
+pub(super) mod program;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -49,20 +50,34 @@ const FOV: f32 = 40.0_f32.to_radians();
 /// How much of the model's radius the initial framing leaves as margin.
 const MARGIN: f32 = 1.25;
 
+/// The scene key deciding whether a shader skins, and the value asking it to. Nothing in a file
+/// says it; a mesh carrying bone indices is what the engine would set it from.
+const TRANSFORM_VIEW: u32 = 0xa5a1_910d;
+const TRANSFORM_VIEW_SKIN: u32 = 0x9c14_c8e9;
+
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
 
 /// A vertex as the shader reads it. `#[repr(C)]` with no padding, so a mesh uploads as its own
 /// slice.
+///
+/// Every semantic a drawing package asks for is here whether or not a given shader reads it, so one
+/// upload serves both this viewer's own shading and the game's, which bind different subsets of it.
+/// Tangents are kept as the file states them, since the game's own shaders do their own unbiasing.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     position: [f32; 3],
     normal: [f32; 3],
     tangent: [f32; 4],
-    uv: [f32; 2],
+    bitangent: [f32; 4],
+    uv: [f32; 4],
+    uv1: [f32; 4],
     color: [u8; 4],
+    color1: [u8; 4],
+    weights: [u8; 4],
+    bones: [u8; 4],
 }
 
 /// Where the camera is looking from.
@@ -136,6 +151,22 @@ enum Slot {
     Failed(String),
 }
 
+/// A shader package, from the moment a material names it to the moment it can be translated.
+enum Package {
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready(Vec<u8>),
+    Failed(String),
+}
+
+/// One material's translated shaders, and what they were translated for: which channel is being
+/// shown decides which of the shader's targets a reading writes, and how many attachments the
+/// context allows decides how many of them fit in one.
+struct Translated {
+    target: usize,
+    attachments: usize,
+    held: Result<(Arc<program::Program>, Option<Arc<program::Program>>), String>,
+}
+
 /// One detail level's geometry, and everything the browser says about it.
 struct Level {
     identity: Vec<(&'static str, String)>,
@@ -152,6 +183,9 @@ struct Level {
     home: Camera,
     /// Half the bounding box's diagonal, which the depth range is cut to.
     radius: f32,
+    /// Whether any mesh carries bone indices, which is what decides whether the game would draw
+    /// this model through its skinning variant.
+    skinned: bool,
     gpu: Arc<Mutex<gpu::Model>>,
 }
 
@@ -170,10 +204,20 @@ pub struct Rendered {
     shapes: RefCell<BTreeSet<String>>,
     slots: RefCell<Vec<Option<Slot>>>,
     textures: RefCell<BTreeMap<String, Texture>>,
+    /// Shader packages the materials name, by path, since several materials share one.
+    packages: RefCell<BTreeMap<String, Package>>,
+    /// The translated shaders, by material.
+    translated: RefCell<BTreeMap<usize, Translated>>,
+    /// The color table in the game's own layout, by material.
+    tables: RefCell<BTreeMap<usize, Arc<(Vec<u16>, usize, usize)>>>,
     camera: Cell<Camera>,
     /// Decoded texture bytes handed to egui so far.
     resident: Cell<usize>,
     debug: Cell<gpu::Debug>,
+    /// Whether to draw with the game's own shaders rather than with this viewer's approximation.
+    shaded: Cell<bool>,
+    /// Which G-buffer channel the game's own shaders put on screen.
+    target: Cell<usize>,
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
@@ -195,9 +239,14 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         shapes: Default::default(),
         level: RefCell::new(level),
         textures: Default::default(),
+        packages: Default::default(),
+        translated: Default::default(),
+        tables: Default::default(),
         camera: Cell::new(camera),
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
+        shaded: Cell::new(false),
+        target: Cell::new(0),
     })))
 }
 
@@ -225,6 +274,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         declared.iter().map(|_| Vec::new()).collect();
 
     let mut skipped: Vec<MeshKind> = Vec::new();
+    let mut skinned = false;
     for (index, mesh) in model.meshes().into_iter().enumerate() {
         if !mesh.kinds().contains(&MeshKind::Standard) {
             for kind in mesh.kinds() {
@@ -235,7 +285,12 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
             continue;
         }
         let built = match (mesh.attributes(), mesh.indices()) {
-            (Ok(attributes), Ok(indices)) => build(&attributes, indices),
+            (Ok(attributes), Ok(indices)) => {
+                skinned |= attributes.iter().any(|attribute| {
+                    attribute.kind as u8 == VertexAttributeKind::BlendIndices as u8
+                });
+                build(&attributes, indices)
+            }
             (Err(why), _) | (_, Err(why)) => Err(why.to_string()),
         };
         let (vertices, indices) = match built {
@@ -381,6 +436,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         unreadable,
         home,
         radius,
+        skinned,
         gpu: gpu::Model::new(pending),
     })
 }
@@ -391,35 +447,23 @@ pub(super) fn build(
     attributes: &[ironworks::file::mdl::VertexAttribute],
     indices: Vec<u16>,
 ) -> Result<(Vec<Vertex>, Vec<u16>), String> {
-    let mut positions = None;
-    let mut normals = None;
-    let mut tangents = None;
-    let mut uvs = None;
-    let mut colors = None;
-    for attribute in attributes {
-        let slot = match attribute.kind {
-            VertexAttributeKind::Position => &mut positions,
-            VertexAttributeKind::Normal => &mut normals,
-            VertexAttributeKind::Tangent1 => &mut tangents,
-            VertexAttributeKind::Uv => &mut uvs,
-            VertexAttributeKind::Color => &mut colors,
-            _ => continue,
-        };
-        // The lowest usage index rather than the first declared: a second UV or color set belongs
-        // to shading this viewer does not do, and nothing promises the sets arrive in order.
-        if slot.is_none_or(|(held, _, _)| attribute.usage_index < held) {
-            *slot = Some((attribute.usage_index, &attribute.values, attribute.format));
-        }
-    }
-    let positions = positions.map(|(_, values, _)| values);
-    let normals = normals.map(|(_, values, _)| values);
-    // Only a byte tangent arrives scaled to 0..1; a half or float one is already signed.
-    let signed = tangents.is_some_and(|(_, _, format)| format != VertexFormat::ByteFloat4);
-    let tangents = tangents.map(|(_, values, _)| values);
-    let uvs = uvs.map(|(_, values, _)| values);
-    let colors = colors.map(|(_, values, _)| values);
+    let held = |kind: u8, usage: u8| {
+        attributes
+            .iter()
+            .find(|attribute| attribute.kind as u8 == kind && attribute.usage_index == usage)
+    };
+    let positions = held(VertexAttributeKind::Position as u8, 0);
+    let normals = held(VertexAttributeKind::Normal as u8, 0);
+    let tangents = held(VertexAttributeKind::Tangent1 as u8, 0);
+    let bitangents = held(VertexAttributeKind::Tangent2 as u8, 0);
+    let uvs = held(VertexAttributeKind::Uv as u8, 0);
+    let uvs1 = held(VertexAttributeKind::Uv as u8, 1);
+    let colors = held(VertexAttributeKind::Color as u8, 0);
+    let colors1 = held(VertexAttributeKind::Color as u8, 1);
+    let weights = held(VertexAttributeKind::BlendWeights as u8, 0);
+    let bones = held(VertexAttributeKind::BlendIndices as u8, 0);
 
-    let Some(positions) = positions else {
+    let Some(positions) = positions.map(|held| &held.values) else {
         return Err("mesh declares no vertex positions".into());
     };
     let count = match positions {
@@ -433,30 +477,45 @@ pub(super) fn build(
         ));
     }
 
+    let (normals, uvs, uvs1) = (values(normals), values(uvs), values(uvs1));
+    let (colors, colors1) = (values(colors), values(colors1));
+    let (weights, bones) = (values(weights), values(bones));
+    // A byte tangent arrives scaled to nought and one, which is the convention the game's own
+    // shaders unbias from, so a half or float one is put back into it rather than the other way.
+    let frame = |held: Option<&ironworks::file::mdl::VertexAttribute>, at| {
+        let held = held?;
+        let value = xyzw(&held.values, at)?;
+        Some(match held.format {
+            VertexFormat::ByteFloat4 => value,
+            _ => value.map(|channel| channel * 0.5 + 0.5),
+        })
+    };
+
     let vertices = (0..count)
         .map(|at| Vertex {
             position: xyz(positions, at).unwrap_or_default(),
             normal: normals
                 .and_then(|held| xyz(held, at))
                 .unwrap_or([0.0, 1.0, 0.0]),
-            // A mesh with no tangent gets a zero one, which the shader reads as "no tangent"
-            // rather than lighting a normal map through a frame nothing measured.
-            tangent: tangents.and_then(|held| xyzw(held, at)).map_or(
-                [0.0; 4],
-                |value| match signed {
-                    true => value,
-                    false => value.map(|channel| channel * 2.0 - 1.0),
-                },
-            ),
+            // A mesh with no frame gets a flat one, which unbiases to the surface normal rather
+            // than to a basis nothing measured.
+            tangent: frame(tangents, at).unwrap_or([0.5, 0.5, 1.0, 1.0]),
+            bitangent: frame(bitangents, at).unwrap_or([0.5, 0.5, 1.0, 1.0]),
             uv: uvs.and_then(|held| uv(held, at)).unwrap_or_default(),
-            color: colors
-                .and_then(|held| xyzw(held, at))
-                .map_or([255; 4], |value| {
-                    value.map(|channel| (channel.clamp(0.0, 1.0) * 255.0) as u8)
-                }),
+            uv1: uvs1.and_then(|held| uv(held, at)).unwrap_or_default(),
+            color: colors.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
+            color1: colors1.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
+            weights: weights
+                .and_then(|held| bytes(held, at))
+                .unwrap_or([255, 0, 0, 0]),
+            bones: bones.and_then(|held| bytes(held, at)).unwrap_or_default(),
         })
         .collect();
     Ok((vertices, indices))
+}
+
+fn values(held: Option<&ironworks::file::mdl::VertexAttribute>) -> Option<&VertexValues> {
+    Some(&held?.values)
 }
 
 fn xyz(values: &VertexValues, at: usize) -> Option<[f32; 3]> {
@@ -474,13 +533,30 @@ fn xyzw(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
     }
 }
 
-/// A half4 UV element carries two sets packed as `xy` and `zw`, so the first two components are the
-/// first set whichever shape the element took.
-fn uv(values: &VertexValues, at: usize) -> Option<[f32; 2]> {
+/// A half4 UV element carries two sets packed as `xy` and `zw`, so the whole element goes across
+/// rather than only the first two components.
+fn uv(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
     match values {
-        VertexValues::Vector2(held) => held.get(at).copied(),
-        VertexValues::Vector3(held) => held.get(at).map(|value| [value[0], value[1]]),
-        VertexValues::Vector4(held) => held.get(at).map(|value| [value[0], value[1]]),
+        VertexValues::Vector2(held) => held.get(at).map(|value| [value[0], value[1], 0.0, 0.0]),
+        VertexValues::Vector3(held) => {
+            held.get(at).map(|value| [value[0], value[1], value[2], 0.0])
+        }
+        VertexValues::Vector4(held) => held.get(at).copied(),
+        _ => None,
+    }
+}
+
+/// Four bytes of an attribute the shader reads as bytes. An eight-byte element carries two sets
+/// interleaved, the low half first, so its own four are every other one.
+fn bytes(values: &VertexValues, at: usize) -> Option<[u8; 4]> {
+    match values {
+        VertexValues::Vector4(held) => held
+            .get(at)
+            .map(|value| value.map(|channel| (channel.clamp(0.0, 1.0) * 255.0) as u8)),
+        VertexValues::Bytes8(held) => held.get(at).map(|value| {
+            [value[0], value[2], value[4], value[6]]
+        }),
+        VertexValues::Uint(held) => held.get(at).map(|value| value.to_le_bytes()),
         _ => None,
     }
 }
@@ -554,13 +630,36 @@ const VIEWS: [(gpu::Debug, &str); 9] = [
 
 pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     ui.horizontal_wrapped(|ui| {
-        let debug = model.debug.get();
-        for (mode, label) in VIEWS {
-            if ui.selectable_label(debug == mode, label).clicked() {
-                model.debug.set(match debug == mode {
-                    true => gpu::Debug::None,
-                    false => mode,
-                });
+        let shaded = model.shaded.get();
+        if ui
+            .selectable_label(shaded, "Game shaders")
+            .on_hover_text("Draw with the package the material names, into its own G-buffer")
+            .clicked()
+        {
+            model.shaded.set(!shaded);
+        }
+        match shaded {
+            true => {
+                let names = model.channels();
+                for (at, name) in names.iter().enumerate() {
+                    if ui
+                        .selectable_label(model.target.get() == at, name)
+                        .clicked()
+                    {
+                        model.target.set(at);
+                    }
+                }
+            }
+            false => {
+                let debug = model.debug.get();
+                for (mode, label) in VIEWS {
+                    if ui.selectable_label(debug == mode, label).clicked() {
+                        model.debug.set(match debug == mode {
+                            true => gpu::Debug::None,
+                            false => mode,
+                        });
+                    }
+                }
             }
         }
         let level = model.level.borrow();
@@ -634,12 +733,53 @@ impl Rendered {
             }
         }
 
+        if self.shaded.get() {
+            let mut packages = self.packages.borrow_mut();
+            for slot in slots.iter().flatten() {
+                let Slot::Ready(material) = slot else {
+                    continue;
+                };
+                let path = material.package();
+                if packages.contains_key(&path) {
+                    continue;
+                }
+                let files = backend.files().clone();
+                let wanted = path.clone();
+                packages.insert(
+                    path,
+                    Package::Fetching(TrackedPromise::spawn_local(async move {
+                        files.read(&wanted).await
+                    })),
+                );
+            }
+            for (path, package) in packages.iter_mut() {
+                let Package::Fetching(promise) = package else {
+                    continue;
+                };
+                let Some(result) = promise.try_get() else {
+                    continue;
+                };
+                *package = match result {
+                    Ok(bytes) => Package::Ready(bytes.clone()),
+                    Err(why) => {
+                        log::error!("assets/mdl: {path}: {why}");
+                        Package::Failed(why.to_string())
+                    }
+                };
+            }
+        }
+
         let mut textures = self.textures.borrow_mut();
         for slot in slots.iter().flatten() {
             let Slot::Ready(material) = slot else {
                 continue;
             };
-            for path in material.textures() {
+            let held: Vec<&String> = material.textures().collect();
+            let bound: Vec<String> = match self.shaded.get() {
+                true => material.bound().map(|(_, path)| path.to_owned()).collect(),
+                false => Vec::new(),
+            };
+            for path in held.into_iter().chain(bound.iter()) {
                 if textures.contains_key(path) {
                     continue;
                 }
@@ -772,9 +912,15 @@ impl Rendered {
             slot.copy_from_slice(&light.normalize().to_array());
         }
 
+        let attachments = level.gpu.lock().unwrap().attachments();
+        if self.shaded.get() {
+            self.translate(level.skinned, attachments);
+        }
+        let translated = self.translated.borrow();
+        let tables = self.tables.borrow();
         let slots = self.slots.borrow();
         let textures = self.textures.borrow();
-        let bind = |path: Option<&String>| match path.and_then(|path| textures.get(path)) {
+        let bind = |path: &str| match textures.get(path) {
             Some(Texture::Ready(handle)) => Some(handle.id()),
             _ => None,
         };
@@ -796,14 +942,27 @@ impl Rendered {
                         ..Default::default()
                     };
                 }
+                let shaded = self.shaded.get().then(|| {
+                    let (buffer, depth) = translated.get(&mesh.material)?.held.as_ref().ok()?;
+                    Some(gpu::Shaded {
+                        buffer: buffer.clone(),
+                        depth: depth.clone(),
+                        table: tables.get(&mesh.material).cloned(),
+                        textures: material
+                            .bound()
+                            .map(|(id, path)| (id, bind(path)))
+                            .collect(),
+                    })
+                });
                 gpu::Surface {
                     material: mesh.material,
+                    shaded: shaded.flatten(),
                     runs,
                     family: material.family(),
-                    normal: bind(material.texture(Role::Normal)),
-                    index: bind(material.texture(Role::Index)),
-                    mask: bind(material.texture(Role::Mask)),
-                    diffuse: bind(material.texture(Role::Diffuse)),
+                    normal: material.texture(Role::Normal).and_then(|path| bind(path)),
+                    index: material.texture(Role::Index).and_then(|path| bind(path)),
+                    mask: material.texture(Role::Mask).and_then(|path| bind(path)),
+                    diffuse: material.texture(Role::Diffuse).and_then(|path| bind(path)),
                     alpha_threshold: material.alpha_threshold(),
                     diffuse_color: material.diffuse(),
                     emissive_color: material.emissive(),
@@ -816,6 +975,7 @@ impl Rendered {
         let frame = gpu::Frame {
             view: view.to_cols_array(),
             projection: projection.to_cols_array(),
+            target: self.target.get(),
             eye: eye.to_array(),
             lights,
             surfaces,
@@ -827,10 +987,87 @@ impl Rendered {
         let model = level.gpu.clone();
         ui.painter().add(egui::PaintCallback {
             rect,
-            callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                model.lock().unwrap().draw(painter.gl(), painter, &frame);
+            callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
+                model.lock().unwrap().draw(painter.gl(), painter, &frame, &info);
             })),
         });
+    }
+
+    /// What the translated shaders call their targets, which is what the channel row offers.
+    fn channels(&self) -> Vec<String> {
+        self.translated
+            .borrow()
+            .values()
+            .find_map(|held| held.held.as_ref().ok())
+            .map(|(buffer, _)| buffer.names.clone())
+            .unwrap_or_default()
+    }
+
+    /// Translates every ready material's pair, again where the channel being shown or the context's
+    /// own limit changed what the translation would be.
+    fn translate(&self, skinned: bool, attachments: usize) {
+        let target = self.target.get();
+        let slots = self.slots.borrow();
+        let packages = self.packages.borrow();
+        let mut translated = self.translated.borrow_mut();
+        let mut tables = self.tables.borrow_mut();
+        // The key the engine sets rather than the material: a mesh carrying bone indices is one the
+        // game would draw through the skinning variant.
+        let set: &[(u32, u32)] = match skinned {
+            true => &[(TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN)],
+            false => &[],
+        };
+        for (index, slot) in slots.iter().enumerate() {
+            let Some(Slot::Ready(material)) = slot else {
+                continue;
+            };
+            if translated
+                .get(&index)
+                .is_some_and(|held| held.target == target && held.attachments == attachments)
+            {
+                continue;
+            }
+            let Some(Package::Ready(bytes)) = packages.get(&material.package()) else {
+                continue;
+            };
+            let held = program::Program::build(
+                bytes,
+                material,
+                set,
+                program::Pass::Buffer,
+                target,
+                attachments,
+            )
+            .map(|buffer| {
+                let depth = program::Program::build(
+                    bytes,
+                    material,
+                    set,
+                    program::Pass::Depth,
+                    target,
+                    attachments,
+                );
+                (Arc::new(buffer), depth.ok().map(Arc::new))
+            });
+            if let Err(why) = &held {
+                log::warn!("assets/mdl: {}: {why}", material.package());
+            }
+            translated.insert(
+                index,
+                Translated {
+                    target,
+                    attachments,
+                    held,
+                },
+            );
+            if let Some((values, columns, rows)) =
+                material.held().color_table().and_then(program::table)
+            {
+                tables
+                    .entry(index)
+                    .or_insert_with(|| Arc::new((values.to_vec(), columns, rows)));
+            }
+        }
     }
 
     /// Rewrites every touched mesh's indices from the file's own, so switching a shape off restores

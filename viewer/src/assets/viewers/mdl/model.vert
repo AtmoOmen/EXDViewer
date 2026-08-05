@@ -18,7 +18,7 @@ out vec4 v_color;
 void main() {
 	v_position = a_position;
 	v_normal = a_normal;
-	v_tangent = a_tangent;
+	v_tangent = a_tangent * 2.0 - 1.0;
 	v_uv = a_uv;
 	v_color = a_color;
 	gl_Position = u_projection * u_view * vec4(a_position, 1.0);

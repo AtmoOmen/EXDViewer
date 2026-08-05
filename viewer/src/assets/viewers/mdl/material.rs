@@ -65,6 +65,7 @@ const HIDE_BACKFACES: u32 = 1;
 const UNDRAWN: [&str; 2] = ["characterocclusion.shpk", "charactertattoo.shpk"];
 
 pub struct Material {
+    held: mtrl::Material,
     shader: String,
     family: Family,
     textures: [Option<String>; 4],
@@ -141,12 +142,14 @@ impl Material {
             false => declared,
         };
 
+        let cull = material.shader_flags() & HIDE_BACKFACES != 0;
         let (table, rows) = match material.color_table() {
             Some(table) => (pack(table), table.rows()),
             None => (None, 0),
         };
 
         Ok(Self {
+            held: material,
             shader,
             family,
             textures,
@@ -154,7 +157,7 @@ impl Material {
             diffuse,
             emissive,
             normal_scale,
-            cull: material.shader_flags() & HIDE_BACKFACES != 0,
+            cull,
             table,
             rows,
         })
@@ -162,6 +165,27 @@ impl Material {
 
     pub fn texture(&self, role: Role) -> Option<&String> {
         self.textures[role as usize].as_ref()
+    }
+
+    /// The material as the file states it, for the path that runs the game's own shaders and so
+    /// needs every sampler and constant rather than the four roles this viewer's own shading knows.
+    pub fn held(&self) -> &mtrl::Material {
+        &self.held
+    }
+
+    /// The package this material names, as a path under the shader tree.
+    pub fn package(&self) -> String {
+        format!("shader/sm5/shpk/{}", self.shader)
+    }
+
+    /// Every texture the material binds, by the sampler id the package knows it as.
+    pub fn bound(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.held.samplers().iter().filter_map(|sampler| {
+            let texture = sampler
+                .texture_index()
+                .and_then(|index| self.held.textures().get(usize::from(index)))?;
+            Some((sampler.id(), texture.path()))
+        })
     }
 
     pub fn family(&self) -> Family {

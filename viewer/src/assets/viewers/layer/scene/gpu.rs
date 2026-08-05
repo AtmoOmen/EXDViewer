@@ -15,7 +15,7 @@ use super::super::super::mdl::gpu::{Dead, bury, graveyard};
 
 /// Attribute locations, in the order [`Vertex`] stores them. The tangent and color the model viewer
 /// reads are left unbound; nothing here shades from them.
-const ATTRIBUTES: [(u32, i32, i32); 3] = [(0, 3, 0), (1, 3, 12), (3, 2, 40)];
+const ATTRIBUTES: [(u32, i32, i32); 3] = [(0, 3, 0), (1, 3, 12), (3, 2, 56)];
 
 /// Where the instance matrix starts, taking a location per column.
 const MODEL: u32 = 5;

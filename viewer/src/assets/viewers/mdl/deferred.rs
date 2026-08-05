@@ -359,7 +359,12 @@ impl Buffers {
             gl.depth_func(glow::LEQUAL);
             gl.depth_mask(true);
             gl.color_mask(true, true, true, true);
-            gl.clear(glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT);
+            // Every page draws the same geometry against one depth buffer, so only the first of
+            // them clears it: what a later page does not draw still covered the pixel.
+            gl.clear(match page {
+                0 => glow::COLOR_BUFFER_BIT | glow::DEPTH_BUFFER_BIT,
+                _ => glow::COLOR_BUFFER_BIT,
+            });
         }
     }
 

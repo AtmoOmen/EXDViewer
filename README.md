@@ -86,6 +86,13 @@ More info is available [here](https://github.com/xivdev/EXDSchema?tab=readme-ov-
     cargo run --bin web --release
     ```
 
+## Testing
+
+`cargo test` covers the parsers and the UI logic. The 3D viewers are only really tested in a
+browser, which is what `smoke/run.sh` does: it builds the wasm app, drives headless chromium over
+the model and scene viewers, and fails on any GL error, panic or `ERROR`-level log. See
+[smoke/README.md](smoke/README.md).
+
 ## Contributing
 
 Contributions, bug reports, and feature requests are welcome! Please open an [issue](https://github.com/WorkingRobot/EXDViewer/issues) or a [pull request](https://github.com/WorkingRobot/EXDViewer/pulls).

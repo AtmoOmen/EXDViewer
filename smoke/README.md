@@ -10,8 +10,12 @@ That is the whole command. It builds `viewer/dist` with trunk, serves it, drives
 chromium over it, and exits non-zero with the browser messages that failed it.
 
 Flags: `--no-build` reuses the existing `viewer/dist`, `--shots` writes screenshots to
-`smoke/shots/`, `--explore` boots the model and stops before any click (use it to recalibrate the
-click coordinates in `smoke.ts` after a UI change). Every run writes `smoke/last-run.json`.
+`smoke/shots/`, `--model-only` stops after the model renders and skips every click, `--explore`
+is `--model-only` with screenshots (use it to recalibrate the click coordinates in `smoke.ts`
+after a UI change). Every run writes `smoke/last-run.json`.
+
+**`main` is red right now, for real reasons.** See "Known red" below. A red run here is not a
+broken harness; read the deduped list it prints.
 
 ## Why it exists
 
@@ -49,7 +53,7 @@ egui's own `check_for_gl_error` runs after every paint callback, so GL state err
 no instrumentation. The signals are read off the console over CDP:
 
 - any thrown exception, or `panicked at` in any message
-- any message beginning `ERROR:` — **eframe maps Rust's `Error` level onto `console.warn` with an
+- any message beginning `ERROR:`. **eframe maps Rust's `Error` level onto `console.warn` with an
   `ERROR:` prefix, not `console.error`**, so a gate watching `console.error` alone would miss
   every `egui_glow` GL error
 - `GL_INVALID*`, `GL error`, `INVALID_FRAMEBUFFER_OPERATION` from chromium's own renderer log
@@ -58,10 +62,22 @@ no instrumentation. The signals are read off the console over CDP:
 Network-level errors are reported but not fatal, since the app probes for optional files; the
 coverage counters are what catch a model that failed to load.
 
+## Known red
+
+At `b965b62` the full run reports six distinct problems. `--model-only` passes on the same
+build, so the harness is not stuck red.
+
+- `glBlitFramebuffer: Invalid operation on multisampled framebuffer` in the model viewer, with
+  the matching `ERROR: [egui_glow] GL error ... (callback): GL_INVALID_OPERATION` beside it.
+- `glBlitFramebuffer: Blit feedback loop: the read and draw framebuffer are the same` in the
+  scene viewer, which is a different fault from the one above.
+- `glDrawArrays: Mismatch between texture format and sampler type`, once in each viewer.
+- `ERROR: [viewer::assets::viewers::layer::scene] scene/mod.rs:918`.
+
 ## What it does not cover
 
 Only the two 3D viewers and only one asset each. It does not check that anything is drawn
-*correctly* — no reference images, no pixel comparison. Channel coverage is a positional sweep
+*correctly*: no reference images, no pixel comparison. Channel coverage is a positional sweep
 over the row rather than a lookup of each label, so it counts distinct selections rather than
 naming them. The click coordinates are calibrated against a 1600x1000 viewport and need
 `--explore` and a fresh look if the layout moves.

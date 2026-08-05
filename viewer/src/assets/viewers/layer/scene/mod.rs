@@ -57,6 +57,12 @@ const TEXTURE_BUDGET: usize = 128 << 20;
 /// zone's whole set would cost more than it shows; the nearest are kept.
 const LAMPS: usize = 48;
 
+/// The scene key deciding whether a background shader reads the normal map at all. A package
+/// defaults it to off, and the variant that answer selects samples no normal map, so the frame it
+/// writes is the geometry's own.
+const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
+const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
+
 /// What a light is worth where the zone states no box for it. Nothing in the placement carries the
 /// reach: the file's own `range` is one in nearly every light a zone places.
 const REACH: f32 = 6.0;
@@ -1159,7 +1165,7 @@ impl Scene {
                 program::Program::build(
                     bytes,
                     material,
-                    &[],
+                    &[(GET_NORMAL_MAP, GET_NORMAL_MAP_ON)],
                     program::Pass::Buffer,
                     program::SUB_VIEW_MAIN,
                     page,
@@ -1177,7 +1183,7 @@ impl Scene {
             let depth = program::Program::build(
                 bytes,
                 material,
-                &[],
+                &[(GET_NORMAL_MAP, GET_NORMAL_MAP_ON)],
                 program::Pass::Depth,
                 program::SUB_VIEW_MAIN,
                 0,

@@ -64,27 +64,27 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-At `f8b3ecc` the full run reports three distinct problems across 19 messages:
+Nothing. The full run passes.
 
-- `glDrawArrays: Mismatch between texture format and sampler type`, once in each viewer, with
-  `ERROR: [egui_glow] GL error ... (callback): GL_INVALID_OPERATION` beside it. This is a real
-  fault and nobody has claimed it yet.
-- `ERROR: [viewer::assets::viewers::layer::scene] scene/mod.rs:918: this model draws nothing at
-  any detail level`, for 15 bgplate models. That is an asset complaint rather than a GL fault,
-  and it fails the run only because the app logs it at `Error`. It wants fixing in the app by
-  dropping the level to `warn`; do not mute it here, or the gate stops catching the log level
-  it exists to catch.
+Both of the problems reported at `f8b3ecc` are fixed. `glDrawArrays: Mismatch between texture
+format and sampler type` was the stand-in textures being made lazily from inside the binding loop:
+making a texture binds it to whichever unit happens to be active, so one made partway through took
+over the unit the sampler before it had just been given, and that sampler then read a texture of
+the wrong format. It showed on exactly the frame each stand-in was first made, which is why there
+was one message per viewer. `Buffers::stand_ins` now makes them all before anything is bound. The
+15 `this model draws nothing at any detail level` messages were a model carrying no standard mesh
+at any level being treated as a failure to read one; it is not, and `drawn` already records it.
 
-The two blit faults it used to report are gone. Measured at `b965b62`, before
+The two blit faults are gone too. Measured at `b965b62`, before
 `0e66465 Show the frame with a pass instead of a blit` and
 `46463b9 Keep egui's clip rect off the frame's own buffers`:
 
-| | `b965b62` | `f8b3ecc` |
-|---|---|---|
-| `glBlitFramebuffer: Invalid operation on multisampled framebuffer` | 251 | 0 |
-| `glBlitFramebuffer: Blit feedback loop` | 49 | 0 |
-| `ERROR: [egui_glow] GL error` | 306 | 2 |
-| total messages | 623 | 19 |
+| | `b965b62` | `f8b3ecc` | now |
+|---|---|---|---|
+| `glBlitFramebuffer: Invalid operation on multisampled framebuffer` | 251 | 0 | 0 |
+| `glBlitFramebuffer: Blit feedback loop` | 49 | 0 | 0 |
+| `ERROR: [egui_glow] GL error` | 306 | 2 | 0 |
+| total messages | 623 | 19 | 0 |
 
 ## What it does not cover
 

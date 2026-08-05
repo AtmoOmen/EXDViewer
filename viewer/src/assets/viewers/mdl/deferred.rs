@@ -350,6 +350,9 @@ impl Buffers {
             gl.draw_buffers(&attachments);
             gl.viewport(0, 0, self.size.0, self.size.1);
             gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            // Said rather than assumed: the pass that puts the frame on screen reads this value
+            // back as the sign that nothing drew.
+            gl.clear_depth_f32(1.0);
             // egui leaves the scissor set to the widget's rect in the window's own coordinates, and
             // the frame is a buffer of its own that starts at nought: leaving it on clips the clear
             // and every draw after it to whatever part of the frame the rect happens to overlap.

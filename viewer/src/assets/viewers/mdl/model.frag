@@ -37,6 +37,7 @@ const int HAVE_TABLE = 16;
 const int CHARACTER = 0;
 const int LEGACY = 1;
 const int BACKGROUND = 2;
+const int HAIR = 3;
 
 const int SHOW_NORMAL = 1;
 const int SHOW_UV = 2;
@@ -148,9 +149,10 @@ void main() {
 	float opacity = v_color.a;
 	// Only a character normal map carries opacity here; a background one keeps a height map in the
 	// same place and its cutout in the diffuse map's alpha instead, which is what clips a leaf out
-	// of the quad it is painted on.
+	// of the quad it is painted on. Hair keeps a highlight mask in the blue and its cutout in the
+	// alpha, which is the way round the rest of the tree does not.
 	if (has(HAVE_NORMAL) && u_family != BACKGROUND) {
-		opacity *= sampled.b;
+		opacity *= u_family == HAIR ? sampled.a : sampled.b;
 	}
 	if (has(HAVE_DIFFUSE) && u_family == BACKGROUND) {
 		opacity *= painted.a;
@@ -187,7 +189,7 @@ void main() {
 	vec3 specular = vec3(1.0);
 	vec3 emissive = vec3(0.0);
 	float strength = 0.3;
-	float shininess = 20.0;
+	float roughness = 0.5;
 	float metalness = 0.0;
 	float sheen_rate = 0.0;
 	float sheen_tint = 0.0;
@@ -203,14 +205,13 @@ void main() {
 		vec4 third = table_texel(2, lower, upper, blend);
 		vec4 fourth = table_texel(3, lower, upper, blend);
 		albedo = first.rgb;
-		shininess = max(first.a, 1.0);
+		roughness = first.a;
 		specular = second.rgb;
 		metalness = second.a;
 		emissive = third.rgb;
 		sheen_rate = third.a;
 		sheen_tint = fourth.r;
 		sheen_aperture = max(fourth.g, 1.0);
-		strength = 1.0;
 	}
 
 	if (has(HAVE_DIFFUSE)) {
@@ -221,18 +222,29 @@ void main() {
 	}
 
 	if (has(HAVE_MASK)) {
-		vec3 mask = texture(u_mask_map, v_uv).rgb;
+		vec4 mask = texture(u_mask_map, v_uv);
 		if (u_family == BACKGROUND) {
 			strength *= mask.r;
 		} else {
-			vec3 squared = mask * mask;
-			if (u_family == CHARACTER) {
-				albedo *= squared.r;
+			vec3 squared = mask.rgb * mask.rgb;
+			if (u_family == HAIR) {
+				albedo *= mask.a * mask.a;
 			}
-			specular *= squared.g;
+			specular *= squared.r;
 			strength *= squared.b;
+			// The map states a roughness of its own and the table's is a bias on it, pulling the
+			// whole surface toward a mirror or toward matte. A compatibility row carries no such
+			// map: its own exponent is the whole of it.
+			if (u_family != LEGACY) {
+				float bias = roughness * 2.0 - 1.0;
+				roughness = mask.g + bias * (bias < 0.0 ? mask.g : 1.0 - mask.g);
+			}
 		}
 	}
+
+	// Read backwards off the encoding a compatibility pass writes into the G-buffer, which is where
+	// the game states the two in terms of each other.
+	float shininess = clamp(-15.0 * log2(max(roughness, 0.002)), 1.0, 128.0);
 
 	vec3 mirror = reflect(-view, normal);
 	vec3 diffuse_light = vec3(0.0);

@@ -22,15 +22,18 @@ pub enum Role {
 /// slots, so the slot a texture arrives in does not say what its channels are.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Family {
-    /// A mask map: red scales the diffuse color, green the specular color, blue its strength. The
-    /// color table is indexed by the index map.
+    /// A mask map: red scales the specular color, green states the roughness, blue an occlusion.
+    /// The color table is indexed by the index map.
     Character,
     /// The three-texture set the game keeps a compatibility path for. The mask slot holds a
-    /// specular map, whose green scales the specular color and blue its strength, and the color
-    /// table is indexed by the normal map's alpha.
+    /// specular map, whose blue scales the specular strength, and the color table is indexed by the
+    /// normal map's alpha.
     Legacy,
     /// A specular map, of which only the red channel means what a mask's does.
     Background,
+    /// The normal map carries its cutout in the alpha channel, where every other character family
+    /// keeps it in the blue, and the mask's alpha is what shades a strand.
+    Hair,
 }
 
 const ROLES: [(u32, Role); 7] = [
@@ -127,8 +130,10 @@ impl Material {
         let family =
             if shader == "characterlegacy.shpk" && textures[Role::Diffuse as usize].is_some() {
                 Family::Legacy
+            } else if shader == "hair.shpk" {
+                Family::Hair
             } else if shader.starts_with("character")
-                || matches!(shader.as_str(), "hair.shpk" | "skin.shpk" | "iris.shpk")
+                || matches!(shader.as_str(), "skin.shpk" | "iris.shpk")
             {
                 Family::Character
             } else {
@@ -246,21 +251,18 @@ fn pack(table: &mtrl::ColorTable) -> Option<Vec<f32>> {
     if rows == 0 {
         return None;
     }
-    // Neither layout stores the specular exponent where the other does, and only the wider one
-    // states a roughness at all.
-    let exponent = match table.kind() {
-        mtrl::ColorTableKind::Extended => 3,
-        _ => 7,
-    };
+    let extended = table.kind() == mtrl::ColorTableKind::Extended;
     let mut values = Vec::with_capacity(rows * TABLE_COLUMNS as usize * 4);
     for index in 0..rows {
         let row = table.row_values(index)?;
-        let shininess = match row.roughness {
-            0.0 => f32::from(f16::from_bits(*table.row(index)?.get(exponent)?)),
-            roughness => ((1.0 - roughness) * 7.0).exp2(),
+        // A compatibility row has no roughness field and states a specular exponent in its place;
+        // the conversion is the one the game's own compatibility pass makes.
+        let roughness = match extended {
+            true => row.roughness,
+            false => (-f32::from(f16::from_bits(*table.row(index)?.get(7)?)) / 15.0).exp2(),
         };
         values.extend(row.diffuse);
-        values.push(shininess.clamp(1.0, 128.0));
+        values.push(roughness.clamp(0.0, 1.0));
         values.extend(row.specular);
         values.push(row.metalness);
         values.extend(row.emissive);

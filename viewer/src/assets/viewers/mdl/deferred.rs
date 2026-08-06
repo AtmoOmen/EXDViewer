@@ -252,7 +252,9 @@ impl Buffers {
         }
     }
 
-    /// Draws one of those over the widget and leaves egui's own framebuffer bound behind it.
+    /// Draws one of those over the widget and leaves egui's own framebuffer bound behind it. A raw
+    /// channel is read as data rather than looked at, so only the frame the composite resolved is
+    /// bent toward what a screen holds.
     ///
     /// A pass rather than a blit: the framebuffer a browser hands a callback is multisampled, and
     /// blitting into one of those is an error rather than a resolve. The depth buffer goes with it,
@@ -299,6 +301,9 @@ impl Buffers {
             gl.use_program(Some(program));
             sampler(gl, program, "u_frame", 0, texture);
             sampler(gl, program, "u_depth", 1, depth);
+            if let Some(location) = gl.get_uniform_location(program, "u_tone") {
+                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS));
+            }
             gl.bind_vertex_array(Some(layout));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_vertex_array(None);

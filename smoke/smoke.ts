@@ -239,18 +239,21 @@ async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
     return Bun.hash(result.data).toString(16);
 }
 
-/// The preview frame, once two shots of it in a row come out the same. A model's textures arrive
-/// over several seconds and land on geometry already on screen, so a frame taken before the last of
-/// them is not the frame anything should be compared against.
+/// The preview frame, once it has held still across two intervals rather than one. A model's
+/// textures, its color table and its imc arrive on requests of their own over several seconds and
+/// each lands on geometry already on screen, so a frame that has only matched once can still be
+/// waiting on the last of them and is not what anything should be compared against.
 async function settled(cdp: Cdp): Promise<string> {
     let held = await shot(cdp, "01-preview", VIEWPORT);
+    let same = 0;
     for (let at = 0; at < 20; at++) {
         await sleep(1500);
         const next = await shot(cdp, "01-preview", VIEWPORT);
-        if (next === held) {
+        same = next === held ? same + 1 : 0;
+        held = next;
+        if (same >= 2) {
             return held;
         }
-        held = next;
     }
     return held;
 }

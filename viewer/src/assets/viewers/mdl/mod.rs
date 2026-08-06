@@ -62,6 +62,12 @@ const TRANSFORM_VIEW_SKIN: u32 = 0x9c14_c8e9;
 const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
 const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
 
+/// The scene key deciding whether a character shader clips against its own alpha threshold. A
+/// package defaults it to off, and the variant that answer selects carries no clip at all, so a
+/// material's cutout leaves the geometry it was authored over standing.
+const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
+const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
+
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
@@ -1190,8 +1196,12 @@ impl Rendered {
             true => &[
                 (TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN),
                 (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
+                (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
             ],
-            false => &[(GET_NORMAL_MAP, GET_NORMAL_MAP_ON)],
+            false => &[
+                (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
+                (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
+            ],
         };
         for (index, slot) in slots.iter().enumerate() {
             let Some(Slot::Ready(material)) = slot else {

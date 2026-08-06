@@ -898,6 +898,16 @@ impl Buffer {
         put("m_Viewport", vec![2.0 / width, -2.0 / height, -1.0, 1.0]);
         put("m_Misc", vec![1.0, 1.0, 0.0, 0.0]);
         put("m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
+        put("m_BackBufferSize", vec![width, height]);
+        put("m_ViewportSize", vec![width, height]);
+        for name in ["m_InverseBackBufferSize", "m_InverseViewportSize"] {
+            put(name, vec![1.0 / width, 1.0 / height]);
+        }
+        // Nothing here renders at a resolution other than the one it presents at, and a pass that
+        // reads the frame back scales its coordinate by this before sampling.
+        for name in ["m_DynamicResolutionScale", "m_DynamicResolutionChangeScale"] {
+            put(name, vec![1.0; 2]);
+        }
 
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.

@@ -47,6 +47,9 @@ const TEXTURE_SIZE: u16 = 512;
 /// Decoded texture bytes one model may hold. Past it the rest of its surfaces draw untextured.
 const TEXTURE_BUDGET: usize = 64 << 20;
 
+/// The attributes an imc entry's mask reaches, which the format gives ten bits.
+const IMC_ATTRIBUTES: u32 = 0x3ff;
+
 /// Vertical field of view.
 const FOV: f32 = 40.0_f32.to_radians();
 
@@ -1488,12 +1491,16 @@ impl Rendered {
 
     /// Defaults every part's visibility from the picked variant's attribute mask. Cheap enough to
     /// call on every arrival and every pick: it only sets cells, never rebuilds the level.
+    ///
+    /// A part gated past the ten bits an imc entry carries is one the file cannot speak about, so it
+    /// draws whatever the variant says: a model may declare far more attributes than that.
     fn apply_variant(&self) {
         let mask = self.variant_mask();
         let level = self.level.borrow();
         for part in level.meshes.iter().flat_map(|mesh| &mesh.parts) {
+            let gated = part.mask & IMC_ATTRIBUTES;
             part.shown
-                .set(mask.is_none_or(|mask| part.mask == 0 || part.mask & mask != 0));
+                .set(mask.is_none_or(|mask| gated == 0 || gated & mask != 0));
         }
     }
 

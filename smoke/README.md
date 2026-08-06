@@ -85,6 +85,20 @@ coverage counters are what catch a model that failed to load.
 
 Nothing at present.
 
+`the preview frame changed after game shaders were turned on and off again` used to fire on a
+`--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately
+after the last channel label and is a plain button, not a selectable label, so a sweep that walked
+past the channels clicked it and reset the camera. That only *fails* the comparison when the camera
+was somewhere else to begin with, which is what `--orbit` arranges; without it the camera is already
+at the reset pose and the stray click changes nothing. **Where the button sits moves with the number
+of targets the model's program writes**, so a fixed `SWEEP_TO` fixes it for one model and not the
+next: 750 held for `m0914` and `m0370` at six targets and still overran on `m0911`, which showed
+seven distinct selections. The sweep now stops once it has seen `CHANNELS` distinct selections, so it
+never reaches the button whatever the layout, and `SWEEP_TO` is only a backstop.
+
+Worth keeping because two separate investigations blamed orbit itself, then blamed a coordinate.
+Neither was the whole answer, and a run that passes without `--orbit` says nothing about one with it.
+
 The effects seek used to fail in a **full** run and only there, on `every effect looked identical at
 both points of its timeline` for all nine at once. `SEEK` and `PREVIEW` are absolute window
 coordinates, and **the details panel is resizable and egui remembers its width across a

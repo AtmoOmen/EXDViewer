@@ -331,16 +331,34 @@ impl Renderer {
                         };
                         let mut unit = 0;
                         for texture in &held.textures {
-                            let bound = match texture.id {
-                                TABLE => table,
-                                id => shaded
-                                    .textures
-                                    .iter()
-                                    .find(|(held, _)| *held == id)
-                                    .and_then(|(_, held)| *held)
-                                    .and_then(|held| painter.texture(held)),
+                            // Only a plane can come from the material: what it binds is an egui
+                            // texture, and egui has nothing but two-dimensional ones.
+                            let bound = match texture.kind {
+                                program::Kind::Plane => {
+                                    let held = match texture.id {
+                                        TABLE => table,
+                                        id => shaded
+                                            .textures
+                                            .iter()
+                                            .find(|(held, _)| *held == id)
+                                            .and_then(|(_, held)| *held)
+                                            .and_then(|held| painter.texture(held)),
+                                    };
+                                    match held {
+                                        Some(held) => held,
+                                        None => self.buffers.engine(gl, texture.id)?,
+                                    }
+                                }
+                                kind => self.buffers.absent(gl, kind, texture.id)?,
                             };
-                            sampler(gl, program, &texture.name, unit, bound.unwrap_or(stand_in));
+                            deferred::bind(
+                                gl,
+                                program,
+                                &texture.name,
+                                unit,
+                                bound,
+                                deferred::target(texture.kind),
+                            );
                             unit += 1;
                         }
                         for structured in &held.structured {

@@ -54,12 +54,16 @@ const WIDTH = 1600;
 const HEIGHT = 1000;
 
 // The control row sits at the top of the viewer pane. `ROW_LEFT` is where "Game shaders" is, and the
-// sweep walks right from `SWEEP_FROM` across the channel labels that appear beside it. Recalibrate
-// with `--explore`, which writes screenshots to smoke/shots and stops before any click.
+// sweep walks right from `SWEEP_FROM` across the channel labels that appear beside it. "Reset view"
+// follows immediately after the last channel at x=756 for a 6-target program, and is a plain button
+// rather than a selectable label, so `SWEEP_TO` has to stop short of it: past there the sweep clicks
+// the button instead of a channel, resetting the camera mid-sweep and failing the preview-frame
+// comparison after. A program with fewer targets moves it left of that; recalibrate both with
+// `--explore`, which writes screenshots to smoke/shots and stops before any click.
 const ROW_Y = 116;
 const ROW_LEFT = 268;
 const SWEEP_FROM = 325;
-const SWEEP_TO = 900;
+const SWEEP_TO = 750;
 const SWEEP_STEP = 16;
 
 // The lgb viewer opens on its Tree tab; the 3D scene is the tab beside it.

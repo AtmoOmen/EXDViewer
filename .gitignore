@@ -21,3 +21,5 @@ callgrind.out.*
 # Local secrets / dotenv
 .env
 .secrets.env
+
+.claude/worktrees/

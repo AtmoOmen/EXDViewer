@@ -892,6 +892,13 @@ impl Buffer {
         });
         put("g_InstanceParameter", "m_MulColor", vec![1.0; 4]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
+        // What the color table's own emissive column is scaled by before a character's composite
+        // adds it, so white is what lets a row that glows glow.
+        put(
+            "g_MaterialParameterDynamic",
+            "m_EmissiveColor",
+            vec![1.0; 3],
+        );
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);

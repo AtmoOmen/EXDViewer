@@ -833,6 +833,10 @@ impl Buffer {
             ambient(&scene.ambient, glam::Mat3::from_mat4(view), &mut out);
             return out;
         }
+        if self.name == "g_AmbientParam" {
+            entry(&scene.ambient, glam::Mat3::from_mat4(view), &mut out, 0);
+            return out;
+        }
         if self.name == "g_BGAmbientParameter" {
             write(&mut out, 0, &scene.ambient.haze.to_array());
             return out;
@@ -894,6 +898,16 @@ impl Buffer {
         put("m_Viewport", vec![2.0 / width, -2.0 / height, -1.0, 1.0]);
         put("m_Misc", vec![1.0, 1.0, 0.0, 0.0]);
         put("m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
+        put("m_BackBufferSize", vec![width, height]);
+        put("m_ViewportSize", vec![width, height]);
+        for name in ["m_InverseBackBufferSize", "m_InverseViewportSize"] {
+            put(name, vec![1.0 / width, 1.0 / height]);
+        }
+        // Nothing here renders at a resolution other than the one it presents at, and a pass that
+        // reads the frame back scales its coordinate by this before sampling.
+        for name in ["m_DynamicResolutionScale", "m_DynamicResolutionChangeScale"] {
+            put(name, vec![1.0; 2]);
+        }
 
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.
@@ -1023,14 +1037,25 @@ fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
     for (at, row) in held.sky.iter().enumerate() {
         write(out, 1 + at, &turned(row).to_array());
     }
-    for (at, row) in held.light.iter().enumerate() {
-        write(out, 4 + at, &turned(row).to_array());
+    entry(held, axes, out, 4);
+    // No bounding shape, so the entry covers the frame rather than a room.
+    write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
+    write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
+}
+
+/// The ten registers a composite reads one entry of the ambient from. A drawing package that
+/// composites itself binds exactly these as `g_AmbientParam`, which is what says where each field
+/// sits: the array holds the same run per entry.
+fn entry(held: &Ambient, axes: glam::Mat3, out: &mut [u8], at: usize) {
+    let turned = |row: &Vec4| (axes * row.truncate()).extend(row.w);
+    for (row, held) in held.light.iter().enumerate() {
+        write(out, at + row, &turned(held).to_array());
     }
-    write(out, 7, &[0.0, 0.0, 0.0, held.scale]);
-    write(out, 8, &[held.fade.x, held.fade.y, held.fade.z, 1.0]);
+    write(out, at + 3, &[0.0, 0.0, 0.0, held.scale]);
+    write(out, at + 4, &[held.fade.x, held.fade.y, held.fade.z, 1.0]);
     write(
         out,
-        9,
+        at + 5,
         &[
             held.reflection.x,
             held.reflection.y,
@@ -1038,9 +1063,10 @@ fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
             held.roughness,
         ],
     );
-    // No bounding shape, so the entry covers the frame rather than a room.
-    write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
-    write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
+    for (row, held) in held.sky.iter().enumerate() {
+        write(out, at + 6 + row, &turned(held).to_array());
+    }
+    write(out, at + 9, &[held.sky_scale, 0.0, 0.0, 0.0]);
 }
 
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a

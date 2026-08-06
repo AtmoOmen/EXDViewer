@@ -64,6 +64,19 @@ const LAMPS: usize = 48;
 const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
 const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
 
+/// The scene key deciding whether a shader clips against its own alpha threshold. A package defaults
+/// it to off, and the variant that answer selects carries no clip at all, so a material's cutout
+/// leaves the geometry it was authored over standing.
+const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
+const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
+
+/// The keys the engine sets rather than the material. A package that declares none of them resolves
+/// exactly as it did, since a key the package never declares is never looked up.
+const KEYS: [(u32, u32); 2] = [
+    (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
+    (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
+];
+
 /// What a light is worth where the zone states no box for it. Nothing in the placement carries the
 /// reach: the file's own `range` is one in nearly every light a zone places.
 const REACH: f32 = 6.0;
@@ -1175,7 +1188,7 @@ impl Scene {
                 program::Program::build(
                     bytes,
                     material,
-                    &[(GET_NORMAL_MAP, GET_NORMAL_MAP_ON)],
+                    &KEYS,
                     program::Pass::Buffer,
                     program::SUB_VIEW_MAIN,
                     page,
@@ -1193,7 +1206,7 @@ impl Scene {
             let depth = program::Program::build(
                 bytes,
                 material,
-                &[(GET_NORMAL_MAP, GET_NORMAL_MAP_ON)],
+                &KEYS,
                 program::Pass::Depth,
                 program::SUB_VIEW_MAIN,
                 0,

@@ -141,11 +141,13 @@ struct Mesh {
     base: Vec<u16>,
 }
 
+/// Which of the level's meshes a shape touches, and for each the indices it replaces.
+type Rewrites = Vec<(usize, Vec<(u16, u16)>)>;
+
 /// One shape key, and where it rewrites the geometry.
 struct Shape {
     name: String,
-    /// Which of the level's meshes the shape touches, and for each the indices it replaces.
-    rewrites: Vec<(usize, Vec<(u16, u16)>)>,
+    rewrites: Rewrites,
 }
 
 /// Shape keys the file names as variants of one thing, which the browser offers as alternatives
@@ -334,8 +336,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
 
     let attributes = model.attribute_names().unwrap_or_default();
     let declared = model.shapes();
-    let mut rewrites: Vec<Vec<(usize, Vec<(u16, u16)>)>> =
-        declared.iter().map(|_| Vec::new()).collect();
+    let mut rewrites: Vec<Rewrites> = declared.iter().map(|_| Vec::new()).collect();
 
     let mut skipped: Vec<MeshKind> = Vec::new();
     let mut skinned = false;

@@ -1582,6 +1582,17 @@ impl Scene {
     }
 }
 
+pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, backend: &Backend) {
+    if let Some(why) = scene.renderer.lock().unwrap().failure() {
+        ui.centered_and_justified(|ui| {
+            ui.colored_label(Color32::RED, format!("Could not build the shader: {why}"));
+        });
+        return;
+    }
+    scene.poll(ui, backend);
+    scene.viewport(ui);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1611,15 +1622,4 @@ mod tests {
         assert_eq!(level([true, true, true], 0.0001), Some(2));
         assert_eq!(level([false, false, false], 0.5), None);
     }
-}
-
-pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, backend: &Backend) {
-    if let Some(why) = scene.renderer.lock().unwrap().failure() {
-        ui.centered_and_justified(|ui| {
-            ui.colored_label(Color32::RED, format!("Could not build the shader: {why}"));
-        });
-        return;
-    }
-    scene.poll(ui, backend);
-    scene.viewport(ui);
 }

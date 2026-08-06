@@ -241,9 +241,7 @@ fn pseudo(held: &Function) -> Vec<bool> {
             Opcode::SetList if instruction.c() == 0 => 1,
             _ => 0,
         };
-        for at in pc + 1..(pc + 1 + extra).min(code.len()) {
-            pseudo[at] = true;
-        }
+        pseudo[pc + 1..(pc + 1 + extra).min(code.len())].fill(true);
         pc += 1 + extra;
     }
     pseudo
@@ -328,7 +326,7 @@ fn touches(held: Instruction, reads: &mut Vec<usize>) -> Option<usize> {
         }
         Opcode::Call | Opcode::TailCall => {
             reads.extend(a..a + b.max(1));
-            Some(a + c.saturating_sub(2).max(0))
+            Some(a + c.saturating_sub(2))
         }
         Opcode::Return => {
             reads.extend(a..a + b.saturating_sub(1));
@@ -342,7 +340,7 @@ fn touches(held: Instruction, reads: &mut Vec<usize>) -> Option<usize> {
             reads.extend(a + 1..=a + b.max(1));
             None
         }
-        Opcode::Vararg => Some(a + c.saturating_sub(1).max(0)),
+        Opcode::Vararg => Some(a + c.saturating_sub(1)),
         Opcode::Jmp | Opcode::Close | Opcode::Unknown(_) => None,
     }
 }

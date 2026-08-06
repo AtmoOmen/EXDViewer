@@ -142,12 +142,16 @@ impl Expr {
         match self {
             Self::Binary(Binary::Eq, left, right) => Self::Binary(Binary::Ne, left, right),
             Self::Binary(Binary::Ne, left, right) => Self::Binary(Binary::Eq, left, right),
-            Self::Binary(Binary::And, left, right) => {
-                Self::Binary(Binary::Or, Box::new(left.negate()), Box::new(right.negate()))
-            }
-            Self::Binary(Binary::Or, left, right) => {
-                Self::Binary(Binary::And, Box::new(left.negate()), Box::new(right.negate()))
-            }
+            Self::Binary(Binary::And, left, right) => Self::Binary(
+                Binary::Or,
+                Box::new(left.negate()),
+                Box::new(right.negate()),
+            ),
+            Self::Binary(Binary::Or, left, right) => Self::Binary(
+                Binary::And,
+                Box::new(left.negate()),
+                Box::new(right.negate()),
+            ),
             Self::Unary(Unary::Not, held) => *held,
             Self::Bool(held) => Self::Bool(!held),
             held => Self::Unary(Unary::Not, Box::new(held)),

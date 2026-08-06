@@ -401,7 +401,7 @@ fn imc_part(path: &str) -> u8 {
 fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> bool {
     let cover: u32 = match declared {
         0 => return false,
-        1..=32 => (1u32 << declared) - 1,
+        1..32 => (1u32 << declared) - 1,
         _ => u32::MAX,
     };
     let first = image_change

@@ -133,10 +133,10 @@ impl Items {
                     }
                     None => {
                         ui.label(RichText::new(head(item)).monospace());
-                        if let Some(path) = path(item) {
-                            if link(ui, file_name(path), path) {
-                                follow = Some(path.to_owned());
-                            }
+                        if let Some(path) = path(item)
+                            && link(ui, file_name(path), path)
+                        {
+                            follow = Some(path.to_owned());
                         }
                         let body = body(item);
                         if !body.is_empty() {

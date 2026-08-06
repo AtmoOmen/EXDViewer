@@ -86,7 +86,7 @@ impl CellValue {
             CellValue::Integer(i) => Some(*i),
             CellValue::Float(f) => Some(*f as i128),
             CellValue::Boolean(b) => Some(i128::from(*b)),
-            CellValue::Icon(id) => Some(i128::from(*id)),
+            CellValue::Icon(id) => Some(*id),
             CellValue::ModelId(id) => Some(match id {
                 Either::Left(id) => i128::from(*id),
                 Either::Right(id) => i128::from(*id),

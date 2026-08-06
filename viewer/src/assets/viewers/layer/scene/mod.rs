@@ -1026,7 +1026,7 @@ impl Scene {
     }
 
     fn load_materials(&mut self, backend: &Backend) {
-        let mut fetching = self
+        let fetching = self
             .materials
             .iter()
             .filter(|(_, slot)| matches!(slot, Slot::Fetching(_)))
@@ -1042,16 +1042,12 @@ impl Scene {
             .collect();
         wanted.sort_unstable();
         wanted.dedup();
-        for at in wanted {
-            if fetching >= MATERIALS {
-                break;
-            }
+        for at in wanted.into_iter().take(MATERIALS.saturating_sub(fetching)) {
             let files = backend.files().clone();
             let path = self.materials[at].0.clone();
             self.materials[at].1 = Slot::Fetching(TrackedPromise::spawn_local(async move {
                 files.read(&path).await
             }));
-            fetching += 1;
         }
 
         for (path, slot) in &mut self.materials {

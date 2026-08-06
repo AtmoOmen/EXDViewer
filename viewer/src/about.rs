@@ -126,8 +126,7 @@ pub fn centered_inline(ui: &mut egui::Ui, measure: &str, add: impl FnOnce(&mut e
 }
 
 fn to_title_case(s: &str) -> String {
-    s.chars().next().map_or_else(
-        || String::new(),
-        |first| first.to_uppercase().collect::<String>() + &s[first.len_utf8()..],
-    )
+    s.chars().next().map_or_else(String::new, |first| {
+        first.to_uppercase().collect::<String>() + &s[first.len_utf8()..]
+    })
 }

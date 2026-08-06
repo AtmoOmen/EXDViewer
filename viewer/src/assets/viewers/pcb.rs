@@ -240,6 +240,7 @@ fn render_list(path: &str, list: pcb::MeshList) -> Rendered {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_node(
     node: &pcb::Node,
     path: &mut Vec<usize>,

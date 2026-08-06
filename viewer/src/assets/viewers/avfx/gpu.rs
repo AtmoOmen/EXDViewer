@@ -11,6 +11,7 @@
 //! into an attachment of its own and dropped.
 
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::sync::{Arc, Mutex};
 
 use egui::TextureId;
@@ -185,11 +186,11 @@ impl Particles {
         }
         .ok_or("the package has not arrived")?;
 
-        if !self.programs.contains_key(&batch.def) {
+        if let Entry::Vacant(slot) = self.programs.entry(batch.def) {
             let keys = [shading.keys.clone(), shading.lights.clone()].concat();
             let held = Program::build(bytes, &keys, shading.sprite)?;
             let program = build_pair(gl, &held.vertex, &held.fragment)?;
-            self.programs.insert(batch.def, Linked { program, held });
+            slot.insert(Linked { program, held });
         }
         let linked = &self.programs[&batch.def];
         let program = linked.program;

@@ -1037,6 +1037,7 @@ pub struct Mip {
 }
 
 /// Build the image preview both the image and texture viewers end at.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn upload(
     ctx: &egui::Context,
     path: &str,

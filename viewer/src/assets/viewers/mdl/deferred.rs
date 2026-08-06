@@ -501,12 +501,13 @@ impl Buffers {
     /// an array where it holds several: a sampler is declared over one or the other, and a draw only
     /// validates where the texture bound to its unit is of the declaration's own kind.
     ///
-    /// Repeated rather than clamped: the shaders that read the arrays scale the coordinate up by a
-    /// tile factor and expect the tile to come round again.
+    /// An array repeats, since the shaders that read one scale the coordinate up by a tile factor
+    /// and expect the tile to come round again. A ramp is clamped: it is addressed over its whole
+    /// width, and wrapping would blend its last texel against its first.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
-        let target = match held.layers > 1 {
-            true => glow::TEXTURE_2D_ARRAY,
-            false => glow::TEXTURE_2D,
+        let (target, wrap) = match held.layers > 1 {
+            true => (glow::TEXTURE_2D_ARRAY, glow::REPEAT),
+            false => (glow::TEXTURE_2D, glow::CLAMP_TO_EDGE),
         };
         unsafe {
             let texture = gl.create_texture()?;
@@ -539,8 +540,8 @@ impl Buffers {
             for (name, value) in [
                 (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
                 (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-                (glow::TEXTURE_WRAP_S, glow::REPEAT),
-                (glow::TEXTURE_WRAP_T, glow::REPEAT),
+                (glow::TEXTURE_WRAP_S, wrap),
+                (glow::TEXTURE_WRAP_T, wrap),
             ] {
                 gl.tex_parameter_i32(target, name, value as i32);
             }

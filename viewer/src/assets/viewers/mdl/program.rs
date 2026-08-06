@@ -887,6 +887,9 @@ impl Buffer {
         put("m_TransformMatrix", rows(world_view, 3));
         put("m_MulColor", vec![1.0; 4]);
         put("m_Params", vec![1.0; 4]);
+        // What the color table's own emissive column is scaled by before a character's composite
+        // adds it, so white is what lets a row that glows glow.
+        put("m_EmissiveColor", vec![1.0; 3]);
         put("m_SkyVisibility", vec![1.0]);
         put("m_DitherAlpha", vec![1.0]);
 

@@ -57,6 +57,14 @@ pub const TYPES: &str = "g_ShaderTypeParameter";
 /// What a texture the material binds nothing to answers with.
 const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 
+/// The tables a toon character is shaded through, which the engine builds a frame at a time and no
+/// file holds. `g_SamplerToneMapLut` divides the resolved color and `g_SamplerCharaToon` scales the
+/// light, so one leaves each where it was and the flat stand-in would halve and double them.
+const NEUTRAL: [(u32, [u8; 4]); 2] = [
+    (0x342f_2734, [255, 255, 255, 255]),
+    (0x8b73_3c20, [255, 255, 255, 255]),
+];
+
 /// What a buffer nothing here fills answers with where a lighting pass wants a weight: nothing
 /// shadowed in the red the lighting reads, nothing faded in the alpha the composite reads.
 const UNOCCLUDED: [u8; 4] = [255, 255, 255, 0];
@@ -187,6 +195,7 @@ pub struct Buffers {
     blanks: BTreeMap<u32, glow::Texture>,
     /// The textures the shaders read off the game's own files, by resource id.
     arrays: BTreeMap<u32, glow::Texture>,
+    neutrals: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     unweighted: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
@@ -474,6 +483,21 @@ impl Buffers {
         Ok(held)
     }
 
+    /// One of those tables, at the value that leaves the term it drives where it was.
+    fn neutral(
+        &mut self,
+        gl: &glow::Context,
+        id: u32,
+        value: &[u8; 4],
+    ) -> Result<glow::Texture, String> {
+        if let Some(held) = self.neutrals.get(&id) {
+            return Ok(*held);
+        }
+        let held = flat(gl, glow::TEXTURE_2D, value)?;
+        self.neutrals.insert(id, held);
+        Ok(held)
+    }
+
     /// What a lighting pass reads where nothing occluded the pixel. Nothing here computes occlusion,
     /// so every pixel answers the same, and it is not the value a color map would stand in with.
     fn unoccluded(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
@@ -595,6 +619,9 @@ impl Buffers {
         self.unweighted(gl)?;
         self.types(gl)?;
         self.reflection(gl)?;
+        for (id, value) in &NEUTRAL {
+            self.neutral(gl, *id, value)?;
+        }
         for kind in [
             program::Kind::Plane,
             program::Kind::Array,
@@ -616,6 +643,9 @@ impl Buffers {
                 .ok_or_else(|| format!("the G-buffer has no channel {at}"));
         }
         if let Some(held) = self.arrays.get(&id) {
+            return Ok(*held);
+        }
+        if let Some(held) = self.neutrals.get(&id) {
             return Ok(*held);
         }
         Ok(match id {
@@ -839,6 +869,7 @@ impl Drop for Buffers {
             .into_iter()
             .flatten()
             .chain(std::mem::take(&mut self.blanks).into_values())
+            .chain(std::mem::take(&mut self.neutrals).into_values())
             .chain(std::mem::take(&mut self.arrays).into_values())
             .map(Dead::Texture),
         );

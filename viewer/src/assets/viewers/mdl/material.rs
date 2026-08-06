@@ -26,8 +26,8 @@ pub enum Family {
     /// The color table is indexed by the index map.
     Character,
     /// The three-texture set the game keeps a compatibility path for. The mask slot holds a
-    /// specular map, whose green scales the specular color and blue its strength, and the color
-    /// table is indexed by the normal map's alpha.
+    /// specular map, whose blue scales the specular strength, and the color table is indexed by the
+    /// normal map's alpha.
     Legacy,
     /// A specular map, of which only the red channel means what a mask's does.
     Background,

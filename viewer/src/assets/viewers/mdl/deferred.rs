@@ -367,16 +367,18 @@ impl Buffers {
             // The view position and the light the frame gathers hold values a byte cannot: one is a
             // place in front of the camera, the other a sum of every light that reached the pixel.
             let position = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
-            self.position = Some((frame_of(gl, &[position])?, position));
+            self.position = Some((frame_of(gl, &[position], None)?, position));
             let light = [
                 plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
                 plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
             ];
-            self.light = Some((frame_of(gl, &light)?, light));
+            self.light = Some((frame_of(gl, &light, None)?, light));
             // The composite answers with a color already brought into the range a screen shows, so
-            // the frame it lands in is the one that can be blitted to the screen.
+            // the frame it lands in is the one that can be blitted to the screen. It carries the
+            // G-buffer's own depth, since a material resolves itself into it as geometry, and a
+            // framebuffer with no depth buffer passes every depth test put to it.
             let lit = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
-            self.lit = Some((frame_of(gl, &[lit])?, lit));
+            self.lit = Some((frame_of(gl, &[lit], Some(depth))?, lit));
             self.resolved = Some(plane(
                 gl,
                 size,
@@ -970,7 +972,11 @@ fn plane(
 }
 
 /// A framebuffer over the textures given, in the order a pass writes them.
-fn frame_of(gl: &glow::Context, color: &[glow::Texture]) -> Result<glow::Framebuffer, String> {
+fn frame_of(
+    gl: &glow::Context,
+    color: &[glow::Texture],
+    depth: Option<glow::Texture>,
+) -> Result<glow::Framebuffer, String> {
     unsafe {
         let held = gl.create_framebuffer()?;
         gl.bind_framebuffer(glow::FRAMEBUFFER, Some(held));
@@ -983,6 +989,13 @@ fn frame_of(gl: &glow::Context, color: &[glow::Texture]) -> Result<glow::Framebu
                 0,
             );
         }
+        gl.framebuffer_texture_2d(
+            glow::FRAMEBUFFER,
+            glow::DEPTH_ATTACHMENT,
+            glow::TEXTURE_2D,
+            depth,
+            0,
+        );
         let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
         match status == glow::FRAMEBUFFER_COMPLETE {
             true => Ok(held),

@@ -92,8 +92,25 @@ const NEUTRAL: [(u32, [u8; 4]); 3] = [
 /// shadowed in the red the lighting reads, nothing faded in the alpha the composite reads.
 const UNOCCLUDED: [u8; 4] = [255, 255, 255, 0];
 
-/// What the composite takes a reflection against where nothing reconstructs the zone's own cube.
+/// What the composite takes a reflection against before a place has said what its sky looks like.
 const UNREFLECTED: [u8; 4] = [128, 128, 128, 0];
+
+/// Texels a face of the reflection cube takes. The sky it is built from is three harmonic rows,
+/// which carry nothing finer than this.
+const SKY_FACE: i32 = 16;
+
+/// Which way a texel of a cube face looks, in the space the composite samples the cube in.
+fn facing(face: usize, u: f32, v: f32) -> glam::Vec3 {
+    match face {
+        0 => glam::Vec3::new(1.0, -v, -u),
+        1 => glam::Vec3::new(-1.0, -v, u),
+        2 => glam::Vec3::new(u, 1.0, v),
+        3 => glam::Vec3::new(u, -1.0, -v),
+        4 => glam::Vec3::new(u, -v, 1.0),
+        _ => glam::Vec3::new(-u, -v, -1.0),
+    }
+    .normalize()
+}
 
 /// One triangle covering clip space, which is the geometry a screen-wide pass draws: their vertex
 /// shaders pass the position straight through, and one of them reads it back as the place on screen
@@ -218,6 +235,8 @@ pub struct Buffers {
     neutrals: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
+    /// The sky the reflection cube was built from, so a frame asking for the same one keeps it.
+    sky: Option<([glam::Vec4; 3], f32)>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
     volume: Option<(glow::VertexArray, glow::Buffer, glow::Buffer)>,
     resolvers: BTreeMap<usize, Linked>,
@@ -549,8 +568,9 @@ impl Buffers {
         Ok(())
     }
 
-    /// The cube the composite takes reflections against, which nothing here reconstructs. The alpha
-    /// is the weight it is blended in at, so nought leaves the ambient it would otherwise replace.
+    /// The cube the composite takes reflections against, before a place has said what its sky looks
+    /// like. The alpha is the weight it is blended in at, so nought leaves the ambient it would
+    /// otherwise replace.
     pub fn reflection(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
         if let Some(held) = self.reflection {
             return Ok(held);
@@ -558,6 +578,64 @@ impl Buffers {
         let held = flat(gl, glow::TEXTURE_CUBE_MAP, &UNREFLECTED)?;
         self.reflection = Some(held);
         Ok(held)
+    }
+
+    /// The same cube off the sky a place states, which is what a smooth surface has to reflect where
+    /// nothing captures the frame around it. A harmonic row dotted against a direction is what that
+    /// sky looks like that way, and a mirror reflection is that same sky read the mirror way.
+    ///
+    /// Rebuilt only where the sky changed: a zone states one per time of day, and a frame otherwise
+    /// asks for the same cube it asked for last.
+    pub fn reflect(&mut self, gl: &glow::Context, held: &program::Ambient) -> Result<(), String> {
+        let sky = (held.sky, held.sky_scale);
+        if self.sky == Some(sky) {
+            return Ok(());
+        }
+        let mut pixels = Vec::with_capacity((6 * SKY_FACE * SKY_FACE * 4) as usize);
+        for face in 0..6 {
+            for y in 0..SKY_FACE {
+                for x in 0..SKY_FACE {
+                    let over = |at: i32| 2.0 * (at as f32 + 0.5) / SKY_FACE as f32 - 1.0;
+                    let toward = facing(face, over(x), over(y)).extend(1.0);
+                    pixels.extend(held.sky.iter().map(|row| {
+                        let held = row.dot(toward) * sky.1;
+                        (held.clamp(0.0, 1.0) * 255.0).round() as u8
+                    }));
+                    pixels.push(255);
+                }
+            }
+        }
+        unsafe {
+            let texture = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_CUBE_MAP, Some(texture));
+            let face = (SKY_FACE * SKY_FACE * 4) as usize;
+            for at in 0..6 {
+                gl.tex_image_2d(
+                    glow::TEXTURE_CUBE_MAP_POSITIVE_X + at as u32,
+                    0,
+                    glow::RGBA8 as i32,
+                    SKY_FACE,
+                    SKY_FACE,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&pixels[at * face..(at + 1) * face])),
+                );
+            }
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_CUBE_MAP, name, value as i32);
+            }
+            if let Some(stale) = self.reflection.replace(texture) {
+                graveyard().lock().unwrap().push(Dead::Texture(stale));
+            }
+        }
+        self.sky = Some(sky);
+        Ok(())
     }
 
     /// Takes one of the game's own textures onto the card, as a plane where it holds one slice and
@@ -830,6 +908,7 @@ impl Buffers {
         let (position, _) = self.position.ok_or("no view position")?;
         let (light, _) = self.light.ok_or("no light buffer")?;
         let (lit, _) = self.lit.ok_or("no lit frame")?;
+        self.reflect(gl, &scene.ambient)?;
         unsafe {
             // A screen-wide pass covers every pixel and reads the depth rather than testing against
             // it, so nothing here is depth tested and nothing writes depth.

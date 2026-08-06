@@ -241,12 +241,19 @@ pub struct Ambient {
 impl Default for Ambient {
     fn default() -> Self {
         Self {
-            sky: [Vec4::ZERO; 3],
+            // A place with no zone around it still has to state a sky, since that is the only thing
+            // a smooth surface has to reflect. Brighter overhead than underfoot, and this viewer's
+            // own: nothing on disk states what a model out of any zone stands in.
+            sky: [
+                Vec4::new(0.0, 0.12, 0.0, 0.26),
+                Vec4::new(0.0, 0.13, 0.0, 0.28),
+                Vec4::new(0.0, 0.16, 0.0, 0.33),
+            ],
             sky_scale: 1.0,
             light: [Vec4::new(0.0, 0.0, 0.0, 0.12); 3],
             scale: 1.0,
             fade: Vec3::new(0.0, 1.0, 0.0),
-            reflection: Vec3::new(0.0, 1.0, 0.0),
+            reflection: Vec3::new(1.0, 0.0, 0.0),
             roughness: 0.0,
             haze: Vec4::W,
         }

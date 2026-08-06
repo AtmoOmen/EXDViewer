@@ -187,7 +187,7 @@ impl Ambient {
             azimuth: AZIMUTH,
             elevation: ELEVATION,
             fade: Vec3::new(0.0, 1.0, 0.0),
-            reflection: Vec3::new(0.0, 1.0, 0.0),
+            reflection: Vec3::new(1.0, 0.0, 0.0),
             roughness: 0.0,
             haze: Vec4::W,
         }

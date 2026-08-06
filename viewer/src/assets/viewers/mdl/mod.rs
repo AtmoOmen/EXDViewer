@@ -253,6 +253,9 @@ struct Level {
     /// Whether any mesh carries bone indices, which is what decides whether the game would draw
     /// this model through its skinning variant.
     skinned: bool,
+    /// How many attributes the file declares. An imc variant's mask means something over only
+    /// this many of its bits; the rest are padding the format reserves rather than states.
+    attributes: usize,
     gpu: Arc<Mutex<gpu::Model>>,
 }
 
@@ -387,6 +390,45 @@ fn imc_part(path: &str) -> u8 {
         "sho" | "ril" => 4,
         _ => 0,
     }
+}
+
+/// Whether an imc's variants pick between mutually exclusive geometry, which is what lets a first
+/// look default past entry 0's own all-on catalog: variant 1's mask is set, at least one other
+/// variant's is too, and no two share a bit. Masks are restricted to the model's own declared
+/// attributes, since the format reserves ten bits regardless of how many exist; a lone alternative
+/// is a toggle rather than a choice and does not count, which is what keeps this off ordinary
+/// equipment.
+fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> bool {
+    let cover: u32 = match declared {
+        0 => return false,
+        1..=32 => (1u32 << declared) - 1,
+        _ => u32::MAX,
+    };
+    let first = image_change
+        .entry(part, 1)
+        .map_or(0, |entry| u32::from(entry.attribute_mask()) & cover);
+    if first == 0 {
+        return false;
+    }
+    let mut seen = first;
+    let mut count = 1;
+    for variant in 2..=image_change.variant_count() {
+        let Some(mask) = image_change
+            .entry(part, variant)
+            .map(|entry| u32::from(entry.attribute_mask()) & cover)
+        else {
+            continue;
+        };
+        if mask == 0 {
+            continue;
+        }
+        if seen & mask != 0 {
+            return false;
+        }
+        seen |= mask;
+        count += 1;
+    }
+    count >= 2
 }
 
 fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> {
@@ -564,6 +606,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         home,
         radius,
         skinned,
+        attributes: attributes.len(),
         gpu: gpu::Model::new(pending),
     })
 }
@@ -914,7 +957,16 @@ impl Rendered {
                                 .map_err(|why| why.to_string())
                         });
                     *imc = Some(match read {
-                        Ok(image_change) => Imc::Ready(image_change),
+                        Ok(image_change) => {
+                            if exclusive_variants(
+                                &image_change,
+                                imc_part(&self.path),
+                                level.attributes,
+                            ) {
+                                self.variant.set(1);
+                            }
+                            Imc::Ready(image_change)
+                        }
                         Err(why) => {
                             log::warn!("assets/mdl: {}: {why}", self.path);
                             Imc::Absent

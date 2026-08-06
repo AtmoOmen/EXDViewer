@@ -580,11 +580,12 @@ impl Game {
         Ok(())
     }
 
-    /// Every material resolved into the frame as its own geometry, after the lighting. What each
-    /// reads to write it is the copy of the frame taken before the first of them drew.
+    /// Every material resolved into the frame as its own geometry, after the lighting.
     ///
-    /// Depth tested against what the G-buffer covered and writing none of its own, so the surfaces
-    /// in front of a piece of glass hide it and the pieces behind it do not.
+    /// A material that wrote the G-buffer goes first and reads it; one that did not wrote nothing
+    /// to light and reads the frame instead, so the copy it reads is taken once the rest have
+    /// drawn. Depth tested against what the G-buffer covered and writing none of its own, so the
+    /// surfaces in front of a piece of glass hide it and the pieces behind it do not.
     fn resolve(
         &mut self,
         gl: &glow::Context,
@@ -593,7 +594,7 @@ impl Game {
         meshes: &[Buffers],
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let drawn: Vec<usize> = frame
+        let (opaque, blended): (Vec<usize>, Vec<usize>) = frame
             .surfaces
             .iter()
             .enumerate()
@@ -605,47 +606,56 @@ impl Game {
                     && !surface.runs.is_empty()
             })
             .map(|(at, _)| at)
-            .collect();
-        if drawn.is_empty() {
-            return Ok(());
-        }
-        self.buffers.keep(gl)?;
-        let into = self.buffers.frame().ok_or("no lit frame")?;
-        let size = self.buffers.size();
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            gl.viewport(0, 0, size.0, size.1);
-            gl.color_mask(true, true, true, true);
-            gl.enable(glow::DEPTH_TEST);
-            gl.depth_func(glow::LEQUAL);
-            gl.depth_mask(false);
-            gl.disable(glow::BLEND);
-        }
-        for at in drawn {
-            let surface = &frame.surfaces[at];
-            let Some(mesh) = meshes.get(at) else {
+            .partition(|at| {
+                frame.surfaces[*at]
+                    .shaded
+                    .as_ref()
+                    .is_some_and(|shaded| !shaded.buffer.is_empty())
+            });
+        for (behind, held) in [(false, &opaque), (true, &blended)] {
+            if held.is_empty() {
                 continue;
-            };
-            let held = surface
-                .shaded
-                .as_ref()
-                .and_then(|shaded| shaded.resolve.as_deref())
-                .ok_or("no pass to resolve with")?;
-            let program =
-                deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
-            unsafe {
-                gl.use_program(Some(program));
-                match surface.cull {
-                    true => {
-                        gl.enable(glow::CULL_FACE);
-                        gl.cull_face(glow::BACK);
-                        gl.front_face(glow::CCW);
-                    }
-                    false => gl.disable(glow::CULL_FACE),
-                }
             }
-            self.bind(gl, painter, program, held, surface, mesh, scene)?;
+            if behind {
+                self.buffers.keep(gl)?;
+            }
+            let into = self.buffers.frame().ok_or("no lit frame")?;
+            let size = self.buffers.size();
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.viewport(0, 0, size.0, size.1);
+                gl.color_mask(true, true, true, true);
+                gl.enable(glow::DEPTH_TEST);
+                gl.depth_func(glow::LEQUAL);
+                gl.depth_mask(false);
+                gl.disable(glow::BLEND);
+            }
+            for at in held {
+                let surface = &frame.surfaces[*at];
+                let Some(mesh) = meshes.get(*at) else {
+                    continue;
+                };
+                let held = surface
+                    .shaded
+                    .as_ref()
+                    .and_then(|shaded| shaded.resolve.as_deref())
+                    .ok_or("no pass to resolve with")?;
+                let program =
+                    deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
+                unsafe {
+                    gl.use_program(Some(program));
+                    match surface.cull {
+                        true => {
+                            gl.enable(glow::CULL_FACE);
+                            gl.cull_face(glow::BACK);
+                            gl.front_face(glow::CCW);
+                        }
+                        false => gl.disable(glow::CULL_FACE),
+                    }
+                }
+                self.bind(gl, painter, program, held, surface, mesh, scene)?;
+            }
         }
         Ok(())
     }

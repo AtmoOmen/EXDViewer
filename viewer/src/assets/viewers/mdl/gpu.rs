@@ -195,6 +195,8 @@ pub struct Model {
     rewritten: Vec<(usize, Vec<u16>)>,
     /// The game's own layered textures, waiting for the same.
     arrays: Vec<(u32, Layered)>,
+    /// The table the shading passes index, waiting for the same.
+    types: Option<Vec<u32>>,
     tables: BTreeMap<usize, (glow::Texture, f32)>,
     /// Why the shader would not build, kept so the viewer can say so rather than draw nothing.
     failure: Option<String>,
@@ -210,6 +212,7 @@ impl Model {
             queued: Vec::new(),
             rewritten: Vec::new(),
             arrays: Vec::new(),
+            types: None,
             tables: BTreeMap::new(),
             failure: None,
         }))
@@ -239,6 +242,11 @@ impl Model {
     /// by.
     pub fn queue_array(&mut self, id: u32, held: Layered) {
         self.arrays.push((id, held));
+    }
+
+    /// Hands the table the shading passes index over, replacing the one the frame stood in with.
+    pub fn queue_types(&mut self, values: Vec<u32>) {
+        self.types = Some(values);
     }
 
     pub fn draw(
@@ -279,6 +287,11 @@ impl Model {
             if let Err(why) = self.game.buffers.layered(gl, id, &held) {
                 log::error!("assets/mdl: texture array {id:#010x}: {why}");
             }
+        }
+        if let Some(values) = self.types.take()
+            && let Err(why) = self.game.buffers.fill_types(gl, &values)
+        {
+            log::error!("assets/mdl: shader types: {why}");
         }
         for (material, values) in std::mem::take(&mut self.queued) {
             let rows = values.len() as i32 / (TABLE_COLUMNS * 4);

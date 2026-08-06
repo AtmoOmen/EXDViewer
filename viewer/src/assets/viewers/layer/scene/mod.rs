@@ -797,7 +797,7 @@ impl Scene {
             }
         }
         if let Some((path, bytes)) = falloff {
-            match mdl::layered(&bytes, &path) {
+            match mdl::layered(&bytes, &path, mdl::deferred::RAMP.2) {
                 Ok(held) => self
                     .renderer
                     .lock()

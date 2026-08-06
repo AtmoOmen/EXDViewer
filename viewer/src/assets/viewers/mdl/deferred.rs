@@ -31,15 +31,40 @@ const FINAL_COLOR: u32 = 0x8ea9_df48;
 /// The ramp a placed light's falloff is read off, indexed by the square of how far the pixel stands
 /// from it. The engine binds this rather than any material, and the flat stand-in leaves every light
 /// at full strength out to the edge of its own volume, which is a hard circle.
-pub const RAMP: (u32, &str) = (ATTENUATION, "common/graphics/texture/-attenuation.tex");
+pub const RAMP: (u32, &str, u32) = (
+    ATTENUATION,
+    "common/graphics/texture/-attenuation.tex",
+    glow::LINEAR,
+);
 
-/// The textures the game's own shaders read that no material names: the tiles a character's surface
-/// detail is taken from, the spheres its resolve pass shades against, and that ramp.
-pub const ENGINE: [(u32, &str); 4] = [
-    (0x92f0_3e53, "chara/common/texture/tile_norm_array.tex"),
-    (0x800b_e99b, "chara/common/texture/tile_orb_array.tex"),
-    (0x3334_d3ca, "chara/common/texture/sphere_d_array.tex"),
+/// The textures the game's own shaders read that no material names, and how each is read between its
+/// texels: the tiles a character's surface detail is taken from, the spheres its resolve pass shades
+/// against, that ramp, and the profiles the subsurface term is read off.
+///
+/// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
+/// filtering it would answer with the mean of two profiles and of two Gaussians alike.
+pub const ENGINE: [(u32, &str, u32); 5] = [
+    (
+        0x92f0_3e53,
+        "chara/common/texture/tile_norm_array.tex",
+        glow::LINEAR,
+    ),
+    (
+        0x800b_e99b,
+        "chara/common/texture/tile_orb_array.tex",
+        glow::LINEAR,
+    ),
+    (
+        0x3334_d3ca,
+        "chara/common/texture/sphere_d_array.tex",
+        glow::LINEAR,
+    ),
     RAMP,
+    (
+        0x3b44_510e,
+        "common/graphics/texture/-sss_kernel_ssst.tex",
+        glow::NEAREST,
+    ),
 ];
 
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
@@ -155,6 +180,7 @@ pub struct Layered {
     pub size: (i32, i32),
     pub layers: i32,
     pub pixels: Vec<u8>,
+    pub filter: u32,
 }
 
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
@@ -504,14 +530,24 @@ impl Buffers {
         Ok(held)
     }
 
-    /// The table `SV_Target.w` indexes, which every pixel shader that shades a surface reads.
+    /// The table `SV_Target.w` indexes, which every pixel shader that shades a surface reads. Empty
+    /// until the files it is filled from arrive, which is the branch a plain surface takes.
     pub fn types(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
         if let Some(held) = self.types {
             return Ok(held);
         }
-        let held = dwords(gl, &program::shader_types())?;
+        let held = dwords(gl, &program::shader_types(&[]))?;
         self.types = Some(held);
         Ok(held)
+    }
+
+    /// The same table, as the parameter files that have arrived state it.
+    pub fn fill_types(&mut self, gl: &glow::Context, values: &[u32]) -> Result<(), String> {
+        let held = dwords(gl, values)?;
+        if let Some(stale) = self.types.replace(held) {
+            graveyard().lock().unwrap().push(Dead::Texture(stale));
+        }
+        Ok(())
     }
 
     /// The cube the composite takes reflections against, which nothing here reconstructs. The alpha
@@ -530,8 +566,10 @@ impl Buffers {
     /// validates where the texture bound to its unit is of the declaration's own kind.
     ///
     /// An array repeats, since the shaders that read one scale the coordinate up by a tile factor
-    /// and expect the tile to come round again. A ramp is clamped: it is addressed over its whole
-    /// width, and wrapping would blend its last texel against its first.
+    /// and expect the tile to come round again. A plane is clamped: it is addressed over its whole
+    /// width, and wrapping would blend its last texel against its first. What is read between the
+    /// texels is the caller's to say, since nothing about the texture tells whether it is an image
+    /// or a table.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
         let (target, wrap) = match held.layers > 1 {
             true => (glow::TEXTURE_2D_ARRAY, glow::REPEAT),
@@ -566,8 +604,8 @@ impl Buffers {
                 ),
             }
             for (name, value) in [
-                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
-                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MIN_FILTER, held.filter),
+                (glow::TEXTURE_MAG_FILTER, held.filter),
                 (glow::TEXTURE_WRAP_S, wrap),
                 (glow::TEXTURE_WRAP_T, wrap),
             ] {

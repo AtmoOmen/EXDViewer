@@ -193,7 +193,7 @@ enum Array {
 /// into is built again from all of them each time one more arrives.
 enum Parameters {
     Fetching(TrackedPromise<Result<Vec<u8>>>),
-    Ready(Box<ShaderParameters>),
+    Ready(ShaderParameters),
     Failed,
 }
 
@@ -679,6 +679,19 @@ fn named(attributes: &[String], mask: u32) -> String {
         .join(", ")
 }
 
+/// The table the shading passes index, from the parameter files that have arrived. Nothing until one
+/// has, since a table of nought is what the frame already stands in with.
+fn types(parameters: &BTreeMap<usize, Parameters>) -> Option<Vec<u32>> {
+    let held = parameters
+        .iter()
+        .filter_map(|(base, held)| match held {
+            Parameters::Ready(file) => Some((*base, file)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!held.is_empty()).then(|| program::shader_types(&held))
+}
+
 /// One of the game's own textures as the card takes it. Mip nought alone: nothing tells a translated
 /// shader how many levels a texture has, and the graph answers that with one.
 pub(super) fn layered(bytes: &[u8], path: &str, filter: u32) -> Result<deferred::Layered> {
@@ -920,7 +933,7 @@ impl Rendered {
                         ShaderParameters::read(Cursor::new(bytes.clone()))
                             .map_err(|why| why.to_string())
                     }) {
-                    Ok(file) => Parameters::Ready(Box::new(file)),
+                    Ok(file) => Parameters::Ready(file),
                     Err(why) => {
                         log::error!("assets/mdl: {path}: {why}");
                         Parameters::Failed
@@ -928,19 +941,8 @@ impl Rendered {
                 };
                 arrived = true;
             }
-            if arrived {
-                let held = parameters
-                    .iter()
-                    .filter_map(|(base, held)| match held {
-                        Parameters::Ready(file) => Some((*base, &**file)),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                level
-                    .gpu
-                    .lock()
-                    .unwrap()
-                    .queue_types(program::shader_types(&held));
+            if arrived && let Some(values) = types(&parameters) {
+                level.gpu.lock().unwrap().queue_types(values);
             }
         }
 
@@ -1397,6 +1399,10 @@ impl Rendered {
             {
                 level.gpu.lock().unwrap().queue_table(index, table.to_vec());
             }
+        }
+        // Nor the shader type table, and the files it is built from have already arrived.
+        if let Some(values) = types(&self.parameters.borrow()) {
+            level.gpu.lock().unwrap().queue_types(values);
         }
 
         self.lod.set(lod);

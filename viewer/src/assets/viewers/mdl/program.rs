@@ -12,8 +12,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use glam::{Mat4, Vec3, Vec4};
-use ironworks::file::mtrl;
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
+use ironworks::file::{mtrl, spm};
 
 use super::material::Material;
 
@@ -1141,15 +1141,87 @@ pub fn joints(count: usize, transform: Mat4) -> Vec<u32> {
     out
 }
 
+/// The parameter files the table is filled from, and the record each one's first profile lands at: a
+/// G pass adds its own family's base to the type its material names.
+pub const PARAMETERS: [(usize, &str); 2] = [
+    (32, "common/graphics/chara_shader_param.spm"),
+    (128, "common/graphics/bg_shader_param.spm"),
+];
+
 /// The table `SV_Target.w` indexes, as the dwords of the texture standing in for a structured
-/// buffer. A record's first field is the lighting model the shader branches on; nothing in any file
-/// says what the rest hold, so they are left at nought, which is the branch a plain surface takes.
+/// buffer, filled from the parameter files whose profiles it holds.
 ///
 /// Every index a G pass can write has a record, since the one it writes is `(32 + type) / 255` and
-/// what a material makes of that is the material's own business.
-pub fn shader_types() -> Vec<u32> {
+/// what a material makes of that is the material's own business. A file the caller has yet to
+/// receive leaves its own records at nought, which is the branch a plain surface takes.
+pub fn shader_types(files: &[(usize, &spm::ShaderParameters)]) -> Vec<u32> {
     let rows = (SHADER_TYPES * SHADER_TYPE).div_ceil(ROW);
-    vec![0u32; rows * ROW]
+    let mut out = vec![0u32; rows * ROW];
+    for (base, file) in files {
+        for profile in 0..file.rows().len() {
+            let at = (base + profile) * SHADER_TYPE;
+            let Some(record) = out.get_mut(at..at + SHADER_TYPE) else {
+                continue;
+            };
+            for (column, held) in file.columns().iter().enumerate() {
+                let Some(name) = spm::name(held.id()) else {
+                    continue;
+                };
+                let Some(value) = file.value(profile, column) else {
+                    continue;
+                };
+                if let Some((slot, stated)) = parameter(name, value) {
+                    record[slot] = stated;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Where one of the parameters a file names goes in a record, and the dword it goes there as. A file
+/// orders its own columns and carries whichever subset of the parameters its family reads; the
+/// record's layout is the shaders' own, and every file writes into the same one.
+fn parameter(name: &str, value: spm::Value) -> Option<(usize, u32)> {
+    let slot = match name {
+        "LightingType" => 0,
+        "SubSurfaceProfileID" => 1,
+        "SubSurfaceWidth" => 2,
+        "BackScatterPower" => 3,
+        "SheenRate" => 4,
+        "SheenTintRate" => 5,
+        "SheenAperture" => 6,
+        "UseSubSurfaceRate" => 7,
+        "HairScatterColorShift" => 8,
+        "HairSpecularPrimaryShift" => 9,
+        "HairSpecularBackScatterShift" => 10,
+        "HairSpecularSecondaryShift" => 11,
+        "FurLength" => 12,
+        "HairBackScatterRoughnessOffsetRate" => 13,
+        "HairSecondaryRoughnessOffsetRate" => 14,
+        "SubSurfacePower" => 15,
+        _ => return None,
+    };
+    let held = match value {
+        // A specular shift is a lobe center against the sine of an angle, and the files state it in
+        // degrees.
+        spm::Value::Float(held) if name.starts_with("HairSpecular") => held.to_radians().to_bits(),
+        spm::Value::Float(held) => held.to_bits(),
+        spm::Value::Unsigned(held) => held,
+        spm::Value::Name(held) => lighting(held),
+    };
+    Some((slot, held))
+}
+
+/// The lighting model a record names, as the integer the shaders compare against. Anything else is
+/// the default, which is the model a surface with nothing said about it takes.
+fn lighting(id: u32) -> u32 {
+    match spm::name(id) {
+        Some("HAIR") => 1,
+        Some("LEGACY") => 2,
+        Some("HALF") => 3,
+        _ => 0,
+    }
 }
 
 /// The color table as the game's own shaders read it: the rows exactly as the material states them,
@@ -1165,9 +1237,12 @@ pub fn table(held: &mtrl::ColorTable) -> Option<(&[u16], usize, usize)> {
 
 #[cfg(test)]
 mod test {
-    use glam::{Mat3, Mat4, Vec3, Vec4};
+    use std::io::Cursor;
 
-    use super::{Ambient, JOINT, ROW, ambient, joints, selector};
+    use glam::{Mat3, Mat4, Vec3, Vec4};
+    use ironworks::file::{File, spm::ShaderParameters};
+
+    use super::{Ambient, JOINT, ROW, SHADER_TYPE, ambient, joints, selector, shader_types};
 
     /// The composite reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, and its header
     /// at nought through three. Nothing in the reflection lays the entry out, so this is the whole
@@ -1233,5 +1308,55 @@ mod test {
             [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 4.0, 5.0, 6.0]
         );
         assert_eq!(&held[JOINT..JOINT * 2], &held[..JOINT]);
+    }
+
+    /// A parameter file of one profile, written the way the shipping ones are.
+    fn parameters(columns: &[(u32, u32)], values: &[u32]) -> Vec<u8> {
+        // Offsets are counted in words, and the header is three of them.
+        let columns_at = 3u16;
+        let rows_at = columns_at + 2 * columns.len() as u16;
+        let values_at = rows_at + 2;
+
+        let mut bytes = 0x0100_0000u32.to_le_bytes().to_vec();
+        bytes.push(columns.len() as u8);
+        bytes.push(1);
+        bytes.extend(columns_at.to_le_bytes());
+        bytes.extend(rows_at.to_le_bytes());
+        bytes.extend(values_at.to_le_bytes());
+        for (id, kind) in columns {
+            bytes.extend(id.to_le_bytes());
+            bytes.extend(kind.to_le_bytes());
+        }
+        bytes.extend(0xB9FD_FB6Cu32.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        for value in values {
+            bytes.extend(value.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Nothing in a file says where its parameters go: the record is laid out by what the shaders
+    /// read, and a file states whichever of them its own family uses, in whichever order it likes.
+    #[test]
+    fn a_profile_fills_the_record_the_shaders_read() {
+        let file = ShaderParameters::read(Cursor::new(parameters(
+            &[
+                (0xF33F_F064, 0),
+                (0x8FB5_3404, 1),
+                (0xE800_1A59, 2),
+                (0x4133_8E94, 0),
+            ],
+            &[13.0f32.to_bits(), 5, 0x56F1_6FCB, 1.0f32.to_bits()],
+        )))
+        .unwrap();
+
+        let held = shader_types(&[(32, &file)]);
+        let record = &held[32 * SHADER_TYPE..33 * SHADER_TYPE];
+        assert_eq!(record[0], 2);
+        assert_eq!(record[1], 5);
+        assert_eq!(f32::from_bits(record[3]), 1.0);
+        // The lobe this centers is a Gaussian over a sine, and the file states it in degrees.
+        assert_eq!(f32::from_bits(record[9]), 13.0f32.to_radians());
+        assert!(held[..32 * SHADER_TYPE].iter().all(|held| *held == 0));
     }
 }

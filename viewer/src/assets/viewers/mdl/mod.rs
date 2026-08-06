@@ -28,6 +28,7 @@ use glam::{Mat3, Mat4, Vec3};
 use ironworks::file::{
     File,
     mdl::{Lod, MeshKind, ModelContainer, VertexAttributeKind, VertexFormat, VertexValues},
+    spm::ShaderParameters,
 };
 use std::io::Cursor;
 
@@ -188,6 +189,14 @@ enum Array {
     Done,
 }
 
+/// One of the game's own shader parameter files. Kept once parsed, since the table every file writes
+/// into is built again from all of them each time one more arrives.
+enum Parameters {
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready(ShaderParameters),
+    Failed,
+}
+
 /// One material's translated shaders, and what they were translated for: how many attachments the
 /// context allows decides how many of the G-buffer's targets fit in one reading.
 struct Translated {
@@ -251,6 +260,9 @@ pub struct Rendered {
     packages: RefCell<BTreeMap<String, Package>>,
     /// The textures the shaders read that no material names, by resource id.
     arrays: RefCell<BTreeMap<u32, Array>>,
+    /// The parameter files the shader type table is filled from, by the record their first profile
+    /// lands at.
+    parameters: RefCell<BTreeMap<usize, Parameters>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
     /// The passes that light the G-buffer, which belong to the frame rather than to a material.
@@ -289,6 +301,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         textures: Default::default(),
         packages: Default::default(),
         arrays: Default::default(),
+        parameters: Default::default(),
         translated: Default::default(),
         lighting: Default::default(),
         tables: Default::default(),
@@ -666,9 +679,22 @@ fn named(attributes: &[String], mask: u32) -> String {
         .join(", ")
 }
 
+/// The table the shading passes index, from the parameter files that have arrived. Nothing until one
+/// has, since a table of nought is what the frame already stands in with.
+fn types(parameters: &BTreeMap<usize, Parameters>) -> Option<Vec<u32>> {
+    let held = parameters
+        .iter()
+        .filter_map(|(base, held)| match held {
+            Parameters::Ready(file) => Some((*base, file)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    (!held.is_empty()).then(|| program::shader_types(&held))
+}
+
 /// One of the game's own textures as the card takes it. Mip nought alone: nothing tells a translated
 /// shader how many levels a texture has, and the graph answers that with one.
-pub(super) fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
+pub(super) fn layered(bytes: &[u8], path: &str, filter: u32) -> Result<deferred::Layered> {
     let texture = ironworks::file::tex::Texture::read(Cursor::new(bytes.to_vec()))?;
     let image = crate::utils::tex_loader::decode_stack(&texture, 0, path)?;
     let (width, height) = texture.mip_size(0);
@@ -676,6 +702,7 @@ pub(super) fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
         size: (width.into(), height.into()),
         layers: texture.layers(0).into(),
         pixels: image.into_rgba8().into_raw(),
+        filter,
     })
 }
 
@@ -860,7 +887,7 @@ impl Rendered {
             }
 
             let mut arrays = self.arrays.borrow_mut();
-            for (id, path) in deferred::ENGINE {
+            for (id, path, filter) in deferred::ENGINE {
                 let held = arrays.entry(id).or_insert_with(|| {
                     let files = backend.files().clone();
                     Array::Fetching(TrackedPromise::spawn_local(async move {
@@ -876,12 +903,46 @@ impl Rendered {
                 match result
                     .as_ref()
                     .map_err(ToString::to_string)
-                    .and_then(|bytes| layered(bytes, path).map_err(|why| why.to_string()))
+                    .and_then(|bytes| layered(bytes, path, filter).map_err(|why| why.to_string()))
                 {
                     Ok(decoded) => level.gpu.lock().unwrap().queue_array(id, decoded),
                     Err(why) => log::error!("assets/mdl: {path}: {why}"),
                 }
                 *held = Array::Done;
+            }
+
+            let mut parameters = self.parameters.borrow_mut();
+            let mut arrived = false;
+            for (base, path) in program::PARAMETERS {
+                let held = parameters.entry(base).or_insert_with(|| {
+                    let files = backend.files().clone();
+                    Parameters::Fetching(TrackedPromise::spawn_local(async move {
+                        files.read(path).await
+                    }))
+                });
+                let Parameters::Fetching(promise) = held else {
+                    continue;
+                };
+                let Some(result) = promise.try_get() else {
+                    continue;
+                };
+                *held = match result
+                    .as_ref()
+                    .map_err(ToString::to_string)
+                    .and_then(|bytes| {
+                        ShaderParameters::read(Cursor::new(bytes.clone()))
+                            .map_err(|why| why.to_string())
+                    }) {
+                    Ok(file) => Parameters::Ready(file),
+                    Err(why) => {
+                        log::error!("assets/mdl: {path}: {why}");
+                        Parameters::Failed
+                    }
+                };
+                arrived = true;
+            }
+            if arrived && let Some(values) = types(&parameters) {
+                level.gpu.lock().unwrap().queue_types(values);
             }
         }
 
@@ -1338,6 +1399,10 @@ impl Rendered {
             {
                 level.gpu.lock().unwrap().queue_table(index, table.to_vec());
             }
+        }
+        // Nor the shader type table, and the files it is built from have already arrived.
+        if let Some(values) = types(&self.parameters.borrow()) {
+            level.gpu.lock().unwrap().queue_types(values);
         }
 
         self.lod.set(lod);

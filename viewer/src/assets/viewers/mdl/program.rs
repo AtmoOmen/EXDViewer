@@ -45,11 +45,6 @@ pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
 const GET_DIRECTIONAL_LIGHT: u32 = 0x8115_916d;
 const GET_DIRECTIONAL_LIGHT_ENABLE: u32 = 0x51ed_d496;
 
-/// `SpecularLighting`, and the value that works a specular out rather than moving nought into the
-/// target the composite reads it back from. A placed light's package defaults it to `_Disable`.
-const SPECULAR_LIGHTING: u32 = 0x0d81_2fa4;
-const SPECULAR_LIGHTING_ENABLE: u32 = 0xaba1_f498;
-
 /// Records of `g_ShaderTypeParameter`, which `SV_Target.w` indexes as `(32 + type) / 255`.
 const SHADER_TYPES: usize = 256;
 
@@ -581,12 +576,8 @@ impl Program {
     /// G-buffer holds, which the engine runs over the whole frame rather than over one draw.
     pub fn screen(bytes: &[u8], pass: Pass, attachments: usize) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
-        // A key a package does not declare is never looked up, so a set covering all of them costs
-        // the ones that read none of it nothing.
-        let set = [
-            (GET_DIRECTIONAL_LIGHT, GET_DIRECTIONAL_LIGHT_ENABLE),
-            (SPECULAR_LIGHTING, SPECULAR_LIGHTING_ENABLE),
-        ];
+        // The package defaults `GetDirectionalLight` to the shader that writes no light at all.
+        let set = [(GET_DIRECTIONAL_LIGHT, GET_DIRECTIONAL_LIGHT_ENABLE)];
         let (vs, ps) = pair(&package, &[], &set, pass.id(), SUB_VIEW_MAIN)
             .ok_or("this package reaches no such pass")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)

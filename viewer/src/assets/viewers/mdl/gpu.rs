@@ -63,6 +63,8 @@ struct Buffers {
     layout: glow::VertexArray,
     vertices: glow::Buffer,
     indices: glow::Buffer,
+    /// The middle of the mesh's own extent, which is what orders the passes drawn over the frame.
+    center: glam::Vec3,
 }
 
 /// One material drawn with the shaders the game would draw it with.
@@ -586,6 +588,10 @@ impl Game {
     /// to light and reads the frame instead, so the copy it reads is taken once the rest have
     /// drawn. Depth tested against what the G-buffer covered and writing none of its own, so the
     /// surfaces in front of a piece of glass hide it and the pieces behind it do not.
+    ///
+    /// The ones reading the frame are drawn back to front and each takes its own copy: a pass of
+    /// theirs writes the whole composited color rather than blending, so one drawn over another
+    /// reading the same copy would erase it.
     fn resolve(
         &mut self,
         gl: &glow::Context,
@@ -594,7 +600,7 @@ impl Game {
         meshes: &[Buffers],
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (opaque, blended): (Vec<usize>, Vec<usize>) = frame
+        let (opaque, mut blended): (Vec<usize>, Vec<usize>) = frame
             .surfaces
             .iter()
             .enumerate()
@@ -612,12 +618,16 @@ impl Game {
                     .as_ref()
                     .is_some_and(|shaded| !shaded.buffer.is_empty())
             });
+        // The camera looks down negative z, so the farthest is the least.
+        let away = |at: &usize| match meshes.get(*at) {
+            Some(mesh) => (scene.view * scene.model).transform_point3(mesh.center).z,
+            None => 0.0,
+        };
+        blended.sort_by(|left, right| away(left).total_cmp(&away(right)));
+
         for (behind, held) in [(false, &opaque), (true, &blended)] {
             if held.is_empty() {
                 continue;
-            }
-            if behind {
-                self.buffers.keep(gl)?;
             }
             let into = self.buffers.frame().ok_or("no lit frame")?;
             let size = self.buffers.size();
@@ -632,6 +642,9 @@ impl Game {
                 gl.disable(glow::BLEND);
             }
             for at in held {
+                if behind {
+                    self.buffers.keep(gl)?;
+                }
                 let surface = &frame.surfaces[*at];
                 let Some(mesh) = meshes.get(*at) else {
                     continue;
@@ -868,10 +881,18 @@ fn upload_mesh(
 
         gl.bind_vertex_array(None);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        let (low, high) = vertices.iter().fold(
+            (glam::Vec3::INFINITY, glam::Vec3::NEG_INFINITY),
+            |(low, high), vertex| {
+                let held = glam::Vec3::from_array(vertex.position);
+                (low.min(held), high.max(held))
+            },
+        );
         Ok(Buffers {
             layout,
             vertices: held,
             indices: drawn,
+            center: (low + high) * 0.5,
         })
     }
 }

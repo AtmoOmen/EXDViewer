@@ -130,5 +130,9 @@ It cannot catch the `Send + Sync` bug at all. That one is a wasm *compile* error
 `cargo check -p viewer --target wasm32-unknown-unknown --lib`; nothing that runs a built app can
 see it. Of the three bugs this exists for, the browser is the only place the other two show up.
 
+`--model-only` returns before the shaders phase, so it never turns the game shaders on and never
+links the deferred lighting programs. A pass in that mode says nothing either way about anything
+`Program::screen` selects, translates or links, which once cost a correct change a revert.
+
 It needs the network: the app reads from `https://exd.camora.dev`, and the run uses the live API
 so that the real decode path is what gets exercised.

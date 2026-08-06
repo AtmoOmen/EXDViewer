@@ -367,6 +367,28 @@ fn imc_path(path: &str) -> Option<String> {
     Some(format!("{base}/{part}.imc"))
 }
 
+/// Which of the imc's five parts this model's own slot reads: head or ears 0, body or neck 1,
+/// hands or wrists 2, legs or right ring 3, feet or left ring 4, matching `imc.rs`'s own doc. A
+/// monster or weapon has one part and no such suffix, so it falls back to 0, which is already
+/// right for it.
+fn imc_part(path: &str) -> u8 {
+    let stem = path.rsplit('/').next().unwrap_or(path);
+    let slot = stem
+        .strip_suffix(".mdl")
+        .unwrap_or(stem)
+        .rsplit('_')
+        .next()
+        .unwrap_or("");
+    match slot {
+        "met" | "ear" => 0,
+        "top" | "nek" => 1,
+        "glv" | "wrs" => 2,
+        "dwn" | "rir" => 3,
+        "sho" | "ril" => 4,
+        _ => 0,
+    }
+}
+
 fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> {
     let model = container.model(detail(lod));
 
@@ -1400,7 +1422,7 @@ impl Rendered {
             return None;
         };
         image_change
-            .entry(0, self.variant.get())
+            .entry(imc_part(&self.path), self.variant.get())
             .map(|entry| u32::from(entry.attribute_mask()))
     }
 

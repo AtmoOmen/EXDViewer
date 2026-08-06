@@ -890,6 +890,16 @@ impl Buffer {
         put("m_SkyVisibility", vec![1.0]);
         put("m_DitherAlpha", vec![1.0]);
 
+        // The colors a character was made with, which no file a model names holds. Each is what an
+        // albedo is multiplied by or mixed toward, so white leaves the texture's own color where it
+        // is and nought takes hair and eyes to black. A lip tint is left alone: its own alpha is the
+        // weight it carries. The last lane of the two hair colors is where a decal is read from.
+        for name in ["m_SkinColor", "m_MainColor", "m_LeftColor", "m_RightColor"] {
+            put(name, vec![1.0; 4]);
+        }
+        put("m_MeshColor", vec![1.0, 1.0, 1.0, 0.0]);
+        put("m_OptionColor0", vec![1.0; 3]);
+
         // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a
         // texture coordinate names counts from the far side of the one a fragment coordinate does,
         // so the height goes in negative and the offset takes it back.

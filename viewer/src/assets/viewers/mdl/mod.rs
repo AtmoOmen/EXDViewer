@@ -27,6 +27,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Vec3};
 use ironworks::file::{
     File,
+    imc::ImageChange,
     mdl::{Lod, MeshKind, ModelContainer, VertexAttributeKind, VertexFormat, VertexValues},
     spm::ShaderParameters,
 };
@@ -122,10 +123,15 @@ impl Camera {
 /// One part of a mesh, drawn with the rest of it but hideable on its own.
 struct Part {
     range: Range<usize>,
-    shown: bool,
+    /// A cell rather than a plain bool: the imc variant this defaults from is fetched after the
+    /// level is built, and applying it only has to reach the part, not rebuild the level around it.
+    shown: Cell<bool>,
     /// What the model's attribute table calls this part, which is the only name it carries. Empty
     /// where the part claims no attribute.
     attributes: String,
+    /// The bits behind that name, as the file's own attribute mask states them. Nought where the
+    /// part claims no attribute, which is what leaves it shown whatever variant is picked.
+    mask: u32,
 }
 
 /// One mesh of the model, as far as the browser cares about it.
@@ -197,6 +203,15 @@ enum Parameters {
     Failed,
 }
 
+/// The model's own `.imc`, which states which attribute-gated parts a variant draws. `Absent` covers
+/// both a model this could name no such file for and one whose file would not read, and either way
+/// means what today means: every part shows, whatever it claims an attribute for.
+enum Imc {
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready(ImageChange),
+    Absent,
+}
+
 /// One material's translated shaders, and what they were translated for: how many attachments the
 /// context allows decides how many of the G-buffer's targets fit in one reading.
 struct Translated {
@@ -238,6 +253,9 @@ struct Level {
     /// Whether any mesh carries bone indices, which is what decides whether the game would draw
     /// this model through its skinning variant.
     skinned: bool,
+    /// How many attributes the file declares. An imc variant's mask means something over only
+    /// this many of its bits; the rest are padding the format reserves rather than states.
+    attributes: usize,
     gpu: Arc<Mutex<gpu::Model>>,
 }
 
@@ -265,6 +283,11 @@ pub struct Rendered {
     parameters: RefCell<BTreeMap<usize, Parameters>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
+    /// The model's own `.imc`, once asked for.
+    imc: RefCell<Option<Imc>>,
+    /// Which of the imc's variants a part's default visibility is drawn from. Nought is the file's
+    /// own default entry.
+    variant: Cell<u16>,
     /// The passes that light the G-buffer, which belong to the frame rather than to a material.
     lighting: RefCell<Option<Arc<gpu::Lighting>>>,
     /// The color table in the game's own layout, by material.
@@ -303,6 +326,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         arrays: Default::default(),
         parameters: Default::default(),
         translated: Default::default(),
+        imc: Default::default(),
+        variant: Cell::new(0),
         lighting: Default::default(),
         tables: Default::default(),
         camera: Cell::new(camera),
@@ -335,6 +360,75 @@ fn kind_name(kind: MeshKind) -> &'static str {
         MeshKind::CrestChange => "crest change",
         MeshKind::Standard => "standard",
     }
+}
+
+/// The `.imc` this model's part draws with, derived from the model's own path rather than named
+/// anywhere in the file: strip the `model/<name>.mdl` tail and the directory left names it.
+fn imc_path(path: &str) -> Option<String> {
+    let base = &path[..path.rfind("/model/")?];
+    let part = base.rsplit('/').next()?;
+    Some(format!("{base}/{part}.imc"))
+}
+
+/// Which of the imc's five parts this model's own slot reads: head or ears 0, body or neck 1,
+/// hands or wrists 2, legs or right ring 3, feet or left ring 4, matching `imc.rs`'s own doc. A
+/// monster or weapon has one part and no such suffix, so it falls back to 0, which is already
+/// right for it.
+fn imc_part(path: &str) -> u8 {
+    let stem = path.rsplit('/').next().unwrap_or(path);
+    let slot = stem
+        .strip_suffix(".mdl")
+        .unwrap_or(stem)
+        .rsplit('_')
+        .next()
+        .unwrap_or("");
+    match slot {
+        "met" | "ear" => 0,
+        "top" | "nek" => 1,
+        "glv" | "wrs" => 2,
+        "dwn" | "rir" => 3,
+        "sho" | "ril" => 4,
+        _ => 0,
+    }
+}
+
+/// Whether an imc's variants pick between mutually exclusive geometry, which is what lets a first
+/// look default past entry 0's own all-on catalog: variant 1's mask is set, at least one other
+/// variant's is too, and no two share a bit. Masks are restricted to the model's own declared
+/// attributes, since the format reserves ten bits regardless of how many exist; a lone alternative
+/// is a toggle rather than a choice and does not count, which is what keeps this off ordinary
+/// equipment.
+fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> bool {
+    let cover: u32 = match declared {
+        0 => return false,
+        1..32 => (1u32 << declared) - 1,
+        _ => u32::MAX,
+    };
+    let first = image_change
+        .entry(part, 1)
+        .map_or(0, |entry| u32::from(entry.attribute_mask()) & cover);
+    if first == 0 {
+        return false;
+    }
+    let mut seen = first;
+    let mut count = 1;
+    for variant in 2..=image_change.variant_count() {
+        let Some(mask) = image_change
+            .entry(part, variant)
+            .map(|entry| u32::from(entry.attribute_mask()) & cover)
+        else {
+            continue;
+        };
+        if mask == 0 {
+            continue;
+        }
+        if seen & mask != 0 {
+            return false;
+        }
+        seen |= mask;
+        count += 1;
+    }
+    count >= 2
 }
 
 fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> {
@@ -398,15 +492,17 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         let parts = match submeshes.is_empty() {
             true => vec![Part {
                 range: 0..indices.len(),
-                shown: true,
+                shown: Cell::new(true),
                 attributes: String::new(),
+                mask: 0,
             }],
             false => submeshes
                 .iter()
                 .map(|part| Part {
                     range: part.start..part.start + part.count,
-                    shown: true,
+                    shown: Cell::new(true),
                     attributes: named(&attributes, part.attributes),
+                    mask: part.attributes,
                 })
                 .collect(),
         };
@@ -510,6 +606,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         home,
         radius,
         skinned,
+        attributes: attributes.len(),
         gpu: gpu::Model::new(pending),
     })
 }
@@ -710,7 +807,7 @@ pub(super) fn layered(bytes: &[u8], path: &str, filter: u32) -> Result<deferred:
 /// index order, so two neighbours that both draw are one call rather than two.
 fn shown(parts: &[Part]) -> Vec<Range<i32>> {
     let mut runs: Vec<Range<i32>> = Vec::new();
-    for part in parts.iter().filter(|part| part.shown) {
+    for part in parts.iter().filter(|part| part.shown.get()) {
         let run = part.range.start as i32..part.range.end as i32;
         match runs.last_mut() {
             Some(last) if last.end == run.start => last.end = run.end,
@@ -835,6 +932,51 @@ impl Rendered {
                 }
                 Some(_) => {}
             }
+        }
+
+        let mut imc = self.imc.borrow_mut();
+        match &mut *imc {
+            None => {
+                *imc = Some(match imc_path(&self.path) {
+                    Some(path) => {
+                        let files = backend.files().clone();
+                        Imc::Fetching(TrackedPromise::spawn_local(async move {
+                            files.read(&path).await
+                        }))
+                    }
+                    None => Imc::Absent,
+                });
+            }
+            Some(Imc::Fetching(promise)) => {
+                if let Some(result) = promise.try_get() {
+                    let read = result
+                        .as_ref()
+                        .map_err(ToString::to_string)
+                        .and_then(|bytes| {
+                            ImageChange::read(Cursor::new(bytes.clone()))
+                                .map_err(|why| why.to_string())
+                        });
+                    *imc = Some(match read {
+                        Ok(image_change) => {
+                            if exclusive_variants(
+                                &image_change,
+                                imc_part(&self.path),
+                                level.attributes,
+                            ) {
+                                self.variant.set(1);
+                            }
+                            Imc::Ready(image_change)
+                        }
+                        Err(why) => {
+                            log::warn!("assets/mdl: {}: {why}", self.path);
+                            Imc::Absent
+                        }
+                    });
+                    drop(imc);
+                    self.apply_variant();
+                }
+            }
+            Some(_) => {}
         }
 
         if self.shaded.get() {
@@ -1324,6 +1466,37 @@ impl Rendered {
         }
     }
 
+    /// The picked variant's attribute mask, once the imc has arrived. `None` before it has, or where
+    /// it named nothing to read: a part with an attribute then draws exactly as one without.
+    fn variant_mask(&self) -> Option<u32> {
+        let held = self.imc.borrow();
+        let Some(Imc::Ready(image_change)) = held.as_ref() else {
+            return None;
+        };
+        image_change
+            .entry(imc_part(&self.path), self.variant.get())
+            .map(|entry| u32::from(entry.attribute_mask()))
+    }
+
+    /// How many variants past the default the imc carries, once it has arrived.
+    fn variant_count(&self) -> Option<u16> {
+        match self.imc.borrow().as_ref() {
+            Some(Imc::Ready(image_change)) => Some(image_change.variant_count()),
+            _ => None,
+        }
+    }
+
+    /// Defaults every part's visibility from the picked variant's attribute mask. Cheap enough to
+    /// call on every arrival and every pick: it only sets cells, never rebuilds the level.
+    fn apply_variant(&self) {
+        let mask = self.variant_mask();
+        let level = self.level.borrow();
+        for part in level.meshes.iter().flat_map(|mesh| &mesh.parts) {
+            part.shown
+                .set(mask.is_none_or(|mask| part.mask == 0 || part.mask & mask != 0));
+        }
+    }
+
     /// Rewrites every touched mesh's indices from the file's own, so switching a shape off restores
     /// what it replaced and two shapes over the same mesh both land.
     fn apply(&self) {
@@ -1408,12 +1581,14 @@ impl Rendered {
         self.lod.set(lod);
         *self.level.borrow_mut() = level;
         self.apply();
+        self.apply_variant();
     }
 
     pub fn details_ui(&self, ui: &mut egui::Ui, follow: &mut Option<String>) {
         let mut picked = None;
         let mut toggled = None;
         let mut picked_shape = None;
+        let mut picked_variant = None;
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let level = self.level.borrow();
             facts(ui, "mdl_identity", &level.identity);
@@ -1481,11 +1656,26 @@ impl Rendered {
                 }
             }
 
+            if let Some(count) = self.variant_count().filter(|count| *count > 0) {
+                ui.add_space(8.0);
+                section(ui, "Variant");
+                let current = self.variant.get();
+                ui.horizontal_wrapped(|ui| {
+                    for at in 0..=count {
+                        if ui.selectable_label(current == at, at.to_string()).clicked()
+                            && current != at
+                        {
+                            picked_variant = Some(at);
+                        }
+                    }
+                });
+            }
+
             ui.add_space(8.0);
             section(ui, "Meshes");
             for (index, mesh) in level.meshes.iter().enumerate() {
                 ui.horizontal_wrapped(|ui| {
-                    let drawn = mesh.parts.iter().any(|part| part.shown);
+                    let drawn = mesh.parts.iter().any(|part| part.shown.get());
                     if ui
                         .selectable_label(drawn, RichText::new(format!("Mesh {index}")).weak())
                         .on_hover_text(format!(
@@ -1502,7 +1692,7 @@ impl Rendered {
                             true => part.to_string(),
                             false => held.attributes.clone(),
                         };
-                        if ui.selectable_label(held.shown, label).clicked() {
+                        if ui.selectable_label(held.shown.get(), label).clicked() {
                             toggled = Some((index, Some(part)));
                         }
                     }
@@ -1530,17 +1720,21 @@ impl Rendered {
             }
         });
         if let Some((mesh, part)) = toggled {
-            let mut level = self.level.borrow_mut();
-            let parts = &mut level.meshes[mesh].parts;
+            let level = self.level.borrow();
+            let parts = &level.meshes[mesh].parts;
             match part {
-                Some(part) => parts[part].shown = !parts[part].shown,
+                Some(part) => parts[part].shown.set(!parts[part].shown.get()),
                 None => {
-                    let hide = parts.iter().any(|part| part.shown);
-                    for part in parts.iter_mut() {
-                        part.shown = !hide;
+                    let hide = parts.iter().any(|part| part.shown.get());
+                    for part in parts {
+                        part.shown.set(!hide);
                     }
                 }
             }
+        }
+        if let Some(variant) = picked_variant {
+            self.variant.set(variant);
+            self.apply_variant();
         }
         if let Some((group, variant)) = picked_shape {
             {

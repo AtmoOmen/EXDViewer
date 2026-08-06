@@ -804,7 +804,12 @@ impl Buffer {
         let rows = |matrix: Mat4, count: usize| -> Vec<f32> {
             matrix.transpose().to_cols_array()[..count * 4].to_vec()
         };
-        let mut put = |name: &str, values: Vec<f32>| {
+        // Aimed at one buffer, since the same name means different things in two of them: a light's
+        // diffuse color is also what skin under a stocking is multiplied by.
+        let mut put = |buffer: &str, name: &str, values: Vec<f32>| {
+            if self.name != buffer {
+                return;
+            }
             let Some(member) = self.members.iter().find(|held| held.name == name) else {
                 return;
             };
@@ -845,84 +850,98 @@ impl Buffer {
         let view_projection = projection * view;
         // Nothing here moves between frames, so every previous-frame matrix is the current one and
         // the motion vectors come out as nought.
+        let camera = "g_CameraParameter";
         for name in ["m_ViewMatrix", "m_ViewMatrixPrev"] {
-            put(name, rows(view, 3));
+            put(camera, name, rows(view, 3));
         }
         for name in [
             "m_InverseViewMatrix",
             "m_InverseViewMatrixPrev",
             "m_MainViewToWorldMatrix",
         ] {
-            put(name, rows(view.inverse(), 3));
+            put(camera, name, rows(view.inverse(), 3));
         }
         for name in ["m_ViewProjectionMatrix", "m_ViewProjectionMatrixPrev"] {
-            put(name, rows(view_projection, 4));
+            put(camera, name, rows(view_projection, 4));
         }
         for name in [
             "m_InverseViewProjectionMatrix",
             "m_InverseViewProjectionMatrixPrev",
         ] {
-            put(name, rows(view_projection.inverse(), 4));
+            put(camera, name, rows(view_projection.inverse(), 4));
         }
         for name in [
             "m_ProjectionMatrix",
             "m_ProjectionMatrixPrev",
             "m_MainViewToProjectionMatrix",
         ] {
-            put(name, rows(projection, 4));
+            put(camera, name, rows(projection, 4));
         }
         for name in ["m_InverseProjectionMatrix", "m_InverseProjectionMatrixPrev"] {
-            put(name, rows(projection.inverse(), 4));
+            put(camera, name, rows(projection.inverse(), 4));
         }
-        put("m_ProjToProjPrevMatrix", rows(Mat4::IDENTITY, 4));
-        put("m_ViewToViewPrevMatrix", rows(Mat4::IDENTITY, 3));
+        put(camera, "m_ProjToProjPrevMatrix", rows(Mat4::IDENTITY, 4));
+        put(camera, "m_ViewToViewPrevMatrix", rows(Mat4::IDENTITY, 3));
         // The transform a vertex shader multiplies by before the projection alone, with nothing
         // between the two: it takes an object into view space rather than into the world. The buffer
         // holds this frame's and the last one's.
-        put("g_WorldViewMatrix", {
+        put("g_WorldViewMatrix", "g_WorldViewMatrix", {
             let mut held = rows(world_view, 3);
             held.extend(rows(world_view, 3));
             held
         });
-        put("m_TransformMatrix", rows(world_view, 3));
-        put("m_MulColor", vec![1.0; 4]);
-        put("m_Params", vec![1.0; 4]);
-        put("m_SkyVisibility", vec![1.0]);
-        put("m_DitherAlpha", vec![1.0]);
+        put("g_InstanceParameter", "m_MulColor", vec![1.0; 4]);
+        put("g_ModelParameter", "m_Params", vec![1.0; 4]);
+        // What skin showing through a stocking is multiplied by, which is not the light's own color
+        // of the same name.
+        put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);
 
         // The colors a character was made with, which no file a model names holds. Each is what an
         // albedo is multiplied by or mixed toward, so white leaves the texture's own color where it
         // is and nought takes hair and eyes to black. A lip tint is left alone: its own alpha is the
         // weight it carries. The last lane of the two hair colors is where a decal is read from.
+        let customize = "g_CustomizeParameter";
         for name in ["m_SkinColor", "m_MainColor", "m_LeftColor", "m_RightColor"] {
-            put(name, vec![1.0; 4]);
+            put(customize, name, vec![1.0; 4]);
         }
-        put("m_MeshColor", vec![1.0, 1.0, 1.0, 0.0]);
-        put("m_OptionColor0", vec![1.0; 3]);
+        put(customize, "m_MeshColor", vec![1.0, 1.0, 1.0, 0.0]);
+        put(customize, "m_OptionColor0", vec![1.0; 3]);
 
         // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a
         // texture coordinate names counts from the far side of the one a fragment coordinate does,
         // so the height goes in negative and the offset takes it back.
         let (width, height) = (size.0.max(1.0), size.1.max(1.0));
-        put("m_RenderTarget", vec![1.0 / width, -1.0 / height, 0.0, 1.0]);
-        put("m_Viewport", vec![2.0 / width, -2.0 / height, -1.0, 1.0]);
-        put("m_Misc", vec![1.0, 1.0, 0.0, 0.0]);
-        put("m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
-        put("m_BackBufferSize", vec![width, height]);
-        put("m_ViewportSize", vec![width, height]);
+        let common = "g_CommonParameter";
+        put(
+            common,
+            "m_RenderTarget",
+            vec![1.0 / width, -1.0 / height, 0.0, 1.0],
+        );
+        put(
+            common,
+            "m_Viewport",
+            vec![2.0 / width, -2.0 / height, -1.0, 1.0],
+        );
+        put(common, "m_Misc", vec![1.0, 1.0, 0.0, 0.0]);
+        put(common, "m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
+        let screen = "g_ScreenParameter";
+        put(screen, "m_BackBufferSize", vec![width, height]);
+        put(screen, "m_ViewportSize", vec![width, height]);
         for name in ["m_InverseBackBufferSize", "m_InverseViewportSize"] {
-            put(name, vec![1.0 / width, 1.0 / height]);
+            put(screen, name, vec![1.0 / width, 1.0 / height]);
         }
         // Nothing here renders at a resolution other than the one it presents at, and a pass that
         // reads the frame back scales its coordinate by this before sampling.
         for name in ["m_DynamicResolutionScale", "m_DynamicResolutionChangeScale"] {
-            put(name, vec![1.0; 2]);
+            put(screen, name, vec![1.0; 2]);
         }
 
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.
         let axes = glam::Mat3::from_mat4(view);
+        let light = "g_LightParam";
         put(
+            light,
             "m_Direction",
             (axes * scene.light).normalize_or_zero().to_array().to_vec(),
         );
@@ -931,8 +950,9 @@ impl Buffer {
             Pass::Lamp => lamp.color,
             _ => scene.diffuse,
         };
-        put("m_DiffuseColor", color.to_array().to_vec());
+        put(light, "m_DiffuseColor", color.to_array().to_vec());
         put(
+            light,
             "m_SpecularColor",
             match pass {
                 Pass::Lamp => lamp.color,
@@ -946,14 +966,15 @@ impl Buffer {
         // it alone. A lamp is clipped at the square of its own reach and scaled by it.
         let reach = lamp.reach();
         put(
+            light,
             "m_Attenuation",
             match pass {
                 Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.0],
                 _ => vec![0.0, 0.0, 1.0 / (reach * reach), reach],
             },
         );
-        put("m_LightFadeValueStatic", vec![1.0]);
-        put("m_LightFadeValueDynamic", vec![1.0]);
+        put(light, "m_LightFadeValueStatic", vec![1.0]);
+        put(light, "m_LightFadeValueDynamic", vec![1.0]);
 
         // A lamp is drawn as the volume it reaches: its own vertex shader clamps a unit box to the
         // extents the zone clips it against and then projects, so the transform carries the light's
@@ -961,18 +982,21 @@ impl Buffer {
         let volume = lamp.placement * Mat4::from_scale(Vec3::splat(reach));
         let (min, max) = lamp.clip();
         put(
+            light,
             "m_Position",
             (view * lamp.placement * Vec3::ZERO.extend(1.0))
                 .to_array()
                 .to_vec(),
         );
-        put("m_ClipMin", min.to_array().to_vec());
-        put("m_ClipMax", max.to_array().to_vec());
+        put(light, "m_ClipMin", min.to_array().to_vec());
+        put(light, "m_ClipMax", max.to_array().to_vec());
         put(
+            light,
             "m_WorldViewProjectionMatrix",
             rows(view_projection * volume, 4),
         );
         put(
+            light,
             "m_WorldViewInversMatrix",
             rows((view * volume).inverse(), 3),
         );

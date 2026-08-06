@@ -399,19 +399,13 @@ impl Buffers {
                 plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
             ];
             self.light = Some((frame_of(gl, &light, None)?, light));
-            // The composite answers with a color already brought into the range a screen shows, so
-            // the frame it lands in is the one that can be blitted to the screen. It carries the
-            // G-buffer's own depth, since a material resolves itself into it as geometry, and a
-            // framebuffer with no depth buffer passes every depth test put to it.
-            let lit = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+            // The composite answers in the range the light arrived in rather than the one a screen
+            // shows, so this holds what a byte cannot. It carries the G-buffer's own depth, since a
+            // material resolves itself into it as geometry, and a framebuffer with no depth buffer
+            // passes every depth test put to it.
+            let lit = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
             self.lit = Some((frame_of(gl, &[lit], Some(depth))?, lit));
-            self.resolved = Some(plane(
-                gl,
-                size,
-                glow::RGBA8,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-            )?);
+            self.resolved = Some(plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?);
         }
         Ok(())
     }

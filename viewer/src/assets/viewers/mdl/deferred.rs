@@ -28,12 +28,18 @@ const ATTENUATION: u32 = 0x008c_d1ca;
 /// The frame as the composite left it, which is what a semitransparent pass blends over.
 const FINAL_COLOR: u32 = 0x8ea9_df48;
 
-/// The layered textures a character's shaders read that no material names: the tiles its surface
-/// detail is taken from, and the spheres its resolve pass shades against.
-pub const ARRAYS: [(u32, &str); 3] = [
+/// The ramp a placed light's falloff is read off, indexed by the square of how far the pixel stands
+/// from it. The engine binds this rather than any material, and the flat stand-in leaves every light
+/// at full strength out to the edge of its own volume, which is a hard circle.
+pub const RAMP: (u32, &str) = (ATTENUATION, "common/graphics/texture/-attenuation.tex");
+
+/// The textures the game's own shaders read that no material names: the tiles a character's surface
+/// detail is taken from, the spheres its resolve pass shades against, and that ramp.
+pub const ENGINE: [(u32, &str); 4] = [
     (0x92f0_3e53, "chara/common/texture/tile_norm_array.tex"),
     (0x800b_e99b, "chara/common/texture/tile_orb_array.tex"),
     (0x3334_d3ca, "chara/common/texture/sphere_d_array.tex"),
+    RAMP,
 ];
 
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
@@ -171,7 +177,7 @@ pub struct Buffers {
     /// outright where what is bound to a unit is not of the declaration's own kind, so a plane
     /// cannot stand in for the rest.
     blanks: BTreeMap<u32, glow::Texture>,
-    /// The layered textures the shaders read off the game's own files, by resource id.
+    /// The textures the shaders read off the game's own files, by resource id.
     arrays: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
@@ -491,32 +497,53 @@ impl Buffers {
         Ok(held)
     }
 
-    /// Takes one of the game's own layered textures onto the card. Repeated rather than clamped:
-    /// the shaders that read these scale the coordinate up by a tile factor and expect the tile to
-    /// come round again.
+    /// Takes one of the game's own textures onto the card, as a plane where it holds one slice and
+    /// an array where it holds several: a sampler is declared over one or the other, and a draw only
+    /// validates where the texture bound to its unit is of the declaration's own kind.
+    ///
+    /// An array repeats, since the shaders that read one scale the coordinate up by a tile factor
+    /// and expect the tile to come round again. A ramp is clamped: it is addressed over its whole
+    /// width, and wrapping would blend its last texel against its first.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
+        let (target, wrap) = match held.layers > 1 {
+            true => (glow::TEXTURE_2D_ARRAY, glow::REPEAT),
+            false => (glow::TEXTURE_2D, glow::CLAMP_TO_EDGE),
+        };
         unsafe {
             let texture = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D_ARRAY, Some(texture));
-            gl.tex_image_3d(
-                glow::TEXTURE_2D_ARRAY,
-                0,
-                glow::RGBA8 as i32,
-                held.size.0,
-                held.size.1,
-                held.layers,
-                0,
-                glow::RGBA,
-                glow::UNSIGNED_BYTE,
-                glow::PixelUnpackData::Slice(Some(&held.pixels)),
-            );
+            gl.bind_texture(target, Some(texture));
+            match target {
+                glow::TEXTURE_2D => gl.tex_image_2d(
+                    target,
+                    0,
+                    glow::RGBA8 as i32,
+                    held.size.0,
+                    held.size.1,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&held.pixels)),
+                ),
+                _ => gl.tex_image_3d(
+                    target,
+                    0,
+                    glow::RGBA8 as i32,
+                    held.size.0,
+                    held.size.1,
+                    held.layers,
+                    0,
+                    glow::RGBA,
+                    glow::UNSIGNED_BYTE,
+                    glow::PixelUnpackData::Slice(Some(&held.pixels)),
+                ),
+            }
             for (name, value) in [
                 (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
                 (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
-                (glow::TEXTURE_WRAP_S, glow::REPEAT),
-                (glow::TEXTURE_WRAP_T, glow::REPEAT),
+                (glow::TEXTURE_WRAP_S, wrap),
+                (glow::TEXTURE_WRAP_T, wrap),
             ] {
-                gl.tex_parameter_i32(glow::TEXTURE_2D_ARRAY, name, value as i32);
+                gl.tex_parameter_i32(target, name, value as i32);
             }
             if let Some(stale) = self.arrays.insert(id, texture) {
                 graveyard().lock().unwrap().push(Dead::Texture(stale));
@@ -568,6 +595,9 @@ impl Buffers {
                 .get(at)
                 .copied()
                 .ok_or_else(|| format!("the G-buffer has no channel {at}"));
+        }
+        if let Some(held) = self.arrays.get(&id) {
+            return Ok(*held);
         }
         Ok(match id {
             DEPTH => self.depth.ok_or("no depth buffer")?,

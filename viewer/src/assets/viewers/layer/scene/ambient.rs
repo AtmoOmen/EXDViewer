@@ -21,6 +21,7 @@ use ironworks::file::{File, envb, layer};
 
 use super::super::super::mdl::program;
 use super::super::super::{link, section};
+use crate::assets::deps::Deps;
 use crate::backend::Backend;
 use crate::utils::TrackedPromise;
 
@@ -30,6 +31,9 @@ const DAY: f32 = 86_400.0;
 /// Every sky the game holds, which its own id indexes, and the first id it holds samples for.
 const SKY_LIGHT: &str = "bgcommon/nature/sky/ambient/skylight.amb";
 const FIRST_SKY: u16 = 1;
+
+/// What a weather an `.envb` states a timeline for is called.
+const WEATHER: &str = "Weather";
 
 /// Where the key light stands until the user moves it.
 const AZIMUTH: f32 = -50.0;
@@ -224,6 +228,12 @@ impl Ambient {
         self.weather_file.poll(backend);
         self.location.poll(backend);
         self.sky_file.poll(backend);
+        // Which tracks a file holds is the file's own business, and a track it states no keyframes
+        // for samples nothing at all: the ambient would come out at nought everywhere.
+        let tracks = self.tracks();
+        if !tracks.is_empty() && !tracks.iter().any(|(held, _)| *held == self.track) {
+            self.track = tracks[0].0;
+        }
     }
 
     /// The tracks the location's `.amb` holds keyframes for, and how many each holds.
@@ -382,7 +392,13 @@ impl Ambient {
         ))
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, follow: &mut Option<String>) -> bool {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        follow: &mut Option<String>,
+        deps: &mut Deps,
+        backend: &Backend,
+    ) -> bool {
         let mut changed = false;
         section(ui, "Environment");
         if self.environments.len() > 1 {
@@ -413,18 +429,21 @@ impl Ambient {
 
         let weathers = self.weathers();
         if !weathers.is_empty() {
+            let mut named = |ui: &egui::Ui, id: u32| match deps.text(ui.ctx(), backend, WEATHER, id)
+            {
+                Some(name) => format!("{id}  {name}"),
+                None => id.to_string(),
+            };
             ui.label(RichText::new("Weather").weak());
+            let selected = weathers
+                .get(self.weather)
+                .map_or_else(String::new, |id| named(ui, *id));
             egui::ComboBox::from_id_salt("scene_weather")
-                .selected_text(
-                    weathers
-                        .get(self.weather)
-                        .map_or_else(String::new, u32::to_string),
-                )
+                .selected_text(selected)
                 .show_ui(ui, |ui| {
                     for (at, id) in weathers.iter().enumerate() {
-                        changed |= ui
-                            .selectable_value(&mut self.weather, at, id.to_string())
-                            .changed();
+                        let label = named(ui, *id);
+                        changed |= ui.selectable_value(&mut self.weather, at, label).changed();
                     }
                 });
         }

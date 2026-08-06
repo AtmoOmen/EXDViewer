@@ -32,6 +32,7 @@ use ironworks::file::{File, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFil
 use super::super::mdl;
 use super::super::{facts, section};
 use super::Source;
+use crate::assets::deps::Deps;
 use crate::backend::Backend;
 use crate::data::DecodedTexture;
 use crate::utils::TrackedPromise;
@@ -281,6 +282,7 @@ pub struct Scene {
     /// How much of the sky reaches each part, by the key its `.svb` entry uses.
     visibility: HashMap<(u32, [u8; 4]), f32>,
     sky: Aside,
+    falloff: Aside,
     textures: BTreeMap<String, Texture>,
     resident: usize,
     files: HashMap<String, Held>,
@@ -404,6 +406,7 @@ impl Scene {
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
             sky: aside(source.scene().map(layer::Scene::sky_visibility_path)),
+            falloff: Aside::Wanted(mdl::deferred::RAMP.1.to_owned()),
             textures: BTreeMap::new(),
             resident: 0,
             files: HashMap::new(),
@@ -715,10 +718,10 @@ impl Scene {
             .collect()
     }
 
-    /// The two files a scene names beside itself, read as they arrive: the boxes its lights are
-    /// clipped against, and how much of the sky reaches each of its parts.
+    /// The files read once beside the scene, as they arrive: the boxes its lights are clipped
+    /// against, how much of the sky reaches each of its parts, and the ramp their falloff comes off.
     fn load_asides(&mut self, backend: &Backend) {
-        for held in [&mut self.clip, &mut self.sky] {
+        for held in [&mut self.clip, &mut self.sky, &mut self.falloff] {
             *held = match std::mem::replace(held, Aside::Done) {
                 Aside::Wanted(path) => {
                     let files = backend.files().clone();
@@ -748,6 +751,7 @@ impl Scene {
         };
         let clip = taken(&mut self.clip);
         let sky = taken(&mut self.sky);
+        let falloff = taken(&mut self.falloff);
 
         if let Some((path, bytes)) = clip {
             match lcb::ClipBoxes::read(Cursor::new(bytes)) {
@@ -776,6 +780,16 @@ impl Scene {
                     }
                     self.dirty = true;
                 }
+                Err(why) => log::error!("assets/layer: {path}: {why}"),
+            }
+        }
+        if let Some((path, bytes)) = falloff {
+            match mdl::layered(&bytes, &path) {
+                Ok(held) => self
+                    .renderer
+                    .lock()
+                    .unwrap()
+                    .queue_supplied(mdl::deferred::RAMP.0, held),
                 Err(why) => log::error!("assets/layer: {path}: {why}"),
             }
         }
@@ -1450,7 +1464,13 @@ impl Scene {
         }
     }
 
-    pub fn details_ui(&mut self, ui: &mut egui::Ui, follow: &mut Option<String>) {
+    pub fn details_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        follow: &mut Option<String>,
+        deps: &mut Deps,
+        backend: &Backend,
+    ) {
         let mut refit = false;
         let mut changed = false;
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -1518,7 +1538,7 @@ impl Scene {
 
             ui.add_space(8.0);
             ui.separator();
-            changed |= self.ambient.ui(ui, follow);
+            changed |= self.ambient.ui(ui, follow, deps, backend);
 
             ui.add_space(8.0);
             ui.separator();

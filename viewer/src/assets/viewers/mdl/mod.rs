@@ -241,7 +241,7 @@ pub struct Rendered {
     textures: RefCell<BTreeMap<String, Texture>>,
     /// Shader packages the materials name, by path, since several materials share one.
     packages: RefCell<BTreeMap<String, Package>>,
-    /// The layered textures the shaders read that no material names, by resource id.
+    /// The textures the shaders read that no material names, by resource id.
     arrays: RefCell<BTreeMap<u32, Array>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
@@ -297,6 +297,22 @@ pub(super) fn detail(lod: u8) -> Lod {
         0 => Lod::High,
         1 => Lod::Medium,
         _ => Lod::Low,
+    }
+}
+
+/// What a mesh a drawing pass leaves out is for. Only `Standard` is drawn here: the rest are the
+/// engine's own passes, which nothing in this graph runs.
+fn kind_name(kind: MeshKind) -> &'static str {
+    match kind {
+        MeshKind::Water => "water",
+        MeshKind::Shadow => "shadow",
+        MeshKind::Terrain => "terrain shadow",
+        MeshKind::VerticalFog => "vertical fog",
+        MeshKind::LightShaft => "light shaft",
+        MeshKind::Glass => "glass",
+        MeshKind::MaterialChange => "material change",
+        MeshKind::CrestChange => "crest change",
+        MeshKind::Standard => "standard",
     }
 }
 
@@ -393,32 +409,17 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         pending.meshes.push((vertices, indices));
     }
 
+    // A model whose every mesh carries a kind nothing here draws still has materials, a tree and a
+    // browser worth opening, so the level comes back empty and names what it left out rather than
+    // the read failing. A mesh that would not read at all is a different matter.
+    if meshes.is_empty()
+        && let Some((_, why)) = unreadable.first()
+    {
+        anyhow::bail!("no mesh of this model could be read: {why}");
+    }
     if meshes.is_empty() {
-        let why = match (unreadable.first(), skipped.is_empty()) {
-            (Some((_, why)), _) => format!("no mesh of this model could be read: {why}"),
-            (None, false) => format!(
-                "this model draws nothing on its own: every mesh is {}",
-                skipped
-                    .iter()
-                    .map(|kind| match kind {
-                        MeshKind::Water => "water",
-                        MeshKind::Shadow => "shadow",
-                        MeshKind::Terrain => "terrain shadow",
-                        MeshKind::VerticalFog => "vertical fog",
-                        MeshKind::LightShaft => "light shaft",
-                        MeshKind::Glass => "glass",
-                        MeshKind::MaterialChange => "material change",
-                        MeshKind::CrestChange => "crest change",
-                        MeshKind::Standard => "standard",
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" or ")
-            ),
-            (None, true) => {
-                "this model holds no standard meshes at its highest detail level".to_owned()
-            }
-        };
-        anyhow::bail!(why);
+        low = Vec3::NEG_ONE;
+        high = Vec3::ONE;
     }
 
     let shapes = declared
@@ -442,7 +443,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
 
     let vertices: usize = meshes.iter().map(|mesh| mesh.vertices).sum();
     let triangles: usize = meshes.iter().map(|mesh| mesh.triangles).sum();
-    let identity = vec![
+    let mut identity = vec![
         ("Meshes", meshes.len().to_string()),
         ("Vertices", vertices.to_string()),
         ("Triangles", triangles.to_string()),
@@ -461,6 +462,16 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
             Bytes(vertices * size_of::<Vertex>() + triangles * 6).to_string(),
         ),
     ];
+    if !skipped.is_empty() {
+        identity.push((
+            "Not drawn",
+            skipped
+                .iter()
+                .map(|kind| kind_name(*kind))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
 
     log::info!(
         "assets/mdl: {path} {} meshes, {vertices} vertices, {} materials, {} unreadable",
@@ -648,9 +659,9 @@ fn named(attributes: &[String], mask: u32) -> String {
         .join(", ")
 }
 
-/// One of the game's own arrays as the card takes it. Mip nought alone: nothing tells a translated
+/// One of the game's own textures as the card takes it. Mip nought alone: nothing tells a translated
 /// shader how many levels a texture has, and the graph answers that with one.
-fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
+pub(super) fn layered(bytes: &[u8], path: &str) -> Result<deferred::Layered> {
     let texture = ironworks::file::tex::Texture::read(Cursor::new(bytes.to_vec()))?;
     let image = crate::utils::tex_loader::decode_stack(&texture, 0, path)?;
     let (width, height) = texture.mip_size(0);
@@ -842,7 +853,7 @@ impl Rendered {
             }
 
             let mut arrays = self.arrays.borrow_mut();
-            for (id, path) in deferred::ARRAYS {
+            for (id, path) in deferred::ENGINE {
                 let held = arrays.entry(id).or_insert_with(|| {
                     let files = backend.files().clone();
                     Array::Fetching(TrackedPromise::spawn_local(async move {

@@ -830,7 +830,7 @@ impl Buffer {
             return out;
         }
         if self.name == "g_AmbientParamArray" {
-            ambient(&scene.ambient, &mut out);
+            ambient(&scene.ambient, glam::Mat3::from_mat4(view), &mut out);
             return out;
         }
         if self.name == "g_BGAmbientParameter" {
@@ -1009,18 +1009,22 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
 /// One entry is filled and the count says one, which is what keeps the composite from walking the
 /// array at all: it takes entry `count - 1` at full weight and never enters the loop. The composite
 /// reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, so the one entry starts at four.
-fn ambient(held: &Ambient, out: &mut [u8]) {
+///
+/// The harmonics go in turned by `axes`. The composite dots them against a normal it has just taken
+/// through the view matrix, and against a reflection of that, so the rows are read in view space.
+fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
     if out.len() < 8 {
         return;
     }
+    let turned = |row: &Vec4| (axes * row.truncate()).extend(row.w);
     // The count reads as a whole number rather than as the float that would print the same.
     out[..4].copy_from_slice(&1u32.to_le_bytes());
     out[4..8].copy_from_slice(&held.sky_scale.to_le_bytes());
     for (at, row) in held.sky.iter().enumerate() {
-        write(out, 1 + at, &row.to_array());
+        write(out, 1 + at, &turned(row).to_array());
     }
     for (at, row) in held.light.iter().enumerate() {
-        write(out, 4 + at, &row.to_array());
+        write(out, 4 + at, &turned(row).to_array());
     }
     write(out, 7, &[0.0, 0.0, 0.0, held.scale]);
     write(out, 8, &[held.fade.x, held.fade.y, held.fade.z, 1.0]);
@@ -1083,7 +1087,7 @@ pub fn table(held: &mtrl::ColorTable) -> Option<(&[u16], usize, usize)> {
 
 #[cfg(test)]
 mod test {
-    use glam::{Mat4, Vec3, Vec4};
+    use glam::{Mat3, Mat4, Vec3, Vec4};
 
     use super::{Ambient, JOINT, ROW, ambient, joints, selector};
 
@@ -1103,7 +1107,7 @@ mod test {
             haze: Vec4::ZERO,
         };
         let mut out = vec![0u8; 16 * 16];
-        ambient(&held, &mut out);
+        ambient(&held, Mat3::IDENTITY, &mut out);
         let lane = |register: usize, at: usize| {
             let start = register * 16 + at * 4;
             f32::from_le_bytes(out[start..start + 4].try_into().unwrap())

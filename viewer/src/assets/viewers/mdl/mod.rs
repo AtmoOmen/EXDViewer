@@ -1215,11 +1215,14 @@ impl Rendered {
                 );
                 passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
             }
-            // Only where the package writes no G-buffer. One that does is resolved by the pass that
-            // reads the whole frame, and drawing its own over that would resolve it twice.
-            if passes.buffer.is_empty() {
-                passes.resolve = build(program::Pass::CompositeBlended, 0).ok().map(Arc::new);
-            }
+            // A package carrying a composite of its own resolves itself with it. The screen-wide
+            // pass is `bg`'s, and `bg` reserves values past one in the second target as the sign
+            // that a pixel keeps its specular color in the fifth; a character writes a luminance
+            // there that reaches one of its own accord, and is then read as that.
+            passes.resolve = build(program::Pass::Composite, 0)
+                .or_else(|_| build(program::Pass::CompositeBlended, 0))
+                .ok()
+                .map(Arc::new);
             let held = match passes.buffer.is_empty() && passes.resolve.is_none() {
                 true => Err("this material's keys reach no pass that draws it".into()),
                 false => Ok(passes),

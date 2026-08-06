@@ -25,10 +25,6 @@ const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
 const OCCLUSION: u32 = 0x3266_7bd7;
 const ATTENUATION: u32 = 0x008c_d1ca;
 
-/// The ramp a pixel's fog weight is read off, which the engine builds each frame off the zone's own
-/// fog rather than out of any file.
-const FOG_WEIGHT: u32 = 0x6e23_1669;
-
 /// The frame as the composite left it, which is what a semitransparent pass blends over.
 const FINAL_COLOR: u32 = 0x8ea9_df48;
 
@@ -57,12 +53,14 @@ pub const TYPES: &str = "g_ShaderTypeParameter";
 /// What a texture the material binds nothing to answers with.
 const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 
-/// The tables a toon character is shaded through, which the engine builds a frame at a time and no
-/// file holds. `g_SamplerToneMapLut` divides the resolved color and `g_SamplerCharaToon` scales the
-/// light, so one leaves each where it was and the flat stand-in would halve and double them.
-const NEUTRAL: [(u32, [u8; 4]); 2] = [
+/// The tables the engine works out a frame at a time and no file holds, each at the value that
+/// leaves the term it drives where it was. `g_SamplerToneMapLut` divides the resolved color and
+/// `g_SamplerCharaToon` scales the light, so the flat stand-in would halve one and double the other;
+/// a fog weight of nought keeps the color it mixes toward out of the frame entirely.
+const NEUTRAL: [(u32, [u8; 4]); 3] = [
     (0x342f_2734, [255, 255, 255, 255]),
     (0x8b73_3c20, [255, 255, 255, 255]),
+    (0x6e23_1669, [0, 0, 0, 0]),
 ];
 
 /// What a buffer nothing here fills answers with where a lighting pass wants a weight: nothing
@@ -71,10 +69,6 @@ const UNOCCLUDED: [u8; 4] = [255, 255, 255, 0];
 
 /// What the composite takes a reflection against where nothing reconstructs the zone's own cube.
 const UNREFLECTED: [u8; 4] = [128, 128, 128, 0];
-
-/// What a pass reads where it wants a weight and nothing here works one out. Nought leaves the term
-/// that weight carries out of the frame; the flat stand-in would mix half of it in.
-const UNWEIGHTED: [u8; 4] = [0, 0, 0, 0];
 
 /// One triangle covering clip space, which is the geometry a screen-wide pass draws: their vertex
 /// shaders pass the position straight through, and one of them reads it back as the place on screen
@@ -197,7 +191,6 @@ pub struct Buffers {
     arrays: BTreeMap<u32, glow::Texture>,
     neutrals: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
-    unweighted: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
     volume: Option<(glow::VertexArray, glow::Buffer, glow::Buffer)>,
@@ -509,15 +502,6 @@ impl Buffers {
         Ok(held)
     }
 
-    fn unweighted(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
-        if let Some(held) = self.unweighted {
-            return Ok(held);
-        }
-        let held = flat(gl, glow::TEXTURE_2D, &UNWEIGHTED)?;
-        self.unweighted = Some(held);
-        Ok(held)
-    }
-
     /// The table `SV_Target.w` indexes, which every pixel shader that shades a surface reads.
     pub fn types(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
         if let Some(held) = self.types {
@@ -616,7 +600,6 @@ impl Buffers {
     /// reads a texture of the wrong format.
     pub fn stand_ins(&mut self, gl: &glow::Context) -> Result<(), String> {
         self.unoccluded(gl)?;
-        self.unweighted(gl)?;
         self.types(gl)?;
         self.reflection(gl)?;
         for (id, value) in &NEUTRAL {
@@ -655,7 +638,6 @@ impl Buffers {
             LIGHT_SPECULAR => self.light.ok_or("no light buffer")?.1[1],
             FINAL_COLOR => self.resolved.ok_or("no resolved frame")?,
             OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
-            FOG_WEIGHT => self.unweighted(gl)?,
             _ => self.stand_in(gl)?,
         })
     }
@@ -861,7 +843,6 @@ impl Drop for Buffers {
             [
                 self.types.take(),
                 self.unoccluded.take(),
-                self.unweighted.take(),
                 self.reflection.take(),
                 self.resolved.take(),
                 self.depth.take(),

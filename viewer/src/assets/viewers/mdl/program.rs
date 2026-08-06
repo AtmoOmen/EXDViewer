@@ -1024,8 +1024,9 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
 /// array at all: it takes entry `count - 1` at full weight and never enters the loop. The composite
 /// reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, so the one entry starts at four.
 ///
-/// The harmonics go in turned by `axes`. The composite dots them against a normal it has just taken
-/// through the view matrix, and against a reflection of that, so the rows are read in view space.
+/// The harmonics go in turned by `axes`. The composite dots the light rows against a normal it has
+/// just taken through the view matrix and the sky rows against a reflection of that same normal, so
+/// both are read in view space; the reflection only goes back to the world to sample the cube.
 fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
     if out.len() < 8 {
         return;
@@ -1045,7 +1046,9 @@ fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
 
 /// The ten registers a composite reads one entry of the ambient from. A drawing package that
 /// composites itself binds exactly these as `g_AmbientParam`, which is what says where each field
-/// sits: the array holds the same run per entry.
+/// sits. An array entry shares the first six and then diverges: what the sky rows sit at here is a
+/// bounding volume there, tested against the pixel's position rather than dotted against a
+/// direction, and left unread while the shape register stays nought.
 fn entry(held: &Ambient, axes: glam::Mat3, out: &mut [u8], at: usize) {
     let turned = |row: &Vec4| (axes * row.truncate()).extend(row.w);
     for (row, held) in held.light.iter().enumerate() {

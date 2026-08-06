@@ -833,6 +833,10 @@ impl Buffer {
             ambient(&scene.ambient, &mut out);
             return out;
         }
+        if self.name == "g_AmbientParam" {
+            entry(&scene.ambient, &mut out, 0);
+            return out;
+        }
         if self.name == "g_BGAmbientParameter" {
             write(&mut out, 0, &scene.ambient.haze.to_array());
             return out;
@@ -1019,14 +1023,24 @@ fn ambient(held: &Ambient, out: &mut [u8]) {
     for (at, row) in held.sky.iter().enumerate() {
         write(out, 1 + at, &row.to_array());
     }
-    for (at, row) in held.light.iter().enumerate() {
-        write(out, 4 + at, &row.to_array());
+    entry(held, out, 4);
+    // No bounding shape, so the entry covers the frame rather than a room.
+    write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
+    write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
+}
+
+/// The ten registers a composite reads one entry of the ambient from. A drawing package that
+/// composites itself binds exactly these as `g_AmbientParam`, which is what says where each field
+/// sits: the array holds the same run per entry.
+fn entry(held: &Ambient, out: &mut [u8], at: usize) {
+    for (row, held) in held.light.iter().enumerate() {
+        write(out, at + row, &held.to_array());
     }
-    write(out, 7, &[0.0, 0.0, 0.0, held.scale]);
-    write(out, 8, &[held.fade.x, held.fade.y, held.fade.z, 1.0]);
+    write(out, at + 3, &[0.0, 0.0, 0.0, held.scale]);
+    write(out, at + 4, &[held.fade.x, held.fade.y, held.fade.z, 1.0]);
     write(
         out,
-        9,
+        at + 5,
         &[
             held.reflection.x,
             held.reflection.y,
@@ -1034,9 +1048,10 @@ fn ambient(held: &Ambient, out: &mut [u8]) {
             held.roughness,
         ],
     );
-    // No bounding shape, so the entry covers the frame rather than a room.
-    write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
-    write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
+    for (row, held) in held.sky.iter().enumerate() {
+        write(out, at + 6 + row, &held.to_array());
+    }
+    write(out, at + 9, &[held.sky_scale, 0.0, 0.0, 0.0]);
 }
 
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a

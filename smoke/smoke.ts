@@ -55,15 +55,15 @@ const HEIGHT = 1000;
 
 // The control row sits at the top of the viewer pane. `ROW_LEFT` is where "Game shaders" is, and the
 // sweep walks right from `SWEEP_FROM` across the channel labels that appear beside it. "Reset view"
-// follows immediately after the last channel at x=756 for a 6-target program, and is a plain button
-// rather than a selectable label, so `SWEEP_TO` has to stop short of it: past there the sweep clicks
-// the button instead of a channel, resetting the camera mid-sweep and failing the preview-frame
-// comparison after. A program with fewer targets moves it left of that; recalibrate both with
-// `--explore`, which writes screenshots to smoke/shots and stops before any click.
+// follows immediately after the last channel and is a plain button rather than a selectable label,
+// so a sweep that runs past the channels clicks it, moves the camera, and fails the preview-frame
+// comparison later. Where it sits moves with the number of targets the model's program writes, so
+// the sweep stops on coverage rather than on an x, and `SWEEP_TO` is only a backstop. Recalibrate
+// with `--explore`, which writes screenshots to smoke/shots and stops before any click.
 const ROW_Y = 116;
 const ROW_LEFT = 268;
 const SWEEP_FROM = 325;
-const SWEEP_TO = 750;
+const SWEEP_TO = 900;
 const SWEEP_STEP = 16;
 
 // The lgb viewer opens on its Tree tab; the 3D scene is the tab beside it.
@@ -510,7 +510,7 @@ async function main() {
         const rowClip = { x: 0, y: ROW_Y - 14, width: WIDTH, height: 28 };
         const seen = new Set<string>();
         let index = 0;
-        for (let x = SWEEP_FROM; x <= SWEEP_TO; x += SWEEP_STEP) {
+        for (let x = SWEEP_FROM; x <= SWEEP_TO && seen.size < CHANNELS; x += SWEEP_STEP) {
             await click(cdp, x, ROW_Y);
             // Park the pointer away from the row first, or its hover highlight lands in the clip
             // and two shots of the same selection come out different.

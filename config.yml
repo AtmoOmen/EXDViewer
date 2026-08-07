@@ -12,6 +12,14 @@ server_addr: 0.0.0.0:3000
 cache:
   max_concurrent_downloads: 4
   storage_directory: cache
+  # storage_file points the disk tier at a single file or a raw unformatted block device
+  # instead of a directory, skipping the filesystem entirely. Takes precedence over
+  # storage_directory if both are set.
+  # storage_file: /dev/disk/by-id/scsi-0DEVICE_ID
+  # storage_capacity_bytes is set explicitly here because storage_directory usually
+  # shares its filesystem with other things; left unset it falls back to 80% of the
+  # directory's free space. Left unset for storage_file instead, an existing file or
+  # device is filled to its own size, since it is assumed to be dedicated to the cache.
   storage_capacity_bytes: 1073741824 # 1GiB
   clut_ram_bytes: 536870912 # 512 MiB
 # How much of a file to download at once. Larger values reduces amortized latency.

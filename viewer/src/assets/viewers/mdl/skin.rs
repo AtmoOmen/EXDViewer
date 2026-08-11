@@ -27,6 +27,10 @@ use crate::utils::{TrackedPromise, file_name};
 /// What the picker calls standing the model where its own file put it.
 const REST: &str = "Reference pose";
 
+/// The bone a body hangs off, which is what a pose is centred on. A tail carries many bones a long
+/// way out and swings them, and averaging every bone instead walks the frame around with it.
+const ANCHOR: &str = "n_hara";
+
 /// The rig a model is skinned to, ready to answer a mesh's bone table with a palette.
 pub struct Skin {
     rig: Rig,
@@ -34,8 +38,9 @@ pub struct Skin {
     rest: Vec<Mat4>,
     /// Which bone the skeleton calls each name.
     named: HashMap<String, usize>,
-    /// The middle of the bones at rest and how far the furthest stands from it, which a pose's own
-    /// are read against.
+    /// The bone a pose is centred on, where it rests, and how far the furthest bone stands from it,
+    /// which a pose's own are read against.
+    anchor: Option<usize>,
     home: Vec3,
     spread: f32,
 }
@@ -47,17 +52,19 @@ impl Skin {
             .iter()
             .map(|placement| placement.matrix().inverse())
             .collect();
-        let named = rig
+        let named: HashMap<_, _> = rig
             .names()
             .iter()
             .enumerate()
             .map(|(bone, name)| (name.clone(), bone))
             .collect();
-        let (home, spread) = middle(&world);
+        let anchor = named.get(ANCHOR).copied();
+        let (home, spread) = middle(&world, anchor);
         Self {
             rig,
             rest,
             named,
+            anchor,
             home,
             spread,
         }
@@ -239,7 +246,7 @@ impl Animation {
             Some(binding) => skin.rig.posed(binding, self.time.get()),
             None => skin.rig.world(skin.rig.reference()),
         };
-        let (center, spread) = middle(&posed);
+        let (center, spread) = middle(&posed, skin.anchor);
         Pose {
             joints: tables
                 .iter()
@@ -384,7 +391,7 @@ mod tests {
     use glam::{Mat4, Vec3};
     use ironworks::file::sklb::Transform;
 
-    use super::super::super::skeleton::Rig;
+    use super::super::super::skeleton::{Rig, middle};
     use super::{Skin, code, pack_path, skeleton_path};
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -401,6 +408,34 @@ mod tests {
             &[-1, 0],
             &[transform([0.0, 1.0, 0.0]), transform([0.0, 2.0, 0.0])],
         )
+    }
+
+    /// A tail swinging is not the body moving.
+    #[test]
+    fn a_pose_stands_where_its_anchor_does_however_far_a_tail_swings() {
+        let skin = Skin::new(Rig::new(
+            &[
+                "n_root".to_owned(),
+                "n_hara".to_owned(),
+                "j_sits".to_owned(),
+            ],
+            &[-1, 0, 1],
+            &[
+                transform([0.0, 0.0, 0.0]),
+                transform([0.0, 1.0, 0.0]),
+                transform([0.0, 0.0, -4.0]),
+            ],
+        ));
+        assert_eq!(skin.anchor, Some(1));
+
+        let mut locals = skin.rig.reference().to_vec();
+        locals[2] = transform([3.0, 0.0, -4.0]);
+        let swung = skin.rig.world(&locals);
+        assert_eq!(middle(&swung, skin.anchor).0, skin.home);
+        assert_ne!(
+            middle(&swung, None).0,
+            middle(&skin.rig.world(skin.rig.reference()), None).0
+        );
     }
 
     /// The rest pose against itself is no movement at all, whatever order the table names the

@@ -274,17 +274,23 @@ const IDENTITY: Transform = Transform {
     scale: [1.0, 1.0, 1.0, 0.0],
 };
 
-/// The middle of a pose and how far the furthest bone stands from it, which is what a pose is
-/// framed and clipped by.
-pub fn middle(world: &[Placement]) -> (Vec3, f32) {
+/// Where a pose stands and how far the furthest bone reaches from there, which is what a pose is
+/// framed and clipped by. `anchor` is the bone the body hangs off; without one this falls back to
+/// the middle of every bone, which a long tail drags around each time it swings.
+pub fn middle(world: &[Placement], anchor: Option<usize>) -> (Vec3, f32) {
     if world.is_empty() {
         return (Vec3::ZERO, 0.0);
     }
-    let center = world
-        .iter()
-        .map(|placement| placement.translation)
-        .sum::<Vec3>()
-        / world.len() as f32;
+    let center = match anchor.and_then(|bone| world.get(bone)) {
+        Some(placement) => placement.translation,
+        None => {
+            world
+                .iter()
+                .map(|placement| placement.translation)
+                .sum::<Vec3>()
+                / world.len() as f32
+        }
+    };
     let reach = world
         .iter()
         .map(|placement| placement.translation.distance(center))

@@ -34,7 +34,7 @@ use ironworks::file::{
 };
 use std::io::Cursor;
 
-use super::{Preview, facts, link, section};
+use super::{Preview, facts, link, placed, section};
 use crate::assets::Bytes;
 use crate::backend::Backend;
 use crate::data::DecodedTexture;
@@ -304,6 +304,9 @@ pub struct Rendered {
     /// The color table in the game's own layout, by material.
     tables: RefCell<BTreeMap<usize, Table>>,
     camera: Cell<Camera>,
+    /// Whether the rig it is posed on is drawn over it, and the boxes that is drawn as.
+    skeleton: Cell<bool>,
+    overlay: Arc<Mutex<placed::Placements>>,
     /// Decoded texture bytes handed to egui so far.
     resident: Cell<usize>,
     debug: Cell<gpu::Debug>,
@@ -345,6 +348,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         graded: Cell::new(false),
         tables: Default::default(),
         camera: Cell::new(camera),
+        skeleton: Cell::new(false),
+        overlay: placed::Placements::new(Vec::new()),
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
         shaded: Cell::new(false),
@@ -902,6 +907,16 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
             }
         }
         let level = model.level.borrow();
+        if level.skinned {
+            let skeleton = model.skeleton.get();
+            if ui
+                .selectable_label(skeleton, "Skeleton")
+                .on_hover_text("Draw the rig it is posed on over it")
+                .clicked()
+            {
+                model.skeleton.set(!skeleton);
+            }
+        }
         if ui.button("Reset view").clicked() {
             model.camera.set(level.home);
         }
@@ -1287,7 +1302,7 @@ impl Rendered {
 
         // The joints move the geometry after the file stated its bounds, so where the model stands
         // has to be worked out before anything is framed or clipped against it.
-        let pose = self.animation.pose(&level.bones);
+        let pose = self.animation.pose(&level.bones, self.skeleton.get());
         // Carried rather than written into the camera, so a motion that walks runs in place and the
         // user's own orbit, pan and zoom still mean what they did.
         let focus = level.home.target + pose.drift;
@@ -1430,6 +1445,13 @@ impl Rendered {
             debug: self.debug.get(),
         };
 
+        // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in
+        // the mesh it poses.
+        let overlay = self.skeleton.get().then(|| {
+            self.overlay.lock().unwrap().replace(pose.skeleton);
+            (self.overlay.clone(), (projection * view).to_cols_array())
+        });
+
         // The context is taken from the painter rather than captured: `glow::Context` is neither
         // `Send` nor `Sync` on wasm, and a callback has to be both.
         let model = level.gpu.clone();
@@ -1440,6 +1462,12 @@ impl Rendered {
                     .lock()
                     .unwrap()
                     .draw(painter.gl(), painter, &frame, &info);
+                if let Some((bones, view_projection)) = &overlay {
+                    bones
+                        .lock()
+                        .unwrap()
+                        .draw(painter.gl(), painter, view_projection, false);
+                }
             })),
         });
     }

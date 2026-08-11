@@ -86,11 +86,13 @@ impl Placements {
         self.failure.as_deref()
     }
 
+    /// Without `depth` what is drawn stands over whatever the frame already holds.
     pub fn draw(
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
         view_projection: &[f32; 16],
+        depth: bool,
     ) {
         bury(gl);
         if self.failure.is_some() {
@@ -106,9 +108,14 @@ impl Placements {
         };
 
         unsafe {
-            gl.enable(glow::DEPTH_TEST);
-            gl.depth_func(glow::LEQUAL);
-            gl.depth_mask(true);
+            match depth {
+                true => {
+                    gl.enable(glow::DEPTH_TEST);
+                    gl.depth_func(glow::LEQUAL);
+                    gl.depth_mask(true);
+                }
+                false => gl.disable(glow::DEPTH_TEST),
+            }
             gl.disable(glow::BLEND);
             gl.enable(glow::CULL_FACE);
             gl.cull_face(glow::BACK);

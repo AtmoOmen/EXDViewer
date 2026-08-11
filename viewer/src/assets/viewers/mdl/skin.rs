@@ -20,7 +20,7 @@ use ironworks::file::pap::{AnimationPack, Binding};
 use ironworks::file::sklb::SkeletonBinary;
 
 use super::super::skeleton::{Placement, Rig, middle};
-use super::super::{link, section};
+use super::super::{link, placed, section};
 use crate::backend::Backend;
 use crate::utils::{TrackedPromise, file_name};
 
@@ -80,6 +80,8 @@ impl Skin {
 pub struct Pose {
     /// The palette each mesh's blend indices read, in the model's own space.
     pub joints: Vec<Vec<Mat4>>,
+    /// The rig itself, drawn where it was asked for.
+    pub skeleton: Vec<placed::Batch>,
     /// How far the pose has carried the bones from where the model rests.
     pub drift: Vec3,
     /// How much further from the middle of them the pose flings the bones than the rest pose does,
@@ -217,7 +219,7 @@ impl Animation {
     }
 
     /// Where the model stands this frame: one walk of the rig, and everything read off it.
-    pub fn pose(&self, tables: &[Vec<String>]) -> Pose {
+    pub fn pose(&self, tables: &[Vec<String>], skeleton: bool) -> Pose {
         let skin = self.skin.borrow();
         let Some(skin) = skin.as_ref().and_then(Fetch::ready) else {
             return Pose {
@@ -243,6 +245,10 @@ impl Animation {
                 .iter()
                 .map(|table| skin.palette(table, &posed))
                 .collect(),
+            skeleton: match skeleton {
+                true => skin.rig.batches(&posed, None),
+                false => Vec::new(),
+            },
             drift: center - skin.home,
             stretch: (spread - skin.spread).max(0.0),
         }

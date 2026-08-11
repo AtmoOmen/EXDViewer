@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use egui::{Color32, RichText, Sense};
 use glam::{Mat4, Vec3};
 
-pub use gpu::{Batch, Instance, Shape};
+pub use gpu::{Batch, Instance, Placements, Shape};
 
 /// Vertical field of view.
 const FOV: f32 = 55.0_f32.to_radians();
@@ -186,7 +186,7 @@ impl View {
                 renderer
                     .lock()
                     .unwrap()
-                    .draw(painter.gl(), painter, &view_projection);
+                    .draw(painter.gl(), painter, &view_projection, true);
             })),
         });
     }

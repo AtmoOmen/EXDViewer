@@ -58,9 +58,11 @@ pub const POST_TABLE: &str = "sLUT";
 /// What the pass takes of that buffer: `w` is the exponent the frame is raised to before the table,
 /// and `z` how much of the table's answer reaches the frame, which the pass skips entirely while it
 /// is not positive. Neither is stated anywhere: every constant buffer of the chain reports no
-/// default at all. So the exponent is left where it changes nothing, and the table is read at the
-/// strength it was authored at, which is the only reading of it that is not a dial.
-const TONE_MAP: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+/// default at all. So the exponent is left where it changes nothing, and the table is left out:
+/// three of them ship, nothing states which one binds, and the exposure and tone curve a frame
+/// would reach one through are not run here, so reading a table at full strength grades a frame it
+/// was never authored over and takes the color out of it.
+const TONE_MAP: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The vertex shader the pass is drawn with. The game pairs these with a `VSSampling`, which reads a
 /// quad of positions and coordinates against a scale and a bias no file states; the screen triangle

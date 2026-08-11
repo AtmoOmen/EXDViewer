@@ -14,12 +14,12 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use egui::{Color32, RichText};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use ironworks::file::File;
 use ironworks::file::pap::{AnimationPack, Binding};
 use ironworks::file::sklb::SkeletonBinary;
 
-use super::super::skeleton::{Placement, Rig};
+use super::super::skeleton::{Placement, Rig, middle};
 use super::super::{link, section};
 use crate::backend::Backend;
 use crate::utils::{TrackedPromise, file_name};
@@ -34,12 +34,16 @@ pub struct Skin {
     rest: Vec<Mat4>,
     /// Which bone the skeleton calls each name.
     named: HashMap<String, usize>,
+    /// The middle of the bones at rest and how far the furthest stands from it, which a pose's own
+    /// are read against.
+    home: Vec3,
+    spread: f32,
 }
 
 impl Skin {
     fn new(rig: Rig) -> Self {
-        let rest = rig
-            .world(rig.reference())
+        let world = rig.world(rig.reference());
+        let rest = world
             .iter()
             .map(|placement| placement.matrix().inverse())
             .collect();
@@ -49,7 +53,14 @@ impl Skin {
             .enumerate()
             .map(|(bone, name)| (name.clone(), bone))
             .collect();
-        Self { rig, rest, named }
+        let (home, spread) = middle(&world);
+        Self {
+            rig,
+            rest,
+            named,
+            home,
+            spread,
+        }
     }
 
     /// What each slot of one mesh's bone table moves a vertex by, in the model's own space.
@@ -62,6 +73,18 @@ impl Skin {
             })
             .collect()
     }
+}
+
+/// One frame of a model's pose, worked out once for everything that reads it.
+#[derive(Default)]
+pub struct Pose {
+    /// The palette each mesh's blend indices read, in the model's own space.
+    pub joints: Vec<Vec<Mat4>>,
+    /// How far the pose has carried the bones from where the model rests.
+    pub drift: Vec3,
+    /// How much further from the middle of them the pose flings the bones than the rest pose does,
+    /// which the geometry hung on them reaches by too.
+    pub stretch: f32,
 }
 
 /// The motions a pack holds, and the name each of its animations gives one.
@@ -193,14 +216,17 @@ impl Animation {
         }
     }
 
-    /// The palette each mesh's blend indices read, in the model's own space.
-    pub fn palettes(&self, tables: &[Vec<String>]) -> Vec<Vec<Mat4>> {
+    /// Where the model stands this frame: one walk of the rig, and everything read off it.
+    pub fn pose(&self, tables: &[Vec<String>]) -> Pose {
         let skin = self.skin.borrow();
         let Some(skin) = skin.as_ref().and_then(Fetch::ready) else {
-            return tables
-                .iter()
-                .map(|table| vec![Mat4::IDENTITY; table.len()])
-                .collect();
+            return Pose {
+                joints: tables
+                    .iter()
+                    .map(|table| vec![Mat4::IDENTITY; table.len()])
+                    .collect(),
+                ..Default::default()
+            };
         };
         let pack = self.pack.borrow();
         let binding = self
@@ -211,10 +237,15 @@ impl Animation {
             Some(binding) => skin.rig.posed(binding, self.time.get()),
             None => skin.rig.world(skin.rig.reference()),
         };
-        tables
-            .iter()
-            .map(|table| skin.palette(table, &posed))
-            .collect()
+        let (center, spread) = middle(&posed);
+        Pose {
+            joints: tables
+                .iter()
+                .map(|table| skin.palette(table, &posed))
+                .collect(),
+            drift: center - skin.home,
+            stretch: (spread - skin.spread).max(0.0),
+        }
     }
 
     /// Which motion is playing, play and pause, and the scrubber that is also what advances the

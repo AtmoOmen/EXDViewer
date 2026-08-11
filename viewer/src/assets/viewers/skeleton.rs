@@ -274,6 +274,24 @@ const IDENTITY: Transform = Transform {
     scale: [1.0, 1.0, 1.0, 0.0],
 };
 
+/// The middle of a pose and how far the furthest bone stands from it, which is what a pose is
+/// framed and clipped by.
+pub fn middle(world: &[Placement]) -> (Vec3, f32) {
+    if world.is_empty() {
+        return (Vec3::ZERO, 0.0);
+    }
+    let center = world
+        .iter()
+        .map(|placement| placement.translation)
+        .sum::<Vec3>()
+        / world.len() as f32;
+    let reach = world
+        .iter()
+        .map(|placement| placement.translation.distance(center))
+        .fold(0.0, f32::max);
+    (center, reach)
+}
+
 /// How far across the pose reaches, which sizes the markers drawn on it.
 fn extent(world: &[Placement]) -> f32 {
     let mut low = Vec3::splat(f32::INFINITY);

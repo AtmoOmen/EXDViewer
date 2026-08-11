@@ -1285,15 +1285,24 @@ impl Rendered {
         }
         self.camera.set(camera);
 
-        let eye = camera.eye();
-        let view = Mat4::look_at_rh(eye, camera.target, Vec3::Y);
+        // The joints move the geometry after the file stated its bounds, so where the model stands
+        // has to be worked out before anything is framed or clipped against it.
+        let pose = self.animation.pose(&level.bones);
+        // Carried rather than written into the camera, so a motion that walks runs in place and the
+        // user's own orbit, pan and zoom still mean what they did.
+        let focus = level.home.target + pose.drift;
+        let reach = level.radius + pose.stretch;
+
+        let target = camera.target + pose.drift;
+        let eye = camera.eye() + pose.drift;
+        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
         // Cut to the model's own bounding sphere. A fixed ratio leaves a large piece with almost no
         // depth precision where it is actually drawn.
-        let span = (eye - level.home.target).length();
-        let near = (span - level.radius).max(level.radius * 0.005);
+        let span = (eye - focus).length();
+        let near = (span - reach).max(reach * 0.005);
         // Past the light box's own far corner rather than past the model, since the volume a lamp
         // is drawn as is clipped by these planes whether or not anything depth tests against them.
-        let far = span + level.radius * (1.0 + LAMP_SPAN * 2.0);
+        let far = span + reach.max(level.radius * (1.0 + LAMP_SPAN * 2.0));
         let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
 
         // Fill and rim follow the camera; a fill weighted toward the eye is the whole of what keeps
@@ -1401,7 +1410,7 @@ impl Rendered {
                 light: KEY,
                 lamp: program::Lamp {
                     placement: Mat4::from_translation(
-                        camera.target + Vec3::new(0.0, level.radius, level.radius),
+                        target + Vec3::new(0.0, level.radius, level.radius),
                     ),
                     min: Vec3::splat(-level.radius * LAMP_SPAN),
                     max: Vec3::splat(level.radius * LAMP_SPAN),
@@ -1417,7 +1426,7 @@ impl Rendered {
             eye: eye.to_array(),
             lights,
             surfaces,
-            joints: self.animation.palettes(&level.bones),
+            joints: pose.joints,
             debug: self.debug.get(),
         };
 

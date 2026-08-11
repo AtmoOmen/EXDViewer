@@ -566,6 +566,14 @@ impl Game {
                         // A material with no depth pass writes its own, since the depth buffer is
                         // what says which pixels the frame covered.
                         gl.depth_mask(depth || shaded.depth.is_none());
+                        // Where a pre-pass has settled which fragment is visible, every later pass
+                        // takes that one rather than deciding again: a mesh layered over itself
+                        // offers two fragments a nearer-or-equal test would both accept, and the
+                        // passes need not agree on which they keep.
+                        gl.depth_func(match depth || shaded.depth.is_none() {
+                            true => glow::LEQUAL,
+                            false => glow::EQUAL,
+                        });
                         gl.color_mask(!depth, !depth, !depth, !depth);
                         let written: Vec<u32> = (0..held.targets.len().max(1))
                             .map(|at| glow::COLOR_ATTACHMENT0 + at as u32)
@@ -650,7 +658,14 @@ impl Game {
                 gl.viewport(0, 0, size.0, size.1);
                 gl.color_mask(true, true, true, true);
                 gl.enable(glow::DEPTH_TEST);
-                gl.depth_func(glow::LEQUAL);
+                // A surface that filled the G-buffer resolves against the depth its own pre-pass
+                // settled, so a mesh layered over itself keeps the fragment the buffer pass kept.
+                // One that wrote no depth of its own has nothing to match and only wants to be
+                // hidden by what stands in front of it.
+                gl.depth_func(match behind {
+                    true => glow::LEQUAL,
+                    false => glow::EQUAL,
+                });
                 gl.depth_mask(false);
                 gl.disable(glow::BLEND);
             }

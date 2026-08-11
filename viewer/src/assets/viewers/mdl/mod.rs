@@ -298,6 +298,9 @@ pub struct Rendered {
     variant: Cell<u16>,
     /// The passes that light the G-buffer, which belong to the frame rather than to a material.
     lighting: RefCell<Option<Arc<gpu::Lighting>>>,
+    /// The pass that grades the frame they resolve, and whether the table it reads has landed.
+    post: RefCell<Option<Arc<program::Program>>>,
+    graded: Cell<bool>,
     /// The color table in the game's own layout, by material.
     tables: RefCell<BTreeMap<usize, Table>>,
     camera: Cell<Camera>,
@@ -338,6 +341,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         animation: skin::Animation::new(path),
         variant: Cell::new(0),
         lighting: Default::default(),
+        post: Default::default(),
+        graded: Cell::new(false),
         tables: Default::default(),
         camera: Cell::new(camera),
         resident: Cell::new(0),
@@ -832,6 +837,7 @@ pub(super) fn layered(bytes: &[u8], path: &str, filter: u32) -> Result<deferred:
         layers: texture.layers(0).into(),
         pixels: image.into_rgba8().into_raw(),
         filter,
+        volumetric: texture.kind() == ironworks::file::tex::TextureKind::D3,
     })
 }
 
@@ -1041,6 +1047,7 @@ impl Rendered {
                         program::DIRECTIONAL,
                         program::POINT,
                         program::COMPOSITE,
+                        program::TONE_ADJUST,
                     ]
                     .map(str::to_owned),
                 );
@@ -1074,7 +1081,7 @@ impl Rendered {
             }
 
             let mut arrays = self.arrays.borrow_mut();
-            for (id, path, filter) in deferred::ENGINE {
+            for (id, path, filter) in deferred::ENGINE.into_iter().chain([deferred::GRADING]) {
                 let held = arrays.entry(id).or_insert_with(|| {
                     let files = backend.files().clone();
                     Array::Fetching(TrackedPromise::spawn_local(async move {
@@ -1092,7 +1099,11 @@ impl Rendered {
                     .map_err(ToString::to_string)
                     .and_then(|bytes| layered(bytes, path, filter).map_err(|why| why.to_string()))
                 {
-                    Ok(decoded) => level.gpu.lock().unwrap().queue_array(id, decoded),
+                    Ok(decoded) => {
+                        level.gpu.lock().unwrap().queue_array(id, decoded);
+                        self.graded
+                            .set(self.graded.get() || id == deferred::GRADING.0);
+                    }
                     Err(why) => log::error!("assets/mdl: {path}: {why}"),
                 }
                 *held = Array::Done;
@@ -1399,6 +1410,10 @@ impl Rendered {
                 ..Default::default()
             },
             lighting,
+            post: match self.shaded.get() {
+                true => self.post(),
+                false => None,
+            },
             eye: eye.to_array(),
             lights,
             surfaces,
@@ -1460,6 +1475,36 @@ impl Rendered {
             held.push((gpu::LIT, "Lit".to_owned()));
         }
         held
+    }
+
+    /// The pass that grades the resolved frame, translated once its shader has arrived. Withheld
+    /// until the table it reads has landed too: a pass drawn against the flat stand-in would grade
+    /// every pixel toward the one grey it answers with.
+    fn post(&self) -> Option<Arc<program::Program>> {
+        if !self.graded.get() {
+            return None;
+        }
+        if let Some(held) = self.post.borrow().as_ref() {
+            return Some(held.clone());
+        }
+        let mut packages = self.packages.borrow_mut();
+        let built = match packages.get(program::TONE_ADJUST) {
+            Some(Package::Ready(bytes)) => program::Program::tone_adjust(bytes),
+            _ => return None,
+        };
+        // Kept as a failure rather than tried again: the file will not translate differently on the
+        // next frame, and the pass is skipped from here on.
+        let built = match built {
+            Ok(held) => Arc::new(held),
+            Err(why) => {
+                log::error!("assets/mdl: {}: {why}", program::TONE_ADJUST);
+                packages.insert(program::TONE_ADJUST.to_owned(), Package::Failed(why));
+                return None;
+            }
+        };
+        drop(packages);
+        *self.post.borrow_mut() = Some(built.clone());
+        Some(built)
     }
 
     /// The passes that light the G-buffer, translated once their packages have arrived. They are the

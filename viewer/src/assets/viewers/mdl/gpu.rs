@@ -154,6 +154,8 @@ pub struct Frame {
     pub scene: program::Scene,
     /// The passes that light the G-buffer, once their packages have arrived.
     pub lighting: Option<Arc<Lighting>>,
+    /// The pass that grades the frame they resolve, once its shader and its table have arrived.
+    pub post: Option<Arc<program::Program>>,
     pub eye: [f32; 3],
     /// Key, fill and rim directions, in world space. Built once a frame from the camera, so a
     /// surface is lit by one set of lights rather than by a set of its own.
@@ -632,6 +634,9 @@ impl Game {
             self.buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
             self.resolve(gl, painter, frame, meshes, &scene)?;
+            if let Some(post) = frame.post.as_ref() {
+                self.buffers.post(gl, post, &scene)?;
+            }
         }
         Ok(())
     }

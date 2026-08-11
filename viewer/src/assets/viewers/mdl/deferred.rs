@@ -67,6 +67,18 @@ pub const ENGINE: [(u32, &str, u32); 5] = [
     ),
 ];
 
+/// The table the frame is graded through, which the grading pass addresses by the color it found.
+/// Three of these ship and nothing states which one binds; this is the one that answers a grey with
+/// the grey it was given and departs from the identity least of the three.
+pub const GRADING: (u32, &str, u32) = (
+    0xabc0_472a,
+    "common/graphics/texture/-output_lut_d.tex",
+    glow::LINEAR,
+);
+
+/// Where the grading pass is linked, past the slots the lighting and the composite take.
+const POST: usize = 5;
+
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
 /// once, and the channel past the last of them: the frame the composite resolved.
 pub const TARGETS: usize = 5;
@@ -217,6 +229,10 @@ pub struct Layered {
     pub layers: i32,
     pub pixels: Vec<u8>,
     pub filter: u32,
+    /// Whether the file addresses its slices as a third dimension rather than holding a stack of
+    /// separate images. A sampler is declared over one or the other, and a draw only validates where
+    /// the texture bound to its unit is of the declaration's own kind.
+    pub volumetric: bool,
 }
 
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
@@ -264,6 +280,9 @@ pub struct Buffers {
     resolvers: BTreeMap<usize, Linked>,
     present: Option<glow::Program>,
     blocks: Vec<glow::Buffer>,
+    /// Whether the graph has already brought the frame into the range a screen holds, which is what
+    /// keeps the pass that puts it up from bending it a second time.
+    toned: bool,
 }
 
 impl Buffers {
@@ -329,21 +348,14 @@ impl Buffers {
             .channel(at)
             .ok_or_else(|| format!("the frame has no buffer {at}"))?;
         let depth = self.depth.ok_or("no depth buffer")?;
-        let program = match self.present {
-            Some(held) => held,
-            None => {
-                let held = build_pair(gl, PRESENT_VERTEX, PRESENT_FRAGMENT)?;
-                self.present = Some(held);
-                held
-            }
-        };
+        let program = self.presenter(gl)?;
         let layout = self.screen(gl)?;
         unsafe {
             gl.use_program(Some(program));
             sampler(gl, program, "u_frame", 0, texture);
             sampler(gl, program, "u_depth", 1, depth);
             if let Some(location) = gl.get_uniform_location(program, "u_tone") {
-                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS));
+                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && !self.toned));
             }
             gl.bind_vertex_array(Some(layout));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -481,6 +493,92 @@ impl Buffers {
         Ok(())
     }
 
+    /// The resolved frame put through the game's own grading pass.
+    ///
+    /// That pass saturates what it reads before it reads its table, so the shoulder runs first: it
+    /// stands where the game's exposure and tone curve would, and running it here rather than at the
+    /// present is what keeps it from being applied twice. Each step reads the copy the one before it
+    /// left, since a texture being written cannot also be sampled.
+    pub fn post(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let table = *self
+            .arrays
+            .get(&GRADING.0)
+            .ok_or("the grading table has not arrived")?;
+        let source = self.resolved.ok_or("no resolved frame")?;
+        // The pass that puts a frame up drops the pixels the depth buffer says nothing drew at,
+        // which belong to egui. Here every pixel is the frame's, and the depth buffer is attached to
+        // what this draws into: sampling it would be reading a buffer it is writing.
+        let covered = self.stand_in(gl)?;
+        let layout = self.screen(gl)?;
+        let shoulder = self.presenter(gl)?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+            gl.color_mask(true, true, true, true);
+            gl.viewport(0, 0, self.size.0, self.size.1);
+        }
+
+        self.keep(gl)?;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(lit));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.use_program(Some(shoulder));
+            sampler(gl, shoulder, "u_frame", 0, source);
+            sampler(gl, shoulder, "u_depth", 1, covered);
+            if let Some(location) = gl.get_uniform_location(shoulder, "u_tone") {
+                gl.uniform_1_i32(Some(&location), 1);
+            }
+            gl.bind_vertex_array(Some(layout));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+        }
+
+        self.keep(gl)?;
+        let program = link(gl, &mut self.resolvers, POST, held)?;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(lit));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.use_program(Some(program));
+        }
+        self.bind(gl, program, held, scene, &[])?;
+        // Named rather than looked up by resource id: what a name here does not reach would be
+        // bound the flat stand-in, and a table of one grey renders something plausible and wrong.
+        for (unit, texture) in held.textures.iter().enumerate() {
+            let bound = match texture.name.as_str() {
+                program::POST_INPUT => source,
+                program::POST_TABLE => table,
+                name => {
+                    return Err(format!(
+                        "the grading pass reads {name}, which nothing fills"
+                    ));
+                }
+            };
+            bind(
+                gl,
+                program,
+                &texture.name,
+                unit as u32,
+                bound,
+                target(texture.kind),
+            );
+        }
+        unsafe {
+            gl.bind_vertex_array(Some(layout));
+            gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            gl.bind_vertex_array(None);
+        }
+        self.toned = true;
+        Ok(())
+    }
+
     /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
     /// writes.
     pub fn frame(&self) -> Option<glow::Framebuffer> {
@@ -523,6 +621,17 @@ impl Buffers {
                 _ => glow::COLOR_BUFFER_BIT,
             });
         }
+    }
+
+    /// The pair that bends a frame toward what a screen holds and puts it up, built the first time
+    /// something draws it.
+    fn presenter(&mut self, gl: &glow::Context) -> Result<glow::Program, String> {
+        if let Some(held) = self.present {
+            return Ok(held);
+        }
+        let held = build_pair(gl, PRESENT_VERTEX, PRESENT_FRAGMENT)?;
+        self.present = Some(held);
+        Ok(held)
     }
 
     /// The screen-wide triangle's array, uploaded the first time something draws it.
@@ -676,9 +785,10 @@ impl Buffers {
     /// texels is the caller's to say, since nothing about the texture tells whether it is an image
     /// or a table.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
-        let (target, wrap) = match held.layers > 1 {
-            true => (glow::TEXTURE_2D_ARRAY, glow::REPEAT),
-            false => (glow::TEXTURE_2D, glow::CLAMP_TO_EDGE),
+        let (target, wrap) = match (held.volumetric, held.layers > 1) {
+            (true, _) => (glow::TEXTURE_3D, glow::CLAMP_TO_EDGE),
+            (false, true) => (glow::TEXTURE_2D_ARRAY, glow::REPEAT),
+            (false, false) => (glow::TEXTURE_2D, glow::CLAMP_TO_EDGE),
         };
         unsafe {
             let texture = gl.create_texture()?;
@@ -715,6 +825,9 @@ impl Buffers {
                 (glow::TEXTURE_WRAP_T, wrap),
             ] {
                 gl.tex_parameter_i32(target, name, value as i32);
+            }
+            if target == glow::TEXTURE_3D {
+                gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_R, wrap as i32);
             }
             if let Some(stale) = self.arrays.insert(id, texture) {
                 graveyard().lock().unwrap().push(Dead::Texture(stale));
@@ -939,6 +1052,7 @@ impl Buffers {
         let (position, _) = self.position.ok_or("no view position")?;
         let (light, _) = self.light.ok_or("no light buffer")?;
         let (lit, _) = self.lit.ok_or("no lit frame")?;
+        self.toned = false;
         self.reflect(gl, &scene.ambient)?;
         unsafe {
             // A screen-wide pass covers every pixel and reads the depth rather than testing against

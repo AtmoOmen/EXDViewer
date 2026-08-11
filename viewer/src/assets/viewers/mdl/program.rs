@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use glam::{Mat4, Vec3, Vec4};
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
-use ironworks::file::{mtrl, spm};
+use ironworks::file::{mtrl, shcd, spm};
 
 use super::material::Material;
 
@@ -44,6 +44,40 @@ pub const SPOT: &str = "shader/sm5/shpk/spotlighting.shpk";
 pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
 /// Softens the surface a strand grows out of, between the G-buffer and the light it is read under.
 pub const FUR: &str = "shader/sm5/shpk/furblur.shpk";
+
+/// The one member of the game's post chain the viewer runs. It reads a table a file holds, where
+/// the exposure and the tone curve before it are targets the engine builds a frame at a time off
+/// constants no file states.
+pub const TONE_ADJUST: &str = "shader/sm5/posteffect/ToneAdjust.shcd";
+
+/// The buffer it reads, and the frame and the table it reads them through.
+const TONE_MAP_PARAM: &str = "cToneMapParam";
+pub const POST_INPUT: &str = "sInput";
+pub const POST_TABLE: &str = "sLUT";
+
+/// What the pass takes of that buffer: `w` is the exponent the frame is raised to before the table,
+/// and `z` how much of the table's answer reaches the frame, which the pass skips entirely while it
+/// is not positive. Neither is stated anywhere: every constant buffer of the chain reports no
+/// default at all. So the exponent is left where it changes nothing, and the table is read at the
+/// strength it was authored at, which is the only reading of it that is not a dial.
+const TONE_MAP: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
+
+/// The vertex shader the pass is drawn with. The game pairs these with a `VSSampling`, which reads a
+/// quad of positions and coordinates against a scale and a bias no file states; the screen triangle
+/// carries its own, and a frame a pass of this graph wrote is already the way round a sampler here
+/// reads it.
+const POST_VERTEX: &str = "\
+#version 300 es
+
+layout(location = 0) in vec4 a_position;
+
+out vec2 TEXCOORD;
+
+void main() {
+\tTEXCOORD = a_position.xy * 0.5 + 0.5;
+\tgl_Position = a_position;
+}
+";
 
 /// `GetDirectionalLight`, and the value that draws a light rather than nothing. The package defaults
 /// it to `_Disable`, whose shader writes no light at all.
@@ -483,20 +517,49 @@ fn program<'a>(
     let start = package.blobs_offset() + usize::try_from(shader.blob_offset()).ok()?;
     let end = start.checked_add(usize::try_from(shader.blob_size()).ok()?)?;
     let blob = bytes.get(start..end)?;
-    let held = dxbc::scan_dxbc(blob)
+    Some((shex(blob)?, blob))
+}
+
+/// The program the disassembler reads out of a blob.
+fn shex(blob: &[u8]) -> Option<dxbc::shex::Program> {
+    dxbc::scan_dxbc(blob)
         .iter()
         .flat_map(|container| &container.chunks)
         .find_map(|chunk| match chunk.parse() {
             dxbc::chunks::ChunkData::Shader(program) => Some(program),
             _ => None,
-        })?;
-    Some((held, blob))
+        })
+}
+
+/// What a blob's own signature chunks declare its inputs and outputs as. A translation without
+/// these emits every one of them as a bare register nothing declared.
+fn signatures(blob: &[u8], into: &mut hlsl::Names) {
+    use dxbc::chunks::ChunkData;
+
+    for chunk in dxbc::scan_dxbc(blob)
+        .iter()
+        .flat_map(|container| &container.chunks)
+    {
+        let (held, signature) = match chunk.parse() {
+            ChunkData::InputSignature(signature) => (&mut into.inputs, signature),
+            ChunkData::OutputSignature(signature) => (&mut into.outputs, signature),
+            _ => continue,
+        };
+        for element in &signature.elements {
+            held.entry(element.register).or_insert_with(|| {
+                hlsl::Semantic::new(
+                    &element.semantic_name,
+                    element.semantic_index,
+                    element.component_type,
+                    element.mask,
+                )
+            });
+        }
+    }
 }
 
 /// What this shader's registers are called, and what its signatures declare.
 fn names(package: &ShaderPackage, index: u32, blob: &[u8]) -> hlsl::Names {
-    use dxbc::chunks::ChunkData;
-
     let mut names = hlsl::Names::default();
     let Some(shader) = package.shaders().get(index as usize) else {
         return names;
@@ -524,26 +587,7 @@ fn names(package: &ShaderPackage, index: u32, blob: &[u8]) -> hlsl::Names {
                 .insert(resource.slot(), hlsl::Buffer::new(name, Vec::new()));
         }
     }
-    for chunk in dxbc::scan_dxbc(blob)
-        .iter()
-        .flat_map(|container| &container.chunks)
-    {
-        let (into, signature) = match chunk.parse() {
-            ChunkData::InputSignature(signature) => (&mut names.inputs, signature),
-            ChunkData::OutputSignature(signature) => (&mut names.outputs, signature),
-            _ => continue,
-        };
-        for element in &signature.elements {
-            into.entry(element.register).or_insert_with(|| {
-                hlsl::Semantic::new(
-                    &element.semantic_name,
-                    element.semantic_index,
-                    element.component_type,
-                    element.mask,
-                )
-            });
-        }
-    }
+    signatures(blob, &mut names);
     names
 }
 
@@ -661,6 +705,94 @@ impl Program {
         let (vs, ps) = pair(&package, &[], &set, pass.id(), SUB_VIEW_MAIN)
             .ok_or("this package reaches no such pass")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
+    }
+
+    /// Translates the pass that grades the resolved frame. A `.shcd` holds one shader and no node
+    /// table, so the file is the variant and there is nothing to select; what it wants is a
+    /// screen-wide draw and the frame it grades in the range a screen holds, since it saturates
+    /// what it reads before it reads the table.
+    pub fn tone_adjust(bytes: &[u8]) -> Result<Self, String> {
+        let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
+        let blob = bytes
+            .get(code.blob_offset()..code.blob_offset() + code.blob_size())
+            .ok_or("the shader's bytecode runs past the file")?;
+        let fragment = shex(blob).ok_or("no shader in the blob")?;
+
+        let mut names = hlsl::Names::default();
+        for (resources, into) in [
+            (code.textures(), &mut names.textures),
+            (code.samplers(), &mut names.samplers),
+        ] {
+            for resource in resources {
+                if let Some(name) = code.name(resource) {
+                    into.insert(resource.slot(), name.to_owned());
+                }
+            }
+        }
+        for resource in code.constants() {
+            if let Some(name) = code.name(resource) {
+                names.constants.insert(
+                    resource.slot(),
+                    hlsl::Buffer::new(name.to_owned(), Vec::new()),
+                );
+            }
+        }
+        signatures(blob, &mut names);
+
+        let outputs: Vec<u32> = names
+            .outputs
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let extents = hlsl::glsl::extents(&fragment, &names);
+        let options = hlsl::glsl::Options {
+            targets: outputs.clone(),
+            extents: extents.clone(),
+        };
+
+        let declared = hlsl::glsl::declarations(&fragment);
+        let textures = hlsl::glsl::textures(&fragment, &names)
+            .into_iter()
+            .filter_map(|(slot, _, name)| {
+                let resource = code.textures().iter().find(|held| held.slot() == slot)?;
+                Some(Texture {
+                    name,
+                    id: resource.id(),
+                    kind: kind(declared.get(&slot).copied().unwrap_or_default()),
+                })
+            })
+            .collect();
+        let buffers = extents
+            .into_iter()
+            .map(|(name, registers)| Buffer {
+                fixed: (name == TONE_MAP_PARAM).then(|| {
+                    TONE_MAP
+                        .iter()
+                        .flat_map(|held| held.to_le_bytes())
+                        .collect()
+                }),
+                name,
+                members: Vec::new(),
+                registers,
+            })
+            .collect();
+
+        Ok(Self {
+            vertex: POST_VERTEX.to_owned(),
+            fragment: hlsl::glsl(&fragment, &names, hlsl::Reading::Plain, &options)
+                .lines
+                .join("\n"),
+            attributes: Vec::new(),
+            textures,
+            buffers,
+            structured: Vec::new(),
+            names: outputs.iter().map(|at| format!("SV_Target{at}")).collect(),
+            targets: outputs.clone(),
+            outputs,
+            pass: Pass::Composite,
+        })
     }
 
     fn assemble(

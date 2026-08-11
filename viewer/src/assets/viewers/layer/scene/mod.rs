@@ -210,7 +210,7 @@ struct Light {
 }
 
 /// A file the scene names beside itself and reads once: the boxes its lights are clipped against,
-/// and how much of the sky reaches each of its parts.
+/// how much of the sky reaches each of its parts, and the game's own textures its shaders read.
 enum Aside {
     Wanted(String),
     Fetching(String, TrackedPromise<Result<Vec<u8>>>),
@@ -300,7 +300,10 @@ pub struct Scene {
     /// How much of the sky reaches each part, by the key its `.svb` entry uses.
     visibility: HashMap<(u32, [u8; 4]), f32>,
     sky: Aside,
-    falloff: Aside,
+    /// The engine's own textures, by resource id. The ramp every placed light reads its falloff off
+    /// is wanted from the start, since the lighting passes read it whatever a zone holds; the rest
+    /// are only worth their fetch once a material's own shaders turn out to declare one.
+    engine: BTreeMap<u32, Aside>,
     textures: BTreeMap<String, Texture>,
     resident: usize,
     files: HashMap<String, Held>,
@@ -424,7 +427,10 @@ impl Scene {
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
             sky: aside(source.scene().map(layer::Scene::sky_visibility_path)),
-            falloff: Aside::Wanted(mdl::deferred::RAMP.1.to_owned()),
+            engine: BTreeMap::from([(
+                mdl::deferred::RAMP.0,
+                Aside::Wanted(mdl::deferred::RAMP.1.to_owned()),
+            )]),
             textures: BTreeMap::new(),
             resident: 0,
             files: HashMap::new(),
@@ -751,9 +757,13 @@ impl Scene {
     }
 
     /// The files read once beside the scene, as they arrive: the boxes its lights are clipped
-    /// against, how much of the sky reaches each of its parts, and the ramp their falloff comes off.
+    /// against, how much of the sky reaches each of its parts, and the game's own textures its
+    /// shaders read.
     fn load_asides(&mut self, backend: &Backend) {
-        for held in [&mut self.clip, &mut self.sky, &mut self.falloff] {
+        for held in [&mut self.clip, &mut self.sky]
+            .into_iter()
+            .chain(self.engine.values_mut())
+        {
             *held = match std::mem::replace(held, Aside::Done) {
                 Aside::Wanted(path) => {
                     let files = backend.files().clone();
@@ -783,7 +793,11 @@ impl Scene {
         };
         let clip = taken(&mut self.clip);
         let sky = taken(&mut self.sky);
-        let falloff = taken(&mut self.falloff);
+        let supplied: Vec<(u32, String, Vec<u8>)> = self
+            .engine
+            .iter_mut()
+            .filter_map(|(id, held)| taken(held).map(|(path, bytes)| (*id, path, bytes)))
+            .collect();
 
         if let Some((path, bytes)) = clip {
             match lcb::ClipBoxes::read(Cursor::new(bytes)) {
@@ -815,13 +829,15 @@ impl Scene {
                 Err(why) => log::error!("assets/layer: {path}: {why}"),
             }
         }
-        if let Some((path, bytes)) = falloff {
-            match mdl::layered(&bytes, &path, mdl::deferred::RAMP.2) {
-                Ok(held) => self
-                    .renderer
-                    .lock()
-                    .unwrap()
-                    .queue_supplied(mdl::deferred::RAMP.0, held),
+        for (id, path, bytes) in supplied {
+            let Some((_, _, filter)) = mdl::deferred::ENGINE
+                .into_iter()
+                .find(|(held, _, _)| *held == id)
+            else {
+                continue;
+            };
+            match mdl::layered(&bytes, &path, filter) {
+                Ok(held) => self.renderer.lock().unwrap().queue_supplied(id, held),
                 Err(why) => log::error!("assets/layer: {path}: {why}"),
             }
         }
@@ -1261,6 +1277,18 @@ impl Scene {
             let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
             let mut buffer = vec![Arc::new(first)];
             buffer.extend((1..pages).filter_map(|held| page(held).ok().map(Arc::new)));
+            // The engine binds these rather than the material, so nothing names them as a path;
+            // what a surface's own shaders declare is what says the file is worth reading at all.
+            for texture in buffer.iter().flat_map(|held| &held.textures) {
+                if let Some((id, path, _)) = mdl::deferred::ENGINE
+                    .iter()
+                    .find(|(held, _, _)| *held == texture.id)
+                {
+                    self.engine
+                        .entry(*id)
+                        .or_insert_with(|| Aside::Wanted(path.to_string()));
+                }
+            }
             let depth = program::Program::build(
                 bytes,
                 material,

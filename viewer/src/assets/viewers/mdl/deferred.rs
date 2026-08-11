@@ -268,8 +268,9 @@ pub struct Buffers {
     /// outright where what is bound to a unit is not of the declaration's own kind, so a plane
     /// cannot stand in for the rest.
     blanks: BTreeMap<u32, glow::Texture>,
-    /// The textures the shaders read off the game's own files, by resource id.
-    arrays: BTreeMap<u32, glow::Texture>,
+    /// The textures the shaders read off the game's own files, by resource id, each with the target
+    /// its file was taken onto the card at.
+    arrays: BTreeMap<u32, (u32, glow::Texture)>,
     neutrals: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
@@ -364,16 +365,97 @@ impl Buffers {
         Ok(())
     }
 
+    /// One channel of the frame read off the card, each component between nought and one.
+    ///
+    /// The channel's own texture is attached to a framebuffer of this read's own, rather than the
+    /// page it was written on being bound and the channel named as an attachment of that: how many
+    /// channels a page holds is whatever the context turned out to allow rather than the four one
+    /// is promised, so a channel named by its own number can fall past the last attachment its page
+    /// has an image at. A read of an attachment with no image leaves the pixels it was given
+    /// untouched and raises an error, which is a black frame to anyone who did not ask for one.
+    pub fn read(&self, gl: &glow::Context, at: usize) -> Result<Vec<f32>, String> {
+        let texture = self
+            .channel(at)
+            .ok_or_else(|| format!("the frame has no buffer {at}"))?;
+        let count = (self.size.0 * self.size.1 * 4) as usize;
+        unsafe {
+            let held = gl.create_framebuffer()?;
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(held));
+            gl.framebuffer_texture_2d(
+                glow::READ_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                0,
+            );
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            let status = gl.check_framebuffer_status(glow::READ_FRAMEBUFFER);
+            let incomplete = (status != glow::FRAMEBUFFER_COMPLETE).then_some(status);
+            while gl.get_error() != glow::NO_ERROR {}
+            // The G-buffer holds bytes and the frame the composite resolved does not, and a read is
+            // only asked for in a pair the format it is reading answers in.
+            let values = match at >= TARGETS {
+                true => {
+                    let mut values = vec![0f32; count];
+                    gl.read_pixels(
+                        0,
+                        0,
+                        self.size.0,
+                        self.size.1,
+                        glow::RGBA,
+                        glow::FLOAT,
+                        glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(&mut values))),
+                    );
+                    values
+                }
+                false => {
+                    let mut values = vec![0u8; count];
+                    gl.read_pixels(
+                        0,
+                        0,
+                        self.size.0,
+                        self.size.1,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelPackData::Slice(Some(&mut values)),
+                    );
+                    values
+                        .into_iter()
+                        .map(|value| f32::from(value) / 255.0)
+                        .collect()
+                }
+            };
+            let why = gl.get_error();
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            gl.delete_framebuffer(held);
+            match incomplete.or((why != glow::NO_ERROR).then_some(why)) {
+                Some(why) => Err(format!("buffer {at} would not read back: {why:#x}")),
+                None => Ok(values),
+            }
+        }
+    }
+
+    /// Asks the context how much of the G-buffer one pass may write, which is only answerable where
+    /// there is a context to ask.
+    ///
+    /// Asked by every frame rather than by the first one to draw the G-buffer: a material's passes
+    /// are translated into pages of this size before the callback that draws them, so a frame that
+    /// first asked as it drew would have translated its own passes against the four a context is
+    /// promised and written that many targets into a buffer of however many it turned out to allow.
+    pub fn limit(&mut self, gl: &glow::Context) {
+        if self.attachments == 0 {
+            let limit = unsafe { gl.get_parameter_i32(glow::MAX_DRAW_BUFFERS) };
+            self.attachments = (limit.max(1) as usize).min(TARGETS);
+        }
+    }
+
     /// Every buffer of the graph, sized to what is being drawn into.
     ///
     /// The G-buffer is one framebuffer per page of its targets: a context is promised four draw
     /// buffers and a framebuffer no more color attachments than that, so five targets cannot all
     /// hang off one, and what a page cannot hold is written by a reading of its own.
     pub fn attach(&mut self, gl: &glow::Context, size: (i32, i32)) -> Result<(), String> {
-        if self.attachments == 0 {
-            let limit = unsafe { gl.get_parameter_i32(glow::MAX_DRAW_BUFFERS) };
-            self.attachments = (limit.max(1) as usize).min(TARGETS);
-        }
+        self.limit(gl);
         if !self.frames.is_empty() && self.size == size {
             return Ok(());
         }
@@ -506,9 +588,11 @@ impl Buffers {
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
-        let table = *self
-            .arrays
-            .get(&GRADING.0)
+        let table = held
+            .textures
+            .iter()
+            .find(|texture| texture.name == program::POST_TABLE)
+            .and_then(|texture| self.supplied(texture.kind, GRADING.0))
             .ok_or("the grading table has not arrived")?;
         let source = self.resolved.ok_or("no resolved frame")?;
         // The pass that puts a frame up drops the pixels the depth buffer says nothing drew at,
@@ -829,15 +913,26 @@ impl Buffers {
             if target == glow::TEXTURE_3D {
                 gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_R, wrap as i32);
             }
-            if let Some(stale) = self.arrays.insert(id, texture) {
+            if let Some((_, stale)) = self.arrays.insert(id, (target, texture)) {
                 graveyard().lock().unwrap().push(Dead::Texture(stale));
             }
         }
         Ok(())
     }
 
-    /// What stands in for a sampler of this kind that nothing bound a texture to. An array is the
-    /// file the resource id names once that has arrived, since nothing else answers as one.
+    /// The file a resource id names, where one has arrived and its own target is the one a sampler
+    /// of this kind reads through. A file states how many slices it holds and a package states what
+    /// it is sampled as, so the two can disagree; a texture bound at the other target is not of the
+    /// declaration's kind, and answers a constant rather than being rejected.
+    fn supplied(&self, kind: program::Kind, id: u32) -> Option<glow::Texture> {
+        self.arrays
+            .get(&id)
+            .filter(|(at, _)| *at == target(kind))
+            .map(|(_, held)| *held)
+    }
+
+    /// What stands in for a sampler of this kind that nothing bound a texture to: the file the
+    /// resource id names once that has arrived, and the flat texture of its own target until then.
     pub fn absent(
         &mut self,
         gl: &glow::Context,
@@ -846,8 +941,10 @@ impl Buffers {
     ) -> Result<glow::Texture, String> {
         match kind {
             program::Kind::Cube => self.reflection(gl),
-            program::Kind::Array if self.arrays.contains_key(&id) => Ok(self.arrays[&id]),
-            held => self.blank(gl, target(held)),
+            held => match self.supplied(held, id) {
+                Some(texture) => Ok(texture),
+                None => self.blank(gl, target(held)),
+            },
         }
     }
 
@@ -883,8 +980,8 @@ impl Buffers {
                 .copied()
                 .ok_or_else(|| format!("the G-buffer has no channel {at}"));
         }
-        if let Some(held) = self.arrays.get(&id) {
-            return Ok(*held);
+        if let Some(held) = self.supplied(program::Kind::Plane, id) {
+            return Ok(held);
         }
         if let Some(held) = self.neutrals.get(&id) {
             return Ok(*held);
@@ -1138,7 +1235,11 @@ impl Drop for Buffers {
             .flatten()
             .chain(std::mem::take(&mut self.blanks).into_values())
             .chain(std::mem::take(&mut self.neutrals).into_values())
-            .chain(std::mem::take(&mut self.arrays).into_values())
+            .chain(
+                std::mem::take(&mut self.arrays)
+                    .into_values()
+                    .map(|(_, held)| held),
+            )
             .map(Dead::Texture),
         );
         dead.extend(self.frames.drain(..).map(Dead::Frame));

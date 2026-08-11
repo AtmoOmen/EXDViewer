@@ -749,7 +749,16 @@ impl Game {
                     false => glow::EQUAL,
                 });
                 gl.depth_mask(false);
-                gl.disable(glow::BLEND);
+                // A pass drawn over the frame states in its alpha how much of itself reaches it,
+                // and nothing downstream would ever apply that. One that reads the frame back
+                // instead resolves what it found and states one, which blends to the same pixel.
+                match behind {
+                    true => {
+                        gl.enable(glow::BLEND);
+                        gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                    }
+                    false => gl.disable(glow::BLEND),
+                }
             }
             for at in held {
                 if behind {
@@ -780,6 +789,7 @@ impl Game {
                 self.bind(gl, painter, program, held, surface, *at, mesh, scene)?;
             }
         }
+        unsafe { gl.disable(glow::BLEND) };
         Ok(())
     }
 

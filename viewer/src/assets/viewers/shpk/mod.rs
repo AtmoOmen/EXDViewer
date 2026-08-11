@@ -119,7 +119,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let params = params::rows(&package);
     let registers = params::registers(&package);
 
-    let [technique, subview] = package.subview_defaults();
+    let [technique, subview] = package.technique_subview();
     let identity = vec![
         ("Version", format!("{:#06X}", package.version())),
         (

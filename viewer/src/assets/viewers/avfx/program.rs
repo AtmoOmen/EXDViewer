@@ -169,8 +169,7 @@ fn pair(package: &ShaderPackage, set: &[(u32, u32)]) -> Option<(u32, u32)> {
     .iter()
     .map(|keys| selector(&values(keys, set)))
     .collect();
-    let subview = package.subview_defaults();
-    parts.push(selector(&[subview[0], subview[1]]));
+    parts.push(selector(&package.technique_subview()));
     let id = selector(&parts);
 
     let node = package

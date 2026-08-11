@@ -134,7 +134,7 @@ pub fn read(package: &shpk::ShaderPackage) -> Keys {
         })
         .chain(
             package
-                .subview_defaults()
+                .technique_subview()
                 .into_iter()
                 .zip(["Technique", "Subview"])
                 .map(|(default, name)| KeyColumn {

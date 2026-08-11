@@ -83,7 +83,7 @@ fn pair(package: &ShaderPackage) -> Option<(u32, u32)> {
             selector(&values)
         })
         .collect();
-    parts.push(selector(&[package.subview_defaults()[0], SUB_VIEW_MAIN]));
+    parts.push(selector(&[package.technique_subview()[0], SUB_VIEW_MAIN]));
     let id = selector(&parts);
 
     // Lookup is by node id, falling back to the alias table: skin and hair only resolve through it.

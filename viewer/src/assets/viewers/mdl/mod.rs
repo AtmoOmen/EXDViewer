@@ -1294,6 +1294,15 @@ impl Rendered {
             Some(Texture::Ready(handle)) => Some(handle.id()),
             _ => None,
         };
+        // One that has not answered yet, as against one that answered with nothing. The flat
+        // stand-in a draw reaches for meanwhile is opaque, so a cutout authored into a normal map's
+        // alpha clips nothing and the quad it was cut out of stands as a solid card.
+        let pending = |path: &str| {
+            !matches!(
+                textures.get(path),
+                Some(Texture::Ready(_) | Texture::Absent)
+            )
+        };
         let surfaces = level
             .meshes
             .iter()
@@ -1314,6 +1323,9 @@ impl Rendered {
                 }
                 let shaded = self.shaded.get().then(|| {
                     let passes = translated.get(&mesh.material)?.held.as_ref().ok()?;
+                    if material.bound().any(|(_, path)| pending(path)) {
+                        return None;
+                    }
                     Some(gpu::Shaded {
                         buffer: passes.buffer.clone(),
                         depth: passes.depth.clone(),

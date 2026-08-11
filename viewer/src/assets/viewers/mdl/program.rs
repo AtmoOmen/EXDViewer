@@ -67,6 +67,40 @@ const JOINT: usize = 12;
 /// The buffer a drawing package reads one record of per object drawn.
 const INSTANCING: &str = "g_InstancingData";
 
+/// The buffer holding what the engine decides per object rather than per material.
+const INSTANCE: &str = "g_InstanceParameter";
+
+/// Its fields, as every package that reads one by name declares them. `iris.shpk` picks its record
+/// out by which eye a vertex belongs to, and a reflection describes a buffer indexed that way as one
+/// bare array, so the names have to come from somewhere for a fill to reach it at all.
+const INSTANCE_FIELDS: [(&str, u32); 9] = [
+    ("m_MulColor", 16),
+    ("m_EnvParameter", 16),
+    ("m_CameraLight", 32),
+    ("m_Wetness", 16),
+    ("m_Wind", 16),
+    ("m_PrevWind", 16),
+    ("m_IrisParam", 32),
+    ("m_Param", 16),
+    ("m_HeadUpVector", 16),
+];
+
+fn instance_fields() -> Vec<hlsl::layout::Member> {
+    INSTANCE_FIELDS
+        .iter()
+        .scan(0, |offset, (name, size)| {
+            let at = *offset;
+            *offset += size;
+            Some(hlsl::layout::Member {
+                name: (*name).to_owned(),
+                offset: at,
+                size: *size,
+                kind: "float4".to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Which pass of the node to take. `Lighting` and `Lamp` take the same one: the sun and a placed
 /// light are separate packages reading one buffer differently.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -732,8 +766,13 @@ impl Program {
                 let fixed = (name == "g_MaterialParameter")
                     .then(|| parameters.clone())
                     .flatten();
+                let members = match described.get(&name) {
+                    Some(held) => held.clone(),
+                    None if name == INSTANCE => instance_fields(),
+                    None => Vec::new(),
+                };
                 buffers.push(Buffer {
-                    members: described.get(&name).cloned().unwrap_or_default(),
+                    members,
                     name,
                     registers,
                     fixed,
@@ -924,7 +963,11 @@ impl Buffer {
             held.extend(rows(world_view, 3));
             held
         });
-        put("g_InstanceParameter", "m_MulColor", vec![1.0; 4]);
+        put(INSTANCE, "m_MulColor", vec![1.0; 4]);
+        // One record an eye, picked by the vertex color. The first two lanes scale the coordinate an
+        // eye's textures are read at and the third warps it toward the pupil, so ones leave that
+        // coordinate where the mesh's own uv put it; nought collapses the eye onto a single texel.
+        put(INSTANCE, "m_IrisParam", vec![1.0; 8]);
         // The engine drives this per draw and no material states one, so identity is what leaves a
         // table's own emissive column as it was written.
         put(

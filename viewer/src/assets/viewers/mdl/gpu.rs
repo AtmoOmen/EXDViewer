@@ -267,6 +267,9 @@ impl Model {
         if self.failure.is_some() {
             return;
         }
+        // Before anything is drawn, shaded or not: the G-buffer is only attached where a frame draws
+        // into it, and by then this frame's passes have already been translated.
+        self.game.buffers.limit(gl);
         if let Some(pending) = self.pending.take()
             && let Err(why) = self.upload(gl, pending)
         {

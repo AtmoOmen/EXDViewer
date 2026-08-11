@@ -131,6 +131,24 @@ The two blit faults are gone too. Measured at `b965b62`, before
 | `ERROR: [egui_glow] GL error` | 306 | 2 | 0 |
 | total messages | 623 | 19 | 0 |
 
+## Probing one model
+
+`probe.sh` walks a list of models under the game shaders and shoots each one, about two minutes a
+model against the gate's twenty. It exists for reading a render back, not for passing or failing.
+
+| flag | |
+|---|---|
+| `--size=WxH` | viewport, default matches the gate |
+| `--zoom=N` | frames the model; large values fill the pane |
+| `--settle=ms` | wait before the shot, to let materials and textures land |
+| `--channel=x` | which target to show |
+| `--plain` | the preview path instead of the game shaders |
+| `--out=` | where the shots go |
+| `--mark=` | echo console lines carrying a prefix |
+
+`--mark` is how a temporary `console.log` in the renderer gets read back, which is what turned the
+sampler bindings into a table during the task #55 investigation.
+
 ## What it does not cover
 
 Only the three 3D viewers, and one asset each for the model, the scene and the level (the `.lgb`

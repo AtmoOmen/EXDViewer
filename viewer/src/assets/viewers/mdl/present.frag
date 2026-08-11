@@ -24,9 +24,13 @@ float shoulder(float value) {
 void main() {
 	// Nothing drew where the depth buffer still holds what it was cleared to, and those pixels
 	// belong to egui rather than to the frame.
-	if (texture(u_depth, v_uv).r >= 1.0) {
+	float depth = texture(u_depth, v_uv).r;
+	if (depth >= 1.0) {
 		discard;
 	}
+	// Carried over so what is drawn on top of the frame can test against what it covered. It only
+	// lands where the caller left depth writes on, which the pass that grades a frame does not.
+	gl_FragDepth = depth;
 	vec3 color = texture(u_frame, v_uv).rgb;
 	if (u_tone) {
 		// Every channel by what the brightest of them was bent by, so a pixel past the knee loses

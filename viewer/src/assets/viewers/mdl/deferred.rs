@@ -340,10 +340,17 @@ impl Buffers {
             // clip rect means what it says.
             gl.enable(glow::SCISSOR_TEST);
             gl.color_mask(true, true, true, true);
-            gl.depth_mask(false);
-            gl.disable(glow::DEPTH_TEST);
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
+            // The frame carries its own depth up with it, so whatever is drawn over the widget
+            // afterwards can test against what it covered. The pixels this pass drops would keep
+            // what an earlier frame left there, hence the clear, and a fragment writes no depth at
+            // all with the test off, hence the test.
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::ALWAYS);
+            gl.depth_mask(true);
+            gl.clear_depth_f32(1.0);
+            gl.clear(glow::DEPTH_BUFFER_BIT);
         }
         let texture = self
             .channel(at)
@@ -361,6 +368,8 @@ impl Buffers {
             gl.bind_vertex_array(Some(layout));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
             gl.bind_vertex_array(None);
+            gl.depth_mask(false);
+            gl.disable(glow::DEPTH_TEST);
         }
         Ok(())
     }

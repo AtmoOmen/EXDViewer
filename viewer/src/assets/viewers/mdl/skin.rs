@@ -24,6 +24,9 @@ use super::super::{link, section};
 use crate::backend::Backend;
 use crate::utils::{TrackedPromise, file_name};
 
+/// What the picker calls standing the model where its own file put it.
+const REST: &str = "Reference pose";
+
 /// The rig a model is skinned to, ready to answer a mesh's bone table with a palette.
 pub struct Skin {
     rig: Rig,
@@ -149,8 +152,8 @@ pub struct Animation {
     /// The pack to play, as the user has it.
     wanted: RefCell<String>,
     pack: RefCell<Option<Fetch<Motions>>>,
-    /// Which motion is playing, indexing [`Motions::named`].
-    motion: Cell<usize>,
+    /// Which motion is playing, indexing [`Motions::named`]. None stands the model at rest.
+    motion: Cell<Option<usize>>,
     /// How far into it, in seconds.
     time: Cell<f32>,
     running: Cell<bool>,
@@ -164,7 +167,7 @@ impl Animation {
             skin: RefCell::new(None),
             wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
             pack: RefCell::new(None),
-            motion: Cell::new(0),
+            motion: Cell::new(None),
             time: Cell::new(0.0),
             running: Cell::new(false),
         }
@@ -200,10 +203,10 @@ impl Animation {
                 .collect();
         };
         let pack = self.pack.borrow();
-        let binding = pack
-            .as_ref()
-            .and_then(Fetch::ready)
-            .and_then(|motions| motions.binding(self.motion.get()));
+        let binding = self
+            .motion
+            .get()
+            .and_then(|at| pack.as_ref().and_then(Fetch::ready)?.binding(at));
         let posed = match binding {
             Some(binding) => skin.rig.posed(binding, self.time.get()),
             None => skin.rig.world(skin.rig.reference()),
@@ -215,14 +218,32 @@ impl Animation {
     }
 
     /// Which motion is playing, play and pause, and the scrubber that is also what advances the
-    /// clock.
+    /// clock. Only the picker is offered until a motion is picked: with none the model stands where
+    /// its own file put it, and there is nothing to play.
     pub fn ui(&self, ui: &mut egui::Ui) {
         let pack = self.pack.borrow();
         let Some(motions) = pack.as_ref().and_then(Fetch::ready) else {
             return;
         };
         let motion = self.motion.get();
-        let Some(binding) = motions.binding(motion) else {
+        egui::ComboBox::from_id_salt("mdl_motion")
+            .selected_text(match motion.and_then(|at| motions.named.get(at)) {
+                Some((name, _)) => name.as_str(),
+                None => REST,
+            })
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(motion.is_none(), REST).clicked() {
+                    self.motion.set(None);
+                    self.time.set(0.0);
+                }
+                for (at, (name, _)) in motions.named.iter().enumerate() {
+                    if ui.selectable_label(motion == Some(at), name).clicked() {
+                        self.motion.set(Some(at));
+                        self.time.set(0.0);
+                    }
+                }
+            });
+        let Some(binding) = self.motion.get().and_then(|at| motions.binding(at)) else {
             return;
         };
 
@@ -236,17 +257,6 @@ impl Animation {
             // Nothing else asks for a frame while the pointer is still, so playback has to.
             ui.ctx().request_repaint();
         }
-
-        egui::ComboBox::from_id_salt("mdl_motion")
-            .selected_text(&motions.named[motion].0)
-            .show_ui(ui, |ui| {
-                for (at, (name, _)) in motions.named.iter().enumerate() {
-                    if ui.selectable_label(self.motion.get() == at, name).clicked() {
-                        self.motion.set(at);
-                        time = 0.0;
-                    }
-                }
-            });
         let running = self.running.get();
         if ui.button(if running { "Pause" } else { "Play" }).clicked() {
             self.running.set(!running);
@@ -282,7 +292,7 @@ impl Animation {
         {
             *self.wanted.borrow_mut() = wanted;
             *self.pack.borrow_mut() = None;
-            self.motion.set(0);
+            self.motion.set(None);
             self.time.set(0.0);
         }
         if let Some(Fetch::Failed(why)) = self.pack.borrow().as_ref() {

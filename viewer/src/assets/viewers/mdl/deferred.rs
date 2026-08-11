@@ -39,11 +39,12 @@ pub const RAMP: (u32, &str, u32) = (
 
 /// The textures the game's own shaders read that no material names, and how each is read between its
 /// texels: the tiles a character's surface detail is taken from, the spheres its resolve pass shades
-/// against, that ramp, and the profiles the subsurface term is read off.
+/// against, that ramp, the profiles the subsurface term is read off, and the ramps a cel-shaded
+/// surface takes its whole light response off, a profile to a row and the cosine along the row.
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 5] = [
+pub const ENGINE: [(u32, &str, u32); 6] = [
     (
         0x92f0_3e53,
         "chara/common/texture/tile_norm_array.tex",
@@ -65,6 +66,7 @@ pub const ENGINE: [(u32, &str, u32); 5] = [
         "common/graphics/texture/-sss_kernel_ssst.tex",
         glow::NEAREST,
     ),
+    (0x8b73_3c20, "chara/common/texture/-toon.tex", glow::LINEAR),
 ];
 
 /// The table the frame is graded through, which the grading pass addresses by the color it found.
@@ -96,12 +98,11 @@ pub const TYPES: &str = "g_ShaderTypeParameter";
 const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 
 /// The tables the engine works out a frame at a time and no file holds, each at the value that
-/// leaves the term it drives where it was. `g_SamplerToneMapLut` divides the resolved color and
-/// `g_SamplerCharaToon` scales the light, so the flat stand-in would halve one and double the other;
-/// a fog weight of nought keeps the color it mixes toward out of the frame entirely.
-const NEUTRAL: [(u32, [u8; 4]); 3] = [
+/// leaves the term it drives where it was. `g_SamplerToneMapLut` divides the resolved color, so the
+/// flat stand-in would double every pixel; a fog weight of nought keeps the color it mixes toward
+/// out of the frame entirely.
+const NEUTRAL: [(u32, [u8; 4]); 2] = [
     (0x342f_2734, [255, 255, 255, 255]),
-    (0x8b73_3c20, [255, 255, 255, 255]),
     (0x6e23_1669, [0, 0, 0, 0]),
 ];
 

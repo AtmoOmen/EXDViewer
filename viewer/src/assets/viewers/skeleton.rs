@@ -7,7 +7,8 @@
 use std::cell::Cell;
 
 use egui::{RichText, Sense};
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
+use ironworks::file::pap::Binding;
 use ironworks::file::sklb::Transform;
 
 use super::{line, placed, table};
@@ -29,6 +30,12 @@ pub struct Placement {
     translation: Vec3,
     rotation: Quat,
     scale: Vec3,
+}
+
+impl Placement {
+    pub fn matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
+    }
 }
 
 fn axes(values: [f32; 4], count: usize) -> String {
@@ -112,6 +119,11 @@ impl Rig {
         self.names.len()
     }
 
+    /// What the skeleton calls each of its bones, which is how anything else names one.
+    pub fn names(&self) -> &[String] {
+        &self.names
+    }
+
     pub fn reference(&self) -> &[Transform] {
         &self.reference
     }
@@ -142,6 +154,23 @@ impl Rig {
             );
         }
         world
+    }
+
+    /// Where the bones end up with a motion's tracks sampled over the rest pose at `time`.
+    ///
+    /// A motion's tracks are in its own order, which is not the skeleton's, and a track may name a
+    /// bone the skeleton does not have.
+    pub fn posed(&self, binding: &Binding, time: f32) -> Vec<Placement> {
+        let mut locals = self.reference.clone();
+        for (track, transform) in binding.motion().sample(time).into_iter().enumerate() {
+            if let Some(bone) = binding.bones().get(track).copied()
+                && let Ok(bone) = usize::try_from(bone)
+                && bone < locals.len()
+            {
+                locals[bone] = transform;
+            }
+        }
+        self.world(&locals)
     }
 
     /// A marker at every joint and a stick from every bone back to its parent. The counts are fixed

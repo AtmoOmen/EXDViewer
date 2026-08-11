@@ -16,6 +16,7 @@ pub(super) mod deferred;
 pub(super) mod gpu;
 pub(super) mod material;
 pub(super) mod program;
+mod skin;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -256,6 +257,8 @@ struct Level {
     /// Whether any mesh carries bone indices, which is what decides whether the game would draw
     /// this model through its skinning variant.
     skinned: bool,
+    /// The bones each mesh's blend indices name, in the order they index them.
+    bones: Vec<Vec<String>>,
     /// How many attributes the file declares. An imc variant's mask means something over only
     /// this many of its bits; the rest are padding the format reserves rather than states.
     attributes: usize,
@@ -288,6 +291,8 @@ pub struct Rendered {
     translated: RefCell<BTreeMap<usize, Translated>>,
     /// The model's own `.imc`, once asked for.
     imc: RefCell<Option<Imc>>,
+    /// The skeleton the model is skinned to, and the motion it is posed by.
+    animation: skin::Animation,
     /// Which of the imc's variants a part's default visibility is drawn from. Nought is the file's
     /// own default entry.
     variant: Cell<u16>,
@@ -330,6 +335,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         parameters: Default::default(),
         translated: Default::default(),
         imc: Default::default(),
+        animation: skin::Animation::new(path),
         variant: Cell::new(0),
         lighting: Default::default(),
         tables: Default::default(),
@@ -445,6 +451,8 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
     let mut high = Vec3::splat(f32::NEG_INFINITY);
 
     let attributes = model.attribute_names().unwrap_or_default();
+    let bone_names = model.bone_names().unwrap_or_default();
+    let mut bones: Vec<Vec<String>> = Vec::new();
     let declared = model.shapes();
     let mut rewrites: Vec<Rewrites> = declared.iter().map(|_| Vec::new()).collect();
 
@@ -515,6 +523,17 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
                 touched.push((meshes.len(), values));
             }
         }
+        bones.push(
+            mesh.bone_table()
+                .iter()
+                .map(|bone| {
+                    bone_names
+                        .get(usize::from(*bone))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect(),
+        );
         meshes.push(Mesh {
             material,
             vertices: vertices.len(),
@@ -609,6 +628,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         home,
         radius,
         skinned,
+        bones,
         attributes: attributes.len(),
         gpu: gpu::Model::new(pending),
     })
@@ -717,15 +737,24 @@ fn uv(values: &VertexValues, at: usize) -> Option<[f32; 4]> {
     }
 }
 
-/// Four bytes of an attribute the shader reads as bytes. An eight-byte element carries two sets
-/// interleaved, the low half first, so its own four are every other one.
-/// One vertex's four bone influences, widened into the sixteen bits a skinned shader reads them as.
+/// One vertex's bone influences, in the sixteen bits a skinned shader reads each as: the low byte
+/// of a pair is one of the first four influences and the high byte one of the second four.
 fn influences(values: Option<&VertexValues>, at: usize, missing: [u16; 4]) -> [u16; 4] {
-    values
-        .and_then(|held| bytes(held, at))
-        .map_or(missing, |held| held.map(u16::from))
+    match values {
+        Some(VertexValues::Bytes8(held)) => match held.get(at) {
+            Some(held) => {
+                std::array::from_fn(|lane| u16::from_le_bytes([held[lane * 2], held[lane * 2 + 1]]))
+            }
+            None => missing,
+        },
+        held => held
+            .and_then(|held| bytes(held, at))
+            .map_or(missing, |held| held.map(u16::from)),
+    }
 }
 
+/// Four bytes of an attribute the shader reads as bytes. An eight-byte element carries two sets
+/// interleaved, the low half first, so its own four are every other one.
 fn bytes(values: &VertexValues, at: usize) -> Option<[u8; 4]> {
     match values {
         VertexValues::Vector4(held) => held
@@ -899,6 +928,10 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         return;
     }
 
+    if model.level.borrow().skinned {
+        ui.horizontal(|ui| model.animation.ui(ui));
+    }
+
     model.poll(ui, backend);
     model.viewport(ui);
 }
@@ -908,6 +941,9 @@ impl Rendered {
     /// a slot that is already resolved costs a lookup.
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
         let level = self.level.borrow();
+        if level.skinned {
+            self.animation.poll(backend);
+        }
         let mut slots = self.slots.borrow_mut();
         for (index, slot) in slots.iter_mut().enumerate() {
             let path = &level.materials[index];
@@ -1334,6 +1370,7 @@ impl Rendered {
             eye: eye.to_array(),
             lights,
             surfaces,
+            joints: self.animation.palettes(&level.bones),
             debug: self.debug.get(),
         };
 
@@ -1707,6 +1744,11 @@ impl Rendered {
                         }
                     }
                 });
+            }
+
+            if level.skinned {
+                ui.add_space(8.0);
+                self.animation.details_ui(ui, follow);
             }
 
             ui.add_space(8.0);

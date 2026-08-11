@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea};
-use ironworks::file::pap::{AnimationPack, Binding, ModelType, Transform};
+use ironworks::file::pap::{AnimationPack, Binding, ModelType};
 use ironworks::file::sklb::SkeletonBinary;
 use ironworks::file::{File, tmb};
 
@@ -133,23 +133,6 @@ fn face<'a>(code: &str, motion: &'a str) -> Option<&'a str> {
         && sub.starts_with('f')
         && sub[1..].bytes().all(|byte| byte.is_ascii_digit());
     (named && motion.ends_with(":j_kao")).then_some(sub)
-}
-
-/// The rig's own rest pose with the tracks a motion drives written over it.
-///
-/// A motion's tracks are in its own order, which is not the skeleton's, and a track may name a bone
-/// the skeleton does not have.
-fn pose(rig: &Rig, binding: &Binding, time: f32) -> Vec<Transform> {
-    let mut locals = rig.reference().to_vec();
-    for (track, transform) in binding.motion().sample(time).into_iter().enumerate() {
-        if let Some(bone) = binding.bones().get(track).copied()
-            && let Ok(bone) = usize::try_from(bone)
-            && bone < locals.len()
-        {
-            locals[bone] = transform;
-        }
-    }
-    locals
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
@@ -406,9 +389,7 @@ impl Rendered {
                         }
                     });
                     ui.add_space(4.0);
-                    let world = loaded
-                        .rig
-                        .world(&pose(&loaded.rig, binding, self.play.time.get()));
+                    let world = loaded.rig.posed(binding, self.play.time.get());
                     loaded.view.replace(loaded.rig.batches(&world, None));
                     loaded.view.ui(ui);
                     return;

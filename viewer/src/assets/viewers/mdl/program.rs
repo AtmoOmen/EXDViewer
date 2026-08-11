@@ -1131,14 +1131,13 @@ fn entry(held: &Ambient, axes: glam::Mat3, out: &mut [u8], at: usize) {
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a
 /// structured buffer. Each is four columns of three floats.
 ///
-/// A joint's transform is the object's own, composed with what the pose moved that bone by; a model
-/// stands in the pose it is stored in until something animates it, and that composes to the object's
-/// own transform for every bone alike.
-pub fn joints(count: usize, transform: Mat4) -> Vec<u32> {
-    let columns = transform.to_cols_array();
-    let rows = (count.max(1) * JOINT).div_ceil(ROW);
+/// A joint's transform is the object's own, composed with what the pose moved that bone by, so a
+/// palette of identities stands the model in the pose it is stored in.
+pub fn joints(palette: &[Mat4], object: Mat4) -> Vec<u32> {
+    let rows = (palette.len().max(1) * JOINT).div_ceil(ROW);
     let mut out = vec![0u32; rows * ROW];
-    for at in 0..count {
+    for (at, joint) in palette.iter().enumerate() {
+        let columns = (object * *joint).to_cols_array();
         for column in 0..4 {
             for lane in 0..3 {
                 out[at * JOINT + column * 3 + lane] = columns[column * 4 + lane].to_bits();
@@ -1350,7 +1349,10 @@ mod test {
     /// component of each of its four reads.
     #[test]
     fn a_joint_is_four_columns_of_three() {
-        let held = joints(2, Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0)));
+        let held = joints(
+            &[Mat4::IDENTITY; 2],
+            Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0)),
+        );
         assert_eq!(held.len(), ROW);
         let value = |lane: usize| f32::from_bits(held[lane]);
         assert_eq!(

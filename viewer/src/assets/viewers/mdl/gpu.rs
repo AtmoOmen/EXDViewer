@@ -24,6 +24,9 @@ const ATTRIBUTES: [(u32, i32, i32); 4] = [(0, 3, 0), (1, 3, 12), (2, 4, 24), (3,
 const COLOR: u32 = 4;
 const COLOR_OFFSET: i32 = 88;
 
+/// The influences a skinned vertex carries, which the shader reads as integers.
+const INFLUENCES: [(u32, i32); 2] = [(5, 96), (6, 104)];
+
 /// Where each semantic a drawing package asks for sits in a [`Vertex`], and how wide it is. The
 /// bytes are read as integers where the shader's own signature declares them so.
 const FIELDS: [(program::Field, i32, i32, u32); 10] = [
@@ -42,15 +45,13 @@ const FIELDS: [(program::Field, i32, i32, u32); 10] = [
 /// The color table, which the game's own shaders address as a texture of their own.
 const TABLE: u32 = 0x2005_679f;
 
-/// Joints the palette a skinned shader reads is sized for.
-const JOINTS: usize = 256;
-
 /// Texture units, in the order the shader's samplers declare them.
 const NORMAL_UNIT: u32 = 0;
 const INDEX_UNIT: u32 = 1;
 const MASK_UNIT: u32 = 2;
 const DIFFUSE_UNIT: u32 = 3;
 const TABLE_UNIT: u32 = 4;
+const JOINTS_UNIT: u32 = 5;
 
 /// Texels per color-table row. This viewer's own packing, not the game's.
 pub const TABLE_COLUMNS: i32 = 4;
@@ -158,6 +159,9 @@ pub struct Frame {
     /// surface is lit by one set of lights rather than by a set of its own.
     pub lights: [f32; 9],
     pub surfaces: Vec<Surface>,
+    /// What each mesh's blend indices name, in the model's own space: one palette per mesh, since a
+    /// mesh's indices run over its own bone table.
+    pub joints: Vec<Vec<glam::Mat4>>,
     pub debug: Debug,
 }
 
@@ -172,7 +176,8 @@ pub struct Pending {
 #[derive(Default)]
 struct Game {
     buffers: deferred::Buffers,
-    joints: Option<glow::Texture>,
+    /// One palette per mesh, since a mesh's blend indices name its own bone table.
+    joints: Vec<glow::Texture>,
     programs: BTreeMap<(usize, bool, usize), Linked>,
     tables: BTreeMap<usize, glow::Texture>,
     /// The array these shaders bind their attributes into. An array holds the enable flags and the
@@ -321,6 +326,16 @@ impl Model {
             return;
         }
 
+        // In the model's own space, since this path lights a vertex where the file put it and only
+        // then takes it through the camera. A model with nothing to skin leaves the palettes alone
+        // and reads none of them.
+        if frame.joints.iter().any(|held| !held.is_empty())
+            && let Err(why) = self.game.palettes(gl, &frame.joints, glam::Mat4::IDENTITY)
+        {
+            self.failure = Some(why);
+            return;
+        }
+
         unsafe {
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LESS);
@@ -343,6 +358,7 @@ impl Model {
                 ("u_mask_map", MASK_UNIT),
                 ("u_diffuse_map", DIFFUSE_UNIT),
                 ("u_table", TABLE_UNIT),
+                ("u_joints", JOINTS_UNIT),
             ] {
                 let slot = gl.get_uniform_location(program, name);
                 gl.uniform_1_i32(slot.as_ref(), unit as i32);
@@ -357,6 +373,7 @@ impl Model {
             let diffuse = gl.get_uniform_location(program, "u_diffuse_color");
             let emissive = gl.get_uniform_location(program, "u_emissive_color");
             let scale = gl.get_uniform_location(program, "u_normal_scale");
+            let skinned = gl.get_uniform_location(program, "u_skinned");
 
             for (at, (buffers, surface)) in self.meshes.iter().zip(&frame.surfaces).enumerate() {
                 if surface.runs.is_empty() {
@@ -384,6 +401,12 @@ impl Model {
                     gl.bind_texture(glow::TEXTURE_2D, texture);
                     bound |= i32::from(texture.is_some()) << unit;
                 }
+                gl.active_texture(glow::TEXTURE0 + JOINTS_UNIT);
+                gl.bind_texture(glow::TEXTURE_2D, self.game.joints.get(at).copied());
+                gl.uniform_1_i32(
+                    skinned.as_ref(),
+                    i32::from(frame.joints.get(at).is_some_and(|held| !held.is_empty())),
+                );
                 gl.active_texture(glow::TEXTURE0 + TABLE_UNIT);
                 gl.bind_texture(glow::TEXTURE_2D, table.map(|(texture, _)| texture));
                 bound |= i32::from(table.is_some()) << TABLE_UNIT;
@@ -433,13 +456,23 @@ impl Model {
 }
 
 impl Game {
-    /// The joint palette, which every skinned shader reads through a texture of dwords. Rewritten
+    /// The joint palettes, which every skinned shader reads through a texture of dwords. Rewritten
     /// each frame, since a joint carries the camera as well as the pose.
-    fn palette(&mut self, gl: &glow::Context, transform: glam::Mat4) -> Result<(), String> {
-        let held = dwords(gl, &program::joints(JOINTS, transform))?;
-        if let Some(stale) = self.joints.replace(held) {
-            graveyard().lock().unwrap().push(Dead::Texture(stale));
-        }
+    fn palettes(
+        &mut self,
+        gl: &glow::Context,
+        joints: &[Vec<glam::Mat4>],
+        object: glam::Mat4,
+    ) -> Result<(), String> {
+        let held = joints
+            .iter()
+            .map(|palette| dwords(gl, &program::joints(palette, object)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let stale = std::mem::replace(&mut self.joints, held);
+        graveyard()
+            .lock()
+            .unwrap()
+            .extend(stale.into_iter().map(Dead::Texture));
         Ok(())
     }
 
@@ -534,14 +567,14 @@ impl Game {
             size: (size.0 as f32, size.1 as f32),
             ..frame.scene
         };
-        self.palette(gl, scene.view * scene.model)?;
+        self.palettes(gl, &frame.joints, scene.view * scene.model)?;
 
         // The G-buffer a page at a time, and each page's depth pass before its buffer pass: the game
         // runs those as two passes over the whole draw rather than as two draws of one surface.
         for page in 0..self.buffers.pages() {
             self.buffers.open(gl, page);
             for depth in [true, false] {
-                for (buffers, surface) in meshes.iter().zip(&frame.surfaces) {
+                for (at, (buffers, surface)) in meshes.iter().zip(&frame.surfaces).enumerate() {
                     let Some(shaded) = &surface.shaded else {
                         continue;
                     };
@@ -588,7 +621,7 @@ impl Game {
                             false => gl.disable(glow::CULL_FACE),
                         }
                     }
-                    self.bind(gl, painter, program, held, surface, buffers, &scene)?;
+                    self.bind(gl, painter, program, held, surface, at, buffers, &scene)?;
                 }
             }
         }
@@ -695,7 +728,7 @@ impl Game {
                         false => gl.disable(glow::CULL_FACE),
                     }
                 }
-                self.bind(gl, painter, program, held, surface, mesh, scene)?;
+                self.bind(gl, painter, program, held, surface, *at, mesh, scene)?;
             }
         }
         Ok(())
@@ -712,11 +745,12 @@ impl Game {
         program: glow::Program,
         held: &program::Program,
         surface: &Surface,
+        at: usize,
         mesh: &Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let shaded = surface.shaded.as_ref().ok_or("nothing to draw with")?;
-        let palette = self.joints.ok_or("no joint palette")?;
+        let palette = *self.joints.get(at).ok_or("no joint palette")?;
         let layout = self.layout(gl)?;
         let size = self.buffers.size();
         self.buffers.bind(gl, program, held, scene, &[])?;
@@ -800,7 +834,11 @@ impl Drop for Game {
     fn drop(&mut self) {
         let mut dead = graveyard().lock().unwrap();
         dead.extend(self.tables.values().copied().map(Dead::Texture));
-        dead.extend(self.joints.take().map(Dead::Texture));
+        dead.extend(
+            std::mem::take(&mut self.joints)
+                .into_iter()
+                .map(Dead::Texture),
+        );
         dead.extend(self.layout.take().map(Dead::Layout));
         dead.extend(
             std::mem::take(&mut self.programs)
@@ -898,6 +936,10 @@ fn upload_mesh(
         }
         gl.enable_vertex_attrib_array(COLOR);
         gl.vertex_attrib_pointer_f32(COLOR, 4, glow::UNSIGNED_BYTE, true, stride, COLOR_OFFSET);
+        for (location, offset) in INFLUENCES {
+            gl.enable_vertex_attrib_array(location);
+            gl.vertex_attrib_pointer_i32(location, 4, glow::UNSIGNED_SHORT, stride, offset);
+        }
 
         let drawn = gl.create_buffer()?;
         gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(drawn));

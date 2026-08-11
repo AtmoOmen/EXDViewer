@@ -14,6 +14,7 @@ use egui::TextureId;
 use glow::HasContext;
 
 use super::deferred::{self, Layered, Linked, TARGETS, TYPES, build_pair, dwords, sampler};
+use super::grid::{Grid, Ground};
 use super::material::Family;
 use super::{Vertex, program};
 
@@ -165,6 +166,8 @@ pub struct Frame {
     /// mesh's indices run over its own bone table.
     pub joints: Vec<Vec<glam::Mat4>>,
     pub debug: Debug,
+    /// The floor to rule under the model, where the viewer asks for one.
+    pub grid: Option<Ground>,
 }
 
 /// Geometry waiting for a context to upload it under.
@@ -204,6 +207,7 @@ pub struct Model {
     arrays: Vec<(u32, Layered)>,
     /// The table the shading passes index, waiting for the same.
     types: Option<Vec<u32>>,
+    grid: Grid,
     tables: BTreeMap<usize, (glow::Texture, f32)>,
     /// Why the shader would not build, kept so the viewer can say so rather than draw nothing.
     failure: Option<String>,
@@ -220,6 +224,7 @@ impl Model {
             rewritten: Vec::new(),
             arrays: Vec::new(),
             types: None,
+            grid: Grid::default(),
             tables: BTreeMap::new(),
             failure: None,
         }))
@@ -328,6 +333,11 @@ impl Model {
 
         if frame.surfaces.iter().any(|held| held.shaded.is_some()) {
             self.game.draw(gl, painter, frame, &self.meshes, info);
+            // Only over the frame the composite resolved: a raw channel is data, and a grid ruled
+            // across it would be read as part of it.
+            if frame.target >= LIT {
+                self.ground(gl, painter, frame, info);
+            }
             return;
         }
 
@@ -439,6 +449,37 @@ impl Model {
 
             gl.bind_vertex_array(None);
             gl.depth_mask(false);
+        }
+
+        self.ground(gl, painter, frame, info);
+    }
+
+    /// The floor, over the model and against the depth whichever path drew it left behind. Both
+    /// leave that depth in the buffer egui bound before the callback: the preview path draws
+    /// straight into it, and the pass that puts the game path's frame up carries the G-buffer's own
+    /// depth over with it.
+    fn ground(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        info: &egui::PaintCallbackInfo,
+    ) {
+        let Some(ground) = &frame.grid else {
+            return;
+        };
+        let held = info.viewport_in_pixels();
+        let viewport = (
+            held.left_px,
+            held.from_bottom_px,
+            held.width_px.max(1),
+            held.height_px.max(1),
+        );
+        if let Err(why) = self
+            .grid
+            .draw(gl, ground, painter.intermediate_fbo(), viewport)
+        {
+            self.failure = Some(why);
         }
     }
 

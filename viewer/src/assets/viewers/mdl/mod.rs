@@ -14,6 +14,7 @@
 
 pub(super) mod deferred;
 pub(super) mod gpu;
+mod grid;
 pub(super) mod material;
 pub(super) mod program;
 mod skin;
@@ -311,6 +312,8 @@ pub struct Rendered {
     /// Whether the rig it is posed on is drawn over it, and the boxes that is drawn as.
     skeleton: Cell<bool>,
     overlay: Arc<Mutex<placed::Placements>>,
+    /// Whether a floor is ruled at the origin under it.
+    grid: Cell<bool>,
     /// Decoded texture bytes handed to egui so far.
     resident: Cell<usize>,
     debug: Cell<gpu::Debug>,
@@ -354,6 +357,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         camera: Cell::new(camera),
         skeleton: Cell::new(false),
         overlay: placed::Placements::new(Vec::new()),
+        grid: Cell::new(true),
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
         shaded: Cell::new(false),
@@ -921,6 +925,14 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                 model.skeleton.set(!skeleton);
             }
         }
+        let grid = model.grid.get();
+        if ui
+            .selectable_label(grid, "Grid")
+            .on_hover_text("Rule a floor at the origin, at the model's own scale")
+            .clicked()
+        {
+            model.grid.set(!grid);
+        }
         if ui.button("Reset view").clicked() {
             model.camera.set(level.home);
         }
@@ -1418,6 +1430,34 @@ impl Rendered {
         // backend moves what they compute into the range GL clips against. A projection built for GL
         // would go through that move a second time and lose the near half of the frame.
         let held = Mat4::perspective_rh(FOV, rect.width() / rect.height(), near, far);
+
+        // A cell of about half the model's radius, snapped to a one, a two or a five. Only the model
+        // says what scale to rule at, and a bare decade is a tenfold jump: it leaves a piece of
+        // landscape standing in one cell or a character ruled into mush.
+        let cell = level.radius * 0.5;
+        let decade = 10f32.powf(cell.log10().floor());
+        let step = decade
+            * match cell / decade {
+                held if held < 1.5 => 1.0,
+                held if held < 3.5 => 2.0,
+                held if held < 7.5 => 5.0,
+                _ => 10.0,
+            };
+
+        // The GL projection whichever path drew the frame: the game's own shaders are compiled for
+        // a clip depth of nought to one and the backend moves what they write into GL's range, so
+        // the depth both of them leave behind is this one's. The quad reaches past the far plane,
+        // which is what leaves the fade rather than its own edge as where the grid stops.
+        let grid = self.grid.get().then(|| grid::Ground {
+            view_projection: (projection * view).to_cols_array(),
+            // The camera carries the pose's drift and the lines do not, so a model that walks walks
+            // over them.
+            center: [eye.x, eye.z],
+            extent: far * 1.5,
+            range: [near, far],
+            step,
+        });
+
         let frame = gpu::Frame {
             view: view.to_cols_array(),
             projection: projection.to_cols_array(),
@@ -1448,6 +1488,7 @@ impl Rendered {
             surfaces,
             joints: pose.joints,
             debug: self.debug.get(),
+            grid,
         };
 
         // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in

@@ -870,6 +870,12 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         if ui.button("Reset view").clicked() {
             model.camera.set(level.home);
         }
+        let (arrived, wanted) = model.arrived();
+        if arrived < wanted {
+            ui.add(egui::Spinner::new().size(14.0));
+            ui.label(RichText::new(format!("{arrived}/{wanted}")).weak())
+                .on_hover_text("Materials, shader packages and textures still on their way");
+        }
         if !level.unreadable.is_empty() {
             ui.label(
                 RichText::new(format!("⚠ {} unreadable meshes", level.unreadable.len()))
@@ -1345,6 +1351,31 @@ impl Rendered {
         });
     }
 
+    /// How much of what the model needs has landed, against how much it asked for. A material names
+    /// the package and textures it wants only once it has arrived itself, so the total grows as the
+    /// fetches resolve rather than being known up front.
+    fn arrived(&self) -> (usize, usize) {
+        let slots = self.slots.borrow();
+        let packages = self.packages.borrow();
+        let textures = self.textures.borrow();
+        let ready = slots
+            .iter()
+            .flatten()
+            .filter(|slot| !matches!(slot, Slot::Fetching(_)))
+            .count()
+            + packages
+                .values()
+                .filter(|held| !matches!(held, Package::Fetching(_)))
+                .count()
+            + textures
+                .values()
+                .filter(|held| !matches!(held, Texture::Fetching(_)))
+                .count();
+        // A slot the model has not asked for yet still owes an answer, so every material the level
+        // names counts against the total whether or not it is in flight.
+        (ready, slots.len() + packages.len() + textures.len())
+    }
+
     /// What the channel row offers: the translated shaders' own names for their targets, and the
     /// frame the composite resolves once the passes that make it have arrived.
     fn channels(&self) -> Vec<(usize, String)> {
@@ -1464,7 +1495,7 @@ impl Rendered {
             {
                 tables
                     .entry(index)
-                    .or_insert_with(|| Arc::new((values.to_vec(), columns, rows)));
+                    .or_insert_with(|| Arc::new((values, columns, rows)));
             }
         }
     }

@@ -15,7 +15,7 @@ use glam::{Mat4, Vec3, Vec4};
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
 use ironworks::file::{mtrl, shcd, spm};
 
-use super::material::Material;
+use super::material::{Family, Material};
 
 /// The passes a model is drawn with.
 const PASS_G_OPAQUE: u32 = 0x03ac_862e;
@@ -1110,6 +1110,12 @@ impl Buffer {
             held
         });
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
+        // What a strand's length is scaled by, which a character's buffer pass packs into the fifth
+        // target's alpha and the fur pass marches along the flow. The engine drives it per draw and
+        // no file states one, so it goes in at the identity; nought is what leaves the march at
+        // nothing however long the parameter file states the fur. The first lane alone: nothing
+        // reads the rest of the register.
+        put(INSTANCE, "m_Param", vec![1.0]);
         // One record an eye, picked by the vertex color. The first two lanes scale the coordinate an
         // eye's textures are read at and the third warps it toward the pupil, so ones leave that
         // coordinate where the mesh's own uv put it; nought collapses the eye onto a single texel.
@@ -1413,7 +1419,12 @@ pub fn shader_types(files: &[(usize, &spm::ShaderParameters)]) -> Vec<u32> {
 ///
 /// A material's records are the ones its colour table names a row at a time, plus the one a material
 /// carrying no table states outright; both are offsets into the character family's own profiles.
+/// Only that family: a background material states its profile through the same constant, and the
+/// alpha the pass would march along is that family's emissive flag instead.
 pub fn furred(material: &Material, types: &[u32]) -> bool {
+    if material.family() == Family::Background {
+        return false;
+    }
     let held = material.held();
     let table = held.color_table().into_iter().flat_map(|table| {
         (0..table.rows()).filter_map(|row| Some(table.row_values(row)?.shader_index as usize))

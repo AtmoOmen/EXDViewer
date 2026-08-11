@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
-use ironworks::file::layer::{InstanceData, LayerGroup, Transform};
+use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, Transform};
 use ironworks::file::mdl::{MeshKind, ModelContainer};
 use ironworks::file::{File, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera};
 
@@ -199,6 +199,11 @@ struct Light {
     min: Vec3,
     max: Vec3,
     color: Vec3,
+    kind: program::LampKind,
+    /// Which way it throws, in world space.
+    direction: Vec3,
+    /// The cosine its cone is cut at.
+    cone: f32,
     /// How the zone's own `.lcb` reaches this light: the instance at the top of the tree, then an
     /// index per shared group under it.
     key: (u32, [u8; 4]),
@@ -543,6 +548,17 @@ impl Scene {
                                 min: Vec3::splat(-REACH),
                                 max: Vec3::splat(REACH),
                                 color: color * held.intensity(),
+                                kind: match light.kind() {
+                                    LightKind::Spot => program::LampKind::Spot,
+                                    _ => program::LampKind::Point,
+                                },
+                                direction: here.transform_vector3(Vec3::Z).normalize_or_zero(),
+                                // The two angles the file states together and halved, which is
+                                // what the box its zone clips it against is cut to.
+                                cone: ((light.spot_angle() + light.attenuation_cone_coefficient())
+                                    * 0.5)
+                                    .to_radians()
+                                    .cos(),
                                 key: reach(key, depth, instance.id()),
                             });
                         }
@@ -726,6 +742,9 @@ impl Scene {
                     min,
                     max,
                     color: light.color,
+                    kind: light.kind,
+                    direction: light.direction,
+                    cone: light.cone,
                 }
             })
             .collect()
@@ -1086,7 +1105,7 @@ impl Scene {
         }
     }
 
-    /// The packages the ready materials name, plus the four the frame is lit and resolved with.
+    /// The packages the ready materials name, plus the ones the frame is lit and resolved with.
     fn load_packages(&mut self, backend: &Backend) {
         let mut wanted: Vec<String> = [
             program::VIEW_POSITION,
@@ -1096,6 +1115,17 @@ impl Scene {
         ]
         .map(str::to_owned)
         .to_vec();
+        // A spot's package is twice the size of a point's and nothing can be lit with it until the
+        // four above are in hand, so it is only worth a fetch of its own once they are and the zone
+        // turns out to place one.
+        if self.lighting.is_some()
+            && self
+                .lights
+                .iter()
+                .any(|light| matches!(light.kind, program::LampKind::Spot))
+        {
+            wanted.push(program::SPOT.to_owned());
+        }
         wanted.extend(self.materials.iter().filter_map(|(_, slot)| match slot {
             Slot::Ready(material) => Some(material.package()),
             _ => None,
@@ -1141,33 +1171,58 @@ impl Scene {
         }
     }
 
+    /// One of the packages the frame itself is drawn with, translated where it has arrived.
+    fn screen(
+        &self,
+        path: &str,
+        pass: program::Pass,
+        attachments: usize,
+    ) -> Option<Arc<program::Program>> {
+        let Some(Package::Ready(bytes)) = self.packages.get(path) else {
+            return None;
+        };
+        program::Program::screen(bytes, pass, attachments)
+            .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+            .ok()
+            .map(Arc::new)
+    }
+
     /// Every ready material's shaders, translated once its package has arrived. A context that
     /// turned out to write fewer of the G-buffer's targets at once has them translated again.
     fn translate(&mut self) {
         let attachments = self.renderer.lock().unwrap().attachments();
-        if self.lighting.is_none() {
-            let held = |path: &str, pass| {
-                let Some(Package::Ready(bytes)) = self.packages.get(path) else {
-                    return None;
-                };
-                program::Program::screen(bytes, pass, attachments)
-                    .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
-                    .ok()
-                    .map(Arc::new)
-            };
-            if let (Some(position), Some(directional), Some(point), Some(composite)) = (
-                held(program::VIEW_POSITION, program::Pass::Lighting),
-                held(program::DIRECTIONAL, program::Pass::Lighting),
-                held(program::POINT, program::Pass::Lamp),
-                held(program::COMPOSITE, program::Pass::Composite),
-            ) {
-                self.lighting = Some(Arc::new(mdl::gpu::Lighting {
-                    position,
-                    directional,
-                    point,
-                    composite,
-                }));
+        if self.lighting.is_none()
+            && let (Some(position), Some(directional), Some(point), Some(composite)) = (
+                self.screen(program::VIEW_POSITION, program::Pass::Lighting, attachments),
+                self.screen(program::DIRECTIONAL, program::Pass::Lighting, attachments),
+                self.screen(program::POINT, program::Pass::Lamp, attachments),
+                self.screen(program::COMPOSITE, program::Pass::Composite, attachments),
+            )
+        {
+            self.lighting = Some(Arc::new(mdl::gpu::Lighting {
+                position,
+                directional,
+                point,
+                spot: None,
+                composite,
+            }));
+        }
+        // The frame lights without a spot's own package and takes it up on whichever frame it
+        // arrives on: waiting for it would leave a zone unlit until it did. A package that arrived
+        // and would not translate is marked failed rather than translated again every frame.
+        if let Some(lighting) = self.lighting.clone()
+            && lighting.spot.is_none()
+            && matches!(self.packages.get(program::SPOT), Some(Package::Ready(_)))
+        {
+            let spot = self.screen(program::SPOT, program::Pass::Lamp, attachments);
+            if spot.is_none() {
+                self.packages
+                    .insert(program::SPOT.to_owned(), Package::Failed);
             }
+            self.lighting = Some(Arc::new(mdl::gpu::Lighting {
+                spot,
+                ..(*lighting).clone()
+            }));
         }
 
         for (at, (_, slot)) in self.materials.iter().enumerate() {

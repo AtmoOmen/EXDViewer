@@ -185,10 +185,13 @@ pub fn bury(gl: &glow::Context) {
 ///
 /// Each reads what the one before it wrote: the view position comes off the depth buffer, the light
 /// off the view position and the G-buffer, and the frame off both.
+#[derive(Clone)]
 pub struct Lighting {
     pub position: std::sync::Arc<program::Program>,
     pub directional: std::sync::Arc<program::Program>,
     pub point: std::sync::Arc<program::Program>,
+    /// Absent until a zone's own spot package has arrived, and always where nothing places a spot.
+    pub spot: Option<std::sync::Arc<program::Program>>,
     pub composite: std::sync::Arc<program::Program>,
 }
 
@@ -936,20 +939,26 @@ impl Buffers {
             gl.cull_face(glow::FRONT);
             gl.front_face(glow::CCW);
         }
-        // Every lamp is the same pass over a volume of its own, so the program is linked once and
-        // only the buffer it reads is written again.
+        // Every lamp of a kind is the same pass over a volume of its own, so each kind's program is
+        // linked once, at a slot of its own, and only the buffer it reads is written again. A spot
+        // whose package has not arrived draws through the point one, which reads neither its
+        // direction nor its cone: a lit box rather than nothing.
         for lamp in lamps {
             let held = program::Scene {
                 lamp: *lamp,
                 ..*scene
             };
-            self.pass(gl, 2, &lighting.point, light, &held, true)?;
+            let (slot, program) = match (lamp.kind, &lighting.spot) {
+                (program::LampKind::Spot, Some(spot)) => (3, spot),
+                _ => (2, &lighting.point),
+            };
+            self.pass(gl, slot, program, light, &held, true)?;
         }
         unsafe {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         };
-        self.pass(gl, 3, &lighting.composite, lit, scene, false)
+        self.pass(gl, 4, &lighting.composite, lit, scene, false)
     }
 }
 

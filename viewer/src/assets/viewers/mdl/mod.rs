@@ -1450,6 +1450,8 @@ impl Rendered {
             position: held(program::VIEW_POSITION, program::Pass::Lighting)?,
             directional: held(program::DIRECTIONAL, program::Pass::Lighting)?,
             point: held(program::POINT, program::Pass::Lighting)?,
+            // A model stands under one studio light of this viewer's own, which is a point.
+            spot: None,
             composite: held(program::COMPOSITE, program::Pass::Composite)?,
         };
         drop(packages);

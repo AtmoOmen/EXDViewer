@@ -38,6 +38,7 @@ pub const SUB_VIEW_MAIN_SELECT: u32 = 0x0c01_20ca;
 pub const VIEW_POSITION: &str = "shader/sm5/shpk/createviewposition.shpk";
 pub const DIRECTIONAL: &str = "shader/sm5/shpk/directionallighting.shpk";
 pub const POINT: &str = "shader/sm5/shpk/pointlighting.shpk";
+pub const SPOT: &str = "shader/sm5/shpk/spotlighting.shpk";
 pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
 
 /// `GetDirectionalLight`, and the value that draws a light rather than nothing. The package defaults
@@ -175,6 +176,14 @@ impl Default for Instance {
     }
 }
 
+/// The shape a placed light throws, which is a package of its own reading the one `g_LightParam`
+/// differently. Every kind the game states other than a spot draws as a point.
+#[derive(Clone, Copy)]
+pub enum LampKind {
+    Point,
+    Spot,
+}
+
 /// One placed light, as `g_LightParam` reads it. The box is the one a zone's `.lcb` clips the light
 /// against: stated in the light's own space, in the same units the placement stands in, which is
 /// what makes its extent the distance the light carries.
@@ -185,6 +194,13 @@ pub struct Lamp {
     pub min: Vec3,
     pub max: Vec3,
     pub color: Vec3,
+    pub kind: LampKind,
+    /// Which way the light throws, in world space. Its own space points it along positive z: that
+    /// is the axis a spot's vertex shader keeps the half of its box on.
+    pub direction: Vec3,
+    /// The cosine a spot's cone is cut at, which its own shader compares the direction to a pixel
+    /// against. Nothing but a spot reads it.
+    pub cone: f32,
 }
 
 impl Default for Lamp {
@@ -194,6 +210,9 @@ impl Default for Lamp {
             min: Vec3::splat(-1.0),
             max: Vec3::ONE,
             color: Vec3::ONE,
+            kind: LampKind::Point,
+            direction: Vec3::Z,
+            cone: -1.0,
         }
     }
 }
@@ -962,12 +981,19 @@ impl Buffer {
         // brought out of the G-buffer and through the view matrix.
         let axes = glam::Mat3::from_mat4(view);
         let light = "g_LightParam";
+        let lamp = scene.lamp;
         put(
             light,
             "m_Direction",
-            (axes * scene.light).normalize_or_zero().to_array().to_vec(),
+            (axes
+                * match pass {
+                    Pass::Lamp => lamp.direction,
+                    _ => scene.light,
+                })
+            .normalize_or_zero()
+            .to_array()
+            .to_vec(),
         );
-        let lamp = scene.lamp;
         let color = match pass {
             Pass::Lamp => lamp.color,
             _ => scene.diffuse,
@@ -985,14 +1011,20 @@ impl Buffer {
         );
         // The two lighting packages read this buffer differently. A sun fades with the depth of the
         // pixel, and the fade is off here: the scale is cubed and clamped, so a constant one leaves
-        // it alone. A lamp is clipped at the square of its own reach and scaled by it.
+        // it alone. A lamp is clipped at the square of its own reach and falls off as `w` over the
+        // distance, which the ramp the light is read off then shapes. Only a spot's own shader reads
+        // `y`, and the sun's reads the lane whatever is in it.
         let reach = lamp.reach();
+        let cone = match pass {
+            Pass::Lamp => lamp.cone,
+            _ => 0.0,
+        };
         put(
             light,
             "m_Attenuation",
             match pass {
                 Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.0],
-                _ => vec![0.0, 0.0, 1.0 / (reach * reach), reach],
+                _ => vec![0.0, cone, 1.0 / (reach * reach), reach],
             },
         );
         put(light, "m_LightFadeValueStatic", vec![1.0]);
@@ -1000,7 +1032,9 @@ impl Buffer {
 
         // A lamp is drawn as the volume it reaches: its own vertex shader clamps a unit box to the
         // extents the zone clips it against and then projects, so the transform carries the light's
-        // whole reach and the extents cut the box back out of it.
+        // whole reach and the extents cut the box back out of it. A spot scales the box by the
+        // fourth extent before clamping and keeps only the half in front of itself, so one leaves it
+        // where the clamp alone would have put it.
         let volume = lamp.placement * Mat4::from_scale(Vec3::splat(reach));
         let (min, max) = lamp.clip();
         put(
@@ -1010,7 +1044,7 @@ impl Buffer {
                 .to_array()
                 .to_vec(),
         );
-        put(light, "m_ClipMin", min.to_array().to_vec());
+        put(light, "m_ClipMin", min.extend(1.0).to_array().to_vec());
         put(light, "m_ClipMax", max.to_array().to_vec());
         put(
             light,

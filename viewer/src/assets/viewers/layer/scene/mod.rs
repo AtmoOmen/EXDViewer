@@ -27,6 +27,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, Transform};
 use ironworks::file::mdl::{MeshKind, ModelContainer};
+use ironworks::file::spm::ShaderParameters;
 use ironworks::file::{File, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera};
 
 use super::super::mdl;
@@ -289,6 +290,8 @@ pub struct Scene {
     materials: Vec<(String, Slot)>,
     material_at: HashMap<String, usize>,
     packages: HashMap<String, Package>,
+    /// Parameter files folded into the table the card holds, so a later one uploads it again.
+    typed: usize,
     translated: HashMap<usize, Translated>,
     tables: HashMap<usize, Arc<(Vec<u16>, usize, usize)>>,
     lighting: Option<Arc<mdl::gpu::Lighting>>,
@@ -418,6 +421,7 @@ impl Scene {
             materials: Vec::new(),
             material_at: HashMap::new(),
             packages: HashMap::new(),
+            typed: 0,
             translated: HashMap::new(),
             tables: HashMap::new(),
             lighting: None,
@@ -1131,6 +1135,7 @@ impl Scene {
         ]
         .map(str::to_owned)
         .to_vec();
+        wanted.extend(program::PARAMETERS.map(|(_, path)| path.to_owned()));
         // A spot's package is twice the size of a point's and nothing can be lit with it until the
         // four above are in hand, so it is only worth a fetch of its own once they are and the zone
         // turns out to place one.
@@ -1170,6 +1175,7 @@ impl Scene {
             fetching += 1;
         }
 
+        let mut arrived = false;
         for (path, held) in &mut self.packages {
             let Package::Fetching(promise) = held else {
                 continue;
@@ -1184,7 +1190,42 @@ impl Scene {
                     Package::Failed
                 }
             };
+            arrived = true;
         }
+        if arrived {
+            self.load_types();
+        }
+    }
+
+    /// The table the shading passes index, from the parameter files that have arrived. A zone's
+    /// surfaces name the background family's profiles, and the frame stands in with a table of
+    /// nought until the file holding them lands.
+    fn load_types(&mut self) {
+        let files: Vec<(usize, ShaderParameters)> = program::PARAMETERS
+            .iter()
+            .filter_map(|(base, path)| {
+                let Some(Package::Ready(bytes)) = self.packages.get(*path) else {
+                    return None;
+                };
+                match ShaderParameters::read(Cursor::new(bytes.clone())) {
+                    Ok(file) => Some((*base, file)),
+                    Err(why) => {
+                        log::error!("assets/layer: {path}: {why}");
+                        None
+                    }
+                }
+            })
+            .collect();
+        if files.len() == self.typed {
+            return;
+        }
+        self.typed = files.len();
+        let held: Vec<(usize, &ShaderParameters)> =
+            files.iter().map(|(base, file)| (*base, file)).collect();
+        self.renderer
+            .lock()
+            .unwrap()
+            .queue_types(program::shader_types(&held));
     }
 
     /// One of the packages the frame itself is drawn with, translated where it has arrived.
@@ -1220,8 +1261,8 @@ impl Scene {
                 directional,
                 point,
                 spot: None,
-                // Nothing here fills the table the fur pass reads a length off, so every record a
-                // zone's surfaces reach states nought and the pass would discard the whole frame.
+                // The fifth target's alpha is a background surface's emissive flag rather than the
+                // scale a strand is marched along, so the fur pass has nothing here to read.
                 fur: None,
                 composite,
             }));

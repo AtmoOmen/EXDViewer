@@ -89,6 +89,8 @@ pub struct Renderer {
     pending: Vec<Pending>,
     /// The game's own textures the shaders read that no material names, waiting for a context.
     supplied: Vec<(u32, Layered)>,
+    /// The table the shading passes index, waiting for a context.
+    types: Option<Vec<u32>>,
     /// One linked pair per material, pass and page of the G-buffer.
     programs: BTreeMap<(usize, bool, usize), Linked>,
     tables: BTreeMap<usize, glow::Texture>,
@@ -106,6 +108,7 @@ impl Renderer {
             models: Vec::new(),
             pending: Vec::new(),
             supplied: Vec::new(),
+            types: None,
             programs: BTreeMap::new(),
             tables: BTreeMap::new(),
             instances: None,
@@ -136,6 +139,10 @@ impl Renderer {
     /// Hands one of the game's own textures over, under the resource id its shaders name it by.
     pub fn queue_supplied(&mut self, id: u32, held: Layered) {
         self.supplied.push((id, held));
+    }
+
+    pub fn queue_types(&mut self, values: Vec<u32>) {
+        self.types = Some(values);
     }
 
     pub fn draw(
@@ -169,6 +176,11 @@ impl Renderer {
             if let Err(why) = self.buffers.layered(gl, id, &held) {
                 log::error!("assets/layer: texture {id:#x}: {why}");
             }
+        }
+        if let Some(values) = self.types.take()
+            && let Err(why) = self.buffers.fill_types(gl, &values)
+        {
+            log::error!("assets/layer: shader types: {why}");
         }
         // egui draws into whatever it bound before the callback, and that has to be bound again
         // whether or not the frame drew. Asking the painter rather than the context is what makes

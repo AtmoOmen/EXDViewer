@@ -25,7 +25,7 @@ use crate::data::IconIndex;
 use crate::excel::provider::ExcelProvider;
 use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::api_base;
-use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise};
+use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise, empty_view};
 
 use pathlist::{PathList, Presence};
 
@@ -1632,9 +1632,7 @@ impl AssetBrowser {
                         CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left)
                     });
                 }
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Select a file to inspect.").weak());
-                });
+                empty_view(ui, "🗀", "Select a file to inspect");
                 return;
             };
 

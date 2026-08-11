@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::utils::{HttpResponse, request, yield_to_ui};
 
-const API: &str = "https://api.github.com";
+use super::API;
 
 #[derive(Debug, Clone)]
 pub struct PrDraft {

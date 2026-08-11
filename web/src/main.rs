@@ -93,6 +93,8 @@ async fn main() -> Result<(), ServerError> {
     let collector = Data::new(Collector::new(path_index.clone(), config.report.clone()));
     let server_game_data = MessageQueue::new(game_data.clone(), path_index, config.api_workers)?;
 
+    routes::github::prewarm();
+
     log::info!("Binding to {}", config.server_addr);
     let server = HttpServer::new(move || {
         App::new()

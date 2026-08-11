@@ -1,4 +1,11 @@
-use std::{cell::OnceCell, collections::HashSet, io::Write, num::NonZero, rc::Rc, sync::Arc};
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, HashSet},
+    io::Write,
+    num::NonZero,
+    rc::Rc,
+    sync::Arc,
+};
 
 #[cfg(target_arch = "wasm32")]
 use crate::utils::{PromiseKind, UnsendPromise};
@@ -24,7 +31,7 @@ use crate::{
         base::BaseSheet,
         provider::{ExcelHeader, ExcelProvider},
     },
-    github::CALLBACK_PATH,
+    github::{CALLBACK_PATH, GithubApi, GithubSession},
     goto::{self, ListNav},
     icons, music,
     pr_window::{self, PrAction, PrWindow},
@@ -38,10 +45,10 @@ use crate::{
     settings::{
         ALWAYS_HIRES, BACKEND_CONFIG, BackendConfig, CODE_SYNTAX_THEME, COLOR_THEME,
         CURRENT_SHEET_LANGUAGES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, FILTER_GUIDE_VISIBLE,
-        GithubSchemaBranch, LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN, PR_CHANGED_ONLY,
-        SCHEMA_EDITOR_VISIBLE, SELECTED_SHEET, SHEET_FILTER_OPTIONS, SHEET_FILTERS, SHEETS_FILTER,
-        SOLID_SCROLLBAR, SORTED_BY_OFFSET, SchemaLocation, TEMP_HIGHLIGHTED_ROW, TEMP_SCROLL_TO,
-        TEXT_MAX_LINES, TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
+        GithubSchemaBranch, InstallLocation, LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN,
+        PR_CHANGED_ONLY, Region, SCHEMA_EDITOR_VISIBLE, SELECTED_SHEET, SHEET_FILTER_OPTIONS,
+        SHEET_FILTERS, SHEETS_FILTER, SOLID_SCROLLBAR, SORTED_BY_OFFSET, SchemaLocation,
+        TEMP_HIGHLIGHTED_ROW, TEMP_SCROLL_TO, TEXT_MAX_LINES, TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
     },
     setup::{self, SetupWindow},
     sheet::{
@@ -51,7 +58,7 @@ use crate::{
     shortcuts::{GOTO_ROW, GOTO_SHEET, PALETTE},
     utils::{
         CodeTheme, CollapsibleSidePanel, ColorTheme, ConvertiblePromise, FuzzyMatcher, IconManager,
-        Side, TrackedPromise, install_tex_loader, opt_slider, shortcut, tick_promises,
+        Side, TrackedPromise, empty_view, install_tex_loader, opt_slider, shortcut, tick_promises,
     },
 };
 
@@ -98,7 +105,7 @@ enum PrChangedState {
     Ready(Rc<HashSet<String>>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CjkFont {
     Japanese,
     Korean,
@@ -107,18 +114,50 @@ enum CjkFont {
 }
 
 impl CjkFont {
-    fn for_language(language: Language) -> Option<Self> {
+    /// Fixed order, so which font answers for a character a later one also carries cannot depend on
+    /// the order they happened to be fetched in.
+    const ALL: [Self; 4] = [
+        Self::Japanese,
+        Self::Korean,
+        Self::ChineseSimplified,
+        Self::ChineseTraditional,
+    ];
+
+    /// Only the languages that name a script. The rest say nothing about what the sheets hold.
+    fn of_language(language: Language) -> Option<Self> {
         match language {
+            Language::Japanese => Some(Self::Japanese),
             Language::Korean => Some(Self::Korean),
             Language::ChineseSimplified => Some(Self::ChineseSimplified),
             Language::ChineseTraditional | Language::TaiwanChinese => {
                 Some(Self::ChineseTraditional)
             }
-            Language::Japanese
-            | Language::None
-            | Language::English
-            | Language::German
-            | Language::French => Some(Self::Japanese),
+            Language::None | Language::English | Language::German | Language::French => None,
+        }
+    }
+
+    /// What a region's own sheets are written in. Reading a Chinese install through an English
+    /// interface still puts simplified characters on screen, and only this font carries them.
+    fn of_region(region: Region) -> Self {
+        match region {
+            Region::Global => Self::Japanese,
+            Region::Korea => Self::Korean,
+            Region::China => Self::ChineseSimplified,
+            Region::Taiwan => Self::ChineseTraditional,
+        }
+    }
+
+    /// [`None`] while there is nothing to go on. The setup screen is Latin, and guessing before the
+    /// install is known would fetch a face that the right answer then replaces.
+    fn wanted(ctx: &egui::Context) -> Option<Self> {
+        if let Some(font) = Self::of_language(LANGUAGE.get(ctx)) {
+            return Some(font);
+        }
+        match BACKEND_CONFIG.get(ctx).map(|config| config.location) {
+            Some(InstallLocation::Web(region, _)) => Some(Self::of_region(region)),
+            // A local install says nothing about its region, which leaves the game's own language.
+            Some(_) => Some(Self::Japanese),
+            None => None,
         }
     }
 
@@ -202,6 +241,7 @@ pub struct App {
     save_promise: Option<TrackedPromise<()>>,
     export_promise: Option<TrackedPromise<()>>,
     pr_window: PrWindow,
+    github: GithubSession,
     goto_window: Option<goto::GoToWindow>,
     sheet_nav: ListNav,
     about_open: bool,
@@ -210,8 +250,11 @@ pub struct App {
     icons: icons::IconBrowser,
     quests: quests::QuestBrowser,
     last_system_theme: Option<egui::Theme>,
-    /// `None` = Latin only
-    loaded_cjk: Option<CjkFont>,
+    /// Every CJK font whose bytes are in hand. Kept rather than swapped: text that mixes scripts,
+    /// like a Korean name in an otherwise English sheet, needs more than one of them at once.
+    cjk: HashMap<CjkFont, Arc<FontData>>,
+    /// Which of them answers first where two cover the same character but draw it differently.
+    primary_cjk: Option<CjkFont>,
     #[cfg(target_arch = "wasm32")]
     font_promise: Option<(CjkFont, UnsendPromise<anyhow::Result<Vec<u8>>>)>,
 }
@@ -224,7 +267,7 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
         "/sheet",
         App::on_unnamed_sheet,
         App::draw_unnamed_sheet,
-        static_title("Sheet List"),
+        static_title(Tab::Sheets.title()),
     )?;
     builder.add_route(
         "/sheet/{*name}",
@@ -280,32 +323,45 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
 }
 
 impl App {
-    fn title_named_sheet(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
-        Some(params.get("name")?.to_string())
+    fn title_named_sheet(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        params
+            .get("name")
+            .unwrap_or(Tab::Sheets.title())
+            .to_string()
     }
 
-    fn title_assets(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
+    fn title_assets(&self, _path: &Path, params: &Params<'_, '_>) -> String {
         let Some(asset) = params.get("path") else {
-            return Some("Assets".to_string());
+            return Tab::Assets.title().to_string();
         };
-        Some(crate::utils::file_name(asset).to_string())
+        crate::utils::file_name(asset).to_string()
     }
 
-    fn title_icons(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
-        let id = params.get("id")?.parse::<u32>().ok()?;
-        Some(format!("Icon {id:06}"))
-    }
-
-    fn title_music(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
-        let id = params.get("id")?.parse::<u32>().ok()?;
-        Some(self.music.name_of(id).unwrap_or("Music").to_string())
-    }
-
-    fn title_quests(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
+    fn title_icons(&self, _path: &Path, params: &Params<'_, '_>) -> String {
         let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
-            return Some("Quests".to_string());
+            return Tab::Icons.title().to_string();
         };
-        Some(self.quests.name_of(id).unwrap_or("Quests").to_string())
+        format!("Icon {id:06}")
+    }
+
+    fn title_music(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
+            return Tab::Music.title().to_string();
+        };
+        self.music
+            .name_of(id)
+            .unwrap_or(Tab::Music.title())
+            .to_string()
+    }
+
+    fn title_quests(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
+            return Tab::Quests.title().to_string();
+        };
+        self.quests
+            .name_of(id)
+            .unwrap_or(Tab::Quests.title())
+            .to_string()
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
@@ -327,7 +383,7 @@ impl App {
 
         self.update_fonts(&ctx);
         self.update_sheet_languages(&ctx);
-        self.pr_window.poll(&ctx);
+        self.github.poll(&ctx);
         about::draw(&ctx, &mut self.about_open);
         self.draw_menubar(ui, tab);
         crate::report::notice(ui, self.backend.as_ref());
@@ -448,6 +504,8 @@ impl App {
                     let bar_width = ui.available_width();
 
                     ui.menu_button("App", |ui| {
+                        self.draw_account_menu(ui);
+                        ui.separator();
                         if ui.button("Configure").clicked() {
                             self.navigate("/");
                             ui.close();
@@ -706,6 +764,40 @@ impl App {
             });
     }
 
+    fn draw_account_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
+        if let Some(login) = GithubSession::login(ctx) {
+            ui.label(RichText::new(format!("Signed in as {login}")).weak());
+            if ui.button("Sign out").clicked() {
+                GithubSession::sign_out(ctx);
+                ui.close();
+            }
+            return;
+        }
+
+        if self.github.signing_in() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("Waiting for GitHub…").weak());
+            });
+            return;
+        }
+
+        self.github.prepare();
+        let label = format!("{}  Sign in with GitHub", egui::special_emojis::GITHUB);
+        if ui
+            .add_enabled(self.github.ready(), Button::new(label))
+            .on_hover_text("Raises GitHub's API rate limit and lets you open schema pull requests")
+            .clicked()
+        {
+            self.github.begin_login(ctx);
+            ui.close();
+        }
+        if let Some(error) = self.github.error() {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
+    }
+
     fn draw_logger(&mut self, ctx: &egui::Context) {
         let logger_shown = LOGGER_SHOWN.get(ctx);
         let mut logger_shown_toggle = logger_shown;
@@ -741,10 +833,12 @@ impl App {
 
         if self.changed_schemas.as_ref().map(|(k, _)| k) != Some(&key) {
             let (owner, repo, number) = key.clone();
+            let github = GithubApi::from_ctx(ctx);
             self.changed_schemas = Some((
                 key,
                 ConvertiblePromise::new_promise(TrackedPromise::spawn_local(async move {
-                    WebProvider::fetch_github_pull_request_files(&owner, &repo, number).await
+                    WebProvider::fetch_github_pull_request_files(&github, &owner, &repo, number)
+                        .await
                 })),
             ));
         }
@@ -1372,10 +1466,7 @@ impl App {
         if let Some(redirect) = self.ensure_backend(path) {
             return Some(redirect);
         }
-
-        if let Some(sheet) = &SELECTED_SHEET.get(ui.ctx()) {
-            return Some(format!("/sheet/{sheet}").into());
-        }
+        SELECTED_SHEET.set(ui.ctx(), None);
         None
     }
 
@@ -1428,6 +1519,18 @@ impl App {
         self.draw_goto(ui.ctx());
 
         self.draw_sheet_list(ui);
+        CentralPanel::default().show(ui, |ui| {
+            if CollapsibleSidePanel::is_collapsed(ui.ctx(), "sheet_list") {
+                Panel::top("sheet_list_reexpand").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
+                    });
+                    ui.add_space(4.0);
+                });
+            }
+            empty_view(ui, "🗐", "Select a sheet to view");
+        });
     }
 
     fn draw_named_sheet(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
@@ -1580,7 +1683,7 @@ impl App {
             .iter()
             .map(|(name, _)| (*name).clone())
             .collect();
-        self.pr_window.open(&names);
+        self.pr_window.open(&mut self.github, &names);
     }
 
     fn draw_pr_window(&mut self, ctx: &egui::Context) {
@@ -1591,7 +1694,8 @@ impl App {
             .map(|(name, schema)| ((*name).clone(), schema.invalid_reason()))
             .collect();
         if let Some(PrAction::Submit { title, body }) =
-            self.pr_window.draw(ctx, location.as_ref(), &modified)
+            self.pr_window
+                .draw(ctx, &mut self.github, location.as_ref(), &modified)
             && let Some(location) = &location
         {
             let files: Vec<(String, String)> = self
@@ -1599,7 +1703,7 @@ impl App {
                 .into_iter()
                 .map(|(name, schema)| (format!("{name}.yml"), schema.get_text().clone()))
                 .collect();
-            self.pr_window.submit(location, title, body, files);
+            self.pr_window.submit(ctx, location, title, body, files);
         }
     }
 
@@ -1703,7 +1807,7 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_image_loaders(&cc.egui_ctx);
         install_tex_loader(&cc.egui_ctx);
-        Self::apply_fonts(&cc.egui_ctx, None);
+        Self::apply_fonts(&cc.egui_ctx, None, &HashMap::new());
         Self::setup_theme(&cc.egui_ctx);
 
         Self {
@@ -1720,6 +1824,7 @@ impl App {
             save_promise: None,
             export_promise: None,
             pr_window: PrWindow::default(),
+            github: GithubSession::default(),
             goto_window: None,
             sheet_nav: ListNav::default(),
             about_open: false,
@@ -1728,13 +1833,18 @@ impl App {
             icons: icons::IconBrowser::default(),
             quests: quests::QuestBrowser::default(),
             last_system_theme: None,
-            loaded_cjk: None,
+            cjk: HashMap::new(),
+            primary_cjk: None,
             #[cfg(target_arch = "wasm32")]
             font_promise: None,
         }
     }
 
-    fn apply_fonts(ctx: &egui::Context, cjk: Option<(String, Arc<FontData>)>) {
+    fn apply_fonts(
+        ctx: &egui::Context,
+        primary: Option<CjkFont>,
+        loaded: &HashMap<CjkFont, Arc<FontData>>,
+    ) {
         let mut fonts = FontDefinitions::default();
 
         fonts.font_data.insert(
@@ -1746,9 +1856,21 @@ impl App {
         let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
         proportional.push("FFXIV-PrivateUseIcons".to_owned());
 
-        if let Some((name, data)) = cjk {
-            fonts.font_data.insert(name.clone(), data);
-            proportional.push(name);
+        // The first font carrying a character draws it, and these disagree on the shape of the Han
+        // characters they share, so the one matching the text on screen has to lead.
+        let order = primary.into_iter().chain(
+            CjkFont::ALL
+                .into_iter()
+                .filter(|font| Some(*font) != primary),
+        );
+        for font in order {
+            let Some(data) = loaded.get(&font) else {
+                continue;
+            };
+            fonts
+                .font_data
+                .insert(font.family_name().to_owned(), data.clone());
+            proportional.push(font.family_name().to_owned());
         }
 
         ctx.set_fonts(fonts);
@@ -1756,58 +1878,53 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn update_fonts(&mut self, ctx: &egui::Context) {
-        let wanted = CjkFont::for_language(LANGUAGE.get(ctx));
-        if wanted == self.loaded_cjk {
-            return;
-        }
-        let cjk = wanted.map(|font| {
-            (
-                font.family_name().to_owned(),
-                Arc::new(FontData::from_static(font.embedded_bytes())),
-            )
-        });
-        Self::apply_fonts(ctx, cjk);
-        self.loaded_cjk = wanted;
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn update_fonts(&mut self, ctx: &egui::Context) {
-        let wanted = CjkFont::for_language(LANGUAGE.get(ctx));
-        if wanted == self.loaded_cjk {
-            return;
-        }
-
-        let Some(font) = wanted else {
-            Self::apply_fonts(ctx, None);
-            self.loaded_cjk = None;
-            self.font_promise = None;
+        let Some(wanted) = CjkFont::wanted(ctx) else {
             return;
         };
-
-        if self.font_promise.as_ref().is_some_and(|(f, _)| *f == font) {
-            if !self.font_promise.as_ref().unwrap().1.ready() {
-                return;
-            }
-            let (_, promise) = self.font_promise.take().unwrap();
-            match promise.block_and_take() {
-                Ok(bytes) => Self::apply_fonts(
-                    ctx,
-                    Some((
-                        font.family_name().to_owned(),
-                        Arc::new(FontData::from_owned(bytes)),
-                    )),
-                ),
-                Err(error) => log::error!("Failed to fetch font {}: {error}", font.asset_file()),
-            }
-            self.loaded_cjk = Some(font);
+        if self.primary_cjk == Some(wanted) {
             return;
         }
+        self.cjk
+            .entry(wanted)
+            .or_insert_with(|| Arc::new(FontData::from_static(wanted.embedded_bytes())));
+        self.primary_cjk = Some(wanted);
+        Self::apply_fonts(ctx, self.primary_cjk, &self.cjk);
+    }
 
-        let file = font.asset_file().to_owned();
-        self.font_promise = Some((
-            font,
-            UnsendPromise::new(async move { crate::utils::fetch_url(file).await }),
-        ));
+    /// Each face is 5 to 10 MiB over the wire, so one is fetched only once something on screen calls
+    /// for it, and the ones already fetched are kept as fallbacks.
+    #[cfg(target_arch = "wasm32")]
+    fn update_fonts(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+        if self.font_promise.as_ref().is_some_and(|(_, p)| p.ready()) {
+            let (font, promise) = self.font_promise.take().unwrap();
+            match promise.block_and_take() {
+                Ok(bytes) => {
+                    self.cjk.insert(font, Arc::new(FontData::from_owned(bytes)));
+                    changed = true;
+                }
+                Err(error) => log::error!("Failed to fetch font {}: {error}", font.asset_file()),
+            }
+        }
+
+        if let Some(wanted) = CjkFont::wanted(ctx)
+            && self.primary_cjk != Some(wanted)
+        {
+            if self.cjk.contains_key(&wanted) {
+                self.primary_cjk = Some(wanted);
+                changed = true;
+            } else if self.font_promise.is_none() {
+                let file = wanted.asset_file().to_owned();
+                self.font_promise = Some((
+                    wanted,
+                    UnsendPromise::new(async move { crate::utils::fetch_url(file).await }),
+                ));
+            }
+        }
+
+        if changed {
+            Self::apply_fonts(ctx, self.primary_cjk, &self.cjk);
+        }
     }
 
     fn setup_theme(ctx: &egui::Context) {

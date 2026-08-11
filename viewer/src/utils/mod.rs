@@ -44,3 +44,21 @@ pub use yield_now::yield_to_ui;
 pub fn file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
+
+/// Where a tab puts the placeholder it shows with nothing selected. Above the middle, so a short
+/// column of text sits where the eye already is rather than at the centre of an empty pane.
+pub fn center<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.vertical_centered(|ui| {
+        ui.add_space(ui.available_height() * 0.35);
+        contents(ui)
+    })
+    .inner
+}
+
+/// The glyph and line a tab shows with nothing selected.
+pub fn empty_view(ui: &mut egui::Ui, glyph: &str, label: &str) {
+    center(ui, |ui| {
+        ui.label(egui::RichText::new(glyph).size(56.0).weak());
+        ui.label(egui::RichText::new(label).weak());
+    });
+}

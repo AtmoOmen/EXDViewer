@@ -15,6 +15,7 @@ use crate::{
     backend::Backend,
     data::{IconIndex, get_icon_path},
     excel::provider::ExcelProvider,
+    github::GithubApi,
     goto::{ListNav, Palette, SUGGESTIONS},
     settings::{ALWAYS_HIRES, LANGUAGE, api_base},
     utils::{
@@ -250,11 +251,13 @@ impl IconBrowser {
         }
     }
 
-    fn start_walk(&mut self, backend: &Backend) {
+    fn start_walk(&mut self, ctx: &egui::Context, backend: &Backend) {
         let backend = backend.clone();
         let progress = self.progress.clone();
+        let bundle = crate::pr_window::github_source(ctx)
+            .map(|location| (GithubApi::from_ctx(ctx), location));
         self.refs = Load::Loading(TrackedPromise::spawn_local(async move {
-            refs::walk(backend, progress).await
+            refs::walk(backend, bundle, progress).await
         }));
     }
 
@@ -437,7 +440,7 @@ impl IconBrowser {
                                 )
                                 .clicked()
                         {
-                            self.start_walk(backend);
+                            self.start_walk(ui.ctx(), backend);
                         }
                         if query.is_empty() {
                             select(

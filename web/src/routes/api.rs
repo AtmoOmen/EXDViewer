@@ -38,6 +38,7 @@ pub fn service() -> impl HttpServiceFactory {
         // count, but keeping the rule "literals before variables" makes that obvious.
         .service(get_github_oauth_config)
         .service(post_github_oauth_token)
+        .configure(super::github::configure)
         .service(get_repositories)
         .service(get_regions)
         .service(get_list_id)
@@ -314,7 +315,7 @@ fn serve_frame(request: &HttpRequest, frame: Bytes, max_age: u32) -> Result<Http
     Ok(response.body(body))
 }
 
-fn accepts(request: &HttpRequest, encoding: &str) -> bool {
+pub fn accepts(request: &HttpRequest, encoding: &str) -> bool {
     request
         .headers()
         .get(header::ACCEPT_ENCODING)

@@ -21,7 +21,8 @@ use crate::excel::provider::{ExcelHeader, ExcelProvider, ExcelSheet};
 use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{
-    CollapsibleSidePanel, FuzzyMatcher, PromiseKind, Side, TrackedPromise, fetch_url_str,
+    CollapsibleSidePanel, FuzzyMatcher, PromiseKind, Side, TrackedPromise, center, empty_view,
+    fetch_url_str,
 };
 
 const FILTER_ID: &str = "music_filter";
@@ -661,10 +662,7 @@ impl MusicPlayer {
                     ui.label(RichText::new(name).weak());
                 });
             } else {
-                center(ui, |ui| {
-                    ui.label(RichText::new("♪").size(56.0).weak());
-                    ui.label(RichText::new("Select a track to play").weak());
-                });
+                empty_view(ui, "♪", "Select a track to play");
             }
         });
     }
@@ -916,14 +914,6 @@ fn draw_info(
     }
     ui.add_space(4.0);
     ui.label(RichText::new(path).weak().small());
-}
-
-fn center<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.35);
-        contents(ui)
-    })
-    .inner
 }
 
 fn codec_name(codec: Codec) -> &'static str {

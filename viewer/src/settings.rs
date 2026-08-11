@@ -5,6 +5,7 @@ use ironworks::excel::Language;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
+    github::GithubAuth,
     sheet::{FilterInputType, MatchOptions},
     utils::{CodeTheme, ColorTheme, GameVersion},
 };
@@ -228,6 +229,9 @@ pub const TEXT_WRAP_WIDTH: DKey<Option<NonZero<u16>>> =
 pub const TEXT_MAX_LINES: DKey<Option<NonZero<u8>>> = DKey::new("text-max-lines", NonZero::new(5));
 pub const TEXT_USE_SCROLL: DKey<bool> = DKey::new("text-use-scroll", false);
 pub const BACKEND_CONFIG: DKey<Option<BackendConfig>> = DKey::new("backend-config", None);
+/// The signed-in GitHub account. Kept so a session survives a reload; a revoked token simply fails
+/// its next call and is cleared by signing out.
+pub const GITHUB_AUTH: DKey<Option<GithubAuth>> = DKey::new("github-auth", None);
 pub const LANGUAGE: DKey<Language> = DKey::new("language", Language::English);
 pub const SHEETS_FILTER: DKey<String> = DKey::new("sheets-filter", String::new());
 pub const SHEET_FILTERS: FKey<HashMap<String, (FilterInputType, String)>> =
@@ -343,25 +347,22 @@ pub struct GithubSchemaLocation {
 }
 
 impl GithubSchemaLocation {
-    pub fn base_url(&self) -> String {
+    /// Which (owner, repo, branch) actually carries the schema files. A pull request's are on its
+    /// head fork, which is a different repository from the one being merged into.
+    pub fn source(&self) -> (&str, &str, String) {
         if let GithubSchemaBranch::PullRequest {
             full_name, branch, ..
         } = &self.branch
         {
-            format!("https://raw.githubusercontent.com/{full_name}/refs/heads/{branch}")
-        } else {
-            format!(
-                "https://raw.githubusercontent.com/{}/{}/refs/heads/{}",
-                self.owner,
-                self.repo,
-                match &self.branch {
-                    GithubSchemaBranch::Latest => "latest".to_string(),
-                    GithubSchemaBranch::Other(name) => name.clone(),
-                    GithubSchemaBranch::Version(v) => format!("ver/{}", v.0),
-                    GithubSchemaBranch::PullRequest { .. } => unreachable!(),
-                }
-            )
+            let (owner, repo) = full_name.split_once('/').unwrap_or((full_name, ""));
+            return (owner, repo, branch.clone());
         }
+        (&self.owner, &self.repo, self.base_branch())
+    }
+
+    pub fn base_url(&self) -> String {
+        let (owner, repo, branch) = self.source();
+        format!("https://raw.githubusercontent.com/{owner}/{repo}/refs/heads/{branch}")
     }
 
     pub fn base_branch(&self) -> String {

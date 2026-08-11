@@ -7,7 +7,7 @@ pub type Redirect = Option<Path>;
 
 type RouteStartFn<T> = dyn Fn(&mut T, &mut egui::Ui, &Path, &Params<'_, '_>) -> Redirect;
 type RouteRenderFn<T> = dyn Fn(&mut T, &mut egui::Ui, &Path, &Params<'_, '_>);
-type RouteTitleFn<T> = dyn Fn(&T, &Path, &Params<'_, '_>) -> Option<String>;
+type RouteTitleFn<T> = dyn Fn(&T, &Path, &Params<'_, '_>) -> String;
 
 pub struct Route<T> {
     on_start: Box<RouteStartFn<T>>,
@@ -16,17 +16,15 @@ pub struct Route<T> {
 }
 
 /// Title for a route that always names the same thing.
-pub fn static_title<T>(
-    title: &'static str,
-) -> impl Fn(&T, &Path, &Params<'_, '_>) -> Option<String> {
-    move |_, _, _| Some(title.to_string())
+pub fn static_title<T>(title: &'static str) -> impl Fn(&T, &Path, &Params<'_, '_>) -> String {
+    move |_, _, _| title.to_string()
 }
 
 impl<T> Route<T> {
     pub fn new(
         on_start: impl Fn(&mut T, &mut egui::Ui, &Path, &Params<'_, '_>) -> Redirect + 'static,
         on_render: impl Fn(&mut T, &mut egui::Ui, &Path, &Params<'_, '_>) + 'static,
-        on_title: impl Fn(&T, &Path, &Params<'_, '_>) -> Option<String> + 'static,
+        on_title: impl Fn(&T, &Path, &Params<'_, '_>) -> String + 'static,
     ) -> Self {
         Self {
             on_start: Box::new(on_start),
@@ -45,7 +43,7 @@ impl<T> Route<T> {
                     ui.label("Please check the URL and try again.");
                 });
             },
-            |_, _, _| Some("Not Found".to_string()),
+            |_, _, _| "Not Found".to_string(),
         )
     }
 
@@ -64,8 +62,9 @@ impl<T> Route<T> {
     }
 
     /// Evaluated every frame, not once on entry, so a title can follow something that loads later or
-    /// survives the route being re-entered. [`None`] leaves the current title alone.
-    pub fn title(&self, state: &T, path: &Path, params: &Params<'_, '_>) -> Option<String> {
+    /// survives the route being re-entered. A route with nothing selected names its tab; leaving the
+    /// last route's title in place is not an option, which is what kept stale names in the tab bar.
+    pub fn title(&self, state: &T, path: &Path, params: &Params<'_, '_>) -> String {
         (self.on_title)(state, path, params)
     }
 }

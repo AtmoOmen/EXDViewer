@@ -15,7 +15,9 @@ use crate::{
         base::BaseSheet,
         provider::{ExcelHeader, ExcelProvider, ExcelSheet},
     },
-    schema::{Schema, provider::SchemaProvider},
+    github::GithubApi,
+    schema::{Schema, provider::SchemaProvider, web::WebProvider},
+    settings::GithubSchemaLocation,
     sheet::{SchemaColumn, SchemaColumnMeta, SheetColumnDefinition, read_integer},
     utils::yield_to_ui,
 };
@@ -225,7 +227,11 @@ async fn walk_sheet(
 }
 
 /// Read every schema, then read the rows of only those sheets whose schema names an icon field.
-pub async fn walk(backend: Backend, progress: Rc<Cell<Progress>>) -> Result<IconRefs> {
+pub async fn walk(
+    backend: Backend,
+    bundle: Option<(GithubApi, GithubSchemaLocation)>,
+    progress: Rc<Cell<Progress>>,
+) -> Result<IconRefs> {
     let mut names: Vec<String> = backend
         .excel()
         .get_entries()
@@ -240,35 +246,64 @@ pub async fn walk(backend: Backend, progress: Rc<Cell<Progress>>) -> Result<Icon
     });
 
     let mut wanted: Vec<(String, Schema)> = Vec::new();
-    let mut at = Instant::now();
-    let mut done = 0;
-    let schemas = backend.schema();
-    let mut reads = stream::iter(
-        names
-            .iter()
-            .map(|name| async move { (name, schemas.get_schema_text(name).await) }),
-    )
-    .buffer_unordered(SCHEMA_READS);
-    while let Some((name, text)) = reads.next().await {
-        done += 1;
-        match text {
-            Ok(text) => {
-                if let Ok(Ok(schema)) = Schema::from_str(&text)
-                    && names_icons(&schema)
-                {
-                    wanted.push((name.clone(), schema));
-                }
-            }
-            Err(error) => log::warn!("icons/walk: {name}: {error}"),
+    let mut keep = |name: &str, text: &str| {
+        if let Ok(Ok(schema)) = Schema::from_str(text)
+            && names_icons(&schema)
+        {
+            wanted.push((name.to_owned(), schema));
         }
-        if at.elapsed() >= MAX_FRAME_TIME {
-            progress.set(Progress {
-                done,
-                total: names.len(),
-                reading_rows: false,
-            });
-            yield_to_ui().await;
-            at = Instant::now();
+    };
+
+    let bundled = match bundle {
+        Some((api, location)) => WebProvider::fetch_github_schemas(&api, &location)
+            .await
+            .inspect_err(|error| log::warn!("icons/walk: reading schemas one at a time: {error}"))
+            .ok(),
+        None => None,
+    };
+
+    if let Some(bundled) = bundled {
+        log::info!("icons/walk: {} schemas in one request", bundled.len());
+        let mut at = Instant::now();
+        for (done, name) in names.iter().enumerate() {
+            if let Some(text) = bundled.get(name) {
+                keep(name, text);
+            }
+            if at.elapsed() >= MAX_FRAME_TIME {
+                progress.set(Progress {
+                    done,
+                    total: names.len(),
+                    reading_rows: false,
+                });
+                yield_to_ui().await;
+                at = Instant::now();
+            }
+        }
+    } else {
+        let mut at = Instant::now();
+        let mut done = 0;
+        let schemas = backend.schema();
+        let mut reads = stream::iter(
+            names
+                .iter()
+                .map(|name| async move { (name, schemas.get_schema_text(name).await) }),
+        )
+        .buffer_unordered(SCHEMA_READS);
+        while let Some((name, text)) = reads.next().await {
+            done += 1;
+            match text {
+                Ok(text) => keep(name, &text),
+                Err(error) => log::warn!("icons/walk: {name}: {error}"),
+            }
+            if at.elapsed() >= MAX_FRAME_TIME {
+                progress.set(Progress {
+                    done,
+                    total: names.len(),
+                    reading_rows: false,
+                });
+                yield_to_ui().await;
+                at = Instant::now();
+            }
         }
     }
     // Sheets are numbered by their place here, so the walk has to settle in one order.

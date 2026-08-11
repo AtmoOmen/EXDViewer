@@ -375,7 +375,7 @@ fn pair(
     .iter()
     .map(|keys| selector(&values(keys, material, set)))
     .collect();
-    parts.push(selector(&[package.subview_defaults()[0], subview]));
+    parts.push(selector(&[package.technique_subview()[0], subview]));
     let id = selector(&parts);
 
     // Lookup is by node id, falling back to the alias table: skin and hair only resolve through it.
@@ -906,6 +906,13 @@ impl Buffer {
             held
         });
         put("g_InstanceParameter", "m_MulColor", vec![1.0; 4]);
+        // The engine drives this per draw and no material states one, so identity is what leaves a
+        // table's own emissive column as it was written.
+        put(
+            "g_MaterialParameterDynamic",
+            "m_EmissiveColor",
+            vec![1.0; 3],
+        );
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
@@ -1224,15 +1231,58 @@ fn lighting(id: u32) -> u32 {
     }
 }
 
-/// The color table as the game's own shaders read it: the rows exactly as the material states them,
-/// four halfs to a texel. Answers the halfs, the texels a row takes, and the rows.
-pub fn table(held: &mtrl::ColorTable) -> Option<(&[u16], usize, usize)> {
+/// Halfs in a row of the layout every shader addresses, and the rows it addresses. A row address is
+/// scaled by a hardcoded `1/32` everywhere, and columns nought through seven are divided by the
+/// width the shader queries, so nothing else is readable.
+const EXTENDED_ROW: usize = 32;
+const EXTENDED_ROWS: usize = 32;
+
+/// Where a legacy row's halfs sit in an extended one. Diffuse, specular and emissive land where they
+/// were; the two scalars beside them swap; and the tile index and transform move to the end.
+const LEGACY_TO_EXTENDED: [(usize, usize); 16] = [
+    (0, 0),
+    (1, 1),
+    (2, 2),
+    (7, 3),
+    (4, 4),
+    (5, 5),
+    (6, 6),
+    (3, 7),
+    (8, 8),
+    (9, 9),
+    (10, 10),
+    (11, 25),
+    (12, 28),
+    (13, 29),
+    (14, 30),
+    (15, 31),
+];
+
+/// The color table in the layout the game's own shaders read: eight texels a row, thirty-two rows.
+/// Answers the halfs, the texels a row takes, and the rows.
+///
+/// An extended table is already that. A legacy one states sixteen rows of four texels, so it is
+/// widened and each row becomes the pair the shaders address it as, which leaves the row blend a
+/// no-op: legacy tables have no second row to blend toward.
+pub fn table(held: &mtrl::ColorTable) -> Option<(Vec<u16>, usize, usize)> {
     let rows = held.rows();
     let raw = held.raw();
     if rows == 0 || !raw.len().is_multiple_of(rows * 4) {
         return None;
     }
-    Some((raw, raw.len() / rows / 4, rows))
+    if held.kind() != mtrl::ColorTableKind::Legacy {
+        return Some((raw.to_vec(), raw.len() / rows / 4, rows));
+    }
+    let mut values = vec![0u16; EXTENDED_ROWS * EXTENDED_ROW];
+    for pair in 0..rows.min(EXTENDED_ROWS / 2) {
+        let Some(row) = held.row(pair) else { continue };
+        for (from, to) in LEGACY_TO_EXTENDED {
+            let Some(half) = row.get(from) else { continue };
+            values[pair * 2 * EXTENDED_ROW + to] = *half;
+            values[(pair * 2 + 1) * EXTENDED_ROW + to] = *half;
+        }
+    }
+    Some((values, EXTENDED_ROW / 4, EXTENDED_ROWS))
 }
 
 #[cfg(test)]

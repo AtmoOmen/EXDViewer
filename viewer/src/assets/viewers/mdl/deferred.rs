@@ -805,6 +805,9 @@ impl Buffers {
     /// nothing captures the frame around it. A harmonic row dotted against a direction is what that
     /// sky looks like that way, and a mirror reflection is that same sky read the mirror way.
     ///
+    /// Gamma-encoded, since a composite squares the texel and divides it by the alpha it was
+    /// gathered at rather than reading it as the light it stands for.
+    ///
     /// Rebuilt only where the sky changed: a zone states one per time of day, and a frame otherwise
     /// asks for the same cube it asked for last.
     pub fn reflect(&mut self, gl: &glow::Context, held: &program::Ambient) -> Result<(), String> {
@@ -820,7 +823,7 @@ impl Buffers {
                     let toward = facing(face, over(x), over(y)).extend(1.0);
                     pixels.extend(held.sky.iter().map(|row| {
                         let held = row.dot(toward) * sky.1;
-                        (held.clamp(0.0, 1.0) * 255.0).round() as u8
+                        (held.clamp(0.0, 1.0).sqrt() * 255.0).round() as u8
                     }));
                     pixels.push(255);
                 }

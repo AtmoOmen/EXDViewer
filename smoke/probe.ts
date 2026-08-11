@@ -21,6 +21,7 @@ const models = argv.filter((one) => !one.startsWith("--"));
 const outDir = join(root, "smoke", flag("out", "probe"));
 const mark = flag("mark", "probe:");
 const channel = Number(flag("channel", "-1"));
+const toggle = Number(flag("toggle", "-1"));
 const zoom = Number(flag("zoom", "0"));
 const settle = Number(flag("settle", "8000"));
 const shaded = !argv.includes("--plain");
@@ -175,6 +176,7 @@ async function main() {
             });
             await sleep(1500);
             if (!shaded) {
+                if (toggle >= 0) await click(cdp, toggle, ROW_Y);
                 await shot(cdp, `${tag}-plain`);
                 continue;
             }
@@ -184,6 +186,7 @@ async function main() {
                 await click(cdp, channel, ROW_Y);
                 await sleep(2500);
             }
+            if (toggle >= 0) await click(cdp, toggle, ROW_Y);
             await shot(cdp, `${tag}-${WIDTH}x${HEIGHT}`);
         }
     } finally {

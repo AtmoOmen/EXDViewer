@@ -142,6 +142,7 @@ model against the gate's twenty. It exists for reading a render back, not for pa
 | `--zoom=N` | frames the model; large values fill the pane |
 | `--settle=ms` | wait before the shot, to let materials and textures land |
 | `--channel=x` | which target to show |
+| `--toggle=x` | one more label of the toolbar row to click before the shot |
 | `--plain` | the preview path instead of the game shaders |
 | `--out=` | where the shots go |
 | `--mark=` | echo console lines carrying a prefix |

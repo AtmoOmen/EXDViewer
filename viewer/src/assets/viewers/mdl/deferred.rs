@@ -72,6 +72,11 @@ pub const ENGINE: [(u32, &str, u32); 5] = [
 pub const TARGETS: usize = 5;
 pub const LIT: usize = TARGETS;
 
+/// The channel the fur pass softens. It squares what it reads and takes the root of what it writes,
+/// and the surface color is the one channel a drawing package gamma-encodes; the package asks for it
+/// by a name every package that shades a surface gives the channel after it.
+const FUR_CHANNEL: usize = 2;
+
 /// The one structured buffer that is not a joint palette.
 pub const TYPES: &str = "g_ShaderTypeParameter";
 
@@ -143,6 +148,15 @@ const VOLUME_FACES: [u16; 36] = [
     1, 2, 6, 1, 6, 5, // right
 ];
 
+/// What a pass of the graph covers: the whole frame, what one light reaches, or the whole frame
+/// again where the fur pass reads the channel it answers into as the G-buffer left it.
+#[derive(Clone, Copy)]
+enum Over {
+    Screen,
+    Volume,
+    Softening(glow::Texture),
+}
+
 const PRESENT_VERTEX: &str = include_str!("present.vert");
 const PRESENT_FRAGMENT: &str = include_str!("present.frag");
 
@@ -192,6 +206,8 @@ pub struct Lighting {
     pub point: std::sync::Arc<program::Program>,
     /// Absent until a zone's own spot package has arrived, and always where nothing places a spot.
     pub spot: Option<std::sync::Arc<program::Program>>,
+    /// The same for fur, which only a surface whose own record states a length has any of.
+    pub fur: Option<std::sync::Arc<program::Program>>,
     pub composite: std::sync::Arc<program::Program>,
 }
 
@@ -225,6 +241,9 @@ pub struct Buffers {
     /// What the composite left, kept apart from the frame a semitransparent pass writes: that pass
     /// reads the one and writes the other, and a texture cannot be both at once.
     resolved: Option<glow::Texture>,
+    /// A framebuffer over the channel the fur pass softens, and that channel as the G-buffer left
+    /// it: the pass walks a strand across its neighbours to answer for one pixel.
+    fur: Option<(glow::Framebuffer, glow::Texture)>,
     size: (i32, i32),
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
@@ -359,6 +378,7 @@ impl Buffers {
                 .take()
                 .map(|(frame, held)| (frame, held.to_vec())),
             self.lit.take().map(|(frame, held)| (frame, vec![held])),
+            self.fur.take().map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()
@@ -433,6 +453,11 @@ impl Buffers {
             let lit = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
             self.lit = Some((frame_of(gl, &[lit], Some(depth))?, lit));
             self.resolved = Some(plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?);
+            // The channel the fur pass answers into is one of the G-buffer's own, reached through a
+            // framebuffer of its own so a pass writing one channel does not have to name a page.
+            let softened = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+            let held = frame_of(gl, &self.color[FUR_CHANNEL..=FUR_CHANNEL], None)?;
+            self.fur = Some((held, softened));
         }
         Ok(())
     }
@@ -799,7 +824,7 @@ impl Buffers {
     }
 
     /// One pass of the graph drawn over a framebuffer of its own, reading whatever the passes before
-    /// it left behind. `volume` says whether it covers the frame or only what a light reaches.
+    /// it left behind.
     fn pass(
         &mut self,
         gl: &glow::Context,
@@ -807,7 +832,7 @@ impl Buffers {
         held: &program::Program,
         into: glow::Framebuffer,
         scene: &program::Scene,
-        volume: bool,
+        over: Over,
     ) -> Result<(), String> {
         let source = format!("{}\n{}", held.vertex, held.fragment);
         let program = match self.resolvers.get(&at) {
@@ -829,8 +854,8 @@ impl Buffers {
                 built
             }
         };
-        let layout = match volume {
-            true => {
+        let layout = match over {
+            Over::Volume => {
                 let held = match self.volume {
                     Some(held) => held,
                     None => {
@@ -841,7 +866,7 @@ impl Buffers {
                 };
                 held.0
             }
-            false => self.screen(gl)?,
+            _ => self.screen(gl)?,
         };
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
@@ -858,7 +883,10 @@ impl Buffers {
         let mut unit = 0;
         for texture in &held.textures {
             let bound = match texture.kind {
-                program::Kind::Plane => self.engine(gl, texture.id)?,
+                program::Kind::Plane => match over {
+                    Over::Softening(held) if texture.id == GBUFFER[3] => held,
+                    _ => self.engine(gl, texture.id)?,
+                },
                 kind => self.absent(gl, kind, texture.id)?,
             };
             bind(
@@ -884,14 +912,14 @@ impl Buffers {
                 gl.uniform_2_f32(Some(&location), self.size.0 as f32, self.size.1 as f32);
             }
             gl.bind_vertex_array(Some(layout));
-            match volume {
-                true => gl.draw_elements(
+            match over {
+                Over::Volume => gl.draw_elements(
                     glow::TRIANGLES,
                     VOLUME_FACES.len() as i32,
                     glow::UNSIGNED_SHORT,
                     0,
                 ),
-                false => gl.draw_arrays(glow::TRIANGLES, 0, 3),
+                _ => gl.draw_arrays(glow::TRIANGLES, 0, 3),
             }
             gl.bind_vertex_array(None);
         }
@@ -920,7 +948,25 @@ impl Buffers {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         }
-        self.pass(gl, 0, &lighting.position, position, scene, false)?;
+        self.pass(gl, 0, &lighting.position, position, scene, Over::Screen)?;
+        // A strand is softened where it stands rather than where it is lit, so this runs before any
+        // light reads the channel. It walks its neighbours to answer for one pixel, which is why it
+        // reads a copy of the channel and writes the channel itself, and it discards where the
+        // surface states no fur, leaving those pixels as the G-buffer left them.
+        if let Some(fur) = &lighting.fur
+            && let Some((into, softened)) = self.fur
+        {
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(into));
+                gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(softened));
+                gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, self.size.0, self.size.1);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            }
+            let held = fur.clone();
+            self.pass(gl, 5, &held, into, scene, Over::Softening(softened))?;
+        }
 
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(light));
@@ -930,7 +976,7 @@ impl Buffers {
             gl.enable(glow::BLEND);
             gl.blend_func(glow::ONE, glow::ONE);
         }
-        self.pass(gl, 1, &lighting.directional, light, scene, false)?;
+        self.pass(gl, 1, &lighting.directional, light, scene, Over::Screen)?;
         // One face of the volume, not both. The pass adds what it computes to the buffer, so a box
         // shaded front and back would light every pixel it covers twice over. The far face is the
         // one kept, since it still covers the frame when the camera stands inside the light.
@@ -952,13 +998,13 @@ impl Buffers {
                 (program::LampKind::Spot, Some(spot)) => (3, spot),
                 _ => (2, &lighting.point),
             };
-            self.pass(gl, slot, program, light, &held, true)?;
+            self.pass(gl, slot, program, light, &held, Over::Volume)?;
         }
         unsafe {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         };
-        self.pass(gl, 4, &lighting.composite, lit, scene, false)
+        self.pass(gl, 4, &lighting.composite, lit, scene, Over::Screen)
     }
 }
 
@@ -990,6 +1036,7 @@ impl Drop for Buffers {
                 .take()
                 .map(|(frame, held)| (frame, held.to_vec())),
             self.lit.take().map(|(frame, held)| (frame, vec![held])),
+            self.fur.take().map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()

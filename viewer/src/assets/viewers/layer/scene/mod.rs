@@ -1204,6 +1204,9 @@ impl Scene {
                 directional,
                 point,
                 spot: None,
+                // Nothing here fills the table the fur pass reads a length off, so every record a
+                // zone's surfaces reach states nought and the pass would discard the whole frame.
+                fur: None,
                 composite,
             }));
         }

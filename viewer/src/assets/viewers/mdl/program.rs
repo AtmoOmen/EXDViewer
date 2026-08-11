@@ -24,6 +24,8 @@ const PASS_Z_OPAQUE: u32 = 0xe412_a2d4;
 const PASS_LIGHTING_OPAQUE: u32 = 0xfbde_0a8f;
 const PASS_COMPOSITE_OPAQUE: u32 = 0x955c_0b73;
 const PASS_COMPOSITE_SEMITRANSPARENCY: u32 = 0xc885_bbd3;
+/// The one furblur marches along a strand at. Its other pass is a plain four-tap square.
+const PASS_FUR: u32 = 0x5bc1_ad3f;
 
 /// The render pass a node is selected under. Holding everything else fixed, a drawing package
 /// answers `SUB_VIEW_SHADOW_0` with its depth pass alone, which is what a shadow map is.
@@ -40,6 +42,8 @@ pub const DIRECTIONAL: &str = "shader/sm5/shpk/directionallighting.shpk";
 pub const POINT: &str = "shader/sm5/shpk/pointlighting.shpk";
 pub const SPOT: &str = "shader/sm5/shpk/spotlighting.shpk";
 pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
+/// Softens the surface a strand grows out of, between the G-buffer and the light it is read under.
+pub const FUR: &str = "shader/sm5/shpk/furblur.shpk";
 
 /// `GetDirectionalLight`, and the value that draws a light rather than nothing. The package defaults
 /// it to `_Disable`, whose shader writes no light at all.
@@ -54,8 +58,14 @@ const SPECULAR_LIGHTING_ENABLE: u32 = 0xaba1_f498;
 /// Records of `g_ShaderTypeParameter`, which `SV_Target.w` indexes as `(32 + type) / 255`.
 const SHADER_TYPES: usize = 256;
 
-/// Dwords of one `g_ShaderTypeParameter` record.
+/// Dwords of one `g_ShaderTypeParameter` record, and the one the fur pass reads.
 const SHADER_TYPE: usize = 32;
+const FUR_LENGTH: usize = 12;
+
+/// Where the character family's own profiles start, and what a material with no colour table names
+/// its profile with.
+const CHARA_TYPES: usize = 32;
+const SHADER_ID: u32 = 0x59bd_a0b1;
 
 /// Dwords in a row of the texture a structured buffer is read through, which the backend fixes so
 /// that a shader and whatever fills the texture agree without either having to say so.
@@ -110,6 +120,7 @@ pub enum Pass {
     Blended,
     Lighting,
     Lamp,
+    Fur,
     Composite,
     CompositeBlended,
 }
@@ -121,6 +132,7 @@ impl Pass {
             Self::Buffer => PASS_G_OPAQUE,
             Self::Blended => PASS_G_SEMITRANSPARENCY,
             Self::Lighting | Self::Lamp => PASS_LIGHTING_OPAQUE,
+            Self::Fur => PASS_FUR,
             Self::Composite => PASS_COMPOSITE_OPAQUE,
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
         }
@@ -1227,7 +1239,7 @@ pub fn joints(palette: &[Mat4], object: Mat4) -> Vec<u32> {
 /// The parameter files the table is filled from, and the record each one's first profile lands at: a
 /// G pass adds its own family's base to the type its material names.
 pub const PARAMETERS: [(usize, &str); 2] = [
-    (32, "common/graphics/chara_shader_param.spm"),
+    (CHARA_TYPES, "common/graphics/chara_shader_param.spm"),
     (128, "common/graphics/bg_shader_param.spm"),
 ];
 
@@ -1260,6 +1272,30 @@ pub fn shader_types(files: &[(usize, &spm::ShaderParameters)]) -> Vec<u32> {
         }
     }
     out
+}
+
+/// Whether any record this material can reach states a fur length. The fur pass discards every pixel
+/// whose own record leaves it at nought, so a model reaching none of them has nothing for it to do.
+///
+/// A material's records are the ones its colour table names a row at a time, plus the one a material
+/// carrying no table states outright; both are offsets into the character family's own profiles.
+pub fn furred(material: &Material, types: &[u32]) -> bool {
+    let held = material.held();
+    let table = held.color_table().into_iter().flat_map(|table| {
+        (0..table.rows()).filter_map(|row| Some(table.row_values(row)?.shader_index as usize))
+    });
+    let stated = held
+        .constants()
+        .iter()
+        .find(|constant| constant.id() == SHADER_ID)
+        .and_then(|constant| held.constant_values(constant))
+        .and_then(|values| values.first().copied())
+        .map(|value| value as usize);
+    table.chain(stated).any(|profile| {
+        types
+            .get((CHARA_TYPES + profile) * SHADER_TYPE + FUR_LENGTH)
+            .is_some_and(|held| f32::from_bits(*held) > 0.0)
+    })
 }
 
 /// Where one of the parameters a file names goes in a record, and the dword it goes there as. A file

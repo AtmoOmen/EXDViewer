@@ -1131,6 +1131,26 @@ impl Rendered {
             if arrived && let Some(values) = types(&parameters) {
                 level.gpu.lock().unwrap().queue_types(values);
             }
+
+            // The fur pass belongs to no material either, and nothing can be softened with it until
+            // the frame is lit at all, so it is only worth a fetch of its own once the four above
+            // are in hand and the model turns out to state a fur length.
+            if self.lighting.borrow().is_some()
+                && !packages.contains_key(program::FUR)
+                && let Some(values) = types(&parameters)
+                && slots.iter().flatten().any(|slot| match slot {
+                    Slot::Ready(material) => program::furred(material, &values),
+                    _ => false,
+                })
+            {
+                let files = backend.files().clone();
+                packages.insert(
+                    program::FUR.to_owned(),
+                    Package::Fetching(TrackedPromise::spawn_local(async move {
+                        files.read(program::FUR).await
+                    })),
+                );
+            }
         }
 
         let mut textures = self.textures.borrow_mut();
@@ -1445,8 +1465,9 @@ impl Rendered {
     /// The passes that light the G-buffer, translated once their packages have arrived. They are the
     /// same whatever is being drawn, so they are built once and kept.
     fn lighting(&self, attachments: usize) -> Option<Arc<gpu::Lighting>> {
-        if let Some(held) = self.lighting.borrow().as_ref() {
-            return Some(held.clone());
+        if self.lighting.borrow().is_some() {
+            self.soften(attachments);
+            return self.lighting.borrow().clone();
         }
         let packages = self.packages.borrow();
         let held = |path: &str, pass| {
@@ -1464,12 +1485,40 @@ impl Rendered {
             point: held(program::POINT, program::Pass::Lighting)?,
             // A model stands under one studio light of this viewer's own, which is a point.
             spot: None,
+            fur: None,
             composite: held(program::COMPOSITE, program::Pass::Composite)?,
         };
         drop(packages);
         let built = Arc::new(built);
         *self.lighting.borrow_mut() = Some(built.clone());
         Some(built)
+    }
+
+    /// Takes the fur pass up on whichever frame its package arrives on, the frame having lit without
+    /// it until then. One that arrived and would not translate is marked failed rather than
+    /// translated again every frame, which costs a whole one.
+    fn soften(&self, attachments: usize) {
+        let lit = self.lighting.borrow().clone();
+        let Some(lighting) = lit.filter(|held| held.fur.is_none()) else {
+            return;
+        };
+        let mut packages = self.packages.borrow_mut();
+        let Some(Package::Ready(bytes)) = packages.get(program::FUR) else {
+            return;
+        };
+        let fur = match program::Program::screen(bytes, program::Pass::Fur, attachments) {
+            Ok(held) => Arc::new(held),
+            Err(why) => {
+                log::warn!("assets/mdl: {}: {why}", program::FUR);
+                packages.insert(program::FUR.to_owned(), Package::Failed(why));
+                return;
+            }
+        };
+        drop(packages);
+        *self.lighting.borrow_mut() = Some(Arc::new(gpu::Lighting {
+            fur: Some(fur),
+            ..(*lighting).clone()
+        }));
     }
 
     /// Translates every ready material's passes, again where the context's own limit changed how

@@ -1705,7 +1705,7 @@ impl App {
 
     fn draw_character(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
         if let Some(backend) = self.backend.clone() {
-            self.character.ui(ui, &backend);
+            self.character.ui(ui, &backend, &self.icon_manager);
         }
     }
 

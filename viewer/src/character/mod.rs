@@ -4,18 +4,25 @@
 //! `obj/hair` each hold a numbered set, and a set's `model` directory holds every piece of it. What
 //! a set is made of is read from that directory rather than from a list of suffixes, since a face is
 //! several models and which ones it carries is the file tree's to say.
+//!
+//! What each set is offered under comes from the creator's own menus, in [`menus`].
+
+mod menus;
 
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
 use anyhow::Result;
 use egui::{CentralPanel, Color32, RichText, ScrollArea, containers::panel::Panel};
+use ironworks::excel::Language;
 
 use crate::assets::viewers::{chara, mdl};
 use crate::backend::Backend;
+use crate::data::get_icon_path;
 use crate::data::listing::{Listed, Listing};
+use crate::excel::provider::ExcelProvider;
 use crate::settings::api_base;
-use crate::utils::{CollapsibleSidePanel, Side, TrackedPromise};
+use crate::utils::{CollapsibleSidePanel, IconManager, ManagedIcon, Side, TrackedPromise};
 
 /// The bodies a code's first pair can name, and the variants its second can. Every pairing is
 /// offered only where the listing holds a body model for it.
@@ -25,6 +32,9 @@ const VARIANTS: [u16; 2] = [1, 4];
 /// The one body set a character is built on. A code carries others, but they are the same shape
 /// wearing different equipment, which is [`super::assets`]' job rather than this one's.
 const BODY: u16 = 1;
+
+/// How big a set's icon is drawn.
+const ICON: f32 = 40.0;
 
 /// The files a character is worn out of, each with its bytes.
 type Worn = Vec<(String, Vec<u8>)>;
@@ -45,6 +55,9 @@ pub struct CharacterBuilder {
     hairs: Vec<Set>,
     face: u16,
     hair: u16,
+    /// The icon the creator offers each set under, once its menus have been read.
+    icons: menus::Icons,
+    reading: Option<TrackedPromise<Result<menus::Icons>>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<String>,
     fetching: Option<TrackedPromise<Result<Worn>>>,
@@ -61,6 +74,8 @@ impl Default for CharacterBuilder {
             hairs: Vec::new(),
             face: 1,
             hair: 1,
+            icons: menus::Icons::default(),
+            reading: None,
             worn: Vec::new(),
             fetching: None,
             model: None,
@@ -75,14 +90,16 @@ impl CharacterBuilder {
         self.bodies.clear();
         self.faces.clear();
         self.hairs.clear();
+        self.icons = menus::Icons::default();
+        self.reading = None;
         self.worn.clear();
         self.fetching = None;
         self.model = None;
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) {
+    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend, icons: &IconManager) {
         self.poll(ui.ctx(), backend);
-        self.side_panel(ui);
+        self.side_panel(ui, backend, icons);
         CentralPanel::default().show(ui, |ui| match &self.model {
             Some(Ok(model)) => mdl::ui(ui, model, backend),
             Some(Err(why)) => {
@@ -130,6 +147,20 @@ impl CharacterBuilder {
             self.hairs = sets(&listing, &self.code, "hair");
             self.face = pick(&self.faces, self.face);
             self.hair = pick(&self.hairs, self.hair);
+            let on_disk: Vec<u16> = self.hairs.iter().map(|set| set.id).collect();
+            let backend = backend.clone();
+            self.reading = Some(TrackedPromise::spawn_local(async move {
+                menus::read(&backend, &on_disk).await
+            }));
+        }
+        if matches!(&self.reading, Some(promise) if promise.try_get().is_some())
+            && let Some(promise) = self.reading.take()
+            && let Some(Ok(read)) = promise.try_get()
+        {
+            self.icons = menus::Icons {
+                faces: read.faces.clone(),
+                hairs: read.hairs.clone(),
+            };
         }
 
         let mut wanted = parts(&listing, &format!("{}/obj/body", root(self.code)), BODY);
@@ -166,7 +197,7 @@ impl CharacterBuilder {
         }
     }
 
-    fn side_panel(&mut self, ui: &mut egui::Ui) {
+    fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend, icons: &IconManager) {
         let picked = CollapsibleSidePanel::new("character_pick", Side::Left)
             .show(ui, |ui, is_open| {
                 let mut picked = None;
@@ -193,10 +224,14 @@ impl CharacterBuilder {
                     ui.label(RichText::new("Face").strong());
                     ui.horizontal_wrapped(|ui| {
                         for set in &self.faces {
-                            if ui
-                                .selectable_label(self.face == set.id, set.id.to_string())
-                                .clicked()
-                            {
+                            if chip(
+                                ui,
+                                backend,
+                                icons,
+                                set.id,
+                                self.face,
+                                self.icons.faces.get(&set.id),
+                            ) {
                                 picked = Some(Pick::Face(set.id));
                             }
                         }
@@ -205,10 +240,14 @@ impl CharacterBuilder {
                     ui.label(RichText::new("Hair").strong());
                     ui.horizontal_wrapped(|ui| {
                         for set in &self.hairs {
-                            if ui
-                                .selectable_label(self.hair == set.id, set.id.to_string())
-                                .clicked()
-                            {
+                            if chip(
+                                ui,
+                                backend,
+                                icons,
+                                set.id,
+                                self.hair,
+                                self.icons.hairs.get(&set.id),
+                            ) {
                                 picked = Some(Pick::Hair(set.id));
                             }
                         }
@@ -223,6 +262,7 @@ impl CharacterBuilder {
                 self.code = code;
                 self.faces.clear();
                 self.hairs.clear();
+                self.icons = menus::Icons::default();
             }
             Some(Pick::Face(face)) => self.face = face,
             Some(Pick::Hair(hair)) => self.hair = hair,
@@ -285,4 +325,39 @@ fn held(sets: &[Set], wanted: u16) -> Vec<String> {
         .find(|set| set.id == wanted)
         .map(|set| set.parts.clone())
         .unwrap_or_default()
+}
+
+/// One set to pick from: the icon the creator offers it under where there is one, and its number
+/// where there is not, since a set the menus do not list still has a model on disk.
+fn chip(
+    ui: &mut egui::Ui,
+    backend: &Backend,
+    icons: &IconManager,
+    id: u16,
+    current: u16,
+    icon: Option<&u32>,
+) -> bool {
+    let Some(icon) = icon else {
+        return ui.selectable_label(current == id, id.to_string()).clicked();
+    };
+    let path = get_icon_path(backend.icons(), *icon, false, Language::None);
+    let excel = backend.excel().clone();
+    let held = icons.get_or_insert_icon(&path, ui.ctx(), || {
+        let path = path.clone();
+        TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
+    });
+    match held {
+        ManagedIcon::Loaded(source) => ui
+            .add(
+                egui::Button::image(
+                    egui::Image::new(source)
+                        .maintain_aspect_ratio(true)
+                        .fit_to_exact_size(egui::Vec2::splat(ICON)),
+                )
+                .selected(current == id),
+            )
+            .on_hover_text(id.to_string())
+            .clicked(),
+        _ => ui.selectable_label(current == id, id.to_string()).clicked(),
+    }
 }

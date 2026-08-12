@@ -38,14 +38,17 @@ impl Listing {
         &self.presence
     }
 
-    /// Every path this version ships under a directory prefix, which the sorted directory table
-    /// makes a range rather than a sweep.
+    /// Every path this version ships in a directory or below it, which the sorted directory table
+    /// makes a range rather than a sweep. A directory is listed without a trailing slash, so the
+    /// one named by `prefix` itself has to be matched separately from the ones under it.
     pub fn under(&self, prefix: &str) -> Vec<String> {
         let dirs = self.paths.dirs();
-        let from = dirs.partition_point(|listed| &**listed < prefix);
+        let stem = prefix.strip_suffix('/').unwrap_or(prefix);
+        let below = format!("{stem}/");
+        let from = dirs.partition_point(|listed| &**listed < stem);
         let mut found = Vec::new();
         for (dir, path) in dirs.iter().enumerate().skip(from) {
-            if !path.starts_with(prefix) {
+            if &**path != stem && !path.starts_with(&below) {
                 break;
             }
             let (Ok(offset), Ok(names)) = (self.paths.name_offset(dir), self.paths.names(dir))

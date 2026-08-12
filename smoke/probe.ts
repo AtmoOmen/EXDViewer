@@ -145,14 +145,14 @@ async function main() {
 
     try {
         for (const [at, model] of models.entries()) {
-            const name = model.split("/").pop() ?? model;
+            const name = model.replace(/^\//, "").split("/").pop() ?? model;
             console.log(`\n== ${model}`);
             seen.clear();
-            await cdp.send("Page.navigate", { url: `${origin}/assets/${model}` });
+            await cdp.send("Page.navigate", { url: model.startsWith("/") ? `${origin}${model}` : `${origin}/assets/${model}` });
             await cdp.eval("localStorage.clear()").catch(() => {});
             await waitFor(`${name} to be titled`, 120_000, async () => {
                 const title = await cdp.eval<string>("document.title").catch(() => "");
-                return title.includes(name);
+                return title.toLowerCase().includes(name.toLowerCase());
             });
             await sleep(9000);
             const tag = `${String(at).padStart(2, "0")}-${name.replace(/\.mdl$/, "")}`;

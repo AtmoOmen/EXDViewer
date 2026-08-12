@@ -32,6 +32,12 @@ const VARIANTS: [u16; 2] = [1, 4];
 /// How big a set's icon is drawn.
 const ICON: f32 = 40.0;
 
+/// The equipment slots a body wears, as the file names abbreviate them.
+const SLOTS: [&str; 5] = ["met", "top", "glv", "dwn", "sho"];
+
+/// Smallclothes, which is what a character stands in before anything is put on it.
+const SMALLCLOTHES: u16 = 0;
+
 /// The files a character is worn out of, each with its bytes.
 type Worn = Vec<(String, Vec<u8>)>;
 
@@ -57,6 +63,7 @@ pub struct CharacterBuilder {
     hairs: Vec<Set>,
     face: u16,
     hair: u16,
+    dressed: bool,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<String>,
     fetching: Option<TrackedPromise<Result<Worn>>>,
@@ -78,6 +85,7 @@ impl Default for CharacterBuilder {
             hairs: Vec::new(),
             face: 1,
             hair: 1,
+            dressed: true,
             worn: Vec::new(),
             fetching: None,
             model: None,
@@ -171,6 +179,9 @@ impl CharacterBuilder {
         let mut wanted = body(&listing, self.code);
         wanted.extend(held(&self.faces, self.face));
         wanted.extend(held(&self.hairs, self.hair));
+        if self.dressed {
+            wanted.extend(worn(&listing, self.code, SMALLCLOTHES));
+        }
         if wanted != self.worn && !wanted.is_empty() {
             self.worn = wanted.clone();
             let files = backend.files().clone();
@@ -253,6 +264,10 @@ impl CharacterBuilder {
                         }
                     });
                     ui.add_space(8.0);
+                    if ui.selectable_label(self.dressed, "Smallclothes").clicked() {
+                        picked = Some(Pick::Dressed(!self.dressed));
+                    }
+                    ui.add_space(8.0);
                     ui.label(RichText::new("Face").strong());
                     ui.horizontal_wrapped(|ui| {
                         for set in &self.faces {
@@ -296,6 +311,7 @@ impl CharacterBuilder {
                 self.female = female;
                 self.faces.clear();
             }
+            Some(Pick::Dressed(dressed)) => self.dressed = dressed,
             Some(Pick::Face(face)) => self.face = face,
             Some(Pick::Hair(hair)) => self.hair = hair,
             None => {}
@@ -304,6 +320,7 @@ impl CharacterBuilder {
 }
 
 enum Pick {
+    Dressed(bool),
     Race(u32),
     Tribe(u32),
     Gender(bool),
@@ -367,6 +384,32 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
         .map(|id| Set {
             id,
             parts: parts(listing, &under, id),
+        })
+        .collect()
+}
+
+/// What a code wears out of one equipment set, by slot.
+///
+/// Not every body has a model of its own for a set: the ones that do not are drawn from the base
+/// body of their gender and deformed onto their own shape, which is what `.eqdp` states and
+/// `human.pbd` carries out. The fallback is taken here; the deformation is not, so a piece worn this
+/// way is the right garment on the wrong build.
+fn worn(listing: &Listing, code: u16, set: u16) -> Vec<String> {
+    let under = format!("chara/equipment/e{set:04}/model");
+    let held = listing.under(&format!("{under}/"));
+    let base = match code % 2 {
+        1 => 101,
+        _ => 201,
+    };
+    SLOTS
+        .iter()
+        .filter_map(|slot| {
+            let own = format!("{under}/c{code:04}e{set:04}_{slot}.mdl");
+            let shared = format!("{under}/c{base:04}e{set:04}_{slot}.mdl");
+            held.iter()
+                .find(|path| **path == own)
+                .or_else(|| held.iter().find(|path| **path == shared))
+                .cloned()
         })
         .collect()
 }

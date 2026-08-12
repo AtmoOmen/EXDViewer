@@ -22,6 +22,12 @@ const outDir = join(root, "smoke", flag("out", "probe"));
 const mark = flag("mark", "probe:");
 const channel = Number(flag("channel", "-1"));
 const toggle = Number(flag("toggle", "-1"));
+// Points to click after the channel, as x,y pairs. Anything outside the toolbar row -- a control in
+// a panel the row opens -- is only reachable this way.
+const points = flag("click", "")
+    .split(",")
+    .filter((one) => one !== "")
+    .map(Number);
 const zoom = Number(flag("zoom", "0"));
 const settle = Number(flag("settle", "8000"));
 const shaded = !argv.includes("--plain");
@@ -187,6 +193,10 @@ async function main() {
                 await sleep(2500);
             }
             if (toggle >= 0) await click(cdp, toggle, ROW_Y);
+            for (let at = 0; at + 1 < points.length; at += 2) {
+                await click(cdp, points[at], points[at + 1]);
+                await sleep(2500);
+            }
             await shot(cdp, `${tag}-${WIDTH}x${HEIGHT}`);
         }
     } finally {

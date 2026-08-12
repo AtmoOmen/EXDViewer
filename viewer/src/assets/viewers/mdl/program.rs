@@ -53,6 +53,30 @@ pub const TONE_ADJUST: &str = "shader/sm5/posteffect/ToneAdjust.shcd";
 pub const FXAA_LUMA: &str = "shader/sm5/posteffect/FXAALuma.shcd";
 pub const FXAA: &str = "shader/sm5/posteffect/FXAA.shcd";
 
+/// The two passes that stand between the G-buffer and the occlusion read off it: one linearizes the
+/// depth and brings the normal into view space, the other packs a square of four of those into the
+/// channels of one texel, which is the shape the occlusion pass addresses.
+pub const DOWN_SCALE: &str = "shader/sm5/posteffect/DownScaleDepthNormalZ.shcd";
+pub const GATHER: &str = "shader/sm5/posteffect/GatherDepthNormalZ.shcd";
+
+/// What each of those runs at, against the frame. The pass that fills the first is named for the
+/// scaling and gathers a square of the depth buffer per texel, so this is the factor that makes that
+/// gather the two-by-two it is written as.
+pub const OCCLUSION_SCALE: i32 = 2;
+
+/// The occlusion pass at each quality the game ships, and what each states: the four depth-only
+/// readings first, then the four that read the normal too, each set at the taps its own loop runs.
+pub const OCCLUDERS: [(&str, &str); 8] = [
+    ("shader/sm5/posteffect/SSAO1.shcd", "2 taps, depth"),
+    ("shader/sm5/posteffect/SSAO2.shcd", "6 taps, depth"),
+    ("shader/sm5/posteffect/SSAO3.shcd", "12 taps, depth"),
+    ("shader/sm5/posteffect/SSAO4.shcd", "20 taps, depth"),
+    ("shader/sm5/posteffect/SSAO5.shcd", "2 taps, depth and normal"),
+    ("shader/sm5/posteffect/SSAO6.shcd", "6 taps, depth and normal"),
+    ("shader/sm5/posteffect/SSAO7.shcd", "12 taps, depth and normal"),
+    ("shader/sm5/posteffect/SSAO8.shcd", "20 taps, depth and normal"),
+];
+
 /// The buffer it reads, and the frame and the table it reads them through.
 const TONE_MAP_PARAM: &str = "cToneMapParam";
 pub const POST_INPUT: &str = "sInput";
@@ -73,6 +97,14 @@ const TONE_MAP: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const VIEWPORT_PARAM: &str = "cDynamicViewportResolutionParam";
 const FXAA_PARAM: &str = "cFxaaParam";
 
+/// The buffers the occlusion chain reads. The first is what turns a depth buffer reading into the
+/// distance in front of the camera it stands for, and the second the rotation that brings a normal
+/// out of the world and into the camera's own space. The third is a bare `float4[3]` the reflection
+/// gives no member names and no defaults at all.
+const VIEW_DEPTH_FACTOR: &str = "cViewDepthFactor";
+const VIEW_ROTATION: &str = "cView";
+const HDAO_PARAM: &str = "cHDAOParam";
+
 /// The vertex shader the pass is drawn with. The game pairs these with a `VSSampling`, which reads a
 /// quad of positions and coordinates against a scale and a bias no file states; the screen triangle
 /// carries its own, and a frame a pass of this graph wrote is already the way round a sampler here
@@ -86,6 +118,28 @@ out vec2 TEXCOORD;
 
 void main() {
 \tTEXCOORD = a_position.xy * 0.5 + 0.5;
+\tgl_Position = a_position;
+}
+";
+
+/// The same for the gathering pass, which reads four texels of one square rather than one. The
+/// pixel's own texel goes last, since that is the lane the occlusion pass takes its centre from, and
+/// the other three run round the square so that a lane and the one two along from it stand either
+/// side of its middle. That pairing is what the occlusion pass mirrors its taps by.
+pub const GATHER_VERTEX: &str = "\
+#version 300 es
+
+layout(location = 0) in vec4 a_position;
+
+uniform vec2 u_texel;
+
+out vec4 TEXCOORD;
+out vec4 TEXCOORD1;
+
+void main() {
+\tvec2 uv = a_position.xy * 0.5 + 0.5;
+\tTEXCOORD = vec4(uv + vec2(0.0, u_texel.y), uv + u_texel);
+\tTEXCOORD1 = vec4(uv + vec2(u_texel.x, 0.0), uv);
 \tgl_Position = a_position;
 }
 ";
@@ -370,6 +424,15 @@ impl Default for Ambient {
     }
 }
 
+impl Scene {
+    /// The planes the projection was built with, which is the only scale the frame states: the
+    /// viewer cuts them to the model's own bounding sphere.
+    fn planes(&self) -> (f32, f32) {
+        let (z, w) = (self.projection.z_axis.z, self.projection.w_axis.z);
+        (w / z, w / (z + 1.0))
+    }
+}
+
 impl Ambient {
     /// The harmonics of one channel as the row a normal is dotted against, from the nine
     /// coefficients a file states. The file runs constant, `y`, `z`, `x`, and the row is dotted
@@ -397,15 +460,56 @@ pub struct Look {
     /// `fxaaQualityEdgeThreshold`, likewise. The threshold it is held against is the `0.0833` the
     /// shader carries as a literal, which is what identifies the pass as stock FXAA.
     pub edge: f32,
+    pub occlude: bool,
+    /// Which of [`OCCLUDERS`] runs.
+    pub quality: usize,
+    /// What the tap offsets the pass carries are scaled by, in texels of what it reads.
+    pub radius: f32,
+    /// How steeply a valley counts, as the fall in depth over the distance to it. The one lane of
+    /// the three below that is a ratio rather than a length.
+    pub accept: f32,
+    /// The fall past which two samples are no longer one surface, the distance under which
+    /// occlusion fades out, and the distance past which a pixel is left alone. The first two are
+    /// fractions of the depth the model itself spans, the last of the far plane: the frame is cut to
+    /// the model's own bounding sphere, so a length stated in the world would mean something
+    /// different for every file opened.
+    pub reject: f32,
+    pub fade: f32,
+    pub distance: f32,
+    /// How far along its own normal a sample is pushed before it is compared, likewise a fraction of
+    /// that span.
+    pub bias: f32,
+    pub intensity: f32,
+    /// The exponent the occlusion is raised to. The pass also multiplies by it a second time, which
+    /// is the file's own arithmetic and not a reading of it.
+    pub power: f32,
 }
 
+/// The occlusion values are a guess. Nothing states them: the buffer behind them reports no member
+/// names, no defaults, and no units.
 impl Default for Look {
     fn default() -> Self {
         Self {
             antialias: true,
             subpix: 0.75,
             edge: 0.166,
+            occlude: true,
+            quality: 6,
+            radius: 2.0,
+            accept: 150.0,
+            reject: 0.05,
+            fade: 0.02,
+            distance: 1.0,
+            bias: 0.02,
+            intensity: 3.0,
+            power: 1.0,
         }
+    }
+}
+
+impl Look {
+    pub fn occluder(&self) -> &'static str {
+        OCCLUDERS[self.quality.min(OCCLUDERS.len() - 1)].0
     }
 }
 
@@ -1111,6 +1215,52 @@ impl Buffer {
                 &mut out,
                 0,
                 &[1.0 / size.0, 1.0 / size.1, 1.0 - look.subpix, look.edge],
+            );
+            return out;
+        }
+        if self.name == VIEW_DEPTH_FACTOR {
+            // The reading and the distance are one over the other about the plane the projection
+            // states, so the pass is given that relation rather than the planes. The normal is left
+            // at the scale it arrived with: the occlusion pass has a bias of its own.
+            let (z, w) = (projection.z_axis.z, projection.w_axis.z);
+            write(&mut out, 0, &[z / w, 1.0 / w, 1.0, 0.0]);
+            return out;
+        }
+        if self.name == VIEW_ROTATION {
+            write(&mut out, 0, &rows(view, 3));
+            return out;
+        }
+        if self.name == HDAO_PARAM {
+            let look = scene.look;
+            let (near, far) = scene.planes();
+            let far = far.max(f32::EPSILON);
+            let span = (far - near).max(f32::EPSILON);
+            let scale = OCCLUSION_SCALE as f32;
+            let reach = look.distance * far;
+            write(
+                &mut out,
+                0,
+                &[
+                    look.radius,
+                    look.radius,
+                    scale / size.0,
+                    scale / size.1,
+                ],
+            );
+            write(
+                &mut out,
+                1,
+                &[
+                    look.accept,
+                    1.0 / (look.reject * span).max(f32::EPSILON),
+                    1.0 / (look.fade * far).max(f32::EPSILON),
+                    reach,
+                ],
+            );
+            write(
+                &mut out,
+                2,
+                &[reach, look.bias * span, look.intensity, look.power],
             );
             return out;
         }

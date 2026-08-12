@@ -31,6 +31,19 @@ const FINAL_COLOR: u32 = 0x8ea9_df48;
 /// What every member of the post chain calls the frame it reads.
 const INPUT: u32 = 0x527d_95a1;
 
+/// What the occlusion chain calls what it reads: the depth buffer and the G-buffer channel holding
+/// the normal, then what each of its passes leaves for the next.
+const DEPTH_PLANE: u32 = 0x70f6_bb1f;
+const NORMAL_PLANE: u32 = 0x4a6b_06c7;
+const DEPTH_NORMAL_Z: u32 = 0xe1fb_187c;
+const GATHER_DEPTH: u32 = 0x5ee7_1209;
+const GATHER_NORMAL_Z: u32 = 0x3d66_0475;
+
+/// The G-buffer channel holding the surface normal. In the world rather than in front of the
+/// camera: every pass that lights the frame brings it through the view matrix itself, and so does
+/// the one that scales it down here.
+const NORMAL_CHANNEL: usize = 0;
+
 /// The ramp a placed light's falloff is read off, indexed by the square of how far the pixel stands
 /// from it. The engine binds this rather than any material, and the flat stand-in leaves every light
 /// at full strength out to the edge of its own volume, which is a hard circle.
@@ -236,6 +249,13 @@ pub struct Smoothing {
     pub fxaa: std::sync::Arc<program::Program>,
 }
 
+/// The chain that works out how much of the sky reaches each pixel, in the order it runs.
+pub struct Occlusion {
+    pub scale: std::sync::Arc<program::Program>,
+    pub gather: std::sync::Arc<program::Program>,
+    pub occlude: std::sync::Arc<program::Program>,
+}
+
 /// A layered texture as the card takes one: its slices one after the next, in RGBA bytes.
 pub struct Layered {
     pub size: (i32, i32),
@@ -277,6 +297,15 @@ pub struct Buffers {
     /// its edges off. Filtered rather than point sampled, since that pass reads between texels along
     /// the edge it found.
     smoothed: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The occlusion chain's own buffers, at a fraction of the frame: the depth and normal it works
+    /// from, the square of four of each its taps address, and how much sky reached the pixel. That
+    /// last is filtered, since the lighting reads it back over the whole frame.
+    scaled: Option<(glow::Framebuffer, glow::Texture)>,
+    gathered: Option<(glow::Framebuffer, [glow::Texture; 2])>,
+    occluded: Option<(glow::Framebuffer, glow::Texture)>,
+    /// Whether that chain ran this frame. Every pass reads the flat stand-in until it has, and again
+    /// from the frame the viewer stops asking for it.
+    occluding: bool,
     size: (i32, i32),
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
@@ -502,6 +531,13 @@ impl Buffers {
             self.smoothed
                 .take()
                 .map(|(frame, held)| (frame, vec![held])),
+            self.scaled.take().map(|(frame, held)| (frame, vec![held])),
+            self.gathered
+                .take()
+                .map(|(frame, held)| (frame, held.to_vec())),
+            self.occluded
+                .take()
+                .map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()
@@ -585,8 +621,29 @@ impl Buffers {
             let smoothed = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
             smooth(gl, smoothed);
             self.smoothed = Some((frame_of(gl, &[smoothed], None)?, smoothed));
+
+            // Whole floats: the pass that fills the first of these answers with the distance in
+            // front of the camera, which it caps at a hundred thousand.
+            let held = self.fraction();
+            let scaled = plane(gl, held, glow::RG32F, glow::RG, glow::FLOAT)?;
+            self.scaled = Some((frame_of(gl, &[scaled], None)?, scaled));
+            let gathered = [
+                plane(gl, held, glow::RGBA32F, glow::RGBA, glow::FLOAT)?,
+                plane(gl, held, glow::RGBA32F, glow::RGBA, glow::FLOAT)?,
+            ];
+            self.gathered = Some((frame_of(gl, &gathered, None)?, gathered));
+            let occluded = plane(gl, held, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+            smooth(gl, occluded);
+            self.occluded = Some((frame_of(gl, &[occluded], None)?, occluded));
         }
         Ok(())
+    }
+
+    /// What the occlusion chain draws into, which is the frame taken down by the factor the pass
+    /// that fills it is named for.
+    fn fraction(&self) -> (i32, i32) {
+        let held = program::OCCLUSION_SCALE;
+        ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
     }
 
     /// Takes a copy of the resolved frame, which is what the passes drawn over it read. Bound as
@@ -696,6 +753,47 @@ impl Buffers {
         Ok(())
     }
 
+    /// How much of the sky reaches each pixel, worked out off the G-buffer before anything lights
+    /// it. Three passes at a fraction of the frame: the depth linearized and the normal brought in
+    /// front of the camera, a square of four of those packed into the channels of one texel, and the
+    /// taps that read them. What it leaves is what every lighting pass and the composite read back.
+    pub fn occlude(
+        &mut self,
+        gl: &glow::Context,
+        held: &Occlusion,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (scaled, _) = self.scaled.ok_or("no scaled depth")?;
+        let (gathered, _) = self.gathered.ok_or("no gathered depth")?;
+        let (occluded, _) = self.occluded.ok_or("no occlusion")?;
+        let size = self.fraction();
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+            // Both later passes discard where the pixel stands past the distance the settings state,
+            // and what a discard leaves behind is whatever the buffer last held.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(occluded));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.viewport(0, 0, size.0, size.1);
+            gl.clear_color(1.0, 1.0, 1.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        self.pass(gl, 8, &held.scale, (scaled, size), scene, Over::Screen)?;
+        self.pass(gl, 9, &held.gather, (gathered, size), scene, Over::Screen)?;
+        self.pass(gl, 10, &held.occlude, (occluded, size), scene, Over::Screen)?;
+        self.occluding = true;
+        Ok(())
+    }
+
+    /// Leaves every pass reading the flat stand-in again, which is what a frame nobody asked for
+    /// occlusion on is lit against.
+    pub fn unocclude(&mut self) {
+        self.occluding = false;
+    }
+
     /// The frame with its edges smoothed, which is the last thing the graph does to it.
     ///
     /// Two passes rather than one: the game works each pixel's brightness out in a pass of its own
@@ -717,8 +815,8 @@ impl Buffers {
             gl.depth_mask(false);
         }
         self.keep(gl)?;
-        self.pass(gl, 6, &held.luma, into, scene, Over::Screen)?;
-        self.pass(gl, 7, &held.fxaa, lit, scene, Over::Reading(smoothed))
+        self.pass(gl, 6, &held.luma, (into, self.size), scene, Over::Screen)?;
+        self.pass(gl, 7, &held.fxaa, (lit, self.size), scene, Over::Reading(smoothed))
     }
 
     /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
@@ -1048,11 +1146,20 @@ impl Buffers {
             return Ok(*held);
         }
         Ok(match id {
-            DEPTH => self.depth.ok_or("no depth buffer")?,
+            DEPTH | DEPTH_PLANE => self.depth.ok_or("no depth buffer")?,
+            NORMAL_PLANE => self
+                .color
+                .get(NORMAL_CHANNEL)
+                .copied()
+                .ok_or("the G-buffer has no normal channel")?,
             VIEW_POSITION => self.position.ok_or("no view position")?.1,
             LIGHT_DIFFUSE => self.light.ok_or("no light buffer")?.1[0],
             LIGHT_SPECULAR => self.light.ok_or("no light buffer")?.1[1],
             FINAL_COLOR | INPUT => self.resolved.ok_or("no resolved frame")?,
+            DEPTH_NORMAL_Z => self.scaled.ok_or("no scaled depth")?.1,
+            GATHER_DEPTH => self.gathered.ok_or("no gathered depth")?.1[0],
+            GATHER_NORMAL_Z => self.gathered.ok_or("no gathered depth")?.1[1],
+            OCCLUSION if self.occluding => self.occluded.ok_or("no occlusion")?.1,
             OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
             _ => self.stand_in(gl)?,
         })
@@ -1101,10 +1208,11 @@ impl Buffers {
         gl: &glow::Context,
         at: usize,
         held: &program::Program,
-        into: glow::Framebuffer,
+        into: (glow::Framebuffer, (i32, i32)),
         scene: &program::Scene,
         over: Over,
     ) -> Result<(), String> {
+        let (into, size) = into;
         let source = format!("{}\n{}", held.vertex, held.fragment);
         let program = match self.resolvers.get(&at) {
             Some(linked) if linked.source == source => linked.program,
@@ -1145,7 +1253,7 @@ impl Buffers {
                 .map(|slot| glow::COLOR_ATTACHMENT0 + slot as u32)
                 .collect();
             gl.draw_buffers(&written);
-            gl.viewport(0, 0, self.size.0, self.size.1);
+            gl.viewport(0, 0, size.0, size.1);
             gl.use_program(Some(program));
             gl.color_mask(true, true, true, true);
         }
@@ -1181,7 +1289,11 @@ impl Buffers {
         }
         unsafe {
             if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
-                gl.uniform_2_f32(Some(&location), self.size.0 as f32, self.size.1 as f32);
+                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
+            }
+            // What a pass reading a square of its own source steps between the corners of it.
+            if let Some(location) = gl.get_uniform_location(program, "u_texel") {
+                gl.uniform_2_f32(Some(&location), 1.0 / size.0 as f32, 1.0 / size.1 as f32);
             }
             gl.bind_vertex_array(Some(layout));
             match over {
@@ -1221,7 +1333,7 @@ impl Buffers {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         }
-        self.pass(gl, 0, &lighting.position, position, scene, Over::Screen)?;
+        self.pass(gl, 0, &lighting.position, (position, self.size), scene, Over::Screen)?;
         // A strand is softened where it stands rather than where it is lit, so this runs before any
         // light reads the channel. It walks its neighbours to answer for one pixel, which is why it
         // reads a copy of the channel and writes the channel itself, and it discards where the
@@ -1238,7 +1350,7 @@ impl Buffers {
                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             }
             let held = fur.clone();
-            self.pass(gl, 5, &held, into, scene, Over::Softening(softened))?;
+            self.pass(gl, 5, &held, (into, self.size), scene, Over::Softening(softened))?;
         }
 
         unsafe {
@@ -1249,7 +1361,7 @@ impl Buffers {
             gl.enable(glow::BLEND);
             gl.blend_func(glow::ONE, glow::ONE);
         }
-        self.pass(gl, 1, &lighting.directional, light, scene, Over::Screen)?;
+        self.pass(gl, 1, &lighting.directional, (light, self.size), scene, Over::Screen)?;
         // One face of the volume, not both. The pass adds what it computes to the buffer, so a box
         // shaded front and back would light every pixel it covers twice over. The far face is the
         // one kept, since it still covers the frame when the camera stands inside the light.
@@ -1271,13 +1383,13 @@ impl Buffers {
                 (program::LampKind::Spot, Some(spot)) => (3, spot),
                 _ => (2, &lighting.point),
             };
-            self.pass(gl, slot, program, light, &held, Over::Volume)?;
+            self.pass(gl, slot, program, (light, self.size), &held, Over::Volume)?;
         }
         unsafe {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         };
-        self.pass(gl, 4, &lighting.composite, lit, scene, Over::Screen)
+        self.pass(gl, 4, &lighting.composite, (lit, self.size), scene, Over::Screen)
     }
 }
 
@@ -1315,6 +1427,13 @@ impl Drop for Buffers {
             self.lit.take().map(|(frame, held)| (frame, vec![held])),
             self.fur.take().map(|(frame, held)| (frame, vec![held])),
             self.smoothed
+                .take()
+                .map(|(frame, held)| (frame, vec![held])),
+            self.scaled.take().map(|(frame, held)| (frame, vec![held])),
+            self.gathered
+                .take()
+                .map(|(frame, held)| (frame, held.to_vec())),
+            self.occluded
                 .take()
                 .map(|(frame, held)| (frame, vec![held])),
         ]

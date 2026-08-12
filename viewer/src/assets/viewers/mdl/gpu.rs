@@ -18,7 +18,7 @@ use super::grid::{Grid, Ground};
 use super::material::Family;
 use super::{Vertex, program};
 
-pub use super::deferred::{Dead, LIT, Lighting, Smoothing, bury, graveyard};
+pub use super::deferred::{Dead, LIT, Lighting, Occlusion, Smoothing, bury, graveyard};
 
 /// Attribute locations, in the order [`Vertex`] stores them.
 const ATTRIBUTES: [(u32, i32, i32); 4] = [(0, 3, 0), (1, 3, 12), (2, 4, 24), (3, 2, 56)];
@@ -160,6 +160,8 @@ pub struct Frame {
     /// The pair that smooths its edges, once both their shaders have arrived and the viewer asks
     /// for them.
     pub smoothing: Option<Arc<Smoothing>>,
+    /// The chain that works out how much sky reaches each pixel, on the same terms.
+    pub occlusion: Option<Arc<Occlusion>>,
     pub eye: [f32; 3],
     /// Key, fill and rim directions, in world space. Built once a frame from the camera, so a
     /// surface is lit by one set of lights rather than by a set of its own.
@@ -678,6 +680,12 @@ impl Game {
         // Only where the lit frame is what is being shown: a raw channel is a page of the G-buffer
         // and owes nothing to the passes past it.
         if let Some(lighting) = frame.lighting.as_ref().filter(|_| frame.target >= TARGETS) {
+            // Before anything reads it: every lighting pass and the composite take the occlusion as
+            // a weight on what they work out.
+            match frame.occlusion.as_ref() {
+                Some(held) => self.buffers.occlude(gl, held, &scene)?,
+                None => self.buffers.unocclude(),
+            }
             self.buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
             self.resolve(gl, painter, frame, meshes, &scene)?;

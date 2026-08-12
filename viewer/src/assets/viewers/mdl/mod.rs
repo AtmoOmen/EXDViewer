@@ -306,8 +306,10 @@ pub struct Rendered {
     /// The pass that grades the frame they resolve, and whether the table it reads has landed.
     post: RefCell<Option<Arc<program::Program>>>,
     graded: Cell<bool>,
-    /// The pair that smooths the graded frame's edges.
+    /// The pair that smooths the graded frame's edges, and the chain that occludes it. The second
+    /// is kept against the quality it was built at, since that decides which file it came from.
     smoothing: RefCell<Option<Arc<gpu::Smoothing>>>,
+    occlusion: RefCell<Option<(usize, Arc<gpu::Occlusion>)>>,
     /// What those passes are run with, and whether the settings row is open.
     look: Cell<program::Look>,
     settings: Cell<bool>,
@@ -359,6 +361,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         post: Default::default(),
         graded: Cell::new(false),
         smoothing: Default::default(),
+        occlusion: Default::default(),
         look: Cell::new(program::Look::default()),
         settings: Cell::new(false),
         tables: Default::default(),
@@ -995,27 +998,92 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     model.viewport(ui);
 }
 
-/// The constants the post chain is run with. Every one of these is a value the shaders read and no
-/// file states, so the numbers are the user's to move rather than the viewer's to settle.
+/// The constants the passes past the composite are run with. Every one of these is a value a shader
+/// reads and no file states, so the numbers are the user's to move rather than the viewer's to
+/// settle. The occlusion ones are a guess: that buffer reports no member names, no defaults and no
+/// units at all, and the lengths among them are taken as fractions of what the frame itself spans.
 fn settings(ui: &mut egui::Ui, model: &Rendered) {
     let mut look = model.look.get();
-    egui::Grid::new("mdl-look")
-        .num_columns(2)
-        .spacing([12.0, 4.0])
-        .show(ui, |ui| {
-            ui.checkbox(&mut look.antialias, "Antialias")
-                .on_hover_text("Smooth the frame's edges with the game's own FXAA");
-            ui.end_row();
-            ui.add_enabled_ui(look.antialias, |ui| {
-                ui.add(egui::Slider::new(&mut look.subpix, 0.0..=1.0).text("Subpixel"))
-                    .on_hover_text("FXAA's own subpixel aliasing removal, at its published default");
-            });
-            ui.add_enabled_ui(look.antialias, |ui| {
-                ui.add(egui::Slider::new(&mut look.edge, 0.03..=0.5).text("Edge"))
-                    .on_hover_text("How much local contrast counts as an edge, likewise");
-            });
-            ui.end_row();
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut look.antialias, "Antialias")
+            .on_hover_text("Smooth the frame's edges with the game's own FXAA");
+        ui.add_enabled_ui(look.antialias, |ui| {
+            ui.add(egui::Slider::new(&mut look.subpix, 0.0..=1.0).text("Subpixel"))
+                .on_hover_text("FXAA's own subpixel aliasing removal, at its published default");
+            ui.add(egui::Slider::new(&mut look.edge, 0.03..=0.5).text("Edge"))
+                .on_hover_text("How much local contrast counts as an edge, likewise");
         });
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut look.occlude, "Occlusion")
+            .on_hover_text("Shade the creases with the game's own HDAO");
+        ui.add_enabled_ui(look.occlude, |ui| {
+            egui::ComboBox::from_id_salt("mdl-occluder")
+                .selected_text(program::OCCLUDERS[look.quality].1)
+                .show_ui(ui, |ui| {
+                    for (at, (_, what)) in program::OCCLUDERS.iter().enumerate() {
+                        ui.selectable_value(&mut look.quality, at, *what);
+                    }
+                });
+        });
+    });
+    ui.add_enabled_ui(look.occlude, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for (value, range, name, what) in [
+                (
+                    &mut look.radius,
+                    0.25..=4.0,
+                    "Radius",
+                    "What the taps the pass carries are spread by",
+                ),
+                (
+                    &mut look.accept,
+                    1.0..=200.0,
+                    "Accept",
+                    "How steeply a valley has to fall to count, against the distance to it",
+                ),
+                (
+                    &mut look.reject,
+                    0.005..=0.5,
+                    "Reject",
+                    "The fall past which two samples are no longer one surface",
+                ),
+                (
+                    &mut look.bias,
+                    0.0..=0.2,
+                    "Normal bias",
+                    "How far along its own normal a sample is pushed before it is compared",
+                ),
+                (
+                    &mut look.fade,
+                    0.0..=0.5,
+                    "Near fade",
+                    "The distance under which occlusion fades out",
+                ),
+                (
+                    &mut look.distance,
+                    0.05..=1.0,
+                    "Distance",
+                    "The distance past which a pixel is left alone",
+                ),
+                (
+                    &mut look.intensity,
+                    0.0..=4.0,
+                    "Intensity",
+                    "What the taps add up to is scaled by",
+                ),
+                (
+                    &mut look.power,
+                    0.25..=3.0,
+                    "Power",
+                    "The exponent it is raised to, which the pass multiplies by a second time too",
+                ),
+            ] {
+                ui.add(egui::Slider::new(value, range).text(name))
+                    .on_hover_text(what);
+            }
+        });
+    });
     if look != model.look.get() {
         model.look.set(look);
     }
@@ -1137,6 +1205,22 @@ impl Rendered {
                         .get()
                         .antialias
                         .then_some([program::FXAA_LUMA, program::FXAA])
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_owned),
+                )
+                // Of the eight readings the quality ladder offers, only the one it is set to.
+                .chain(
+                    self.look
+                        .get()
+                        .occlude
+                        .then(|| {
+                            [
+                                program::DOWN_SCALE,
+                                program::GATHER,
+                                self.look.get().occluder(),
+                            ]
+                        })
                         .into_iter()
                         .flatten()
                         .map(str::to_owned),
@@ -1547,6 +1631,10 @@ impl Rendered {
                 true => self.smoothing(),
                 false => None,
             },
+            occlusion: match self.shaded.get() {
+                true => self.occlusion(),
+                false => None,
+            },
             eye: eye.to_array(),
             lights,
             surfaces,
@@ -1681,6 +1769,39 @@ impl Rendered {
         drop(packages);
         let built = Arc::new(built);
         *self.smoothing.borrow_mut() = Some(built.clone());
+        Some(built)
+    }
+
+    /// The chain that occludes the frame, translated once its three shaders have arrived. Rebuilt
+    /// where the quality changed, since that is a file of its own.
+    fn occlusion(&self) -> Option<Arc<gpu::Occlusion>> {
+        let look = self.look.get();
+        if !look.occlude {
+            return None;
+        }
+        if let Some((quality, held)) = self.occlusion.borrow().as_ref()
+            && *quality == look.quality
+        {
+            return Some(held.clone());
+        }
+        let packages = self.packages.borrow();
+        let held = |path: &str, vertex| {
+            let Some(Package::Ready(bytes)) = packages.get(path) else {
+                return None;
+            };
+            program::Program::posteffect(bytes, vertex)
+                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let built = gpu::Occlusion {
+            scale: held(program::DOWN_SCALE, program::POST_VERTEX)?,
+            gather: held(program::GATHER, program::GATHER_VERTEX)?,
+            occlude: held(look.occluder(), program::POST_VERTEX)?,
+        };
+        drop(packages);
+        let built = Arc::new(built);
+        *self.occlusion.borrow_mut() = Some((look.quality, built.clone()));
         Some(built)
     }
 

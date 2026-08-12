@@ -997,8 +997,8 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         {
             model.shaded.set(!shaded);
         }
-        match shaded && inspecting {
-            true => {
+        match shaded {
+            true if inspecting => {
                 for (at, name) in model.channels() {
                     if ui
                         .selectable_label(model.target.get() == at, name)
@@ -1008,7 +1008,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                     }
                 }
             }
-            false => {
+            false if inspecting => {
                 let debug = model.debug.get();
                 for (mode, label) in VIEWS {
                     if ui.selectable_label(debug == mode, label).clicked() {
@@ -1019,6 +1019,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                     }
                 }
             }
+            _ => {}
         }
         let level = model.level.borrow();
         if level.skinned {

@@ -151,6 +151,9 @@ struct Part {
 
 /// One mesh of the model, as far as the browser cares about it.
 struct Mesh {
+    /// Which of the level's pieces this came out of, since each carries its own `.imc` and so its
+    /// own attribute mask.
+    piece: usize,
     material: usize,
     vertices: usize,
     triangles: usize,
@@ -270,18 +273,61 @@ struct Level {
     skinned: bool,
     /// The bones each mesh's blend indices name, in the order they index them.
     bones: Vec<Vec<String>>,
-    /// How many attributes the file declares. An imc variant's mask means something over only
+    /// How many attributes each piece declares. An imc variant's mask means something over only
     /// this many of its bits; the rest are padding the format reserves rather than states.
-    attributes: usize,
+    attributes: Vec<usize>,
     gpu: Arc<Mutex<gpu::Model>>,
+}
+
+/// One file the level was built from. A character is worn out of several, and each carries its own
+/// `.imc`, so the variant a part's visibility is read from is the piece's rather than the level's.
+struct Piece {
+    path: String,
+    bytes: Vec<u8>,
+    /// The file's own `.imc`, once asked for.
+    imc: RefCell<Option<Imc>>,
+    /// Which of that imc's variants a part's default visibility is drawn from. Nought is the file's
+    /// own default entry.
+    variant: Cell<u16>,
+}
+
+impl Piece {
+    fn new(path: &str, bytes: &[u8]) -> Self {
+        Self {
+            path: path.to_owned(),
+            bytes: bytes.to_vec(),
+            imc: RefCell::new(None),
+            variant: Cell::new(0),
+        }
+    }
+
+    /// The picked variant's attribute mask, once the imc has arrived. `None` before it has, or where
+    /// it named nothing to read: a part with an attribute then draws exactly as one without.
+    fn mask(&self) -> Option<u32> {
+        let held = self.imc.borrow();
+        let Some(Imc::Ready(image_change)) = held.as_ref() else {
+            return None;
+        };
+        image_change
+            .entry(imc_part(&self.path), self.variant.get())
+            .map(|entry| u32::from(entry.attribute_mask()))
+    }
+
+    /// How many variants past the default the imc carries, once it has arrived.
+    fn variants(&self) -> Option<u16> {
+        match self.imc.borrow().as_ref() {
+            Some(Imc::Ready(image_change)) => Some(image_change.variant_count()),
+            _ => None,
+        }
+    }
 }
 
 /// A model, decoded and ready to draw. Everything a detail level owns is rebuilt when one is
 /// picked; the camera and the fetched materials and textures are not, so switching neither moves
 /// the view nor asks for anything twice.
 pub struct Rendered {
-    path: String,
-    bytes: Vec<u8>,
+    /// The files the level was merged from, in the order its meshes name them.
+    pieces: Vec<Piece>,
     lod: Cell<u8>,
     /// Which detail levels the file draws anything at.
     drawn: [bool; 3],
@@ -300,13 +346,8 @@ pub struct Rendered {
     parameters: RefCell<BTreeMap<usize, Parameters>>,
     /// The translated shaders, by material.
     translated: RefCell<BTreeMap<usize, Translated>>,
-    /// The model's own `.imc`, once asked for.
-    imc: RefCell<Option<Imc>>,
     /// The skeleton the model is skinned to, and the motion it is posed by.
     animation: skin::Animation,
-    /// Which of the imc's variants a part's default visibility is drawn from. Nought is the file's
-    /// own default entry.
-    variant: Cell<u16>,
     /// The passes that light the G-buffer, which belong to the frame rather than to a material.
     lighting: RefCell<Option<Arc<gpu::Lighting>>>,
     /// The pass that grades the frame they resolve, and whether the table it reads has landed.
@@ -339,11 +380,10 @@ pub struct Rendered {
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let container = ModelContainer::read(Cursor::new(bytes.to_vec()))?;
-    let level = read_level(path, &container, 0)?;
+    let level = read_level(&[(path, &container)], 0)?;
     let camera = level.home;
     Ok(Preview::Model(Box::new(Rendered {
-        path: path.to_owned(),
-        bytes: bytes.to_vec(),
+        pieces: vec![Piece::new(path, bytes)],
         lod: Cell::new(0),
         drawn: std::array::from_fn(|lod| {
             container
@@ -360,9 +400,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         arrays: Default::default(),
         parameters: Default::default(),
         translated: Default::default(),
-        imc: Default::default(),
         animation: skin::Animation::new(path),
-        variant: Cell::new(0),
         lighting: Default::default(),
         post: Default::default(),
         graded: Cell::new(false),
@@ -475,111 +513,128 @@ fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> 
     count >= 2
 }
 
-fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> {
-    let model = container.model(detail(lod));
-
+fn read_level(sources: &[(&str, &ModelContainer)], lod: u8) -> Result<Level> {
     let mut names: Vec<String> = Vec::new();
     let mut meshes = Vec::new();
     let mut unreadable = Vec::new();
     let mut pending = gpu::Pending::default();
     let mut low = Vec3::splat(f32::INFINITY);
     let mut high = Vec3::splat(f32::NEG_INFINITY);
-
-    let attributes = model.attribute_names().unwrap_or_default();
-    let bone_names = model.bone_names().unwrap_or_default();
     let mut bones: Vec<Vec<String>> = Vec::new();
-    let declared = model.shapes();
-    let mut rewrites: Vec<Rewrites> = declared.iter().map(|_| Vec::new()).collect();
-
+    let mut shapes: Vec<Shape> = Vec::new();
+    let mut declares: Vec<usize> = Vec::new();
     let mut skipped: Vec<MeshKind> = Vec::new();
     let mut skinned = false;
-    for (index, mesh) in model.meshes().into_iter().enumerate() {
-        if !mesh.kinds().contains(&MeshKind::Standard) {
-            for kind in mesh.kinds() {
-                if !skipped.contains(kind) {
-                    skipped.push(*kind);
+
+    for (piece, (_, container)) in sources.iter().enumerate() {
+        let model = container.model(detail(lod));
+
+        let attributes = model.attribute_names().unwrap_or_default();
+        let bone_names = model.bone_names().unwrap_or_default();
+        let declared = model.shapes();
+        let mut rewrites: Vec<Rewrites> = declared.iter().map(|_| Vec::new()).collect();
+        declares.push(attributes.len());
+
+        for (index, mesh) in model.meshes().into_iter().enumerate() {
+            if !mesh.kinds().contains(&MeshKind::Standard) {
+                for kind in mesh.kinds() {
+                    if !skipped.contains(kind) {
+                        skipped.push(*kind);
+                    }
                 }
-            }
-            continue;
-        }
-        let built = match (mesh.attributes(), mesh.indices()) {
-            (Ok(attributes), Ok(indices)) => {
-                skinned |= attributes.iter().any(|attribute| {
-                    attribute.kind as u8 == VertexAttributeKind::BlendIndices as u8
-                });
-                build(&attributes, indices)
-            }
-            (Err(why), _) | (_, Err(why)) => Err(why.to_string()),
-        };
-        let (vertices, indices) = match built {
-            Ok(built) => built,
-            Err(why) => {
-                unreadable.push((index, why));
                 continue;
             }
-        };
+            let built = match (mesh.attributes(), mesh.indices()) {
+                (Ok(attributes), Ok(indices)) => {
+                    skinned |= attributes.iter().any(|attribute| {
+                        attribute.kind as u8 == VertexAttributeKind::BlendIndices as u8
+                    });
+                    build(&attributes, indices)
+                }
+                (Err(why), _) | (_, Err(why)) => Err(why.to_string()),
+            };
+            let (vertices, indices) = match built {
+                Ok(built) => built,
+                Err(why) => {
+                    unreadable.push((index, why));
+                    continue;
+                }
+            };
 
-        for vertex in &vertices {
-            let position = Vec3::from_array(vertex.position);
-            low = low.min(position);
-            high = high.max(position);
-        }
-
-        let name = mesh.material().unwrap_or_default();
-        let resolved = material::path(&name).unwrap_or(name);
-        let material = names
-            .iter()
-            .position(|held| *held == resolved)
-            .unwrap_or_else(|| {
-                names.push(resolved);
-                names.len() - 1
-            });
-        let submeshes = mesh.submeshes();
-        let parts = match submeshes.is_empty() {
-            true => vec![Part {
-                range: 0..indices.len(),
-                shown: Cell::new(true),
-                attributes: String::new(),
-                mask: 0,
-            }],
-            false => submeshes
-                .iter()
-                .map(|part| Part {
-                    range: part.start..part.start + part.count,
-                    shown: Cell::new(true),
-                    attributes: named(&attributes, part.attributes),
-                    mask: part.attributes,
-                })
-                .collect(),
-        };
-        for (shape, touched) in declared.iter().zip(&mut rewrites) {
-            let values = shape.rewrites(&mesh);
-            if !values.is_empty() {
-                touched.push((meshes.len(), values));
+            for vertex in &vertices {
+                let position = Vec3::from_array(vertex.position);
+                low = low.min(position);
+                high = high.max(position);
             }
-        }
-        bones.push(
-            mesh.bone_table()
+
+            let name = mesh.material().unwrap_or_default();
+            let resolved = material::path(&name).unwrap_or(name);
+            let material = names
                 .iter()
-                .map(|bone| {
-                    bone_names
-                        .get(usize::from(*bone))
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect(),
+                .position(|held| *held == resolved)
+                .unwrap_or_else(|| {
+                    names.push(resolved);
+                    names.len() - 1
+                });
+            let submeshes = mesh.submeshes();
+            let parts = match submeshes.is_empty() {
+                true => vec![Part {
+                    range: 0..indices.len(),
+                    shown: Cell::new(true),
+                    attributes: String::new(),
+                    mask: 0,
+                }],
+                false => submeshes
+                    .iter()
+                    .map(|part| Part {
+                        range: part.start..part.start + part.count,
+                        shown: Cell::new(true),
+                        attributes: named(&attributes, part.attributes),
+                        mask: part.attributes,
+                    })
+                    .collect(),
+            };
+            for (shape, touched) in declared.iter().zip(&mut rewrites) {
+                let values = shape.rewrites(&mesh);
+                if !values.is_empty() {
+                    touched.push((meshes.len(), values));
+                }
+            }
+            bones.push(
+                mesh.bone_table()
+                    .iter()
+                    .map(|bone| {
+                        bone_names
+                            .get(usize::from(*bone))
+                            .cloned()
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+            );
+            meshes.push(Mesh {
+                piece,
+                material,
+                vertices: vertices.len(),
+                triangles: indices.len() / 3,
+                parts,
+                base: match declared.is_empty() {
+                    true => Vec::new(),
+                    false => indices.clone(),
+                },
+            });
+            pending.meshes.push((vertices, indices));
+        }
+
+        shapes.extend(
+            declared
+                .iter()
+                .zip(rewrites)
+                .filter(|(_, touched)| !touched.is_empty())
+                .map(|(shape, touched)| Shape {
+                    name: shape.name().unwrap_or_default(),
+                    rewrites: touched,
+                }),
         );
-        meshes.push(Mesh {
-            material,
-            vertices: vertices.len(),
-            triangles: indices.len() / 3,
-            parts,
-            base: match declared.is_empty() {
-                true => Vec::new(),
-                false => indices.clone(),
-            },
-        });
-        pending.meshes.push((vertices, indices));
     }
 
     // A model whose every mesh carries a kind nothing here draws still has materials, a tree and a
@@ -594,16 +649,6 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         low = Vec3::NEG_ONE;
         high = Vec3::ONE;
     }
-
-    let shapes = declared
-        .iter()
-        .zip(rewrites)
-        .filter(|(_, touched)| !touched.is_empty())
-        .map(|(shape, touched)| Shape {
-            name: shape.name().unwrap_or_default(),
-            rewrites: touched,
-        })
-        .collect::<Vec<_>>();
 
     let center = (low + high) * 0.5;
     let radius = ((high - low).length() * 0.5).max(0.01);
@@ -647,7 +692,12 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
     }
 
     log::info!(
-        "assets/mdl: {path} {} meshes, {vertices} vertices, {} materials, {} unreadable",
+        "assets/mdl: {} {} meshes, {vertices} vertices, {} materials, {} unreadable",
+        sources
+            .iter()
+            .map(|(path, _)| crate::utils::file_name(path))
+            .collect::<Vec<_>>()
+            .join(" + "),
         meshes.len(),
         names.len(),
         unreadable.len()
@@ -664,7 +714,7 @@ fn read_level(path: &str, container: &ModelContainer, lod: u8) -> Result<Level> 
         radius,
         skinned,
         bones,
-        attributes: attributes.len(),
+        attributes: declares,
         gpu: gpu::Model::new(pending),
     })
 }
@@ -1164,49 +1214,54 @@ impl Rendered {
             }
         }
 
-        let mut imc = self.imc.borrow_mut();
-        match &mut *imc {
-            None => {
-                *imc = Some(match imc_path(&self.path) {
-                    Some(path) => {
-                        let files = backend.files().clone();
-                        Imc::Fetching(TrackedPromise::spawn_local(async move {
-                            files.read(&path).await
-                        }))
-                    }
-                    None => Imc::Absent,
-                });
-            }
-            Some(Imc::Fetching(promise)) => {
-                if let Some(result) = promise.try_get() {
-                    let read = result
-                        .as_ref()
-                        .map_err(ToString::to_string)
-                        .and_then(|bytes| {
-                            ImageChange::read(Cursor::new(bytes.clone()))
-                                .map_err(|why| why.to_string())
-                        });
-                    *imc = Some(match read {
-                        Ok(image_change) => {
-                            if exclusive_variants(
-                                &image_change,
-                                imc_part(&self.path),
-                                level.attributes,
-                            ) {
-                                self.variant.set(1);
-                            }
-                            Imc::Ready(image_change)
+        let mut landed = false;
+        for (at, piece) in self.pieces.iter().enumerate() {
+            let mut imc = piece.imc.borrow_mut();
+            match &mut *imc {
+                None => {
+                    *imc = Some(match imc_path(&piece.path) {
+                        Some(path) => {
+                            let files = backend.files().clone();
+                            Imc::Fetching(TrackedPromise::spawn_local(async move {
+                                files.read(&path).await
+                            }))
                         }
-                        Err(why) => {
-                            log::warn!("assets/mdl: {}: {why}", self.path);
-                            Imc::Absent
-                        }
+                        None => Imc::Absent,
                     });
-                    drop(imc);
-                    self.apply_variant();
                 }
+                Some(Imc::Fetching(promise)) => {
+                    if let Some(result) = promise.try_get() {
+                        let read = result
+                            .as_ref()
+                            .map_err(ToString::to_string)
+                            .and_then(|bytes| {
+                                ImageChange::read(Cursor::new(bytes.clone()))
+                                    .map_err(|why| why.to_string())
+                            });
+                        *imc = Some(match read {
+                            Ok(image_change) => {
+                                if exclusive_variants(
+                                    &image_change,
+                                    imc_part(&piece.path),
+                                    level.attributes[at],
+                                ) {
+                                    piece.variant.set(1);
+                                }
+                                Imc::Ready(image_change)
+                            }
+                            Err(why) => {
+                                log::warn!("assets/mdl: {}: {why}", piece.path);
+                                Imc::Absent
+                            }
+                        });
+                        landed = true;
+                    }
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
+        }
+        if landed {
+            self.apply_variant();
         }
 
         if self.shaded.get() {
@@ -1975,35 +2030,18 @@ impl Rendered {
         }
     }
 
-    /// The picked variant's attribute mask, once the imc has arrived. `None` before it has, or where
-    /// it named nothing to read: a part with an attribute then draws exactly as one without.
-    fn variant_mask(&self) -> Option<u32> {
-        let held = self.imc.borrow();
-        let Some(Imc::Ready(image_change)) = held.as_ref() else {
-            return None;
-        };
-        image_change
-            .entry(imc_part(&self.path), self.variant.get())
-            .map(|entry| u32::from(entry.attribute_mask()))
-    }
-
-    /// How many variants past the default the imc carries, once it has arrived.
-    fn variant_count(&self) -> Option<u16> {
-        match self.imc.borrow().as_ref() {
-            Some(Imc::Ready(image_change)) => Some(image_change.variant_count()),
-            _ => None,
-        }
-    }
-
     /// Defaults every part's visibility from the picked variant's attribute mask. Cheap enough to
     /// call on every arrival and every pick: it only sets cells, never rebuilds the level.
     ///
     /// A part gated past the ten bits an imc entry carries is one the file cannot speak about, so it
     /// draws whatever the variant says: a model may declare far more attributes than that.
     fn apply_variant(&self) {
-        let mask = self.variant_mask();
+        let masks: Vec<Option<u32>> = self.pieces.iter().map(Piece::mask).collect();
         let level = self.level.borrow();
-        for part in level.meshes.iter().flat_map(|mesh| &mesh.parts) {
+        for (mask, part) in level.meshes.iter().flat_map(|mesh| {
+            let mask = masks[mesh.piece];
+            mesh.parts.iter().map(move |part| (mask, part))
+        }) {
             let gated = part.mask & IMC_ATTRIBUTES;
             part.shown
                 .set(mask.is_none_or(|mask| gated == 0 || gated & mask != 0));
@@ -2049,16 +2087,30 @@ impl Rendered {
         }
     }
 
-    /// Draws another detail level of the same file. The materials and textures already fetched are
+    /// Draws another detail level of the same files. The materials and textures already fetched are
     /// kept, matched to the new geometry by path, so nothing is asked for twice and nothing pops.
     fn switch(&self, lod: u8) {
-        let read = ModelContainer::read(Cursor::new(self.bytes.clone()))
-            .map_err(anyhow::Error::from)
-            .and_then(|container| read_level(&self.path, &container, lod));
+        let paths: Vec<&str> = self
+            .pieces
+            .iter()
+            .map(|piece| piece.path.as_str())
+            .collect();
+        let read = self
+            .pieces
+            .iter()
+            .map(|piece| Ok(ModelContainer::read(Cursor::new(piece.bytes.clone()))?))
+            .collect::<Result<Vec<_>>>()
+            .and_then(|containers| {
+                let sources: Vec<_> = paths.iter().copied().zip(&containers).collect();
+                read_level(&sources, lod)
+            });
         let level = match read {
             Ok(level) => level,
             Err(why) => {
-                log::error!("assets/mdl: {}: detail level {lod}: {why}", self.path);
+                log::error!(
+                    "assets/mdl: {}: detail level {lod}: {why}",
+                    paths.join(" + ")
+                );
                 return;
             }
         };
@@ -2169,16 +2221,24 @@ impl Rendered {
                 }
             }
 
-            if let Some(count) = self.variant_count().filter(|count| *count > 0) {
+            for (at, piece) in self.pieces.iter().enumerate() {
+                let Some(count) = piece.variants().filter(|count| *count > 0) else {
+                    continue;
+                };
                 ui.add_space(8.0);
                 section(ui, "Variant");
-                let current = self.variant.get();
+                if self.pieces.len() > 1 {
+                    ui.label(RichText::new(crate::utils::file_name(&piece.path)).weak());
+                }
+                let current = piece.variant.get();
                 ui.horizontal_wrapped(|ui| {
-                    for at in 0..=count {
-                        if ui.selectable_label(current == at, at.to_string()).clicked()
-                            && current != at
+                    for variant in 0..=count {
+                        if ui
+                            .selectable_label(current == variant, variant.to_string())
+                            .clicked()
+                            && current != variant
                         {
-                            picked_variant = Some(at);
+                            picked_variant = Some((at, variant));
                         }
                     }
                 });
@@ -2250,8 +2310,8 @@ impl Rendered {
                 }
             }
         }
-        if let Some(variant) = picked_variant {
-            self.variant.set(variant);
+        if let Some((piece, variant)) = picked_variant {
+            self.pieces[piece].variant.set(variant);
             self.apply_variant();
         }
         if let Some((group, variant)) = picked_shape {

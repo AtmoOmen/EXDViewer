@@ -1036,9 +1036,9 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
             .on_hover_text("Shade the creases with the game's own HDAO");
         ui.add_enabled_ui(look.occlude, |ui| {
             egui::ComboBox::from_id_salt("mdl-occluder")
-                .selected_text(program::OCCLUDERS[look.quality].1)
+                .selected_text(program::OCCLUDERS[look.quality])
                 .show_ui(ui, |ui| {
-                    for (at, (_, what)) in program::OCCLUDERS.iter().enumerate() {
+                    for (at, what) in program::OCCLUDERS.iter().enumerate() {
                         ui.selectable_value(&mut look.quality, at, *what);
                     }
                 });
@@ -1248,14 +1248,13 @@ impl Rendered {
                         .occlude
                         .then(|| {
                             [
-                                program::DOWN_SCALE,
-                                program::GATHER,
+                                program::DOWN_SCALE.to_owned(),
+                                program::GATHER.to_owned(),
                                 self.look.get().occluder(),
                             ]
                         })
                         .into_iter()
-                        .flatten()
-                        .map(str::to_owned),
+                        .flatten(),
                 );
             for path in wanted {
                 if packages.contains_key(&path) {
@@ -1830,7 +1829,7 @@ impl Rendered {
         let built = gpu::Occlusion {
             scale: held(program::DOWN_SCALE, program::POST_VERTEX)?,
             gather: held(program::GATHER, program::GATHER_VERTEX)?,
-            occlude: held(look.occluder(), program::POST_VERTEX)?,
+            occlude: held(&look.occluder(), program::POST_VERTEX)?,
         };
         drop(packages);
         let built = Arc::new(built);

@@ -64,17 +64,18 @@ pub const GATHER: &str = "shader/sm5/posteffect/GatherDepthNormalZ.shcd";
 /// gather the two-by-two it is written as.
 pub const OCCLUSION_SCALE: i32 = 2;
 
-/// The occlusion pass at each quality the game ships, and what each states: the four depth-only
-/// readings first, then the four that read the normal too, each set at the taps its own loop runs.
-pub const OCCLUDERS: [(&str, &str); 8] = [
-    ("shader/sm5/posteffect/SSAO1.shcd", "2 taps, depth"),
-    ("shader/sm5/posteffect/SSAO2.shcd", "6 taps, depth"),
-    ("shader/sm5/posteffect/SSAO3.shcd", "12 taps, depth"),
-    ("shader/sm5/posteffect/SSAO4.shcd", "20 taps, depth"),
-    ("shader/sm5/posteffect/SSAO5.shcd", "2 taps, depth and normal"),
-    ("shader/sm5/posteffect/SSAO6.shcd", "6 taps, depth and normal"),
-    ("shader/sm5/posteffect/SSAO7.shcd", "12 taps, depth and normal"),
-    ("shader/sm5/posteffect/SSAO8.shcd", "20 taps, depth and normal"),
+/// What the occlusion pass reads and over how many taps, at each quality the game ships. Its file
+/// is `SSAO` and the place in this list: the four depth-only readings first, then the four that read
+/// the normal too, each set running the same taps as the other.
+pub const OCCLUDERS: [&str; 8] = [
+    "2 taps, depth",
+    "6 taps, depth",
+    "12 taps, depth",
+    "20 taps, depth",
+    "2 taps, depth and normal",
+    "6 taps, depth and normal",
+    "12 taps, depth and normal",
+    "20 taps, depth and normal",
 ];
 
 /// The buffer it reads, and the frame and the table it reads them through.
@@ -123,7 +124,7 @@ void main() {
 ";
 
 /// The same for the gathering pass, which reads four texels of one square rather than one. The
-/// pixel's own texel goes last, since that is the lane the occlusion pass takes its centre from, and
+/// pixel's own texel goes last, since that is the lane the occlusion pass takes its center from, and
 /// the other three run round the square so that a lane and the one two along from it stand either
 /// side of its middle. That pairing is what the occlusion pass mirrors its taps by.
 pub const GATHER_VERTEX: &str = "\
@@ -512,8 +513,9 @@ impl Default for Look {
 }
 
 impl Look {
-    pub fn occluder(&self) -> &'static str {
-        OCCLUDERS[self.quality.min(OCCLUDERS.len() - 1)].0
+    pub fn occluder(&self) -> String {
+        let at = self.quality.min(OCCLUDERS.len() - 1) + 1;
+        format!("shader/sm5/posteffect/SSAO{at}.shcd")
     }
 }
 
@@ -1244,12 +1246,7 @@ impl Buffer {
             write(
                 &mut out,
                 0,
-                &[
-                    look.radius,
-                    look.radius,
-                    scale / size.0,
-                    scale / size.1,
-                ],
+                &[look.radius, look.radius, scale / size.0, scale / size.1],
             );
             write(
                 &mut out,

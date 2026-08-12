@@ -187,6 +187,9 @@ enum Over {
     /// A member of the post chain reading what the one before it wrote rather than the frame the
     /// composite resolved.
     Reading(glow::Texture),
+    /// A pass of the occlusion chain, which is drawn over a fraction of the frame rather than the
+    /// whole of it.
+    Fraction,
 }
 
 const PRESENT_VERTEX: &str = include_str!("present.vert");
@@ -781,9 +784,9 @@ impl Buffers {
             gl.clear_color(1.0, 1.0, 1.0, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
         }
-        self.pass(gl, 8, &held.scale, (scaled, size), scene, Over::Screen)?;
-        self.pass(gl, 9, &held.gather, (gathered, size), scene, Over::Screen)?;
-        self.pass(gl, 10, &held.occlude, (occluded, size), scene, Over::Screen)?;
+        self.pass(gl, 8, &held.scale, scaled, scene, Over::Fraction)?;
+        self.pass(gl, 9, &held.gather, gathered, scene, Over::Fraction)?;
+        self.pass(gl, 10, &held.occlude, occluded, scene, Over::Fraction)?;
         self.occluding = true;
         Ok(())
     }
@@ -815,8 +818,8 @@ impl Buffers {
             gl.depth_mask(false);
         }
         self.keep(gl)?;
-        self.pass(gl, 6, &held.luma, (into, self.size), scene, Over::Screen)?;
-        self.pass(gl, 7, &held.fxaa, (lit, self.size), scene, Over::Reading(smoothed))
+        self.pass(gl, 6, &held.luma, into, scene, Over::Screen)?;
+        self.pass(gl, 7, &held.fxaa, lit, scene, Over::Reading(smoothed))
     }
 
     /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
@@ -1208,11 +1211,14 @@ impl Buffers {
         gl: &glow::Context,
         at: usize,
         held: &program::Program,
-        into: (glow::Framebuffer, (i32, i32)),
+        into: glow::Framebuffer,
         scene: &program::Scene,
         over: Over,
     ) -> Result<(), String> {
-        let (into, size) = into;
+        let size = match over {
+            Over::Fraction => self.fraction(),
+            _ => self.size,
+        };
         let source = format!("{}\n{}", held.vertex, held.fragment);
         let program = match self.resolvers.get(&at) {
             Some(linked) if linked.source == source => linked.program,
@@ -1333,7 +1339,7 @@ impl Buffers {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         }
-        self.pass(gl, 0, &lighting.position, (position, self.size), scene, Over::Screen)?;
+        self.pass(gl, 0, &lighting.position, position, scene, Over::Screen)?;
         // A strand is softened where it stands rather than where it is lit, so this runs before any
         // light reads the channel. It walks its neighbours to answer for one pixel, which is why it
         // reads a copy of the channel and writes the channel itself, and it discards where the
@@ -1350,7 +1356,7 @@ impl Buffers {
                 gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             }
             let held = fur.clone();
-            self.pass(gl, 5, &held, (into, self.size), scene, Over::Softening(softened))?;
+            self.pass(gl, 5, &held, into, scene, Over::Softening(softened))?;
         }
 
         unsafe {
@@ -1361,7 +1367,7 @@ impl Buffers {
             gl.enable(glow::BLEND);
             gl.blend_func(glow::ONE, glow::ONE);
         }
-        self.pass(gl, 1, &lighting.directional, (light, self.size), scene, Over::Screen)?;
+        self.pass(gl, 1, &lighting.directional, light, scene, Over::Screen)?;
         // One face of the volume, not both. The pass adds what it computes to the buffer, so a box
         // shaded front and back would light every pixel it covers twice over. The far face is the
         // one kept, since it still covers the frame when the camera stands inside the light.
@@ -1383,13 +1389,13 @@ impl Buffers {
                 (program::LampKind::Spot, Some(spot)) => (3, spot),
                 _ => (2, &lighting.point),
             };
-            self.pass(gl, slot, program, (light, self.size), &held, Over::Volume)?;
+            self.pass(gl, slot, program, light, &held, Over::Volume)?;
         }
         unsafe {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         };
-        self.pass(gl, 4, &lighting.composite, (lit, self.size), scene, Over::Screen)
+        self.pass(gl, 4, &lighting.composite, lit, scene, Over::Screen)
     }
 }
 
@@ -1515,7 +1521,7 @@ pub fn point(gl: &glow::Context) {
     }
 }
 
-/// The exception: the one buffer a pass reads between texels rather than at their centres.
+/// The exception: the one buffer a pass reads between texels rather than at their centers.
 fn smooth(gl: &glow::Context, texture: glow::Texture) {
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));

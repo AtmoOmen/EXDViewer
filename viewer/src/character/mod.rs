@@ -16,12 +16,12 @@ use anyhow::Result;
 use egui::{CentralPanel, Color32, RichText, ScrollArea, containers::panel::Panel};
 use ironworks::excel::Language;
 
-use crate::assets::viewers::{chara, mdl};
+use crate::assets::viewers::mdl;
 use crate::backend::Backend;
 use crate::data::get_icon_path;
 use crate::data::listing::{Listed, Listing};
 use crate::excel::provider::ExcelProvider;
-use crate::settings::api_base;
+use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{CollapsibleSidePanel, IconManager, ManagedIcon, Side, TrackedPromise};
 
 /// The bodies a code's first pair can name, and the variants its second can. Every pairing is
@@ -44,16 +44,19 @@ struct Set {
 pub struct CharacterBuilder {
     listing: Option<Rc<Listing>>,
     /// Codes the install ships a body for, in order.
-    bodies: Vec<u16>,
+    codes: Vec<u16>,
+    /// What the creator offers, and which of its races, clans and genders is being built.
+    creator: menus::Creator,
+    reading: Option<TrackedPromise<Result<menus::Creator>>>,
+    race: u32,
+    tribe: u32,
+    female: bool,
+    /// The code the picked clan and gender resolve to, and the sets it carries.
     code: u16,
-    /// The face and hair sets the picked code carries.
     faces: Vec<Set>,
     hairs: Vec<Set>,
     face: u16,
     hair: u16,
-    /// The icon the creator offers each set under, once its menus have been read.
-    icons: menus::Icons,
-    reading: Option<TrackedPromise<Result<menus::Icons>>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<String>,
     fetching: Option<TrackedPromise<Result<Worn>>>,
@@ -64,14 +67,17 @@ impl Default for CharacterBuilder {
     fn default() -> Self {
         Self {
             listing: None,
-            bodies: Vec::new(),
+            codes: Vec::new(),
+            creator: menus::Creator::default(),
+            reading: None,
+            race: 1,
+            tribe: 1,
+            female: false,
             code: 101,
             faces: Vec::new(),
             hairs: Vec::new(),
             face: 1,
             hair: 1,
-            icons: menus::Icons::default(),
-            reading: None,
             worn: Vec::new(),
             fetching: None,
             model: None,
@@ -83,11 +89,11 @@ impl CharacterBuilder {
     /// Drop everything that came from the install, so a reconnect reads it all again.
     pub fn reset(&mut self) {
         self.listing = None;
-        self.bodies.clear();
+        self.codes.clear();
+        self.creator = menus::Creator::default();
+        self.reading = None;
         self.faces.clear();
         self.hairs.clear();
-        self.icons = menus::Icons::default();
-        self.reading = None;
         self.worn.clear();
         self.fetching = None;
         self.model = None;
@@ -125,36 +131,41 @@ impl CharacterBuilder {
         let Some(listing) = self.listing.clone() else {
             return;
         };
-        if self.bodies.is_empty() {
-            self.bodies = BODIES
+        if self.codes.is_empty() {
+            self.codes = BODIES
                 .flat_map(|body| VARIANTS.map(|variant| body * 100 + variant))
                 .filter(|code| !body(&listing, *code).is_empty())
                 .collect();
-            if !self.bodies.contains(&self.code)
-                && let Some(first) = self.bodies.first()
-            {
-                self.code = *first;
-            }
-        }
-        if self.faces.is_empty() {
-            self.faces = sets(&listing, &self.code, "face");
-            self.hairs = sets(&listing, &self.code, "hair");
-            self.face = pick(&self.faces, self.face);
-            self.hair = pick(&self.hairs, self.hair);
-            let on_disk: Vec<u16> = self.hairs.iter().map(|set| set.id).collect();
             let backend = backend.clone();
+            let language = LANGUAGE.get(ctx);
             self.reading = Some(TrackedPromise::spawn_local(async move {
-                menus::read(&backend, &on_disk).await
+                menus::read(&backend, language).await
             }));
         }
         if matches!(&self.reading, Some(promise) if promise.try_get().is_some())
             && let Some(promise) = self.reading.take()
             && let Some(Ok(read)) = promise.try_get()
         {
-            self.icons = menus::Icons {
-                faces: read.faces.clone(),
-                hairs: read.hairs.clone(),
+            self.creator = menus::Creator {
+                bodies: read.bodies.clone(),
+                races: read.races.clone(),
+                tribes: read.tribes.clone(),
             };
+            self.faces.clear();
+        }
+
+        if self.faces.is_empty() {
+            self.code = resolve(
+                &listing,
+                &self.codes,
+                &self.creator,
+                self.tribe,
+                self.female,
+            );
+            self.faces = sets(&listing, &self.code, "face");
+            self.hairs = sets(&listing, &self.code, "hair");
+            self.face = pick(&self.faces, self.face);
+            self.hair = pick(&self.hairs, self.hair);
         }
 
         let mut wanted = body(&listing, self.code);
@@ -207,25 +218,46 @@ impl CharacterBuilder {
                     ui.add_space(4.0);
                 });
                 ScrollArea::vertical().show(ui, |ui| {
-                    ui.label(RichText::new("Body").strong());
-                    for code in &self.bodies {
-                        let name = chara::name(*code).unwrap_or_else(|| code.to_string());
-                        if ui.selectable_label(self.code == *code, name).clicked() {
-                            picked = Some(Pick::Code(*code));
+                    let held = self.creator.body(self.tribe, self.female);
+                    ui.label(RichText::new("Race").strong());
+                    for race in self.creator.races.keys() {
+                        if !self.creator.bodies.iter().any(|body| body.race == *race) {
+                            continue;
+                        }
+                        let name = menus::Creator::named(&self.creator.races, *race, self.female);
+                        if ui.selectable_label(self.race == *race, name).clicked() {
+                            picked = Some(Pick::Race(*race));
                         }
                     }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Clan").strong());
+                    for body in &self.creator.bodies {
+                        if body.race != self.race || body.female != self.female {
+                            continue;
+                        }
+                        let name =
+                            menus::Creator::named(&self.creator.tribes, body.tribe, self.female);
+                        if ui
+                            .selectable_label(self.tribe == body.tribe, name)
+                            .clicked()
+                        {
+                            picked = Some(Pick::Tribe(body.tribe));
+                        }
+                    }
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        for (female, name) in [(false, "Male"), (true, "Female")] {
+                            if ui.selectable_label(self.female == female, name).clicked() {
+                                picked = Some(Pick::Gender(female));
+                            }
+                        }
+                    });
                     ui.add_space(8.0);
                     ui.label(RichText::new("Face").strong());
                     ui.horizontal_wrapped(|ui| {
                         for set in &self.faces {
-                            if chip(
-                                ui,
-                                backend,
-                                icons,
-                                set.id,
-                                self.face,
-                                self.icons.faces.get(&set.id),
-                            ) {
+                            let icon = held.and_then(|body| body.faces.get(&set.id));
+                            if chip(ui, backend, icons, set.id, self.face, icon) {
                                 picked = Some(Pick::Face(set.id));
                             }
                         }
@@ -234,14 +266,8 @@ impl CharacterBuilder {
                     ui.label(RichText::new("Hair").strong());
                     ui.horizontal_wrapped(|ui| {
                         for set in &self.hairs {
-                            if chip(
-                                ui,
-                                backend,
-                                icons,
-                                set.id,
-                                self.hair,
-                                self.icons.hairs.get(&set.id),
-                            ) {
+                            let icon = held.and_then(|body| body.hairs.get(&set.id));
+                            if chip(ui, backend, icons, set.id, self.hair, icon) {
                                 picked = Some(Pick::Hair(set.id));
                             }
                         }
@@ -250,13 +276,25 @@ impl CharacterBuilder {
                 picked
             })
             .and_then(|panel| panel.inner);
+        // A body's faces and hair are its own, so clearing them is what reads them again.
         match picked {
-            // A body's faces and hair are its own, so both lists are read again for the new one.
-            Some(Pick::Code(code)) => {
-                self.code = code;
+            Some(Pick::Race(race)) => {
+                self.race = race;
+                self.tribe = self
+                    .creator
+                    .bodies
+                    .iter()
+                    .find(|body| body.race == race)
+                    .map_or(self.tribe, |body| body.tribe);
                 self.faces.clear();
-                self.hairs.clear();
-                self.icons = menus::Icons::default();
+            }
+            Some(Pick::Tribe(tribe)) => {
+                self.tribe = tribe;
+                self.faces.clear();
+            }
+            Some(Pick::Gender(female)) => {
+                self.female = female;
+                self.faces.clear();
             }
             Some(Pick::Face(face)) => self.face = face,
             Some(Pick::Hair(hair)) => self.hair = hair,
@@ -266,9 +304,36 @@ impl CharacterBuilder {
 }
 
 enum Pick {
-    Code(u16),
+    Race(u32),
+    Tribe(u32),
+    Gender(bool),
     Face(u16),
     Hair(u16),
+}
+
+/// The model code a clan and gender are built on. A code does not name a clan, and two clans share
+/// one, so it is found by which of them ships the hair the creator offers for that clan rather than
+/// by a table pairing them up.
+fn resolve(
+    listing: &Listing,
+    codes: &[u16],
+    creator: &menus::Creator,
+    tribe: u32,
+    female: bool,
+) -> u16 {
+    let Some(body) = creator.body(tribe, female) else {
+        return *codes.first().unwrap_or(&101);
+    };
+    codes
+        .iter()
+        .max_by_key(|code| {
+            sets(listing, code, "hair")
+                .iter()
+                .filter(|set| body.hairs.contains_key(&set.id))
+                .count()
+        })
+        .copied()
+        .unwrap_or(101)
 }
 
 fn root(code: u16) -> String {

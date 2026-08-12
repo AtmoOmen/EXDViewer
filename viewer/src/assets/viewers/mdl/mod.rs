@@ -363,6 +363,8 @@ pub struct Rendered {
     /// The color table in the game's own layout, by material.
     tables: RefCell<BTreeMap<usize, Table>>,
     camera: Cell<Camera>,
+    /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
+    chrome: Cell<Chrome>,
     /// Whether the rig it is posed on is drawn over it, and the boxes that is drawn as.
     skeleton: Cell<bool>,
     overlay: Arc<Mutex<placed::Placements>>,
@@ -379,14 +381,16 @@ pub struct Rendered {
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
-    Ok(Preview::Model(Box::new(compose(&[(
-        path.to_owned(),
-        bytes.to_vec(),
-    )])?)))
+    let model = compose(&[(path.to_owned(), bytes.to_vec())])?;
+    model.chrome.set(Chrome::Asset);
+    model.shaded.set(false);
+    model.animation.rest();
+    Ok(Preview::Model(Box::new(model)))
 }
 
 /// Builds one model out of several files, which is how a character is worn. The first is what the
-/// rest hang off: its path is what names the skeleton they are all posed on.
+/// rest hang off: its path is what names the skeleton they are all posed on. A character is drawn
+/// the way the game draws it, standing in its idle rather than in the pose its files hold.
 pub fn compose(parts: &[(String, Vec<u8>)]) -> Result<Rendered> {
     let (first, _) = parts.first().context("a model of no files")?;
     let containers = parts
@@ -433,12 +437,13 @@ pub fn compose(parts: &[(String, Vec<u8>)]) -> Result<Rendered> {
         settings: Cell::new(false),
         tables: Default::default(),
         camera: Cell::new(camera),
+        chrome: Cell::new(Chrome::Character),
         skeleton: Cell::new(false),
         overlay: placed::Placements::new(Vec::new()),
         grid: Cell::new(true),
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
-        shaded: Cell::new(false),
+        shaded: Cell::new(true),
         target: Cell::new(gpu::LIT),
     })
 }
@@ -958,6 +963,13 @@ fn shown(parts: &[Part]) -> Vec<Range<i32>> {
     runs
 }
 
+/// What the viewer is for: taking a file apart, or standing a character up the way the game does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Chrome {
+    Asset,
+    Character,
+}
+
 /// What the debug row offers, in the order it offers it.
 const VIEWS: [(gpu::Debug, &str); 9] = [
     (gpu::Debug::Normals, "Normals"),
@@ -973,15 +985,19 @@ const VIEWS: [(gpu::Debug, &str); 9] = [
 
 pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     ui.horizontal_wrapped(|ui| {
+        // A character is shown as the game draws it, so the row that takes it apart is not offered:
+        // the shaders are already on and there is nothing to switch them to.
+        let inspecting = model.chrome.get() == Chrome::Asset;
         let shaded = model.shaded.get();
-        if ui
-            .selectable_label(shaded, "Game shaders")
-            .on_hover_text("Draw with the package the material names, into its own G-buffer")
-            .clicked()
+        if inspecting
+            && ui
+                .selectable_label(shaded, "Game shaders")
+                .on_hover_text("Draw with the package the material names, into its own G-buffer")
+                .clicked()
         {
             model.shaded.set(!shaded);
         }
-        match shaded {
+        match shaded && inspecting {
             true => {
                 for (at, name) in model.channels() {
                     if ui

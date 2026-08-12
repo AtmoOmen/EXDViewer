@@ -202,7 +202,8 @@ pub struct Animation {
     /// The pack to play, as the user has it.
     wanted: RefCell<String>,
     pack: RefCell<Option<Fetch<Motions>>>,
-    /// Which motion is playing, indexing [`Motions::named`]. None stands the model at rest.
+    /// Which motion is playing, indexing [`Motions::named`]. None stands the model at rest, which
+    /// is what a file being inspected shows; a character stands in its idle instead.
     motion: Cell<Option<usize>>,
     /// How far into it, in seconds.
     time: Cell<f32>,
@@ -220,7 +221,7 @@ impl Animation {
             filter: RefCell::new(String::new()),
             wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
             pack: RefCell::new(None),
-            motion: Cell::new(None),
+            motion: Cell::new(Some(0)),
             time: Cell::new(0.0),
             running: Cell::new(false),
         }
@@ -267,6 +268,11 @@ impl Animation {
         if !wanted.is_empty() {
             Fetch::poll(&mut self.pack.borrow_mut(), backend, &wanted, Motions::read);
         }
+    }
+
+    /// Stands it where its own file put it, which is what a file being inspected should show.
+    pub fn rest(&self) {
+        self.motion.set(None);
     }
 
     /// Plays `path` from its first motion, since a pack picked by hand was picked to be watched.

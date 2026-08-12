@@ -132,8 +132,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
             female: gender != 0,
             faces: params(&row, FACE)
                 .iter()
-                .enumerate()
-                .map(|(at, icon)| (at as u16 + 1, *icon as u32))
+                .filter_map(|icon| Some((face(*icon)?, *icon as u32)))
                 .collect(),
             hairs: params(&row, HAIR)
                 .iter()
@@ -231,6 +230,17 @@ async fn names(
         }
     }
     Ok(named)
+}
+
+/// Which face an icon is offered for, which is the last two digits of the icon's own number rather
+/// than where it sits in the menu. Hrothgar are what tells the two apart: both of theirs offer four
+/// faces numbered 5 to 8, so reading them off their positions would draw four other faces entirely,
+/// and one of the two codes ships no lower face at all.
+fn face(icon: i32) -> Option<u16> {
+    match icon % 100 {
+        0 => None,
+        id => Some(id as u16),
+    }
 }
 
 /// The choices the menu driving one customisation offers, as the row states them.

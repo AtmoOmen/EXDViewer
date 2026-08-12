@@ -260,6 +260,7 @@ pub struct Occlusion {
 }
 
 /// A layered texture as the card takes one: its slices one after the next, in RGBA bytes.
+#[derive(Clone)]
 pub struct Layered {
     pub size: (i32, i32),
     pub layers: i32,

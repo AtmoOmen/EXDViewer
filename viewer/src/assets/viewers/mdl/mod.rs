@@ -206,11 +206,12 @@ enum Package {
     Failed(String),
 }
 
-/// One of the game's own texture arrays. Nothing is kept once it has been handed over: the card
-/// holds it from there, and a second model asks for it again rather than through this.
+/// One of the game's own texture arrays. Kept once decoded, since a level built later has a context
+/// of its own to hand it to and asking for it again would be a fetch the user watches land.
 enum Array {
     Fetching(TrackedPromise<Result<Vec<u8>>>),
-    Done,
+    Ready(deferred::Layered),
+    Failed,
 }
 
 /// One of the game's own shader parameter files. Kept once parsed, since the table every file writes
@@ -1422,19 +1423,22 @@ impl Rendered {
                 let Some(result) = promise.try_get() else {
                     continue;
                 };
-                match result
+                *held = match result
                     .as_ref()
                     .map_err(ToString::to_string)
                     .and_then(|bytes| layered(bytes, path, filter).map_err(|why| why.to_string()))
                 {
                     Ok(decoded) => {
-                        level.gpu.lock().unwrap().queue_array(id, decoded);
+                        level.gpu.lock().unwrap().queue_array(id, decoded.clone());
                         self.graded
                             .set(self.graded.get() || id == deferred::GRADING.0);
+                        Array::Ready(decoded)
                     }
-                    Err(why) => log::error!("assets/mdl: {path}: {why}"),
-                }
-                *held = Array::Done;
+                    Err(why) => {
+                        log::error!("assets/mdl: {path}: {why}");
+                        Array::Failed
+                    }
+                };
             }
 
             let mut parameters = self.parameters.borrow_mut();
@@ -2241,9 +2245,15 @@ impl Rendered {
                 level.gpu.lock().unwrap().queue_table(index, table.to_vec());
             }
         }
-        // Nor the shader type table, and the files it is built from have already arrived.
+        // Nor the shader type table, nor the engine's own texture arrays, and the files all of
+        // them are built from have already arrived.
         if let Some(values) = types(&self.parameters.borrow()) {
             level.gpu.lock().unwrap().queue_types(values);
+        }
+        for (id, bytes) in self.arrays.borrow().iter() {
+            if let Array::Ready(bytes) = bytes {
+                level.gpu.lock().unwrap().queue_array(*id, bytes.clone());
+            }
         }
 
         drop((slots, translated, tables));

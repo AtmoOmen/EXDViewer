@@ -776,11 +776,17 @@ impl Buffers {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
             gl.depth_mask(false);
-            // Both later passes discard where the pixel stands past the distance the settings state,
-            // and what a discard leaves behind is whatever the buffer last held.
+            gl.viewport(0, 0, size.0, size.1);
+            // The last two passes discard where the pixel stands past the distance the settings
+            // state, and what a discard leaves behind is whatever the buffer last held. A gathered
+            // depth of nought stands further from its neighbour than any setting accepts, so a tap
+            // that reaches one of these is thrown out rather than read as a valley.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(gathered));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(occluded));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            gl.viewport(0, 0, size.0, size.1);
             gl.clear_color(1.0, 1.0, 1.0, 0.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
         }

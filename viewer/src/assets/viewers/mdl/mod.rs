@@ -1127,7 +1127,7 @@ impl Rendered {
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
         let level = self.level.borrow();
         if level.skinned {
-            self.animation.poll(backend);
+            self.animation.poll(ui.ctx(), backend);
         }
         let mut slots = self.slots.borrow_mut();
         for (index, slot) in slots.iter_mut().enumerate() {

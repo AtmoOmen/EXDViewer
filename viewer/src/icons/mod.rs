@@ -9,18 +9,17 @@ use egui::{
 };
 use ironworks::excel::Language;
 use itertools::Itertools;
-use pathlist::{PathList, Presence};
 
 use crate::{
     backend::Backend,
-    data::{IconIndex, get_icon_path},
+    data::{IconIndex, get_icon_path, listing::Listed},
     excel::provider::ExcelProvider,
     github::GithubApi,
     goto::{ListNav, Palette, SUGGESTIONS},
     settings::{ALWAYS_HIRES, LANGUAGE, api_base},
     utils::{
         CollapsibleSidePanel, IconManager, ManagedIcon, PromiseKind, Side, TrackedPromise,
-        icon_modal, yield_to_ui,
+        icon_modal,
     },
 };
 
@@ -199,32 +198,21 @@ impl IconBrowser {
     }
 
     fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
-        // The assets tab cuts the same index from the same fetch, but only once it has been opened.
-        // Without this the tab shows nothing until the user has been there.
+        // The assets tab cuts the same subset out of the same listing, but only once it has been
+        // opened. Without this the tab shows nothing until the user has been there.
         if matches!(self.index, Load::Idle) {
             if backend.icons().is_some() {
                 self.index = Load::Ready(());
             } else {
-                let files = backend.files().clone();
-                let api = api_base(ctx);
-                let backend = backend.clone();
-                self.index = Load::Loading(TrackedPromise::spawn_local(async move {
-                    let (paths, presence) = files.path_index(&api).await?;
-                    yield_to_ui().await;
-                    let paths = PathList::decode(&paths)?;
-                    let presence = Presence::decode(&presence)?;
-                    backend.set_icons(IconIndex::build(&paths, &presence));
-                    Ok(())
-                }));
+                self.index = match backend.listing(&api_base(ctx)) {
+                    Listed::Loading => Load::Idle,
+                    Listed::Ready(list) => {
+                        backend.set_icons(IconIndex::build(list.paths(), list.presence()));
+                        Load::Ready(())
+                    }
+                    Listed::Failed(why) => Load::Failed(why.to_string()),
+                };
             }
-        }
-        if let Load::Loading(promise) = &self.index
-            && let Some(result) = promise.try_get()
-        {
-            self.index = match result.as_ref().map_err(|e| e.to_string()) {
-                Ok(()) => Load::Ready(()),
-                Err(e) => Load::Failed(e),
-            };
         }
 
         if self.all.is_empty()

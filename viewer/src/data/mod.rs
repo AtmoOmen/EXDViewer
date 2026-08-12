@@ -7,6 +7,7 @@ use ironworks::excel::Language;
 use ironworks::file::File;
 use url::Url;
 
+pub mod listing;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sqpack;
 pub mod web;

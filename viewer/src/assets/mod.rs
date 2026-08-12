@@ -22,6 +22,7 @@ use regex_lite::{Regex, RegexBuilder};
 
 use crate::backend::Backend;
 use crate::data::IconIndex;
+use crate::data::listing::{Listed, Listing};
 use crate::excel::provider::ExcelProvider;
 use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::api_base;
@@ -89,29 +90,13 @@ impl fmt::Display for Millis {
     }
 }
 
-/// Decode both payloads and build the tree, timing each stage. The whole thing runs on the frame
-/// that the fetch lands, so anything slow here is a visible hitch rather than a background cost.
-fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
-    let at = Instant::now();
-    let paths = PathList::decode(paths).map_err(|e| e.to_string())?;
-    let paths_took = at.elapsed();
+/// Build the tree over the shared listing, timing each stage. The whole thing runs on the frame
+/// that the listing lands, so anything slow here is a visible hitch rather than a background cost.
+fn build_index(list: Rc<Listing>) -> Result<Loaded, String> {
+    let (paths, presence) = (list.paths(), list.presence());
 
     let at = Instant::now();
-    let presence = Presence::decode(presence).map_err(|e| e.to_string())?;
-    let presence_took = at.elapsed();
-
-    // The map is indexed by position in the list, so a pair from different builds would hide and
-    // reveal the wrong files rather than fail.
-    if paths.list_id() != presence.list_id() {
-        return Err(format!(
-            "This version's file map was built against path list {:016x}, but the list is {:016x}.",
-            presence.list_id(),
-            paths.list_id(),
-        ));
-    }
-
-    let at = Instant::now();
-    let mut live = live_dirs(&paths, &presence);
+    let mut live = live_dirs(paths, presence);
     let live_took = at.elapsed();
 
     let at = Instant::now();
@@ -140,15 +125,6 @@ fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
     let tree_took = at.elapsed();
 
     log::info!(
-        "assets/decode: path list {} ({} dirs, {} paths), presence {} ({} present, {} unnamed)",
-        Millis(paths_took),
-        paths.dirs().len(),
-        paths.len(),
-        Millis(presence_took),
-        presence.len(),
-        presence.unnamed().len(),
-    );
-    log::info!(
         "assets/build: live dirs {} ({} kept), unnamed {} ({} placed in named dirs, {} in {} hash dirs), tree {} ({} nodes, {} roots)",
         Millis(live_took),
         live.len(),
@@ -162,13 +138,12 @@ fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
     );
     log::info!(
         "assets/total: {} to first frame, {} resident",
-        Millis(paths_took + presence_took + live_took + tree_took),
+        Millis(live_took + unnamed_took + tree_took),
         Bytes(paths.resident_bytes()),
     );
 
     Ok(Loaded {
-        paths,
-        presence,
+        list,
         nodes,
         roots,
         extra_dirs,
@@ -478,8 +453,7 @@ struct Names {
 }
 
 struct Loaded {
-    paths: PathList,
-    presence: Presence,
+    list: Rc<Listing>,
     nodes: Vec<Node>,
     roots: Vec<usize>,
     /// Directories that exist only because unnamed files hash into them. Indexed past the end of
@@ -505,10 +479,10 @@ impl Loaded {
 
     /// Path of a directory, whether it came from the list or was synthesised for unnamed files.
     fn dir_path(&self, dir: usize) -> &str {
-        let listed = self.paths.dirs().len();
+        let listed = self.list.paths().dirs().len();
         match dir.checked_sub(listed) {
             Some(extra) => &self.extra_dirs[extra],
-            None => &self.paths.dirs()[dir],
+            None => &self.list.paths().dirs()[dir],
         }
     }
 
@@ -539,14 +513,14 @@ impl Loaded {
     /// Names without caching. The search sweep touches every directory, so caching there would end
     /// up holding the whole corpus in memory.
     fn decode(&mut self, dir: usize) -> Vec<String> {
-        let offset = match self.paths.name_offset(dir) {
+        let offset = match self.list.paths().name_offset(dir) {
             Ok(offset) => offset,
             Err(e) => {
                 log::error!("No offset for directory {dir}: {e}");
                 return Vec::new();
             }
         };
-        let names = self.paths.names(dir).unwrap_or_else(|e| {
+        let names = self.list.paths().names(dir).unwrap_or_else(|e| {
             log::error!("Failed to decode directory {dir}: {e}");
             Vec::new()
         });
@@ -554,7 +528,7 @@ impl Loaded {
         names
             .into_iter()
             .enumerate()
-            .filter(|(i, _)| self.presence.contains(offset + i))
+            .filter(|(i, _)| self.list.presence().contains(offset + i))
             .map(|(_, name)| name)
             .collect()
     }
@@ -1033,40 +1007,23 @@ impl AssetBrowser {
     }
 
     fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
-        if matches!(self.state, Load::Idle) {
-            let files = backend.files().clone();
-            let api = api_base(ctx);
-            self.state = Load::Loading(TrackedPromise::spawn_local(async move {
-                // The list is version-independent and cached hard; the presence map is the only
-                // per-version part, and it is a bit per path.
-                let at = Instant::now();
-                // Served prebuilt by the API; a local install builds its own from the same list.
-                let (paths, presence) = files.path_index(&api).await?;
-                log::info!(
-                    "assets/fetch: path list {}, presence {}, in {}",
-                    Bytes(paths.len()),
-                    Bytes(presence.len()),
-                    Millis(at.elapsed()),
-                );
-                Ok((paths, presence))
-            }));
+        if !matches!(self.state, Load::Idle) {
+            return;
         }
-
-        if let Load::Loading(promise) = &self.state
-            && let Some(result) = promise.try_get()
-        {
-            self.state = match result.as_ref().map_err(|e| e.to_string()) {
-                Ok((paths, presence)) => match build_index(paths, presence) {
-                    Ok(loaded) => {
-                        // Nowhere else holds the decoded list, so the icon subset is cut here.
-                        backend.set_icons(IconIndex::build(&loaded.paths, &loaded.presence));
-                        Load::Ready(Box::new(loaded))
-                    }
-                    Err(e) => Load::Failed(e),
-                },
+        self.state = match backend.listing(&api_base(ctx)) {
+            Listed::Loading => return,
+            Listed::Ready(list) => match build_index(list) {
+                Ok(loaded) => {
+                    backend.set_icons(IconIndex::build(
+                        loaded.list.paths(),
+                        loaded.list.presence(),
+                    ));
+                    Load::Ready(Box::new(loaded))
+                }
                 Err(e) => Load::Failed(e),
-            };
-        }
+            },
+            Listed::Failed(why) => Load::Failed(why.to_string()),
+        };
     }
 
     /// Expand the tree down to `path` so a deep link lands somewhere visible, and report how the
@@ -1272,7 +1229,7 @@ impl AssetBrowser {
                                 ));
                                 let named = loaded.nodes[*node]
                                     .dir
-                                    .is_none_or(|dir| dir < loaded.paths.dirs().len());
+                                    .is_none_or(|dir| dir < loaded.list.paths().dirs().len());
                                 let row = Button::selectable(
                                     false,
                                     if named { text } else { text.weak() },
@@ -1341,7 +1298,7 @@ impl AssetBrowser {
         let Load::Ready(loaded) = &self.state else {
             return None;
         };
-        let total = loaded.paths.dirs().len();
+        let total = loaded.list.paths().dirs().len();
         let mut clicked = None;
         // Offered above the matches, because someone typing a whole path already knows what they
         // want and the sweep for it takes a moment.
@@ -1571,7 +1528,7 @@ impl AssetBrowser {
             }
         }
 
-        let total = loaded.paths.dirs().len();
+        let total = loaded.list.paths().dirs().len();
         // A pattern that will not compile matches nothing, and sweeping the corpus to find that out
         // would stall on every keystroke of one still being typed.
         if matches!(scan.matching, Match::Invalid(_)) {
@@ -1584,7 +1541,7 @@ impl AssetBrowser {
 
         let end = (scan.cursor + SCAN_BATCH).min(total);
         for dir in scan.cursor..end {
-            let dir_path = loaded.paths.dirs()[dir].clone();
+            let dir_path = loaded.list.paths().dirs()[dir].clone();
             for name in loaded.decode(dir) {
                 // Cheapest test first: an extension rules a name out without building its path or
                 // scoring it, which is what keeps an extension-only sweep of the whole list quick.

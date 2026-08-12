@@ -5,12 +5,14 @@
 //! position. Each joint carries the pose a motion puts its bone in against the pose the model is
 //! stored in, which leaves a bone the skeleton does not name standing where the file put it.
 //!
-//! The skeleton and the pack of motions are both guessed from the model's own path and fetched on
-//! the first frame that draws a skinned mesh, the way the model's `.imc` is.
+//! The skeleton is guessed from the model's own path and fetched on the first frame that draws a
+//! skinned mesh, the way the model's `.imc` is. The packs are read off the install's own listing,
+//! since nothing in the model, the skeleton or the sheets names the ones a model can play.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::rc::Rc;
 
 use anyhow::Result;
 use egui::{Color32, RichText};
@@ -22,10 +24,14 @@ use ironworks::file::sklb::SkeletonBinary;
 use super::super::skeleton::{Placement, Rig, middle};
 use super::super::{link, placed, section};
 use crate::backend::Backend;
+use crate::data::listing::Listed;
+use crate::settings::api_base;
 use crate::utils::{TrackedPromise, file_name};
 
 /// What the picker calls standing the model where its own file put it.
 const REST: &str = "Reference pose";
+/// How tall the pack list is allowed to get. A human carries thousands of them.
+const PACK_LIST_HEIGHT: f32 = 240.0;
 
 /// The bone a body hangs off, which is what a pose is centred on. A tail carries many bones a long
 /// way out and swings them, and averaging every bone instead walks the frame around with it.
@@ -176,11 +182,23 @@ impl<T> Fetch<T> {
     }
 }
 
+/// One pack a model can be played from, as the listing names it.
+struct Pack {
+    path: String,
+    /// What the picker calls it: the path with everything every pack shares cut off the front.
+    label: String,
+}
+
 /// What plays a model: the skeleton it is skinned to, a pack of motions, and the clock.
 pub struct Animation {
     /// Where the model's own path says its skeleton is, and the rig that came of it.
     skeleton: Option<String>,
     skin: RefCell<Option<Fetch<Skin>>>,
+    /// Where the model's own path says its packs are filed, and the ones the listing names there.
+    root: Option<String>,
+    packs: RefCell<Option<Result<Vec<Pack>, Rc<str>>>>,
+    /// Cuts the pack list down while the picker is open.
+    filter: RefCell<String>,
     /// The pack to play, as the user has it.
     wanted: RefCell<String>,
     pack: RefCell<Option<Fetch<Motions>>>,
@@ -197,6 +215,9 @@ impl Animation {
         Self {
             skeleton: code.as_deref().and_then(skeleton_path),
             skin: RefCell::new(None),
+            root: code.as_deref().and_then(pack_root),
+            packs: RefCell::new(None),
+            filter: RefCell::new(String::new()),
             wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
             pack: RefCell::new(None),
             motion: Cell::new(None),
@@ -205,9 +226,10 @@ impl Animation {
         }
     }
 
-    /// Asks for the skeleton and the pack, and takes up whichever has landed. Only called for a
-    /// model that carries bone indices, so nothing is fetched for one that could not be posed.
-    pub fn poll(&self, backend: &Backend) {
+    /// Asks for the skeleton, the listing and the pack, and takes up whichever has landed. Only
+    /// called for a model that carries bone indices, so nothing is fetched for one that could not
+    /// be posed.
+    pub fn poll(&self, ctx: &egui::Context, backend: &Backend) {
         if let Some(path) = &self.skeleton {
             Fetch::poll(&mut self.skin.borrow_mut(), backend, path, |bytes| {
                 let file = SkeletonBinary::read(Cursor::new(bytes.to_vec()))?;
@@ -219,10 +241,40 @@ impl Animation {
                 )))
             });
         }
+        let mut held = self.packs.borrow_mut();
+        if let Some(root) = &self.root
+            && held.is_none()
+        {
+            *held = match backend.listing(&api_base(ctx)) {
+                Listed::Loading => None,
+                Listed::Ready(listing) => {
+                    let packs = found(root, listing.under(root));
+                    // The conventional pack is right for nearly every model but not for all of
+                    // them, and a weapon is named none at all; either way the listing knows better.
+                    let mut wanted = self.wanted.borrow_mut();
+                    if !packs.iter().any(|pack| pack.path == *wanted)
+                        && let Some(first) = packs.first()
+                    {
+                        first.path.clone_into(&mut wanted);
+                    }
+                    Some(Ok(packs))
+                }
+                Listed::Failed(why) => Some(Err(why)),
+            };
+        }
+        drop(held);
         let wanted = self.wanted.borrow();
         if !wanted.is_empty() {
             Fetch::poll(&mut self.pack.borrow_mut(), backend, &wanted, Motions::read);
         }
+    }
+
+    /// Plays `path` from its first motion, since a pack picked by hand was picked to be watched.
+    fn play(&self, path: &str) {
+        path.clone_into(&mut self.wanted.borrow_mut());
+        *self.pack.borrow_mut() = None;
+        self.motion.set(Some(0));
+        self.time.set(0.0);
     }
 
     /// Where the model stands this frame: one walk of the rig, and everything read off it.
@@ -261,10 +313,11 @@ impl Animation {
         }
     }
 
-    /// Which motion is playing, play and pause, and the scrubber that is also what advances the
-    /// clock. Only the picker is offered until a motion is picked: with none the model stands where
-    /// its own file put it, and there is nothing to play.
+    /// Which pack is loaded, which motion is playing, play and pause, and the scrubber that is also
+    /// what advances the clock. Only the pickers are offered until a motion is picked: with none
+    /// the model stands where its own file put it, and there is nothing to play.
     pub fn ui(&self, ui: &mut egui::Ui) {
+        self.packs_ui(ui);
         let pack = self.pack.borrow();
         let Some(motions) = pack.as_ref().and_then(Fetch::ready) else {
             return;
@@ -313,6 +366,51 @@ impl Animation {
         self.time.set(time);
     }
 
+    /// Every pack filed under the model's own animation directory. A human carries thousands, so
+    /// the list is filtered rather than scrolled.
+    fn packs_ui(&self, ui: &mut egui::Ui) {
+        let packs = self.packs.borrow();
+        let Some(Ok(packs)) = packs.as_ref() else {
+            return;
+        };
+        let wanted = self.wanted.borrow().clone();
+        let mut picked = None;
+        egui::ComboBox::from_id_salt("mdl_pack")
+            .selected_text(match packs.iter().find(|pack| pack.path == wanted) {
+                Some(pack) => pack.label.as_str(),
+                None => file_name(&wanted),
+            })
+            .show_ui(ui, |ui| {
+                let mut filter = self.filter.borrow_mut();
+                ui.add(
+                    egui::TextEdit::singleline(&mut *filter)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("filter"),
+                );
+                let matching: Vec<&Pack> = packs
+                    .iter()
+                    .filter(|pack| pack.label.contains(&*filter))
+                    .collect();
+                let row = ui.text_style_height(&egui::TextStyle::Body)
+                    + ui.spacing().button_padding.y * 2.0;
+                egui::ScrollArea::vertical()
+                    .max_height(PACK_LIST_HEIGHT)
+                    .show_rows(ui, row, matching.len(), |ui, rows| {
+                        for pack in &matching[rows] {
+                            if ui
+                                .selectable_label(pack.path == wanted, &pack.label)
+                                .clicked()
+                            {
+                                picked = Some(pack.path.clone());
+                            }
+                        }
+                    });
+            });
+        if let Some(path) = picked {
+            self.play(&path);
+        }
+    }
+
     /// The files it is posed from: the skeleton it found, and the pack to take motions out of.
     pub fn details_ui(&self, ui: &mut egui::Ui, follow: &mut Option<String>) {
         section(ui, "Animation");
@@ -341,6 +439,15 @@ impl Animation {
         }
         if let Some(Fetch::Failed(why)) = self.pack.borrow().as_ref() {
             ui.label(RichText::new(why).color(Color32::LIGHT_RED));
+        }
+        match self.packs.borrow().as_ref() {
+            Some(Ok(packs)) => {
+                ui.label(RichText::new(format!("{} packs listed", packs.len())).weak());
+            }
+            Some(Err(why)) => {
+                ui.label(RichText::new(why.as_ref()).color(Color32::LIGHT_RED));
+            }
+            None => {}
         }
     }
 }
@@ -372,8 +479,13 @@ fn skeleton_path(code: &str) -> Option<String> {
     ))
 }
 
-/// The pack a model class idles from. A weapon has none of its own: it is moved by whoever holds
-/// it.
+/// Where every pack a model class can play is filed, whatever animation set names it.
+fn pack_root(code: &str) -> Option<String> {
+    Some(format!("chara/{}/{code}/animation/", tree(code)?))
+}
+
+/// The pack a model class idles from, which is what stands in until the listing lands. A weapon has
+/// none of its own: it is moved by whoever holds it.
 fn pack_path(code: &str) -> Option<String> {
     let tree = tree(code)?;
     let resident = match tree {
@@ -386,13 +498,41 @@ fn pack_path(code: &str) -> Option<String> {
     ))
 }
 
+/// The packs under a model's animation directory, named by what tells them apart. Every pack of a
+/// model sits under the same animation set and the same weapon class, and a segment they all share
+/// says nothing; one that would leave a bare file name has gone too far.
+fn found(root: &str, paths: Vec<String>) -> Vec<Pack> {
+    let mut packs: Vec<Pack> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let label = path.strip_prefix(root)?.strip_suffix(".pap")?.to_owned();
+            Some(Pack { path, label })
+        })
+        .collect();
+    packs.sort_by(|left, right| left.label.cmp(&right.label));
+    while let Some((head, _)) = packs.first().and_then(|pack| pack.label.split_once('/')) {
+        let head = format!("{head}/");
+        if !packs.iter().all(|pack| {
+            pack.label
+                .strip_prefix(&head)
+                .is_some_and(|rest| rest.contains('/'))
+        }) {
+            break;
+        }
+        for pack in &mut packs {
+            pack.label.drain(..head.len());
+        }
+    }
+    packs
+}
+
 #[cfg(test)]
 mod tests {
     use glam::{Mat4, Vec3};
     use ironworks::file::sklb::Transform;
 
     use super::super::super::skeleton::{Rig, middle};
-    use super::{Skin, code, pack_path, skeleton_path};
+    use super::{Skin, code, found, pack_path, pack_root, skeleton_path};
 
     fn transform(translation: [f32; 3]) -> Transform {
         Transform {
@@ -490,5 +630,50 @@ mod tests {
             Some("chara/human/c0101/animation/a0001/bt_common/resident/idle.pap")
         );
         assert_eq!(pack_path("w2616"), None);
+        assert_eq!(
+            pack_root("m0430").as_deref(),
+            Some("chara/monster/m0430/animation/")
+        );
+    }
+
+    /// m0430's own directory, which is the shape the pickers are named from: the set and the weapon
+    /// class go, and the two `mon_sp001` under different directories stay apart.
+    #[test]
+    fn packs_are_named_by_what_tells_them_apart() {
+        let root = "chara/monster/m0430/animation/";
+        let paths = [
+            "a0001/bt_common/mon_sp/m0430/hide/mon_sp001.pap",
+            "a0001/bt_common/mon_sp/m0430/mon_sp001.pap",
+            "a0001/bt_common/resident/monster.pap",
+            "a0001/bt_common/warp/warp_start.pap",
+            "a0001/bt_common/skl_m0430b0001.sklb",
+        ]
+        .map(|tail| format!("{root}{tail}"));
+
+        let packs = found(root, paths.to_vec());
+        assert_eq!(
+            packs.iter().map(|pack| &pack.label).collect::<Vec<_>>(),
+            [
+                "mon_sp/m0430/hide/mon_sp001",
+                "mon_sp/m0430/mon_sp001",
+                "resident/monster",
+                "warp/warp_start",
+            ]
+        );
+        assert_eq!(
+            packs[2].path,
+            format!("{root}a0001/bt_common/resident/monster.pap")
+        );
+    }
+
+    /// Trimming the shared front off one pack would leave a bare file name saying nothing.
+    #[test]
+    fn a_lone_pack_keeps_the_directory_that_names_it() {
+        let root = "chara/weapon/w2616/animation/";
+        let packs = found(
+            root,
+            vec![format!("{root}a0001/wp_common/resident/weapon.pap")],
+        );
+        assert_eq!(packs[0].label, "resident/weapon");
     }
 }

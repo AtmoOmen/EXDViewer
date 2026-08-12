@@ -274,7 +274,11 @@ fn pack(table: &mtrl::ColorTable) -> Option<Vec<f32>> {
 
 /// The file a material name points at. Character models name theirs by filename alone, against a
 /// directory the name itself spells out; everything else states a whole path.
-pub fn path(name: &str) -> Option<String> {
+///
+/// A worn piece states which of a set's colourways it is worn in, and that is the directory its own
+/// materials sit in. The ones it borrows from the body it is worn over are not its to vary, and a
+/// piece being inspected rather than worn states nothing, so both take the base.
+pub fn path(name: &str, variant: u16) -> Option<String> {
     let name = name.trim_start_matches('/');
     if name.contains('/') {
         return Some(name.to_owned());
@@ -284,17 +288,18 @@ pub fn path(name: &str) -> Option<String> {
     let set = stem.as_bytes().get(5).copied()? as char;
     let body: u32 = stem.get(1..5)?.parse().ok()?;
     let part: u32 = stem.get(6..10)?.parse().ok()?;
-    // The variant is an imc lookup the browser has no way to make from a path alone, and the base
-    // one is what every other tool falls back to.
+    let worn = variant.max(1);
     let directory = match (kind, set) {
-        ('c', 'e') => format!("chara/equipment/e{part:04}/material/v0001"),
-        ('c', 'a') => format!("chara/accessory/a{part:04}/material/v0001"),
+        ('c', 'e') => format!("chara/equipment/e{part:04}/material/v{worn:04}"),
+        ('c', 'a') => format!("chara/accessory/a{part:04}/material/v{worn:04}"),
         ('c', 'b') => format!("chara/human/c{body:04}/obj/body/b{part:04}/material/v0001"),
         ('c', 'h') => format!("chara/human/c{body:04}/obj/hair/h{part:04}/material/v0001"),
         ('c', 't') => format!("chara/human/c{body:04}/obj/tail/t{part:04}/material/v0001"),
         ('c', 'f') => format!("chara/human/c{body:04}/obj/face/f{part:04}/material"),
         ('c', 'z') => format!("chara/human/c{body:04}/obj/zear/z{part:04}/material"),
-        ('d', 'e') => format!("chara/demihuman/d{body:04}/obj/equipment/e{part:04}/material/v0001"),
+        ('d', 'e') => {
+            format!("chara/demihuman/d{body:04}/obj/equipment/e{part:04}/material/v{worn:04}")
+        }
         ('m', 'b') => format!("chara/monster/m{body:04}/obj/body/b{part:04}/material/v0001"),
         ('w', 'b') => format!("chara/weapon/w{body:04}/obj/body/b{part:04}/material/v0001"),
         _ => return None,

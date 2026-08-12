@@ -457,7 +457,7 @@ fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
     let containers = containers(pieces)?;
     let sources: Vec<_> = pieces
         .iter()
-        .map(|piece| piece.path.as_str())
+        .map(|piece| (piece.path.as_str(), piece.variant.get()))
         .zip(&containers)
         .collect();
     read_level(&sources, lod)
@@ -570,7 +570,7 @@ fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> 
     count >= 2
 }
 
-fn read_level(sources: &[(&str, &ModelContainer)], lod: u8) -> Result<Level> {
+fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Level> {
     let mut names: Vec<String> = Vec::new();
     let mut meshes = Vec::new();
     let mut unreadable = Vec::new();
@@ -583,7 +583,7 @@ fn read_level(sources: &[(&str, &ModelContainer)], lod: u8) -> Result<Level> {
     let mut skipped: Vec<MeshKind> = Vec::new();
     let mut skinned = false;
 
-    for (piece, (_, container)) in sources.iter().enumerate() {
+    for (piece, ((_, variant), container)) in sources.iter().enumerate() {
         let model = container.model(detail(lod));
 
         let attributes = model.attribute_names().unwrap_or_default();
@@ -625,7 +625,7 @@ fn read_level(sources: &[(&str, &ModelContainer)], lod: u8) -> Result<Level> {
             }
 
             let name = mesh.material().unwrap_or_default();
-            let resolved = material::path(&name).unwrap_or(name);
+            let resolved = material::path(&name, *variant).unwrap_or(name);
             let material = names
                 .iter()
                 .position(|held| *held == resolved)
@@ -752,7 +752,7 @@ fn read_level(sources: &[(&str, &ModelContainer)], lod: u8) -> Result<Level> {
         "assets/mdl: {} {} meshes, {vertices} vertices, {} materials, {} unreadable",
         sources
             .iter()
-            .map(|(path, _)| crate::utils::file_name(path))
+            .map(|((path, _), _)| crate::utils::file_name(path))
             .collect::<Vec<_>>()
             .join(" + "),
         meshes.len(),
@@ -2106,7 +2106,10 @@ impl Rendered {
     /// call on every arrival and every pick: it only sets cells, never rebuilds the level.
     ///
     /// A part gated past the ten bits an imc entry carries is one the file cannot speak about, so it
-    /// draws whatever the variant says: a model may declare far more attributes than that.
+    /// draws whatever the variant says: a model may declare far more attributes than that. So is one
+    /// whose entry enables nothing, which is what a racial outfit states for every slot but the body.
+    /// The parts that gates are the seams between slots, and holding them back leaves a character's
+    /// breeches ending mid-thigh where its boots start at the knee.
     fn apply_variant(&self) {
         let masks: Vec<Option<u32>> = self.pieces.iter().map(Piece::mask).collect();
         let level = self.level.borrow();
@@ -2116,7 +2119,7 @@ impl Rendered {
         }) {
             let gated = part.mask & IMC_ATTRIBUTES;
             part.shown
-                .set(mask.is_none_or(|mask| gated == 0 || gated & mask != 0));
+                .set(mask.is_none_or(|mask| gated == 0 || mask == 0 || gated & mask != 0));
         }
     }
 

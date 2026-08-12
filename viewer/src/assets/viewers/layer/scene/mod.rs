@@ -1058,7 +1058,7 @@ impl Scene {
                     continue;
                 };
                 let name = mesh.material().unwrap_or_default();
-                let resolved = mdl::material::path(&name).unwrap_or(name);
+                let resolved = mdl::material::path(&name, 0).unwrap_or(name);
                 used.push(self.material(&resolved));
                 built.push(geometry);
             }

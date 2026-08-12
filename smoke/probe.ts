@@ -125,8 +125,12 @@ async function main() {
     );
 
     const seen = new Set<string>();
+    // The router titles the page the moment it navigates, long before a viewer is on screen. A
+    // click sent against a title alone lands on the empty panel and is gone.
+    let decoded = 0;
     cdp.on("Runtime.consoleAPICalled", (p: any) => {
         const line = p.args.map(text).join(" ");
+        if (line.includes("assets/preview: ")) decoded += 1;
         if (line.includes(mark) && !seen.has(line)) {
             seen.add(line);
             console.log(`   | ${line.slice(0, 400)}`);
@@ -148,12 +152,14 @@ async function main() {
             const name = model.replace(/^\//, "").split("/").pop() ?? model;
             console.log(`\n== ${model}`);
             seen.clear();
+            const opened = decoded;
             await cdp.send("Page.navigate", { url: model.startsWith("/") ? `${origin}${model}` : `${origin}/assets/${model}` });
             await cdp.eval("localStorage.clear()").catch(() => {});
             await waitFor(`${name} to be titled`, 120_000, async () => {
                 const title = await cdp.eval<string>("document.title").catch(() => "");
                 return title.toLowerCase().includes(name.toLowerCase());
             });
+            await waitFor(`${name} to be decoded`, 120_000, async () => decoded > opened);
             await sleep(9000);
             const tag = `${String(at).padStart(2, "0")}-${name.replace(/\.mdl$/, "")}`;
             // Before the shaders are turned on, so the plain and shaded runs frame alike.

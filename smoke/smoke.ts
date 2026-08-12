@@ -134,9 +134,15 @@ const FATAL_TEXT = [
 
 const noted: Message[] = [];
 
+// The router titles the page the moment it navigates, which is long before the path list has landed
+// and a viewer has anything on screen. What says one is up is the line the app logs when it decodes
+// the file: a click sent against a title alone lands on the empty panel and is gone.
+let decoded = 0;
+
 function record(where: string, source: string, level: string, text: string) {
     const message: Message = { where: phase, source, level, text };
     if (/assets\/avfx:/.test(text)) noted.push(message);
+    if (/assets\/preview: /.test(text)) decoded += 1;
     if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
         muted.push(message);
         return;
@@ -358,6 +364,7 @@ async function main() {
         const name = path.split("/").pop() ?? path;
         phase = `avfx:${name}`;
         console.log(`\n== effect: ${path}`);
+        const opened = decoded;
         await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
         // eframe writes egui's memory out as the page unloads, and the details panel's width is in
         // it: an earlier phase leaves the panel wide enough to move the playback bar out from under
@@ -367,6 +374,7 @@ async function main() {
             const title = await cdp.eval<string>("document.title").catch(() => "");
             return title.includes(name);
         });
+        await waitFor("the effect to be decoded", 180_000, async () => decoded > opened);
         // Long enough for the two apricot packages, which are 20 and 40 MiB, and for the textures.
         await sleep(12000);
         const held = `05-avfx-${String(index).padStart(2, "0")}-${name.replace(/\.avfx$/, "")}`;
@@ -450,6 +458,7 @@ async function main() {
             const title = await cdp.eval<string>("document.title");
             return title.includes("yam04") || title.includes(".mdl");
         });
+        await waitFor("the model to be decoded", 180_000, async () => decoded > 0);
         await sleep(6000);
         await shot(cdp, "01-model");
         const plain = await counters(cdp);
@@ -575,11 +584,13 @@ async function main() {
 /// something. The same walk serves an lgb and the lvb naming it.
 async function walk(cdp: Cdp, origin: string, path: string, name: string) {
     console.log(`\n== ${phase}: ${path}`);
+    const opened = decoded;
     await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
     await waitFor(`${path} to be titled`, 180_000, async () => {
         const title = await cdp.eval<string>("document.title").catch(() => "");
         return title.includes(path.split("/").pop()!);
     });
+    await waitFor(`${path} to be decoded`, 180_000, async () => decoded > opened);
     await sleep(3000);
     const before = await counters(cdp);
     await click(cdp, SCENE_TAB.x, SCENE_TAB.y);

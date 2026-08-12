@@ -26,6 +26,7 @@ mod app;
 mod assets;
 pub mod audio;
 mod backend;
+mod character;
 mod data;
 mod editable_schema;
 mod excel;

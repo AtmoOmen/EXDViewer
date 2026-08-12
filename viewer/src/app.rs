@@ -26,6 +26,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 use crate::{
     about, assets,
     backend::Backend,
+    character,
     editable_schema::EditableSchema,
     excel::{
         base::BaseSheet,
@@ -199,6 +200,7 @@ enum Tab {
     Icons,
     Music,
     Quests,
+    Character,
 }
 
 impl Tab {
@@ -211,6 +213,8 @@ impl Tab {
             Tab::Music
         } else if path.starts_with("/quests") {
             Tab::Quests
+        } else if path.starts_with("/character") {
+            Tab::Character
         } else {
             Tab::Sheets
         }
@@ -223,6 +227,7 @@ impl Tab {
             Tab::Icons => "Icons",
             Tab::Music => "Music",
             Tab::Quests => "Quests",
+            Tab::Character => "Character",
         }
     }
 }
@@ -249,6 +254,7 @@ pub struct App {
     assets: assets::AssetBrowser,
     icons: icons::IconBrowser,
     quests: quests::QuestBrowser,
+    character: character::CharacterBuilder,
     last_system_theme: Option<egui::Theme>,
     /// Every CJK font whose bytes are in hand. Kept rather than swapped: text that mixes scripts,
     /// like a Korean name in an otherwise English sheet, needs more than one of them at once.
@@ -312,6 +318,12 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
         App::on_quest,
         App::draw_quests,
         App::title_quests,
+    )?;
+    builder.add_route(
+        "/character",
+        App::on_character,
+        App::draw_character,
+        static_title(Tab::Character.title()),
     )?;
     builder.add_route(
         CALLBACK_PATH,
@@ -488,6 +500,7 @@ impl App {
             Tab::Icons => self.icons.open_palette(),
             Tab::Music => self.music.open_palette(),
             Tab::Quests => self.quests.open_palette(),
+            Tab::Character => {}
         }
     }
 
@@ -533,6 +546,8 @@ impl App {
                             Tab::Icons => "Find Icon…",
                             Tab::Music => "Find Track…",
                             Tab::Quests => "Find Quest…",
+                            // Nothing to find: everything the tab offers is already on screen.
+                            Tab::Character => return,
                         };
                         if shortcut::button(ui, palette, PALETTE).clicked() {
                             self.open_palette(tab);
@@ -750,6 +765,7 @@ impl App {
                         (Tab::Icons, "/icons"),
                         (Tab::Music, "/music"),
                         (Tab::Quests, "/quests"),
+                        (Tab::Character, "/character"),
                     ] {
                         if ui
                             .add_sized(seg, Button::selectable(tab == target, target.title()))
@@ -1426,6 +1442,7 @@ impl App {
             self.icons.reset();
             self.music.reset();
             self.quests.reset();
+            self.character.reset();
             CURRENT_SHEET_LANGUAGES.remove(ui.ctx());
 
             BACKEND_CONFIG.set(ui.ctx(), Some(config));
@@ -1677,6 +1694,21 @@ impl App {
         }
     }
 
+    fn on_character(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        _params: &Params<'_, '_>,
+    ) -> Redirect {
+        self.ensure_backend(path)
+    }
+
+    fn draw_character(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone() {
+            self.character.ui(ui, &backend);
+        }
+    }
+
     fn command_open_pr(&mut self) {
         let names: Vec<String> = self
             .get_modified_schemas()
@@ -1832,6 +1864,7 @@ impl App {
             assets: assets::AssetBrowser::default(),
             icons: icons::IconBrowser::default(),
             quests: quests::QuestBrowser::default(),
+            character: character::CharacterBuilder::default(),
             last_system_theme: None,
             cjk: HashMap::new(),
             primary_cjk: None,

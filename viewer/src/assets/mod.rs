@@ -32,7 +32,7 @@ use pathlist::{PathList, Presence};
 
 pub mod deps;
 mod magic;
-mod viewers;
+pub(crate) mod viewers;
 use magic::Format;
 use viewers::{Preview, Viewer};
 

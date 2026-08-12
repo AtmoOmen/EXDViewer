@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Vec3};
 use ironworks::file::{
@@ -379,18 +379,41 @@ pub struct Rendered {
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
-    let container = ModelContainer::read(Cursor::new(bytes.to_vec()))?;
-    let level = read_level(&[(path, &container)], 0)?;
+    Ok(Preview::Model(Box::new(compose(&[(
+        path.to_owned(),
+        bytes.to_vec(),
+    )])?)))
+}
+
+/// Builds one model out of several files, which is how a character is worn. The first is what the
+/// rest hang off: its path is what names the skeleton they are all posed on.
+pub fn compose(parts: &[(String, Vec<u8>)]) -> Result<Rendered> {
+    let (first, _) = parts.first().context("a model of no files")?;
+    let containers = parts
+        .iter()
+        .map(|(_, bytes)| Ok(ModelContainer::read(Cursor::new(bytes.clone()))?))
+        .collect::<Result<Vec<_>>>()?;
+    let sources: Vec<_> = parts
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .zip(&containers)
+        .collect();
+    let level = read_level(&sources, 0)?;
     let camera = level.home;
-    Ok(Preview::Model(Box::new(Rendered {
-        pieces: vec![Piece::new(path, bytes)],
+    Ok(Rendered {
+        pieces: parts
+            .iter()
+            .map(|(path, bytes)| Piece::new(path, bytes))
+            .collect(),
         lod: Cell::new(0),
         drawn: std::array::from_fn(|lod| {
-            container
-                .model(detail(lod as u8))
-                .meshes()
-                .iter()
-                .any(|mesh| mesh.kinds().contains(&MeshKind::Standard))
+            containers.iter().any(|container| {
+                container
+                    .model(detail(lod as u8))
+                    .meshes()
+                    .iter()
+                    .any(|mesh| mesh.kinds().contains(&MeshKind::Standard))
+            })
         }),
         slots: RefCell::new((0..level.materials.len()).map(|_| None).collect()),
         shapes: Default::default(),
@@ -400,7 +423,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         arrays: Default::default(),
         parameters: Default::default(),
         translated: Default::default(),
-        animation: skin::Animation::new(path),
+        animation: skin::Animation::new(first),
         lighting: Default::default(),
         post: Default::default(),
         graded: Cell::new(false),
@@ -417,7 +440,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         debug: Cell::new(gpu::Debug::None),
         shaded: Cell::new(false),
         target: Cell::new(gpu::LIT),
-    })))
+    })
 }
 
 pub(super) fn detail(lod: u8) -> Lod {

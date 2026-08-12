@@ -29,10 +29,6 @@ use crate::utils::{CollapsibleSidePanel, IconManager, ManagedIcon, Side, Tracked
 const BODIES: std::ops::RangeInclusive<u16> = 1..=18;
 const VARIANTS: [u16; 2] = [1, 4];
 
-/// The one body set a character is built on. A code carries others, but they are the same shape
-/// wearing different equipment, which is [`super::assets`]' job rather than this one's.
-const BODY: u16 = 1;
-
 /// How big a set's icon is drawn.
 const ICON: f32 = 40.0;
 
@@ -132,9 +128,7 @@ impl CharacterBuilder {
         if self.bodies.is_empty() {
             self.bodies = BODIES
                 .flat_map(|body| VARIANTS.map(|variant| body * 100 + variant))
-                .filter(|code| {
-                    !parts(&listing, &format!("{}/obj/body", root(*code)), BODY).is_empty()
-                })
+                .filter(|code| !body(&listing, *code).is_empty())
                 .collect();
             if !self.bodies.contains(&self.code)
                 && let Some(first) = self.bodies.first()
@@ -163,7 +157,7 @@ impl CharacterBuilder {
             };
         }
 
-        let mut wanted = parts(&listing, &format!("{}/obj/body", root(self.code)), BODY);
+        let mut wanted = body(&listing, self.code);
         wanted.extend(held(&self.faces, self.face));
         wanted.extend(held(&self.hairs, self.hair));
         if wanted != self.worn && !wanted.is_empty() {
@@ -310,6 +304,15 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
             parts: parts(listing, &under, id),
         })
         .collect()
+}
+
+/// The body a code is built on, which is the lowest set it ships: only one code carries `b0001`,
+/// and the rest start wherever their own files do.
+fn body(listing: &Listing, code: u16) -> Vec<String> {
+    sets(listing, &code, "body")
+        .first()
+        .map(|set| set.parts.clone())
+        .unwrap_or_default()
 }
 
 /// The picked set if the code still carries it, and its lowest otherwise.

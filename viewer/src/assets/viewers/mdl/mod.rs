@@ -306,6 +306,11 @@ pub struct Rendered {
     /// The pass that grades the frame they resolve, and whether the table it reads has landed.
     post: RefCell<Option<Arc<program::Program>>>,
     graded: Cell<bool>,
+    /// The pair that smooths the graded frame's edges.
+    smoothing: RefCell<Option<Arc<gpu::Smoothing>>>,
+    /// What those passes are run with, and whether the settings row is open.
+    look: Cell<program::Look>,
+    settings: Cell<bool>,
     /// The color table in the game's own layout, by material.
     tables: RefCell<BTreeMap<usize, Table>>,
     camera: Cell<Camera>,
@@ -353,6 +358,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         lighting: Default::default(),
         post: Default::default(),
         graded: Cell::new(false),
+        smoothing: Default::default(),
+        look: Cell::new(program::Look::default()),
+        settings: Cell::new(false),
         tables: Default::default(),
         camera: Cell::new(camera),
         skeleton: Cell::new(false),
@@ -933,6 +941,16 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         {
             model.grid.set(!grid);
         }
+        if shaded {
+            let settings = model.settings.get();
+            if ui
+                .selectable_label(settings, "Graphics")
+                .on_hover_text("What the passes past the composite are run with")
+                .clicked()
+            {
+                model.settings.set(!settings);
+            }
+        }
         if ui.button("Reset view").clicked() {
             model.camera.set(level.home);
         }
@@ -965,12 +983,42 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         return;
     }
 
+    if model.shaded.get() && model.settings.get() {
+        settings(ui, model);
+    }
+
     if model.level.borrow().skinned {
         ui.horizontal(|ui| model.animation.ui(ui));
     }
 
     model.poll(ui, backend);
     model.viewport(ui);
+}
+
+/// The constants the post chain is run with. Every one of these is a value the shaders read and no
+/// file states, so the numbers are the user's to move rather than the viewer's to settle.
+fn settings(ui: &mut egui::Ui, model: &Rendered) {
+    let mut look = model.look.get();
+    egui::Grid::new("mdl-look")
+        .num_columns(2)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            ui.checkbox(&mut look.antialias, "Antialias")
+                .on_hover_text("Smooth the frame's edges with the game's own FXAA");
+            ui.end_row();
+            ui.add_enabled_ui(look.antialias, |ui| {
+                ui.add(egui::Slider::new(&mut look.subpix, 0.0..=1.0).text("Subpixel"))
+                    .on_hover_text("FXAA's own subpixel aliasing removal, at its published default");
+            });
+            ui.add_enabled_ui(look.antialias, |ui| {
+                ui.add(egui::Slider::new(&mut look.edge, 0.03..=0.5).text("Edge"))
+                    .on_hover_text("How much local contrast counts as an edge, likewise");
+            });
+            ui.end_row();
+        });
+    if look != model.look.get() {
+        model.look.set(look);
+    }
 }
 
 impl Rendered {
@@ -1081,6 +1129,17 @@ impl Rendered {
                         program::TONE_ADJUST,
                     ]
                     .map(str::to_owned),
+                )
+                // Asked for only where the viewer is drawing with them, so a frame nobody wants
+                // smoothed costs no fetch at all.
+                .chain(
+                    self.look
+                        .get()
+                        .antialias
+                        .then_some([program::FXAA_LUMA, program::FXAA])
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_owned),
                 );
             for path in wanted {
                 if packages.contains_key(&path) {
@@ -1476,11 +1535,16 @@ impl Rendered {
                     color: Vec3::splat(LAMP_FILL),
                     ..Default::default()
                 },
+                look: self.look.get(),
                 ..Default::default()
             },
             lighting,
             post: match self.shaded.get() {
                 true => self.post(),
+                false => None,
+            },
+            smoothing: match self.shaded.get() {
+                true => self.smoothing(),
                 false => None,
             },
             eye: eye.to_array(),
@@ -1572,7 +1636,9 @@ impl Rendered {
         }
         let mut packages = self.packages.borrow_mut();
         let built = match packages.get(program::TONE_ADJUST) {
-            Some(Package::Ready(bytes)) => program::Program::tone_adjust(bytes),
+            Some(Package::Ready(bytes)) => {
+                program::Program::posteffect(bytes, program::POST_VERTEX)
+            }
             _ => return None,
         };
         // Kept as a failure rather than tried again: the file will not translate differently on the
@@ -1587,6 +1653,34 @@ impl Rendered {
         };
         drop(packages);
         *self.post.borrow_mut() = Some(built.clone());
+        Some(built)
+    }
+
+    /// The pair that smooths the graded frame's edges, translated once both shaders have arrived.
+    fn smoothing(&self) -> Option<Arc<gpu::Smoothing>> {
+        if !self.look.get().antialias {
+            return None;
+        }
+        if let Some(held) = self.smoothing.borrow().as_ref() {
+            return Some(held.clone());
+        }
+        let packages = self.packages.borrow();
+        let held = |path: &str| {
+            let Some(Package::Ready(bytes)) = packages.get(path) else {
+                return None;
+            };
+            program::Program::posteffect(bytes, program::POST_VERTEX)
+                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let built = gpu::Smoothing {
+            luma: held(program::FXAA_LUMA)?,
+            fxaa: held(program::FXAA)?,
+        };
+        drop(packages);
+        let built = Arc::new(built);
+        *self.smoothing.borrow_mut() = Some(built.clone());
         Some(built)
     }
 

@@ -28,6 +28,9 @@ const ATTENUATION: u32 = 0x008c_d1ca;
 /// The frame as the composite left it, which is what a semitransparent pass blends over.
 const FINAL_COLOR: u32 = 0x8ea9_df48;
 
+/// What every member of the post chain calls the frame it reads.
+const INPUT: u32 = 0x527d_95a1;
+
 /// The ramp a placed light's falloff is read off, indexed by the square of how far the pixel stands
 /// from it. The engine binds this rather than any material, and the flat stand-in leaves every light
 /// at full strength out to the edge of its own volume, which is a hard circle.
@@ -168,6 +171,9 @@ enum Over {
     Screen,
     Volume,
     Softening(glow::Texture),
+    /// A member of the post chain reading what the one before it wrote rather than the frame the
+    /// composite resolved.
+    Reading(glow::Texture),
 }
 
 const PRESENT_VERTEX: &str = include_str!("present.vert");
@@ -224,6 +230,12 @@ pub struct Lighting {
     pub composite: std::sync::Arc<program::Program>,
 }
 
+/// The pair that smooths the frame's edges, in the order they run.
+pub struct Smoothing {
+    pub luma: std::sync::Arc<program::Program>,
+    pub fxaa: std::sync::Arc<program::Program>,
+}
+
 /// A layered texture as the card takes one: its slices one after the next, in RGBA bytes.
 pub struct Layered {
     pub size: (i32, i32),
@@ -261,6 +273,10 @@ pub struct Buffers {
     /// A framebuffer over the channel the fur pass softens, and that channel as the G-buffer left
     /// it: the pass walks a strand across its neighbours to answer for one pixel.
     fur: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The frame with each pixel's brightness in its alpha, which is what the smoothing pass reads
+    /// its edges off. Filtered rather than point sampled, since that pass reads between texels along
+    /// the edge it found.
+    smoothed: Option<(glow::Framebuffer, glow::Texture)>,
     size: (i32, i32),
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
@@ -483,6 +499,9 @@ impl Buffers {
                 .map(|(frame, held)| (frame, held.to_vec())),
             self.lit.take().map(|(frame, held)| (frame, vec![held])),
             self.fur.take().map(|(frame, held)| (frame, vec![held])),
+            self.smoothed
+                .take()
+                .map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()
@@ -562,6 +581,10 @@ impl Buffers {
             let softened = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
             let held = frame_of(gl, &self.color[FUR_CHANNEL..=FUR_CHANNEL], None)?;
             self.fur = Some((held, softened));
+
+            let smoothed = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+            smooth(gl, smoothed);
+            self.smoothed = Some((frame_of(gl, &[smoothed], None)?, smoothed));
         }
         Ok(())
     }
@@ -671,6 +694,31 @@ impl Buffers {
         }
         self.toned = true;
         Ok(())
+    }
+
+    /// The frame with its edges smoothed, which is the last thing the graph does to it.
+    ///
+    /// Two passes rather than one: the game works each pixel's brightness out in a pass of its own
+    /// and leaves it in the alpha the pass after it reads its edges off. Each reads the copy the one
+    /// before it left, since a texture being written cannot also be sampled.
+    pub fn antialias(
+        &mut self,
+        gl: &glow::Context,
+        held: &Smoothing,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (into, smoothed) = self.smoothed.ok_or("no smoothed frame")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+        }
+        self.keep(gl)?;
+        self.pass(gl, 6, &held.luma, into, scene, Over::Screen)?;
+        self.pass(gl, 7, &held.fxaa, lit, scene, Over::Reading(smoothed))
     }
 
     /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
@@ -1004,7 +1052,7 @@ impl Buffers {
             VIEW_POSITION => self.position.ok_or("no view position")?.1,
             LIGHT_DIFFUSE => self.light.ok_or("no light buffer")?.1[0],
             LIGHT_SPECULAR => self.light.ok_or("no light buffer")?.1[1],
-            FINAL_COLOR => self.resolved.ok_or("no resolved frame")?,
+            FINAL_COLOR | INPUT => self.resolved.ok_or("no resolved frame")?,
             OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
             _ => self.stand_in(gl)?,
         })
@@ -1108,6 +1156,7 @@ impl Buffers {
             let bound = match texture.kind {
                 program::Kind::Plane => match over {
                     Over::Softening(held) if texture.id == GBUFFER[3] => held,
+                    Over::Reading(held) if texture.id == INPUT => held,
                     _ => self.engine(gl, texture.id)?,
                 },
                 kind => self.absent(gl, kind, texture.id)?,
@@ -1265,6 +1314,9 @@ impl Drop for Buffers {
                 .map(|(frame, held)| (frame, held.to_vec())),
             self.lit.take().map(|(frame, held)| (frame, vec![held])),
             self.fur.take().map(|(frame, held)| (frame, vec![held])),
+            self.smoothed
+                .take()
+                .map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()
@@ -1341,6 +1393,16 @@ pub fn point(gl: &glow::Context) {
         (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
     ] {
         unsafe { gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32) };
+    }
+}
+
+/// The exception: the one buffer a pass reads between texels rather than at their centres.
+fn smooth(gl: &glow::Context, texture: glow::Texture) {
+    unsafe {
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        for name in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, name, glow::LINEAR as i32);
+        }
     }
 }
 

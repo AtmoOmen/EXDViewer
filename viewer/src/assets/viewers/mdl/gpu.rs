@@ -18,7 +18,7 @@ use super::grid::{Grid, Ground};
 use super::material::Family;
 use super::{Vertex, program};
 
-pub use super::deferred::{Dead, LIT, Lighting, bury, graveyard};
+pub use super::deferred::{Dead, LIT, Lighting, Smoothing, bury, graveyard};
 
 /// Attribute locations, in the order [`Vertex`] stores them.
 const ATTRIBUTES: [(u32, i32, i32); 4] = [(0, 3, 0), (1, 3, 12), (2, 4, 24), (3, 2, 56)];
@@ -157,6 +157,9 @@ pub struct Frame {
     pub lighting: Option<Arc<Lighting>>,
     /// The pass that grades the frame they resolve, once its shader and its table have arrived.
     pub post: Option<Arc<program::Program>>,
+    /// The pair that smooths its edges, once both their shaders have arrived and the viewer asks
+    /// for them.
+    pub smoothing: Option<Arc<Smoothing>>,
     pub eye: [f32; 3],
     /// Key, fill and rim directions, in world space. Built once a frame from the camera, so a
     /// surface is lit by one set of lights rather than by a set of its own.
@@ -680,6 +683,9 @@ impl Game {
             self.resolve(gl, painter, frame, meshes, &scene)?;
             if let Some(post) = frame.post.as_ref() {
                 self.buffers.post(gl, post, &scene)?;
+            }
+            if let Some(smoothing) = frame.smoothing.as_ref() {
+                self.buffers.antialias(gl, smoothing, &scene)?;
             }
         }
         Ok(())

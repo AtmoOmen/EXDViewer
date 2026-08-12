@@ -45,10 +45,13 @@ pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
 /// Softens the surface a strand grows out of, between the G-buffer and the light it is read under.
 pub const FUR: &str = "shader/sm5/shpk/furblur.shpk";
 
-/// The one member of the game's post chain the viewer runs. It reads a table a file holds, where
+/// The members of the game's post chain the viewer runs. The first reads a table a file holds, where
 /// the exposure and the tone curve before it are targets the engine builds a frame at a time off
-/// constants no file states.
+/// constants no file states. The other two smooth the frame's edges, in the order they run: one
+/// writes each pixel's brightness into the alpha the next reads its edges off.
 pub const TONE_ADJUST: &str = "shader/sm5/posteffect/ToneAdjust.shcd";
+pub const FXAA_LUMA: &str = "shader/sm5/posteffect/FXAALuma.shcd";
+pub const FXAA: &str = "shader/sm5/posteffect/FXAA.shcd";
 
 /// The buffer it reads, and the frame and the table it reads them through.
 const TONE_MAP_PARAM: &str = "cToneMapParam";
@@ -64,11 +67,17 @@ pub const POST_TABLE: &str = "sLUT";
 /// was never authored over and takes the color out of it.
 const TONE_MAP: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
+/// The buffers the smoothing pass reads. The first is the rectangle of its target the frame was
+/// rendered into, which every pass of the chain clamps its reads to; the frame fills the whole of
+/// one here, so the corner it names is the far one.
+const VIEWPORT_PARAM: &str = "cDynamicViewportResolutionParam";
+const FXAA_PARAM: &str = "cFxaaParam";
+
 /// The vertex shader the pass is drawn with. The game pairs these with a `VSSampling`, which reads a
 /// quad of positions and coordinates against a scale and a bias no file states; the screen triangle
 /// carries its own, and a frame a pass of this graph wrote is already the way round a sampler here
 /// reads it.
-const POST_VERTEX: &str = "\
+pub const POST_VERTEX: &str = "\
 #version 300 es
 
 layout(location = 0) in vec4 a_position;
@@ -376,6 +385,30 @@ impl Ambient {
     }
 }
 
+/// What the post chain is run with. Every one of these is a constant the shader reads and no file
+/// states: the buffers behind them report no member names and no defaults at all, so what the
+/// sliders open at is a guess and nothing more.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Look {
+    pub antialias: bool,
+    /// `fxaaQualitySubpix`, at FXAA 3.11's own default. The shader takes one less it, so the slider
+    /// runs the way the published constant does rather than the way the buffer holds it.
+    pub subpix: f32,
+    /// `fxaaQualityEdgeThreshold`, likewise. The threshold it is held against is the `0.0833` the
+    /// shader carries as a literal, which is what identifies the pass as stock FXAA.
+    pub edge: f32,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            antialias: true,
+            subpix: 0.75,
+            edge: 0.166,
+        }
+    }
+}
+
 /// What the engine decides rather than the files. Everything a constant buffer holds that is not the
 /// material's own comes from here, so a field that has to be reconstructed is reconstructed once.
 #[derive(Clone, Copy)]
@@ -393,6 +426,8 @@ pub struct Scene {
     pub specular: Vec3,
     /// What the composite lights a surface with where no light reaches it.
     pub ambient: Ambient,
+    /// What the passes past the composite are run with.
+    pub look: Look,
 }
 
 impl Default for Scene {
@@ -407,6 +442,7 @@ impl Default for Scene {
             diffuse: Vec3::ONE,
             specular: Vec3::ONE,
             ambient: Ambient::default(),
+            look: Look::default(),
         }
     }
 }
@@ -709,11 +745,11 @@ impl Program {
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
     }
 
-    /// Translates the pass that grades the resolved frame. A `.shcd` holds one shader and no node
-    /// table, so the file is the variant and there is nothing to select; what it wants is a
-    /// screen-wide draw and the frame it grades in the range a screen holds, since it saturates
-    /// what it reads before it reads the table.
-    pub fn tone_adjust(bytes: &[u8]) -> Result<Self, String> {
+    /// Translates one member of the game's post chain. A `.shcd` holds one shader and no node table,
+    /// so the file is the variant and there is nothing to select; what it wants is a screen-wide
+    /// draw of the vertex shader given, and a frame in the range a screen holds, since the pass that
+    /// grades one saturates what it reads before it reads its table.
+    pub fn posteffect(bytes: &[u8], vertex: &str) -> Result<Self, String> {
         let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
         let blob = bytes
             .get(code.blob_offset()..code.blob_offset() + code.blob_size())
@@ -782,7 +818,7 @@ impl Program {
             .collect();
 
         Ok(Self {
-            vertex: POST_VERTEX.to_owned(),
+            vertex: vertex.to_owned(),
             fragment: hlsl::glsl(&fragment, &names, hlsl::Reading::Plain, &options)
                 .lines
                 .join("\n"),
@@ -1063,6 +1099,19 @@ impl Buffer {
         }
         if self.name == "g_BGAmbientParameter" {
             write(&mut out, 0, &scene.ambient.haze.to_array());
+            return out;
+        }
+        if self.name == VIEWPORT_PARAM {
+            write(&mut out, 0, &[1.0; 4]);
+            return out;
+        }
+        if self.name == FXAA_PARAM {
+            let look = scene.look;
+            write(
+                &mut out,
+                0,
+                &[1.0 / size.0, 1.0 / size.1, 1.0 - look.subpix, look.edge],
+            );
             return out;
         }
         let world_view = view * model;

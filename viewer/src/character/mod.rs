@@ -651,7 +651,7 @@ fn chip(
     icon: Option<&u32>,
 ) -> bool {
     let Some(icon) = icon else {
-        return numbered(ui, id, current);
+        return numbered(ui, id, current, "No icon");
     };
     let path = get_icon_path(backend.icons(), *icon, false, Language::None);
     let excel = backend.excel().clone();
@@ -671,15 +671,18 @@ fn chip(
             )
             .on_hover_text(id.to_string())
             .clicked(),
-        _ => numbered(ui, id, current),
+        // An icon that has not landed yet is not one the creator never named, and saying so would
+        // have every chip claim it has no icon for as long as the icons take to arrive.
+        ManagedIcon::Failed(_) => numbered(ui, id, current, "No icon"),
+        _ => numbered(ui, id, current, "Loading"),
     }
 }
 
-fn numbered(ui: &mut egui::Ui, id: u16, current: u16) -> bool {
+fn numbered(ui: &mut egui::Ui, id: u16, current: u16, why: &str) -> bool {
     ui.add_sized(
         egui::Vec2::splat(ICON),
         egui::Button::new(id.to_string()).selected(current == id),
     )
-    .on_hover_text("No icon")
+    .on_hover_text(why)
     .clicked()
 }

@@ -43,11 +43,17 @@ use crate::utils::TrackedPromise;
 
 use material::{Material, Role};
 
-/// Longest edge a model's textures are decoded to.
-const TEXTURE_SIZE: u16 = 512;
+/// What a model's textures may be decoded to, as the longest edge of the mipmap taken. The last
+/// takes the file's own mip nought, which is what the game itself draws.
+const DETAIL: [(Option<u16>, &str); 4] = [
+    (Some(512), "512"),
+    (Some(1024), "1024"),
+    (Some(2048), "2048"),
+    (None, "Authored"),
+];
 
 /// Decoded texture bytes one model may hold. Past it the rest of its surfaces draw untextured.
-const TEXTURE_BUDGET: usize = 64 << 20;
+const TEXTURE_BUDGET: usize = 256 << 20;
 
 /// The attributes an imc entry's mask reaches, which the format gives ten bits.
 const IMC_ATTRIBUTES: u32 = 0x3ff;
@@ -1005,6 +1011,17 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
 fn settings(ui: &mut egui::Ui, model: &Rendered) {
     let mut look = model.look.get();
     ui.horizontal_wrapped(|ui| {
+        ui.label("Textures").on_hover_text(
+            "Which mipmap of a model's own textures is decoded. The file arrives whole whatever \
+             this says, so only memory and decoding time follow it",
+        );
+        egui::ComboBox::from_id_salt("mdl-detail")
+            .selected_text(label(look.detail))
+            .show_ui(ui, |ui| {
+                for (detail, what) in DETAIL {
+                    ui.selectable_value(&mut look.detail, detail, what);
+                }
+            });
         ui.checkbox(&mut look.antialias, "Antialias")
             .on_hover_text("Smooth the frame's edges with the game's own FXAA");
         ui.add_enabled_ui(look.antialias, |ui| {
@@ -1084,9 +1101,24 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
             }
         });
     });
-    if look != model.look.get() {
+    let held = model.look.get();
+    if look != held {
+        // Which mipmap is taken is settled when a texture is fetched, so a change means fetching
+        // and decoding every one of them again. Dropping the handles is what frees what they held.
+        if look.detail != held.detail {
+            model.textures.borrow_mut().clear();
+            model.resident.set(0);
+        }
         model.look.set(look);
     }
+}
+
+/// What the ladder calls one of its rungs, or the number itself where it names none.
+fn label(detail: Option<u16>) -> String {
+    DETAIL
+        .iter()
+        .find(|(held, _)| *held == detail)
+        .map_or_else(|| format!("{detail:?}"), |(_, what)| (*what).to_owned())
 }
 
 impl Rendered {
@@ -1339,6 +1371,7 @@ impl Rendered {
         }
 
         let mut textures = self.textures.borrow_mut();
+        let detail = self.look.get().detail;
         for slot in slots.iter().flatten() {
             let Slot::Ready(material) = slot else {
                 continue;
@@ -1362,7 +1395,7 @@ impl Rendered {
                 textures.insert(
                     path.clone(),
                     Texture::Fetching(TrackedPromise::spawn_local(async move {
-                        files.read_texture(&wanted, Some(TEXTURE_SIZE)).await
+                        files.read_texture(&wanted, detail).await
                     })),
                 );
             }

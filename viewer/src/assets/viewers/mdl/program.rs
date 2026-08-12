@@ -448,11 +448,14 @@ impl Ambient {
     }
 }
 
-/// What the post chain is run with. Every one of these is a constant the shader reads and no file
-/// states: the buffers behind them report no member names and no defaults at all, so what the
-/// sliders open at is a guess and nothing more.
+/// What the viewer draws with, past what the files decide. Most of these are constants a pass of the
+/// post chain reads and no file states: the buffers behind them report no member names and no
+/// defaults at all, so what the sliders open at is a guess and nothing more.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Look {
+    /// The longest edge a model's textures are decoded to, or the file's own where nothing caps it.
+    /// Not a shader constant: it decides which mipmap is fetched.
+    pub detail: Option<u16>,
     pub antialias: bool,
     /// `fxaaQualitySubpix`, at FXAA 3.11's own default. The shader takes one less it, so the slider
     /// runs the way the published constant does rather than the way the buffer holds it.
@@ -490,6 +493,7 @@ pub struct Look {
 impl Default for Look {
     fn default() -> Self {
         Self {
+            detail: None,
             antialias: true,
             subpix: 0.75,
             edge: 0.166,

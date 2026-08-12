@@ -459,7 +459,7 @@ impl Animation {
 }
 
 /// The `m0911` of a model's path, which is what its skeleton and its animations are filed under.
-fn code(model: &str) -> Option<String> {
+pub fn code(model: &str) -> Option<String> {
     let name = file_name(model);
     let code = name.get(..5)?;
     let (letter, digits) = code.split_at(1);

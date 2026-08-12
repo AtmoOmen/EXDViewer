@@ -291,13 +291,21 @@ struct Piece {
     variant: Cell<u16>,
 }
 
+/// One file to build a model out of, and the imc variant it is worn at. Nought is the file's own
+/// default entry, which is what anything inspected on its own is shown at.
+pub struct Source {
+    pub path: String,
+    pub bytes: Vec<u8>,
+    pub variant: u16,
+}
+
 impl Piece {
-    fn new(path: &str, bytes: &[u8]) -> Self {
+    fn new(source: &Source) -> Self {
         Self {
-            path: path.to_owned(),
-            bytes: bytes.to_vec(),
+            path: source.path.clone(),
+            bytes: source.bytes.clone(),
             imc: RefCell::new(None),
-            variant: Cell::new(0),
+            variant: Cell::new(source.variant),
         }
     }
 
@@ -321,6 +329,9 @@ impl Piece {
         }
     }
 }
+
+/// Everything a material owns that outlives the level it was built for.
+type Kept = (Option<Slot>, Option<Translated>, Option<Table>);
 
 /// A model, decoded and ready to draw. Everything a detail level owns is rebuilt when one is
 /// picked; the camera and the fetched materials and textures are not, so switching neither moves
@@ -381,7 +392,11 @@ pub struct Rendered {
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
-    let model = compose(&[(path.to_owned(), bytes.to_vec())])?;
+    let model = compose(&[Source {
+        path: path.to_owned(),
+        bytes: bytes.to_vec(),
+        variant: 0,
+    }])?;
     model.chrome.set(Chrome::Asset);
     model.shaded.set(false);
     model.animation.rest();
@@ -391,34 +406,16 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 /// Builds one model out of several files, which is how a character is worn. The first is what the
 /// rest hang off: its path is what names the skeleton they are all posed on. A character is drawn
 /// the way the game draws it, standing in its idle rather than in the pose its files hold.
-pub fn compose(parts: &[(String, Vec<u8>)]) -> Result<Rendered> {
-    let (first, _) = parts.first().context("a model of no files")?;
-    let containers = parts
-        .iter()
-        .map(|(_, bytes)| Ok(ModelContainer::read(Cursor::new(bytes.clone()))?))
-        .collect::<Result<Vec<_>>>()?;
-    let sources: Vec<_> = parts
-        .iter()
-        .map(|(path, _)| path.as_str())
-        .zip(&containers)
-        .collect();
-    let level = read_level(&sources, 0)?;
+pub fn compose(parts: &[Source]) -> Result<Rendered> {
+    let first = parts.first().context("a model of no files")?;
+    let pieces: Vec<_> = parts.iter().map(Piece::new).collect();
+    let drawn = drawn_levels(&pieces)?;
+    let level = level_of(&pieces, 0)?;
     let camera = level.home;
     Ok(Rendered {
-        pieces: parts
-            .iter()
-            .map(|(path, bytes)| Piece::new(path, bytes))
-            .collect(),
+        pieces,
         lod: Cell::new(0),
-        drawn: std::array::from_fn(|lod| {
-            containers.iter().any(|container| {
-                container
-                    .model(detail(lod as u8))
-                    .meshes()
-                    .iter()
-                    .any(|mesh| mesh.kinds().contains(&MeshKind::Standard))
-            })
-        }),
+        drawn,
         slots: RefCell::new((0..level.materials.len()).map(|_| None).collect()),
         shapes: Default::default(),
         level: RefCell::new(level),
@@ -427,7 +424,7 @@ pub fn compose(parts: &[(String, Vec<u8>)]) -> Result<Rendered> {
         arrays: Default::default(),
         parameters: Default::default(),
         translated: Default::default(),
-        animation: skin::Animation::new(first),
+        animation: skin::Animation::new(&first.path),
         lighting: Default::default(),
         post: Default::default(),
         graded: Cell::new(false),
@@ -446,6 +443,37 @@ pub fn compose(parts: &[(String, Vec<u8>)]) -> Result<Rendered> {
         shaded: Cell::new(true),
         target: Cell::new(gpu::LIT),
     })
+}
+
+fn containers(pieces: &[Piece]) -> Result<Vec<ModelContainer>> {
+    pieces
+        .iter()
+        .map(|piece| Ok(ModelContainer::read(Cursor::new(piece.bytes.clone()))?))
+        .collect()
+}
+
+fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
+    let containers = containers(pieces)?;
+    let sources: Vec<_> = pieces
+        .iter()
+        .map(|piece| piece.path.as_str())
+        .zip(&containers)
+        .collect();
+    read_level(&sources, lod)
+}
+
+/// Which detail levels the pieces draw anything at.
+fn drawn_levels(pieces: &[Piece]) -> Result<[bool; 3]> {
+    let containers = containers(pieces)?;
+    Ok(std::array::from_fn(|lod| {
+        containers.iter().any(|container| {
+            container
+                .model(detail(lod as u8))
+                .meshes()
+                .iter()
+                .any(|mesh| mesh.kinds().contains(&MeshKind::Standard))
+        })
+    }))
 }
 
 pub(super) fn detail(lod: u8) -> Lod {
@@ -2127,48 +2155,83 @@ impl Rendered {
         }
     }
 
-    /// Draws another detail level of the same files. The materials and textures already fetched are
-    /// kept, matched to the new geometry by path, so nothing is asked for twice and nothing pops.
+    /// Draws another detail level of the same files.
     fn switch(&self, lod: u8) {
         let paths: Vec<&str> = self
             .pieces
             .iter()
             .map(|piece| piece.path.as_str())
             .collect();
-        let read = self
-            .pieces
-            .iter()
-            .map(|piece| Ok(ModelContainer::read(Cursor::new(piece.bytes.clone()))?))
-            .collect::<Result<Vec<_>>>()
-            .and_then(|containers| {
-                let sources: Vec<_> = paths.iter().copied().zip(&containers).collect();
-                read_level(&sources, lod)
-            });
-        let level = match read {
-            Ok(level) => level,
-            Err(why) => {
-                log::error!(
-                    "assets/mdl: {}: detail level {lod}: {why}",
-                    paths.join(" + ")
-                );
-                return;
+        match level_of(&self.pieces, lod) {
+            Ok(level) => {
+                self.lod.set(lod);
+                self.rebuild(level);
             }
-        };
+            Err(why) => log::error!(
+                "assets/mdl: {}: detail level {lod}: {why}",
+                paths.join(" + ")
+            ),
+        }
+    }
 
+    /// Puts a different set of files on the same character, which is what a change of clothes is.
+    /// The camera, the rig and the motion it is playing all stay where they are; the rig is rebuilt
+    /// only where the body under the clothes changed.
+    pub fn redress(&mut self, parts: &[Source]) -> Result<()> {
+        let first = parts.first().context("a model of no files")?;
+        let pieces: Vec<_> = parts.iter().map(Piece::new).collect();
+        let drawn = drawn_levels(&pieces)?;
+        let lod = match drawn[usize::from(self.lod.get())] {
+            true => self.lod.get(),
+            false => 0,
+        };
+        let level = level_of(&pieces, lod)?;
+
+        if skin::code(&first.path)
+            != self
+                .pieces
+                .first()
+                .and_then(|piece| skin::code(&piece.path))
+        {
+            self.animation = skin::Animation::new(&first.path);
+        }
+        self.pieces = pieces;
+        self.drawn = drawn;
+        self.lod.set(lod);
+        self.rebuild(level);
+        Ok(())
+    }
+
+    /// Takes up a level built from the pieces the model now holds. Everything already fetched is
+    /// kept and matched to the new geometry by material path, so nothing is asked for twice and
+    /// nothing pops. Index is not a key that survives this: merging or changing a piece renumbers
+    /// the materials, and an entry carried across by index would draw one material's geometry
+    /// through another's shader.
+    fn rebuild(&self, level: Level) {
         let mut slots = self.slots.borrow_mut();
-        let mut held: BTreeMap<String, Slot> = self
-            .level
-            .borrow_mut()
-            .materials
-            .drain(..)
-            .zip(slots.drain(..))
-            .filter_map(|(path, slot)| slot.map(|slot| (path, slot)))
+        let mut translated = self.translated.borrow_mut();
+        let mut tables = self.tables.borrow_mut();
+        let was = std::mem::take(&mut self.level.borrow_mut().materials);
+        let mut held: BTreeMap<String, Kept> = was
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| {
+                let slot = slots.get_mut(index).and_then(Option::take);
+                (
+                    path,
+                    (slot, translated.remove(&index), tables.remove(&index)),
+                )
+            })
             .collect();
-        *slots = level
-            .materials
-            .iter()
-            .map(|path| held.remove(path))
-            .collect();
+        translated.clear();
+        tables.clear();
+        slots.clear();
+        for (index, path) in level.materials.iter().enumerate() {
+            let (slot, program, table) = held.remove(path).unwrap_or_default();
+            translated.extend(program.map(|program| (index, program)));
+            tables.extend(table.map(|table| (index, table)));
+            slots.push(slot);
+        }
         // The new level's context has no color tables of its own, and a material kept from the old
         // one never transitions again to hand one over.
         for (index, slot) in slots.iter().enumerate() {
@@ -2183,7 +2246,7 @@ impl Rendered {
             level.gpu.lock().unwrap().queue_types(values);
         }
 
-        self.lod.set(lod);
+        drop((slots, translated, tables));
         *self.level.borrow_mut() = level;
         self.apply();
         self.apply_variant();

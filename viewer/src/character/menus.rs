@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use ironworks::excel::Language;
 
+use super::{Gear, Outfit, Slot};
 use crate::backend::Backend;
 use crate::excel::provider::{ExcelProvider, ExcelRow, ExcelSheet};
 
@@ -37,6 +38,15 @@ const HAIR: i32 = 6;
 const MASCULINE: u32 = 0;
 const FEMININE: u32 = 4;
 
+/// Where `Race` names the item worn in each of [`Slot::RACIAL`], masculine then feminine.
+const RSE: u32 = 8;
+/// `Item`'s model quad.
+const MODEL: u32 = 24;
+/// `CharaMakeClassEquip`'s class, after the seven quads it dresses that class in.
+const CLASS_JOB: u32 = 56;
+/// `ClassJob`'s name as the creator writes it, rather than the lowercase one it is filed under.
+const JOB_NAME: u32 = 16;
+
 /// One race, clan and gender the creator offers, and what it offers for them.
 #[derive(Clone)]
 pub struct Body {
@@ -49,12 +59,21 @@ pub struct Body {
     pub hairs: BTreeMap<u16, u32>,
 }
 
+/// One of the classes the creator starts a character in, and what it dresses them in.
+pub struct Job {
+    pub name: String,
+    pub outfit: Outfit,
+}
+
 #[derive(Default)]
 pub struct Creator {
     pub bodies: Vec<Body>,
     /// What each race and clan is called, masculine then feminine.
     pub races: BTreeMap<u32, (String, String)>,
     pub tribes: BTreeMap<u32, (String, String)>,
+    /// The clothing a race wears when it wears nothing else, by race and gender.
+    pub attire: BTreeMap<(u32, bool), Outfit>,
+    pub jobs: Vec<Job>,
 }
 
 impl Creator {
@@ -127,7 +146,69 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
         bodies,
         races: names(backend, "Race", language).await?,
         tribes: names(backend, "Tribe", language).await?,
+        attire: attire(backend, language).await?,
+        jobs: jobs(backend, language).await?,
     })
+}
+
+/// What each race stands in when it is wearing nothing else. `Race` names an item per slot and
+/// gender, and the item's model quad is the set and the variant it is worn at.
+async fn attire(backend: &Backend, language: Language) -> Result<BTreeMap<(u32, bool), Outfit>> {
+    let excel = backend.excel();
+    let races = excel.get_sheet("Race", language).await?;
+    let items = excel.get_sheet("Item", language).await?;
+    let mut dressed = BTreeMap::new();
+    for id in races.get_row_ids() {
+        let Ok(race) = races.get_row(id) else {
+            continue;
+        };
+        for female in [false, true] {
+            let mut outfit = Outfit::default();
+            for (at, slot) in Slot::RACIAL.into_iter().enumerate() {
+                let at = RSE + at as u32 * 8 + u32::from(female) * 4;
+                outfit[slot as usize] = race
+                    .read::<i32>(at)
+                    .ok()
+                    .filter(|item| *item > 0)
+                    .and_then(|item| items.get_row(item as u32).ok())
+                    .and_then(|item| item.read::<u64>(MODEL).ok())
+                    .and_then(Gear::read);
+            }
+            dressed.insert((id, female), outfit);
+        }
+    }
+    Ok(dressed)
+}
+
+/// The classes a character can be started as, and the gear each of them is started in. The sheet
+/// states its five armour quads in [`Slot::ALL`]'s own order, ahead of the two it holds.
+async fn jobs(backend: &Backend, language: Language) -> Result<Vec<Job>> {
+    let excel = backend.excel();
+    let equipped = excel.get_sheet("CharaMakeClassEquip", language).await?;
+    let classes = excel.get_sheet("ClassJob", language).await?;
+    let mut found = Vec::new();
+    for id in equipped.get_row_ids() {
+        let Ok(row) = equipped.get_row(id) else {
+            continue;
+        };
+        let Ok(class) = row.read::<i32>(CLASS_JOB) else {
+            continue;
+        };
+        let mut outfit = Outfit::default();
+        for (at, held) in outfit.iter_mut().enumerate() {
+            *held = row.read::<u64>(at as u32 * 8).ok().and_then(Gear::read);
+        }
+        found.push(Job {
+            name: classes
+                .get_row(class as u32)
+                .ok()
+                .and_then(|row| row.read_string(JOB_NAME).ok().map(|name| name.to_string()))
+                .unwrap_or_else(|| class.to_string()),
+            outfit,
+        });
+    }
+    found.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(found)
 }
 
 /// A sheet's masculine and feminine names, by row.

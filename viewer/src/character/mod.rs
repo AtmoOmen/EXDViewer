@@ -9,7 +9,7 @@
 
 mod menus;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -29,17 +29,70 @@ use crate::utils::{CollapsibleSidePanel, IconManager, ManagedIcon, Side, Tracked
 const BODIES: std::ops::RangeInclusive<u16> = 1..=18;
 const VARIANTS: [u16; 2] = [1, 4];
 
-/// How big a set's icon is drawn.
+/// How big a set's icon is drawn, and how far apart the grid sets them.
 const ICON: f32 = 40.0;
+const GAP: f32 = 4.0;
 
-/// The equipment slots a body wears, as the file names abbreviate them.
-const SLOTS: [&str; 5] = ["met", "top", "glv", "dwn", "sho"];
+/// Smallclothes, which is what everything else is worn over.
+const SMALLCLOTHES: Gear = Gear { set: 0, variant: 1 };
 
-/// Smallclothes, which is what a character stands in before anything is put on it.
-const SMALLCLOTHES: u16 = 0;
+/// A slot a character wears something in, as the file names abbreviate it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Slot {
+    Head,
+    Body,
+    Hands,
+    Legs,
+    Feet,
+}
 
-/// The files a character is worn out of, each with its bytes.
-type Worn = Vec<(String, Vec<u8>)>;
+impl Slot {
+    pub const ALL: [Slot; 5] = [Self::Head, Self::Body, Self::Hands, Self::Legs, Self::Feet];
+    /// The slots a race has clothing of its own for, in the order `Race` states them.
+    pub const RACIAL: [Slot; 4] = [Self::Body, Self::Hands, Self::Legs, Self::Feet];
+
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Head => "met",
+            Self::Body => "top",
+            Self::Hands => "glv",
+            Self::Legs => "dwn",
+            Self::Feet => "sho",
+        }
+    }
+}
+
+/// A set and the variant it is worn at, which is how a model quad states a piece of equipment.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct Gear {
+    pub set: u16,
+    pub variant: u16,
+}
+
+impl Gear {
+    pub fn read(quad: u64) -> Option<Self> {
+        (quad != 0).then_some(Self {
+            set: quad as u16,
+            variant: (quad >> 16) as u16,
+        })
+    }
+}
+
+/// What a character wears, by slot.
+pub type Outfit = [Option<Gear>; 5];
+
+/// What the creator dresses a character in before anything is picked for them.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Attire {
+    #[default]
+    Race,
+    Job,
+    Smallclothes,
+}
+
+/// The bytes of every file read so far, by path, and one batch of them as they land.
+type Files = BTreeMap<String, Vec<u8>>;
+type Read = Vec<(String, Vec<u8>)>;
 
 /// What a picked set is made of, and what to call it.
 struct Set {
@@ -59,14 +112,18 @@ pub struct CharacterBuilder {
     female: bool,
     /// The code the picked clan and gender resolve to, and the sets it carries.
     code: u16,
+    body: Vec<String>,
     faces: Vec<Set>,
     hairs: Vec<Set>,
     face: u16,
     hair: u16,
-    dressed: bool,
+    attire: Attire,
+    job: usize,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
-    worn: Vec<String>,
-    fetching: Option<TrackedPromise<Result<Worn>>>,
+    worn: Vec<(String, u16)>,
+    /// Every file read so far, so a change of clothes only asks for what it newly needs.
+    held: Files,
+    fetching: Option<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
 }
 
@@ -81,12 +138,15 @@ impl Default for CharacterBuilder {
             tribe: 1,
             female: false,
             code: 101,
+            body: Vec::new(),
             faces: Vec::new(),
             hairs: Vec::new(),
             face: 1,
             hair: 1,
-            dressed: true,
+            attire: Attire::default(),
+            job: 0,
             worn: Vec::new(),
+            held: Files::new(),
             fetching: None,
             model: None,
         }
@@ -100,9 +160,11 @@ impl CharacterBuilder {
         self.codes.clear();
         self.creator = menus::Creator::default();
         self.reading = None;
+        self.body.clear();
         self.faces.clear();
         self.hairs.clear();
         self.worn.clear();
+        self.held.clear();
         self.fetching = None;
         self.model = None;
     }
@@ -158,6 +220,15 @@ impl CharacterBuilder {
                 bodies: read.bodies.clone(),
                 races: read.races.clone(),
                 tribes: read.tribes.clone(),
+                attire: read.attire.clone(),
+                jobs: read
+                    .jobs
+                    .iter()
+                    .map(|job| menus::Job {
+                        name: job.name.clone(),
+                        outfit: job.outfit,
+                    })
+                    .collect(),
             };
             self.faces.clear();
         }
@@ -170,46 +241,138 @@ impl CharacterBuilder {
                 self.tribe,
                 self.female,
             );
+            self.body = body(&listing, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
             self.face = pick(&self.faces, self.face);
             self.hair = pick(&self.hairs, self.hair);
         }
 
-        let mut wanted = body(&listing, self.code);
-        wanted.extend(held(&self.faces, self.face));
-        wanted.extend(held(&self.hairs, self.hair));
-        if self.dressed {
-            wanted.extend(worn(&listing, self.code, SMALLCLOTHES));
-        }
+        let wanted = self.wearing(&listing);
         if wanted != self.worn && !wanted.is_empty() {
-            self.worn = wanted.clone();
-            let files = backend.files().clone();
-            self.fetching = Some(TrackedPromise::spawn_local(async move {
-                let mut read = Vec::with_capacity(wanted.len());
-                for path in wanted {
-                    let bytes = files.read(&path).await?;
-                    read.push((path, bytes));
+            self.worn = wanted;
+            let missing: Vec<String> = self
+                .worn
+                .iter()
+                .map(|(path, _)| path)
+                .filter(|path| !self.held.contains_key(*path))
+                .cloned()
+                .collect();
+            match missing.is_empty() {
+                true => self.dress(),
+                false => {
+                    let files = backend.files().clone();
+                    self.fetching = Some(TrackedPromise::spawn_local(async move {
+                        let mut read = Vec::with_capacity(missing.len());
+                        for path in missing {
+                            let bytes = files.read(&path).await?;
+                            read.push((path, bytes));
+                        }
+                        Ok(read)
+                    }));
                 }
-                Ok(read)
-            }));
+            }
         }
-        if matches!(&self.fetching, Some(promise) if promise.try_get().is_some()) {
-            let Some(promise) = self.fetching.take() else {
-                return;
-            };
-            self.model = Some(
-                promise
-                    .try_get()
-                    .expect("just landed")
-                    .as_ref()
-                    .map_err(ToString::to_string)
-                    .and_then(|parts| {
-                        mdl::compose(parts)
-                            .map(Box::new)
-                            .map_err(|why| why.to_string())
-                    }),
-            );
+        if matches!(&self.fetching, Some(promise) if promise.try_get().is_some())
+            && let Some(promise) = self.fetching.take()
+            && let Some(read) = promise.try_get()
+        {
+            match read {
+                Ok(read) => {
+                    self.held.extend(read.iter().cloned());
+                    self.dress();
+                }
+                Err(why) => self.model = Some(Err(why.to_string())),
+            }
+        }
+    }
+
+    /// The outfit the picked attire dresses the character in.
+    fn outfit(&self) -> Outfit {
+        match self.attire {
+            Attire::Race => self
+                .creator
+                .attire
+                .get(&(self.race, self.female))
+                .copied()
+                .unwrap_or_default(),
+            Attire::Job => self
+                .creator
+                .jobs
+                .get(self.job)
+                .map(|job| job.outfit)
+                .unwrap_or_default(),
+            Attire::Smallclothes => {
+                let mut outfit = Outfit::default();
+                for slot in Slot::RACIAL {
+                    outfit[slot as usize] = Some(SMALLCLOTHES);
+                }
+                outfit
+            }
+        }
+    }
+
+    /// Every model the character is drawn from, each with the variant it is worn at. A slot draws
+    /// exactly one of them: the equipment worn in it where there is any, and the body's own model
+    /// for that slot otherwise. Those two are the very same mesh wherever a race's smallclothes are
+    /// its bare skin, which is what drawing both of them showed as z-fighting.
+    ///
+    /// The face leads, since the first file is what names the skeleton the rest are posed on and a
+    /// piece of equipment worn by a race that has no model of its own is filed under another's code.
+    fn wearing(&self, listing: &Listing) -> Vec<(String, u16)> {
+        if self.body.is_empty() {
+            return Vec::new();
+        }
+        let mut found: Vec<_> = held(&self.faces, self.face)
+            .into_iter()
+            .chain(held(&self.hairs, self.hair))
+            .map(|path| (path, 0))
+            .collect();
+        let outfit = self.outfit();
+        for slot in Slot::ALL {
+            let worn = outfit[slot as usize].and_then(|gear| {
+                equipment(listing, self.code, slot, gear).map(|path| (path, gear.variant))
+            });
+            match worn {
+                Some(part) => found.push(part),
+                // Nothing stands in for a bare head: the body ships no model for it, and the face
+                // and the hair are what draw one.
+                None => found.extend(part(&self.body, slot).map(|path| (path, 0))),
+            }
+        }
+        found
+    }
+
+    /// Puts what has arrived on screen, keeping the character that is already there where there is
+    /// one so a change of clothes neither moves the view nor asks for anything twice.
+    fn dress(&mut self) {
+        let parts: Vec<_> = self
+            .worn
+            .iter()
+            .filter_map(|(path, variant)| {
+                Some(mdl::Source {
+                    path: path.clone(),
+                    bytes: self.held.get(path)?.clone(),
+                    variant: *variant,
+                })
+            })
+            .collect();
+        if parts.len() != self.worn.len() {
+            return;
+        }
+        match &mut self.model {
+            Some(Ok(model)) => {
+                if let Err(why) = model.redress(&parts) {
+                    self.model = Some(Err(why.to_string()));
+                }
+            }
+            _ => {
+                self.model = Some(
+                    mdl::compose(&parts)
+                        .map(Box::new)
+                        .map_err(|why| why.to_string()),
+                )
+            }
         }
     }
 
@@ -264,29 +427,41 @@ impl CharacterBuilder {
                         }
                     });
                     ui.add_space(8.0);
-                    if ui.selectable_label(self.dressed, "Smallclothes").clicked() {
-                        picked = Some(Pick::Dressed(!self.dressed));
+                    ui.label(RichText::new("Attire").strong());
+                    ui.horizontal(|ui| {
+                        for (attire, name) in [
+                            (Attire::Race, "Race"),
+                            (Attire::Job, "Job"),
+                            (Attire::Smallclothes, "Smallclothes"),
+                        ] {
+                            if ui.selectable_label(self.attire == attire, name).clicked() {
+                                picked = Some(Pick::Attire(attire));
+                            }
+                        }
+                    });
+                    if self.attire == Attire::Job {
+                        for (at, job) in self.creator.jobs.iter().enumerate() {
+                            if ui.selectable_label(self.job == at, &job.name).clicked() {
+                                picked = Some(Pick::Job(at));
+                            }
+                        }
                     }
                     ui.add_space(8.0);
                     ui.label(RichText::new("Face").strong());
-                    ui.horizontal_wrapped(|ui| {
-                        for set in &self.faces {
-                            let icon = held.and_then(|body| body.faces.get(&set.id));
-                            if chip(ui, backend, icons, set.id, self.face, icon) {
-                                picked = Some(Pick::Face(set.id));
-                            }
-                        }
-                    });
+                    grid(ui, "character_faces", &self.faces, |ui, set| {
+                        let icon = held.and_then(|body| body.faces.get(&set.id));
+                        chip(ui, backend, icons, set.id, self.face, icon)
+                            .then_some(Pick::Face(set.id))
+                    })
+                    .inspect(|face| picked = Some(*face));
                     ui.add_space(8.0);
                     ui.label(RichText::new("Hair").strong());
-                    ui.horizontal_wrapped(|ui| {
-                        for set in &self.hairs {
-                            let icon = held.and_then(|body| body.hairs.get(&set.id));
-                            if chip(ui, backend, icons, set.id, self.hair, icon) {
-                                picked = Some(Pick::Hair(set.id));
-                            }
-                        }
-                    });
+                    grid(ui, "character_hairs", &self.hairs, |ui, set| {
+                        let icon = held.and_then(|body| body.hairs.get(&set.id));
+                        chip(ui, backend, icons, set.id, self.hair, icon)
+                            .then_some(Pick::Hair(set.id))
+                    })
+                    .inspect(|hair| picked = Some(*hair));
                 });
                 picked
             })
@@ -311,7 +486,8 @@ impl CharacterBuilder {
                 self.female = female;
                 self.faces.clear();
             }
-            Some(Pick::Dressed(dressed)) => self.dressed = dressed,
+            Some(Pick::Attire(attire)) => self.attire = attire,
+            Some(Pick::Job(job)) => self.job = job,
             Some(Pick::Face(face)) => self.face = face,
             Some(Pick::Hair(hair)) => self.hair = hair,
             None => {}
@@ -319,11 +495,13 @@ impl CharacterBuilder {
     }
 }
 
+#[derive(Clone, Copy)]
 enum Pick {
-    Dressed(bool),
     Race(u32),
     Tribe(u32),
     Gender(bool),
+    Attire(Attire),
+    Job(usize),
     Face(u16),
     Hair(u16),
 }
@@ -388,30 +566,22 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
         .collect()
 }
 
-/// What a code wears out of one equipment set, by slot.
+/// The model a code wears a set as in one slot.
 ///
-/// Not every body has a model of its own for a set: the ones that do not are drawn from the base
-/// body of their gender and deformed onto their own shape, which is what `.eqdp` states and
-/// `human.pbd` carries out. The fallback is taken here; the deformation is not, so a piece worn this
-/// way is the right garment on the wrong build.
-fn worn(listing: &Listing, code: u16, set: u16) -> Vec<String> {
-    let under = format!("chara/equipment/e{set:04}/model");
-    let held = listing.under(&format!("{under}/"));
+/// Not every race has one of its own: the ones that do not are drawn from the base body of their
+/// gender, which the game then deforms onto their own build. The fallback is taken here; the
+/// deformation is not, so a piece worn this way is the right garment on the wrong build.
+fn equipment(listing: &Listing, code: u16, slot: Slot, gear: Gear) -> Option<String> {
+    let under = format!("chara/equipment/e{:04}/model", gear.set);
+    let held = listing.under(&under);
     let base = match code % 2 {
         1 => 101,
         _ => 201,
     };
-    SLOTS
-        .iter()
-        .filter_map(|slot| {
-            let own = format!("{under}/c{code:04}e{set:04}_{slot}.mdl");
-            let shared = format!("{under}/c{base:04}e{set:04}_{slot}.mdl");
-            held.iter()
-                .find(|path| **path == own)
-                .or_else(|| held.iter().find(|path| **path == shared))
-                .cloned()
-        })
-        .collect()
+    [code, base].into_iter().find_map(|code| {
+        let path = format!("{under}/c{code:04}e{:04}_{}.mdl", gear.set, slot.suffix());
+        held.contains(&path).then_some(path)
+    })
 }
 
 /// The body a code is built on, which is the lowest set it ships: only one code carries `b0001`,
@@ -421,6 +591,12 @@ fn body(listing: &Listing, code: u16) -> Vec<String> {
         .first()
         .map(|set| set.parts.clone())
         .unwrap_or_default()
+}
+
+/// Which of a set's models covers one slot.
+fn part(parts: &[String], slot: Slot) -> Option<String> {
+    let tail = format!("_{}.mdl", slot.suffix());
+    parts.iter().find(|path| path.ends_with(&tail)).cloned()
 }
 
 /// The picked set if the code still carries it, and its lowest otherwise.
@@ -438,6 +614,32 @@ fn held(sets: &[Set], wanted: u16) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Sets to pick from, laid out as many to a row as the panel is wide enough for. Every cell is the
+/// same size whether or not the creator offers an icon for what is in it, so one it does not name
+/// leaves a gap in the numbering rather than a break in the grid.
+fn grid<T, R>(
+    ui: &mut egui::Ui,
+    id: &str,
+    sets: &[T],
+    mut cell: impl FnMut(&mut egui::Ui, &T) -> Option<R>,
+) -> Option<R> {
+    let step = ICON + GAP + ui.spacing().button_padding.x * 2.0;
+    let columns = ((ui.available_width() / step) as usize).max(1);
+    egui::Grid::new(id)
+        .spacing(egui::Vec2::splat(GAP))
+        .show(ui, |ui| {
+            let mut picked = None;
+            for (at, set) in sets.iter().enumerate() {
+                if at > 0 && at % columns == 0 {
+                    ui.end_row();
+                }
+                picked = cell(ui, set).or(picked);
+            }
+            picked
+        })
+        .inner
+}
+
 /// One set to pick from: the icon the creator offers it under where there is one, and its number
 /// where there is not, since a set the menus do not list still has a model on disk.
 fn chip(
@@ -449,7 +651,7 @@ fn chip(
     icon: Option<&u32>,
 ) -> bool {
     let Some(icon) = icon else {
-        return ui.selectable_label(current == id, id.to_string()).clicked();
+        return numbered(ui, id, current);
     };
     let path = get_icon_path(backend.icons(), *icon, false, Language::None);
     let excel = backend.excel().clone();
@@ -469,6 +671,15 @@ fn chip(
             )
             .on_hover_text(id.to_string())
             .clicked(),
-        _ => ui.selectable_label(current == id, id.to_string()).clicked(),
+        _ => numbered(ui, id, current),
     }
+}
+
+fn numbered(ui: &mut egui::Ui, id: u16, current: u16) -> bool {
+    ui.add_sized(
+        egui::Vec2::splat(ICON),
+        egui::Button::new(id.to_string()).selected(current == id),
+    )
+    .on_hover_text("No icon")
+    .clicked()
 }

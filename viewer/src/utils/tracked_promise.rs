@@ -62,6 +62,12 @@ impl<T: Send + 'static> TrackedPromise<T> {
     pub fn try_get(&self) -> Option<&T> {
         self.0.ready()
     }
+
+    /// What the promise answered with, handed over rather than borrowed, and the promise itself
+    /// back where it has not answered yet.
+    pub fn try_take(self) -> Result<T, Self> {
+        self.0.try_take().map_err(Self)
+    }
 }
 
 impl<R: Send + 'static> PromiseKind for TrackedPromise<R> {

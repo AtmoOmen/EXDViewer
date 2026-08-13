@@ -1264,13 +1264,7 @@ impl CharacterBuilder {
                     self.race = held.race;
                     self.tribe = held.tribe;
                     self.female = held.female;
-                    // A base row states a menu's choice the way the creator numbers them, counting
-                    // from one where a menu counts from nought.
-                    self.choices = held
-                        .choices
-                        .iter()
-                        .map(|(customize, choice)| (*customize, choice.saturating_sub(1)))
-                        .collect();
+                    self.choices = held.choices.iter().copied().collect();
                     self.attire = Attire::Npc;
                     self.chosen = [None; 5];
                     self.faces.clear();

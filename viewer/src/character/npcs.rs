@@ -18,21 +18,25 @@ const SINGULAR: u32 = 0;
 const RACE: u32 = 202;
 const GENDER: u32 = 203;
 const TRIBE: u32 = 206;
-/// The customisations, paired with the `Customize` each drives.
-const PICKED: [(u32, u32); 15] = [
-    (205, 3),  // Height
+/// The customisations a row states as the menu's own position, which counts from one where a menu
+/// counts from nought, paired with the `Customize` each drives.
+const LISTED: [(u32, u32); 7] = [
     (207, 5),  // Face
     (208, 6),  // Hairstyle
-    (210, 8),  // Skin colour
-    (212, 10), // Hair colour
-    (214, 12), // Facial features
-    (215, 13), // Tattoo colour
     (216, 14), // Eyebrows
-    (217, 9),  // Eye colour
     (218, 16), // Eye shape
     (219, 17), // Nose
     (220, 18), // Jaw
     (221, 19), // Mouth
+];
+/// The ones it states outright: a palette index, a slider's own place, or a mask of features.
+const STATED: [(u32, u32); 8] = [
+    (205, 3),  // Height
+    (210, 8),  // Skin colour
+    (212, 10), // Hair colour
+    (214, 12), // Facial features
+    (215, 13), // Tattoo colour
+    (217, 9),  // Eye colour
     (222, 20), // Lip colour
     (227, 25), // Face paint colour
 ];
@@ -94,11 +98,15 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
             race: u32::from(race),
             tribe: u32::from(tribe),
             female: gender != 0,
-            choices: PICKED
+            choices: LISTED
                 .into_iter()
                 .filter_map(|(at, customize)| {
-                    Some((customize, u32::from(row.read::<u8>(at).ok()?)))
+                    let held = u32::from(row.read::<u8>(at).ok()?);
+                    Some((customize, held.saturating_sub(1)))
                 })
+                .chain(STATED.into_iter().filter_map(|(at, customize)| {
+                    Some((customize, u32::from(row.read::<u8>(at).ok()?)))
+                }))
                 .collect(),
             outfit,
         });

@@ -210,7 +210,10 @@ pub struct CharacterBuilder {
     worn: Vec<(String, u16)>,
     /// Every file read so far, so a change of clothes only asks for what it newly needs.
     held: Files,
-    fetching: Option<TrackedPromise<Result<Read>>>,
+    /// Batches of files still on their way. A batch is never abandoned: dropping one cancels the
+    /// request under it, and what it was fetching is worth keeping whether or not the character has
+    /// changed clothes since.
+    fetching: Vec<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
 }
 
@@ -256,7 +259,7 @@ impl Default for CharacterBuilder {
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
             held: Files::new(),
-            fetching: None,
+            fetching: Vec::new(),
             model: None,
         }
     }
@@ -291,7 +294,7 @@ impl CharacterBuilder {
         self.sets.borrow_mut().clear();
         self.worn.clear();
         self.held.clear();
-        self.fetching = None;
+        self.fetching.clear();
         self.model = None;
     }
 
@@ -474,7 +477,7 @@ impl CharacterBuilder {
                 true => self.dress(),
                 false => {
                     let files = backend.files().clone();
-                    self.fetching = Some(TrackedPromise::spawn_local(async move {
+                    self.fetching.push(TrackedPromise::spawn_local(async move {
                         let mut read = Vec::with_capacity(missing.len());
                         for path in missing {
                             let bytes = files.read(&path).await?;
@@ -485,17 +488,21 @@ impl CharacterBuilder {
                 }
             }
         }
-        if matches!(&self.fetching, Some(promise) if promise.try_get().is_some())
-            && let Some(promise) = self.fetching.take()
-            && let Some(read) = promise.try_get()
-        {
-            match read {
-                Ok(read) => {
-                    self.held.extend(read.iter().cloned());
-                    self.dress();
+        let mut landed = false;
+        let mut waiting = Vec::new();
+        for promise in std::mem::take(&mut self.fetching) {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.held.extend(read);
+                    landed = true;
                 }
-                Err(why) => self.model = Some(Err(why.to_string())),
+                Ok(Err(why)) => self.model = Some(Err(why.to_string())),
+                Err(promise) => waiting.push(promise),
             }
+        }
+        self.fetching = waiting;
+        if landed {
+            self.dress();
         }
 
         // Cheap enough to hand over on every frame: it walks the parts of one character and the

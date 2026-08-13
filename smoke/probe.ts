@@ -30,6 +30,8 @@ const points = flag("click", "")
     .map(Number);
 const zoom = Number(flag("zoom", "0"));
 const settle = Number(flag("settle", "8000"));
+const wait = Number(flag("wait", "9000"));
+const hold = Number(flag("hold", "2500"));
 const shaded = !argv.includes("--plain");
 
 const [WIDTH, HEIGHT] = flag("size", "1600x1000").split("x").map(Number);
@@ -130,7 +132,7 @@ async function main() {
     let decoded = 0;
     cdp.on("Runtime.consoleAPICalled", (p: any) => {
         const line = p.args.map(text).join(" ");
-        if (line.includes("assets/preview: ")) decoded += 1;
+        if (line.includes("assets/preview: ") || line.includes("assets/mdl: ")) decoded += 1;
         if (line.includes(mark) && !seen.has(line)) {
             seen.add(line);
             console.log(`   | ${line.slice(0, 400)}`);
@@ -160,7 +162,7 @@ async function main() {
                 return title.toLowerCase().includes(name.toLowerCase());
             });
             await waitFor(`${name} to be decoded`, 120_000, async () => decoded > opened);
-            await sleep(9000);
+            await sleep(wait);
             const tag = `${String(at).padStart(2, "0")}-${name.replace(/\.mdl$/, "")}`;
             // Before the shaders are turned on, so the plain and shaded runs frame alike.
             for (let at = 0; at < zoom; at++) {
@@ -187,23 +189,21 @@ async function main() {
                 buttons: 0,
             });
             await sleep(1500);
-            if (!shaded) {
-                if (toggle >= 0) await click(cdp, toggle, ROW_Y);
-                await shot(cdp, `${tag}-plain`);
-                continue;
-            }
-            await click(cdp, ROW_LEFT, ROW_Y);
-            await sleep(settle);
-            if (channel >= 0) {
-                await click(cdp, channel, ROW_Y);
-                await sleep(2500);
+            if (shaded) {
+                await click(cdp, ROW_LEFT, ROW_Y);
+                await sleep(settle);
+                if (channel >= 0) {
+                    await click(cdp, channel, ROW_Y);
+                    await sleep(2500);
+                }
             }
             if (toggle >= 0) await click(cdp, toggle, ROW_Y);
             for (let at = 0; at + 1 < points.length; at += 2) {
                 await click(cdp, points[at], points[at + 1]);
-                await sleep(2500);
+                await sleep(hold);
+                await shot(cdp, `${tag}-click${at / 2}`);
             }
-            await shot(cdp, `${tag}-${WIDTH}x${HEIGHT}`);
+            await shot(cdp, shaded ? `${tag}-${WIDTH}x${HEIGHT}` : `${tag}-plain`);
         }
     } finally {
         cdp.close?.();

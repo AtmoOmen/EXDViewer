@@ -505,6 +505,12 @@ impl CharacterBuilder {
                 if let Some((swatches, held)) = color {
                     *held = swatches.shaded(at);
                 }
+                // A strand is mixed between the two hair colours by its mask, and the creator
+                // offers no menu for the second: with no highlight to pick, both are the one
+                // colour, and leaving the highlight white is what draws brown hair silver.
+                if menu.customize == HAIR_COLOR {
+                    customize.highlight = customize.hair;
+                }
                 if menu.customize == EYE_COLOR {
                     customize.left_eye = customize.right_eye;
                 }

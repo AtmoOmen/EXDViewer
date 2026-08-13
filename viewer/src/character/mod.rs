@@ -57,6 +57,7 @@ const TATTOO_COLOR: u32 = 13;
 const LIP_COLOR: u32 = 20;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
+const MUSCLE_TONE: u32 = 21;
 
 /// What the creator ticks beside a menu rather than offering as a menu of its own, keyed past every
 /// menu number so the two can never collide. The game holds each of them all the same: a highlight
@@ -66,6 +67,7 @@ pub const HIGHLIGHTS: u32 = 100;
 pub const HIGHLIGHT_COLOR: u32 = 101;
 pub const ODD_EYES: u32 = 102;
 pub const LEFT_EYE_COLOR: u32 = 103;
+pub const LIPSTICK: u32 = 104;
 
 /// Where the light half of a palette the file splits in two begins. Lips and face paint are offered
 /// as a dark run and a light one; the file runs them as one, the second half starting here.
@@ -538,6 +540,7 @@ impl CharacterBuilder {
             .collect();
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
+        let mut tone = 0.5;
         let Some(body) = self.creator.body(self.tribe, self.female) else {
             return (customize, hidden, shapes, stature);
         };
@@ -573,10 +576,19 @@ impl CharacterBuilder {
                         false => customize.right_eye,
                     };
                 }
-                if menu.customize == FACE_PAINT_COLOR {
-                    let [red, green, blue, _] = palettes.face_paint.shaded(at);
+                // What the shaders call the option colour is the race feature: a limbal ring, a
+                // Miqo'te's ear tuft, the tattoo the creator names it after. Face paint has a
+                // colour of its own, which the game hands to the decal rather than to this.
+                if menu.customize == TATTOO_COLOR {
+                    let [red, green, blue, _] = palettes.features.shaded(at);
                     customize.option = [red, green, blue];
                 }
+            }
+            // Only the lane, since the muscle tone menu comes before the skin colour that would
+            // otherwise write over what it left.
+            if menu.customize == MUSCLE_TONE {
+                let last = menu.count.saturating_sub(1).max(1) as usize;
+                tone = at.min(last) as f32 / last as f32;
             }
             if menu.customize == HEIGHT
                 && let Some(palettes) = &palettes
@@ -607,6 +619,11 @@ impl CharacterBuilder {
             {
                 shapes.insert(format!("{prefix}_{letter}"));
             }
+        }
+        customize.skin[3] = tone;
+        // Lip colour carries its own opacity, and the creator's own box is what it is worn at all.
+        if !self.ticked(LIPSTICK) {
+            customize.lip[3] = 0.0;
         }
         (customize, hidden, shapes, stature)
     }
@@ -982,6 +999,12 @@ impl CharacterBuilder {
                         FACE_PAINT_COLOR => &palettes.face_paint,
                         _ => &palettes.features,
                     };
+                    if menu.customize == LIP_COLOR {
+                        let mut on = self.ticked(LIPSTICK);
+                        if ui.checkbox(&mut on, "Lipstick").changed() {
+                            picked = Some(Pick::Made(LIPSTICK, u32::from(on)));
+                        }
+                    }
                     // Lips and face paint are offered as a dark run and a light one, which is one
                     // palette in the file: the half a colour belongs to is the top bit of its own
                     // index, so switching halves is that bit and nothing else.

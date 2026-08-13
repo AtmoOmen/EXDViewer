@@ -113,11 +113,14 @@ fn halves(
     }
 }
 
+/// The shaders take a colour squared, which is what the game itself writes into their buffer. The
+/// fourth lane is not a colour and is passed as it is: it is a lip's own opacity.
 fn lanes(held: &cmp::Color) -> [f32; 4] {
+    let squared = |channel: u8| (f32::from(channel) / 255.0).powi(2);
     [
-        f32::from(held.red()) / 255.0,
-        f32::from(held.green()) / 255.0,
-        f32::from(held.blue()) / 255.0,
+        squared(held.red()),
+        squared(held.green()),
+        squared(held.blue()),
         f32::from(held.alpha()) / 255.0,
     ]
 }

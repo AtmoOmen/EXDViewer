@@ -6,7 +6,7 @@
 use anyhow::Result;
 use ironworks::excel::Language;
 
-use super::{Gear, HIGHLIGHT_COLOR, HIGHLIGHTS, LEFT_EYE_COLOR, ODD_EYES};
+use super::{Gear, HIGHLIGHT_COLOR, HIGHLIGHTS, LEFT_EYE_COLOR, LIPSTICK, ODD_EYES};
 use crate::backend::Backend;
 use crate::excel::provider::{ExcelProvider, ExcelSheet};
 
@@ -56,6 +56,8 @@ const EYE_AT: u32 = 9;
 /// numbers its menu fifteen even though the byte of that number is the left eye's colour.
 const IRIS_AT: u32 = 16;
 const IRIS: u32 = 15;
+/// Lipstick, which is the top bit of the byte the mouth menu holds the rest of.
+const LIPSTICK_AT: u32 = 19;
 /// The model quad worn in each of `Slot::ALL`, packed as the set in the low half and the variant
 /// in the high one.
 const MODELS: [u32; 5] = [148, 152, 156, 160, 164];
@@ -120,6 +122,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
                 )
                 .chain([
                     (IRIS, byte(IRIS_AT) >> 7),
+                    (LIPSTICK, byte(LIPSTICK_AT) >> 7),
                     (HIGHLIGHTS, byte(HIGHLIGHTS_AT) >> 7),
                     (HIGHLIGHT_COLOR, byte(HIGHLIGHT_COLOR_AT)),
                     (ODD_EYES, u32::from(left != right)),

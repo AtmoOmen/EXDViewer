@@ -32,6 +32,8 @@ const zoom = Number(flag("zoom", "0"));
 const settle = Number(flag("settle", "8000"));
 const wait = Number(flag("wait", "9000"));
 const hold = Number(flag("hold", "2500"));
+// A region of the frame to shoot instead of the whole of it, as x,y,w,h.
+const clip = flag("clip", "").split(",").filter((one) => one !== "").map(Number);
 const shaded = !argv.includes("--plain");
 
 const [WIDTH, HEIGHT] = flag("size", "1600x1000").split("x").map(Number);
@@ -100,10 +102,14 @@ async function click(cdp: Cdp, x: number, y: number) {
     await sleep(160);
 }
 
-async function shot(cdp: Cdp, name: string, clip?: unknown) {
+async function shot(cdp: Cdp, name: string) {
+    const region =
+        clip.length >= 4
+            ? { x: clip[0], y: clip[1], width: clip[2], height: clip[3], scale: clip[4] ?? 1 }
+            : undefined;
     const result = await cdp.send("Page.captureScreenshot", {
         format: "png",
-        ...(clip ? { clip } : {}),
+        ...(region ? { clip: region } : {}),
     });
     mkdirSync(outDir, { recursive: true });
     writeFileSync(join(outDir, `${name}.png`), Buffer.from(result.data, "base64"));

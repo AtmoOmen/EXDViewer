@@ -29,10 +29,16 @@ const MAX_FRAME_TIME: Duration = Duration::from_millis(250);
 /// Menus a row holds, and the bytes one menu is.
 const MENUS: u32 = 28;
 const STRIDE: u32 = 452;
-/// `Customize` and the first `SubMenuParam`, as byte offsets into a menu.
+/// A menu's name, what it drives, how it is picked from and how many it offers, as byte offsets
+/// into one menu, then the first of its choices.
+const LOBBY: u32 = 0;
 const CUSTOMIZE: u32 = 8;
+const KIND: u32 = 437;
+const COUNT: u32 = 438;
 const PARAMS: u32 = 12;
 const PARAM_COUNT: u32 = 90;
+/// What `Lobby` calls a menu.
+const LOBBY_TEXT: u32 = 0;
 /// Where a row names the race, clan and gender it is for.
 const RACE: u32 = 13064;
 const TRIBE: u32 = 13068;
@@ -65,6 +71,50 @@ const CLASS_JOB: u32 = 56;
 /// `ClassJob`'s name as the creator writes it, rather than the lowercase one it is filed under.
 const JOB_NAME: u32 = 16;
 
+/// How a menu is picked from, as the row states it beside the count.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// A run of numbered choices, each a `CharaMakeCustomize` row carrying an icon.
+    Listed,
+    /// The same, except that the choices are icons in their own right.
+    Icons,
+    /// A palette out of `human.cmp`, of which there are two flavours the file tells apart and the
+    /// creator does not.
+    Skin,
+    Eyes,
+    /// Several choices at once, each a facial feature the face model draws as its own part.
+    Features,
+    /// A run the creator draws as a bar.
+    Slider,
+}
+
+impl Kind {
+    fn read(kind: u8) -> Option<Self> {
+        match kind {
+            0 => Some(Self::Listed),
+            1 => Some(Self::Icons),
+            2 => Some(Self::Skin),
+            3 => Some(Self::Eyes),
+            4 => Some(Self::Features),
+            5 => Some(Self::Slider),
+            _ => None,
+        }
+    }
+}
+
+/// One of the customisations the creator offers, as the row lays it out.
+#[derive(Clone)]
+pub struct Menu {
+    pub name: String,
+    /// Which of `Customize` it drives, which is the only stable name a menu has.
+    pub customize: u32,
+    pub kind: Kind,
+    pub count: u32,
+    /// What each choice is, where the menu names them: a `CharaMakeCustomize` row, or an icon
+    /// outright where the number is too large to be one.
+    pub params: Vec<i32>,
+}
+
 /// One race, clan and gender the creator offers, and what it offers for them.
 #[derive(Clone)]
 pub struct Body {
@@ -75,6 +125,8 @@ pub struct Body {
     pub faces: BTreeMap<u16, u32>,
     /// The icon each hair set is offered under, by the set number the file tree uses.
     pub hairs: BTreeMap<u16, u32>,
+    /// Everything the creator offers this body, in the order it offers it.
+    pub menus: Vec<Menu>,
 }
 
 /// One of the classes the creator starts a character in, and what it dresses them in.
@@ -109,6 +161,9 @@ pub struct Creator {
     /// What each race and clan is called, masculine then feminine.
     pub races: BTreeMap<u32, (String, String)>,
     pub tribes: BTreeMap<u32, (String, String)>,
+    /// What each choice a menu names is: the number the file tree uses for it, and the icon the
+    /// creator offers it under, by `CharaMakeCustomize` row.
+    pub offered: BTreeMap<u32, (u16, u32)>,
     /// The clothing a race wears when it wears nothing else, by race and gender.
     pub attire: BTreeMap<(u32, bool), Outfit>,
     pub jobs: Vec<Job>,
@@ -139,6 +194,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
     let excel = backend.excel();
     let types = excel.get_sheet("CharaMakeType", language).await?;
     let customize = excel.get_sheet("CharaMakeCustomize", language).await?;
+    let lobby = excel.get_sheet("Lobby", language).await?;
 
     // Set number and icon of every choice the creator offers, whatever menu holds it.
     let mut offered = BTreeMap::new();
@@ -178,11 +234,13 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
                 .iter()
                 .filter_map(|param| offered.get(&(*param as u32)).copied())
                 .collect(),
+            menus: menus(&row, &lobby),
         });
     }
 
     Ok(Creator {
         bodies,
+        offered,
         races: names(backend, "Race", language).await?,
         tribes: names(backend, "Tribe", language).await?,
         attire: attire(backend, language).await?,
@@ -371,11 +429,46 @@ async fn names(
 /// than where it sits in the menu. Hrothgar are what tells the two apart: both of theirs offer four
 /// faces numbered 5 to 8, so reading them off their positions would draw four other faces entirely,
 /// and one of the two codes ships no lower face at all.
-fn face(icon: i32) -> Option<u16> {
+pub fn face(icon: i32) -> Option<u16> {
     match icon % 100 {
         0 => None,
         id => Some(id as u16),
     }
+}
+
+/// Everything one body's row offers, in the order the creator offers it. A menu with nothing to
+/// choose from is one the row leaves empty rather than one it names.
+fn menus(row: &ExcelRow<'_>, lobby: &impl ExcelSheet) -> Vec<Menu> {
+    let mut found = Vec::new();
+    for menu in 0..MENUS {
+        let at = menu * STRIDE;
+        let (Ok(count), Ok(kind), Ok(named), Ok(customize)) = (
+            row.read::<u8>(at + COUNT),
+            row.read::<u8>(at + KIND),
+            row.read::<u32>(at + LOBBY),
+            row.read::<i32>(at + CUSTOMIZE),
+        ) else {
+            continue;
+        };
+        let (Some(kind), true) = (Kind::read(kind), count > 0) else {
+            continue;
+        };
+        found.push(Menu {
+            name: lobby
+                .get_row(named)
+                .ok()
+                .and_then(|row| row.read_string(LOBBY_TEXT).ok().map(|name| name.to_string()))
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("Customize {customize}")),
+            customize: customize.max(0) as u32,
+            kind,
+            count: u32::from(count),
+            params: (0..PARAM_COUNT.min(u32::from(count)))
+                .filter_map(|param| row.read::<i32>(at + PARAMS + param * 4).ok())
+                .collect(),
+        });
+    }
+    found
 }
 
 /// The choices the menu driving one customisation offers, as the row states them.

@@ -276,7 +276,7 @@ impl Animation {
     }
 
     /// Plays `path` from its first motion, since a pack picked by hand was picked to be watched.
-    fn play(&self, path: &str) {
+    pub fn play(&self, path: &str) {
         path.clone_into(&mut self.wanted.borrow_mut());
         *self.pack.borrow_mut() = None;
         self.motion.set(Some(0));

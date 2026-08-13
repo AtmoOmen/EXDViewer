@@ -19,6 +19,8 @@ pub(super) mod material;
 pub(super) mod program;
 mod skin;
 
+pub use program::Customize;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
@@ -377,6 +379,13 @@ pub struct Rendered {
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
+    /// The colours the character was made with, and the attributes it does not wear. A face
+    /// declares one part per facial feature and no `.imc` to choose between them, so left to the
+    /// variant alone it draws all seven at once over each other.
+    customize: Cell<program::Customize>,
+    hidden: RefCell<BTreeSet<String>>,
+    /// How tall the character was built, as a scale on everything it is drawn from.
+    stature: Cell<f32>,
     /// Whether the rig it is posed on is drawn over it, and the boxes that is drawn as.
     skeleton: Cell<bool>,
     overlay: Arc<Mutex<placed::Placements>>,
@@ -436,6 +445,9 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         tables: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
+        customize: Cell::new(program::Customize::default()),
+        hidden: Default::default(),
+        stature: Cell::new(1.0),
         skeleton: Cell::new(false),
         overlay: placed::Placements::new(Vec::new()),
         grid: Cell::new(true),
@@ -1767,7 +1779,7 @@ impl Rendered {
             scene: program::Scene {
                 view,
                 projection: held,
-                model: Mat4::IDENTITY,
+                model: Mat4::from_scale(Vec3::splat(self.stature.get())),
                 light: KEY,
                 lamp: program::Lamp {
                     placement: Mat4::from_translation(
@@ -1779,6 +1791,7 @@ impl Rendered {
                     ..Default::default()
                 },
                 look: self.look.get(),
+                customize: self.customize.get(),
                 ..Default::default()
             },
             lighting,
@@ -2113,10 +2126,21 @@ impl Rendered {
     fn apply_variant(&self) {
         let masks: Vec<Option<u32>> = self.pieces.iter().map(Piece::mask).collect();
         let level = self.level.borrow();
+        let hidden = self.hidden.borrow();
         for (mask, part) in level.meshes.iter().flat_map(|mesh| {
             let mask = masks[mesh.piece];
             mesh.parts.iter().map(move |part| (mask, part))
         }) {
+            // A part the tab has switched off is off whatever the variant says, which is how a face
+            // draws one of the features it declares rather than every one of them at once.
+            if part
+                .attributes
+                .split(", ")
+                .any(|name| hidden.contains(name))
+            {
+                part.shown.set(false);
+                continue;
+            }
             let gated = part.mask & IMC_ATTRIBUTES;
             part.shown
                 .set(mask.is_none_or(|mask| gated == 0 || mask == 0 || gated & mask != 0));
@@ -2179,6 +2203,31 @@ impl Rendered {
                 paths.join(" + ")
             ),
         }
+    }
+
+    /// How the character was made: the colours its shaders tint with, the attributes its face draws
+    /// and the shape keys that deform it. Taken together so a pick costs one pass over the parts.
+    pub fn made(
+        &self,
+        customize: program::Customize,
+        hidden: BTreeSet<String>,
+        shapes: BTreeSet<String>,
+        stature: f32,
+    ) {
+        self.customize.set(customize);
+        self.stature.set(stature);
+        *self.hidden.borrow_mut() = hidden;
+        let changed = *self.shapes.borrow() != shapes;
+        *self.shapes.borrow_mut() = shapes;
+        self.apply_variant();
+        if changed {
+            self.apply();
+        }
+    }
+
+    /// Poses the character out of a different pack, which is what picking an emote is.
+    pub fn play(&self, path: &str) {
+        self.animation.play(path);
     }
 
     /// Puts a different set of files on the same character, which is what a change of clothes is.

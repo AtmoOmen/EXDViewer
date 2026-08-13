@@ -7,7 +7,9 @@
 //!
 //! What each set is offered under comes from the creator's own menus, in [`menus`].
 
+mod emotes;
 mod menus;
+mod palette;
 
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -40,6 +42,37 @@ const GAP: f32 = 4.0;
 /// picker shows at once.
 const PIECE: f32 = 24.0;
 const SHOWN: usize = 10;
+
+/// Which customisation each of the creator's menus drives, as `Customize` numbers them. Every one
+/// of these is measured from `CharaMakeType` rather than named by any file.
+const FACE: u32 = 5;
+const HAIRSTYLE: u32 = 6;
+const SKIN_COLOR: u32 = 8;
+const EYE_COLOR: u32 = 9;
+const HAIR_COLOR: u32 = 10;
+const FEATURES: u32 = 12;
+const LIP_COLOR: u32 = 20;
+const FACE_PAINT_COLOR: u32 = 25;
+const HEIGHT: u32 = 3;
+
+/// The parts of a face the creator deforms, and the shape keys each is named with. A choice picks
+/// the nth shape the model declares for that part, counting the first choice as the face's own.
+const SHAPED: [(u32, &str); 6] = [
+    (14, "shp_brw"),
+    (16, "shp_eye"),
+    (15, "shp_irs"),
+    (19, "shp_mth"),
+    (17, "shp_nse"),
+    (18, "shp_chk"),
+];
+
+/// What a face calls the parts a facial feature draws as, one letter each. The creator splits them
+/// across two menus and the model declares them as one run.
+const FEATURE: &str = "atr_fv_";
+const FEATURE_LETTERS: [char; 7] = ['a', 'b', 'c', 'd', 'e', 'f', 'g'];
+
+/// How big a colour swatch is drawn.
+const SWATCH: f32 = 18.0;
 
 /// Smallclothes, which is what everything else is worn over.
 const SMALLCLOTHES: Gear = Gear { set: 0, variant: 1 };
@@ -145,6 +178,18 @@ pub struct CharacterBuilder {
     search: [String; 5],
     matched: RefCell<[(Option<String>, Vec<usize>); 5]>,
     matcher: FuzzyMatcher,
+    /// What has been picked for each of the creator's menus, by the `Customize` it drives. A menu
+    /// the map says nothing about is at its first choice, which is what the row's own defaults are.
+    choices: BTreeMap<u32, u32>,
+    /// The colours the creator offers, read once.
+    made: Option<palette::Made>,
+    reading_made: Option<TrackedPromise<Result<palette::Made>>>,
+    /// The emotes the game names, and which of them is being played.
+    emotes: Vec<emotes::Emote>,
+    reading_emotes: Option<TrackedPromise<Result<Vec<emotes::Emote>>>>,
+    emote: Option<usize>,
+    emote_search: String,
+    emotes_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The models each set is worn as under the current code, by slot. The picker asks about every
     /// set it lists, and a directory listing is too dear to pay for one on every frame.
     sets: RefCell<BTreeMap<u16, [Option<String>; 5]>>,
@@ -180,6 +225,14 @@ impl Default for CharacterBuilder {
             search: Default::default(),
             matched: Default::default(),
             matcher: FuzzyMatcher::new(),
+            choices: BTreeMap::new(),
+            made: None,
+            reading_made: None,
+            emotes: Vec::new(),
+            reading_emotes: None,
+            emote: None,
+            emote_search: String::new(),
+            emotes_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
             held: Files::new(),
@@ -197,6 +250,12 @@ impl CharacterBuilder {
         self.creator = menus::Creator::default();
         self.reading = None;
         self.reading_pieces = None;
+        self.made = None;
+        self.reading_made = None;
+        self.emotes.clear();
+        self.reading_emotes = None;
+        self.emote = None;
+        self.emotes_matched.take();
         self.body.clear();
         self.faces.clear();
         self.hairs.clear();
@@ -247,11 +306,36 @@ impl CharacterBuilder {
                 .flat_map(|body| VARIANTS.map(|variant| body * 100 + variant))
                 .filter(|code| !body(&listing, *code).is_empty())
                 .collect();
-            let backend = backend.clone();
             let language = LANGUAGE.get(ctx);
+            let creator = backend.clone();
             self.reading = Some(TrackedPromise::spawn_local(async move {
-                menus::read(&backend, language).await
+                menus::read(&creator, language).await
             }));
+            let colors = backend.clone();
+            self.reading_made = Some(TrackedPromise::spawn_local(async move {
+                palette::Made::read(&colors).await
+            }));
+            let played = backend.clone();
+            self.reading_emotes = Some(TrackedPromise::spawn_local(async move {
+                emotes::read(&played, language).await
+            }));
+        }
+        if let Some(promise) = self.reading_emotes.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.emotes = read;
+                    self.emotes_matched.take();
+                }
+                Ok(Err(why)) => log::warn!("character: no emotes to play: {why}"),
+                Err(promise) => self.reading_emotes = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_made.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.made = Some(read),
+                Ok(Err(why)) => log::warn!("character: no colours to pick from: {why}"),
+                Err(promise) => self.reading_made = Some(promise),
+            }
         }
         if let Some(promise) = self.reading.take() {
             match promise.try_take() {
@@ -340,6 +424,94 @@ impl CharacterBuilder {
                 Err(why) => self.model = Some(Err(why.to_string())),
             }
         }
+
+        // Cheap enough to hand over on every frame: it walks the parts of one character and the
+        // model keeps what it was already at, so nothing is rebuilt where nothing was picked.
+        if let Some(Ok(model)) = &self.model {
+            let (customize, hidden, shapes, stature) = self.made();
+            model.made(customize, hidden, shapes, stature);
+        }
+    }
+
+    /// What the creator's menus have been left at, and what the shaders and the model make of it:
+    /// the colours to tint with, the parts to leave undrawn and the shape keys to deform by.
+    fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32) {
+        let mut customize = mdl::Customize::default();
+        // Every feature the face declares, less the ones the creator has been left on.
+        let mut hidden: BTreeSet<String> = FEATURE_LETTERS
+            .iter()
+            .map(|letter| format!("{FEATURE}{letter}"))
+            .collect();
+        let mut shapes = BTreeSet::new();
+        let mut stature = 1.0;
+        let Some(body) = self.creator.body(self.tribe, self.female) else {
+            return (customize, hidden, shapes, stature);
+        };
+        let palettes = self
+            .made
+            .as_ref()
+            .map(|made| made.palettes(self.tribe, self.female));
+        for menu in &body.menus {
+            let at = self.choice(menu) as usize;
+            if let Some(palettes) = &palettes {
+                let color = match menu.customize {
+                    SKIN_COLOR => Some((&palettes.skin, &mut customize.skin)),
+                    HAIR_COLOR => Some((&palettes.hair, &mut customize.hair)),
+                    LIP_COLOR => Some((&palettes.lips, &mut customize.lip)),
+                    EYE_COLOR => Some((&palettes.eyes, &mut customize.right_eye)),
+                    _ => None,
+                };
+                if let Some((swatches, held)) = color {
+                    *held = swatches.shaded(at);
+                }
+                if menu.customize == EYE_COLOR {
+                    customize.left_eye = customize.right_eye;
+                }
+                if menu.customize == FACE_PAINT_COLOR {
+                    let [red, green, blue, _] = palettes.face_paint.shaded(at);
+                    customize.option = [red, green, blue];
+                }
+            }
+            if menu.customize == HEIGHT
+                && let Some(palettes) = &palettes
+            {
+                let [short, tall] = palettes.height;
+                let last = menu.count.saturating_sub(1).max(1) as f32;
+                stature = short + (tall - short) * (at as f32 / last);
+            }
+            if menu.customize == FEATURES {
+                // The two menus that share this one number are halves of the same run of parts,
+                // and each states where in it its own toggles start.
+                let first = body
+                    .menus
+                    .iter()
+                    .take_while(|held| !std::ptr::eq(*held, menu))
+                    .filter(|held| held.customize == FEATURES)
+                    .map(|held| held.count as usize)
+                    .sum::<usize>();
+                for bit in 0..menu.count as usize {
+                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(first + bit) {
+                        hidden.remove(&format!("{FEATURE}{letter}"));
+                    }
+                }
+            }
+            if let Some((_, prefix)) = SHAPED.iter().find(|(held, _)| *held == menu.customize)
+                && at > 0
+                && let Some(letter) = FEATURE_LETTERS.get(at - 1)
+            {
+                shapes.insert(format!("{prefix}_{letter}"));
+            }
+        }
+        (customize, hidden, shapes, stature)
+    }
+
+    /// Where a menu has been left, which is its first choice until it is picked from.
+    fn choice(&self, menu: &menus::Menu) -> u32 {
+        self.choices
+            .get(&menu.customize)
+            .copied()
+            .unwrap_or(0)
+            .min(menu.count.saturating_sub(1))
     }
 
     /// The piece picked by hand for a slot, if the list it was picked from is still the one held.
@@ -586,6 +758,211 @@ impl CharacterBuilder {
         }
     }
 
+    /// Everything the creator offers this body, in its own order and under its own names. A face
+    /// and a hairstyle name the files the character is built from, so those are kept where the
+    /// rest of the choices are not.
+    fn appearance(
+        &mut self,
+        ui: &mut egui::Ui,
+        backend: &Backend,
+        icons: &IconManager,
+    ) -> Option<Pick> {
+        let body = self.creator.body(self.tribe, self.female).cloned()?;
+        let palettes = self
+            .made
+            .as_ref()
+            .map(|made| made.palettes(self.tribe, self.female));
+        let mut picked = None;
+        for (at, menu) in body.menus.iter().enumerate() {
+            ui.add_space(8.0);
+            ui.label(RichText::new(&menu.name).strong());
+            let current = self.choice(menu);
+            match menu.kind {
+                menus::Kind::Slider => {
+                    let mut held = current;
+                    let last = menu.count.saturating_sub(1);
+                    if ui.add(egui::Slider::new(&mut held, 0..=last)).changed() {
+                        picked = Some(Pick::Made(menu.customize, held));
+                    }
+                }
+                menus::Kind::Features => {
+                    ui.horizontal_wrapped(|ui| {
+                        for bit in 0..menu.count {
+                            let on = current & 1 << bit != 0;
+                            if ui.selectable_label(on, (bit + 1).to_string()).clicked() {
+                                picked = Some(Pick::Made(menu.customize, current ^ 1 << bit));
+                            }
+                        }
+                    });
+                }
+                menus::Kind::Skin | menus::Kind::Eyes => {
+                    let swatches = palettes.as_ref().map(|held| match menu.customize {
+                        SKIN_COLOR => &held.skin,
+                        HAIR_COLOR => &held.hair,
+                        EYE_COLOR => &held.eyes,
+                        LIP_COLOR => &held.lips,
+                        FACE_PAINT_COLOR => &held.face_paint,
+                        _ => &held.features,
+                    });
+                    let Some(swatches) = swatches else {
+                        ui.spinner();
+                        continue;
+                    };
+                    let offered = (menu.count as usize).min(swatches.len());
+                    egui::Grid::new(("character_colors", at))
+                        .spacing(egui::Vec2::splat(2.0))
+                        .show(ui, |ui| {
+                            for index in 0..offered {
+                                if index > 0 && index % palette::COLUMNS == 0 {
+                                    ui.end_row();
+                                }
+                                let Some(color) = swatches.shown(index) else {
+                                    continue;
+                                };
+                                let (rect, response) = ui.allocate_exact_size(
+                                    egui::Vec2::splat(SWATCH),
+                                    egui::Sense::click(),
+                                );
+                                ui.painter().rect_filled(rect, 2.0, color);
+                                if current as usize == index {
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        2.0,
+                                        ui.visuals().selection.stroke,
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if response.clicked() {
+                                    picked = Some(Pick::Made(menu.customize, index as u32));
+                                }
+                            }
+                        });
+                }
+                menus::Kind::Icons | menus::Kind::Listed => {
+                    let choices: Vec<Choice> = (0..menu.count)
+                        .map(|index| self.choice_of(menu, index))
+                        .collect();
+                    let current = match menu.customize {
+                        FACE => choices.iter().position(|held| held.id == self.face),
+                        HAIRSTYLE => choices.iter().position(|held| held.id == self.hair),
+                        _ => Some(current as usize),
+                    }
+                    .unwrap_or(usize::MAX);
+                    grid(ui, &format!("character_menu_{at}"), &choices, |ui, held| {
+                        let selected = choices
+                            .iter()
+                            .position(|other| std::ptr::eq(other, held))
+                            .is_some_and(|index| index == current);
+                        chip(ui, backend, icons, held, selected)
+                            .then_some(Pick::Choice(menu.customize, held.at, held.id))
+                    })
+                    .inspect(|choice| picked = Some(*choice));
+                }
+            }
+        }
+        picked
+    }
+
+    /// The emotes the game names, searched by name and drawn under their own icons. Standing and
+    /// its unique variant are here rather than in a control of their own: both are idles, so both
+    /// are looked up exactly as an emote is.
+    fn emotes_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        backend: &Backend,
+        icons: &IconManager,
+    ) -> Option<Pick> {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Emote").strong());
+            if self.reading_emotes.is_some() {
+                ui.spinner();
+            }
+        });
+        ui.add(
+            TextEdit::singleline(&mut self.emote_search)
+                .hint_text("Search")
+                .desired_width(f32::INFINITY),
+        );
+        let mut picked = None;
+        let query = self.emote_search.clone();
+        let matched = self.emotes_matching(&query);
+        let step = PIECE + 2.0 * ui.spacing().button_padding.y + ui.spacing().item_spacing.y;
+        ScrollArea::vertical()
+            .id_salt("character_emotes")
+            .max_height(step * SHOWN as f32)
+            .show_rows(ui, step, matched.len(), |ui, rows| {
+                for row in rows {
+                    let index = matched[row];
+                    let emote = &self.emotes[index];
+                    let path = get_icon_path(backend.icons(), emote.icon, false, Language::None);
+                    let excel = backend.excel().clone();
+                    let source = icons.get_or_insert_icon(&path, ui.ctx(), || {
+                        let path = path.clone();
+                        TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
+                    });
+                    let button = match source {
+                        ManagedIcon::Loaded(source) => egui::Button::image_and_text(
+                            egui::Image::new(source)
+                                .maintain_aspect_ratio(true)
+                                .fit_to_exact_size(egui::Vec2::splat(PIECE)),
+                            &emote.name,
+                        ),
+                        _ => egui::Button::new(&emote.name),
+                    };
+                    if ui
+                        .add(
+                            button
+                                .truncate()
+                                .selected(self.emote == Some(index))
+                                .min_size(egui::vec2(ui.available_width(), PIECE)),
+                        )
+                        .clicked()
+                    {
+                        picked = Some(Pick::Emote(index));
+                    }
+                }
+            });
+        picked
+    }
+
+    /// Which emotes a search names, kept the way a slot's own list is.
+    fn emotes_matching(&self, query: &str) -> Ref<'_, Vec<usize>> {
+        if self.emotes_matched.borrow().0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.emotes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, emote)| (index, emote.name.as_str())),
+                |emote| emote.1,
+            );
+            *self.emotes_matched.borrow_mut() = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.emotes_matched.borrow(), |(_, rows)| rows)
+    }
+
+    /// What one choice of a menu is: the number the file tree uses for it, and the icon it is
+    /// offered under. A menu either names icons outright or names rows that carry one.
+    fn choice_of(&self, menu: &menus::Menu, index: u32) -> Choice {
+        let param = menu.params.get(index as usize).copied().unwrap_or(0);
+        let (id, icon) = match self.creator.offered.get(&(param.max(0) as u32)) {
+            Some((id, icon)) => (*id, *icon),
+            None => (
+                menus::face(param).unwrap_or(index as u16 + 1),
+                param.max(0) as u32,
+            ),
+        };
+        Choice {
+            at: index,
+            id,
+            icon: (icon > 0).then_some(icon),
+        }
+    }
+
     /// Which of a slot's pieces its search names, kept since matching every name again on every
     /// frame costs more than reading them all did.
     fn matches(&self, slot: Slot, query: &str) -> Ref<'_, Vec<usize>> {
@@ -689,24 +1066,10 @@ impl CharacterBuilder {
                             self.slot_ui(ui, backend, icons, listing, slot);
                         }
                     }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Face").strong());
-                    grid(ui, "character_faces", &self.faces, |ui, set| {
-                        let body = self.creator.body(self.tribe, self.female);
-                        let icon = body.and_then(|body| body.faces.get(&set.id));
-                        chip(ui, backend, icons, set.id, self.face, icon)
-                            .then_some(Pick::Face(set.id))
-                    })
-                    .inspect(|face| picked = Some(*face));
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("Hair").strong());
-                    grid(ui, "character_hairs", &self.hairs, |ui, set| {
-                        let body = self.creator.body(self.tribe, self.female);
-                        let icon = body.and_then(|body| body.hairs.get(&set.id));
-                        chip(ui, backend, icons, set.id, self.hair, icon)
-                            .then_some(Pick::Hair(set.id))
-                    })
-                    .inspect(|hair| picked = Some(*hair));
+                    self.appearance(ui, backend, icons)
+                        .inspect(|made| picked = Some(*made));
+                    self.emotes_ui(ui, backend, icons)
+                        .inspect(|emote| picked = Some(*emote));
                 });
                 picked
             })
@@ -733,8 +1096,25 @@ impl CharacterBuilder {
             }
             Some(Pick::Attire(attire)) => self.attire = attire,
             Some(Pick::Job(job)) => self.job = job,
-            Some(Pick::Face(face)) => self.face = face,
-            Some(Pick::Hair(hair)) => self.hair = hair,
+            Some(Pick::Emote(emote)) => {
+                self.emote = Some(emote);
+                if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote))
+                    && let Some(path) = emote.pack(self.code, 0)
+                {
+                    model.play(&path);
+                }
+            }
+            Some(Pick::Made(customize, choice)) => {
+                self.choices.insert(customize, choice);
+            }
+            Some(Pick::Choice(customize, choice, id)) => {
+                self.choices.insert(customize, choice);
+                match customize {
+                    FACE => self.face = id,
+                    HAIRSTYLE => self.hair = id,
+                    _ => {}
+                }
+            }
             None => {}
         }
     }
@@ -747,8 +1127,19 @@ enum Pick {
     Gender(bool),
     Attire(Attire),
     Job(usize),
-    Face(u16),
-    Hair(u16),
+    /// A menu left at a choice, by the customisation it drives.
+    Made(u32, u32),
+    /// The same, where the choice also names the files a face or a hairstyle is built from.
+    Choice(u32, u32, u16),
+    Emote(usize),
+}
+
+/// One choice a menu offers: where it sits in the menu, the number the file tree files it under,
+/// and the icon the creator draws it as.
+struct Choice {
+    at: u32,
+    id: u16,
+    icon: Option<u32>,
 }
 
 /// The model code a clan and gender are built on. A code does not name a clan, and two clans share
@@ -894,14 +1285,13 @@ fn chip(
     ui: &mut egui::Ui,
     backend: &Backend,
     icons: &IconManager,
-    id: u16,
-    current: u16,
-    icon: Option<&u32>,
+    choice: &Choice,
+    selected: bool,
 ) -> bool {
-    let Some(icon) = icon else {
-        return numbered(ui, id, current, "No icon");
+    let Some(icon) = choice.icon else {
+        return numbered(ui, choice, selected, "No icon");
     };
-    let path = get_icon_path(backend.icons(), *icon, false, Language::None);
+    let path = get_icon_path(backend.icons(), icon, false, Language::None);
     let excel = backend.excel().clone();
     let held = icons.get_or_insert_icon(&path, ui.ctx(), || {
         let path = path.clone();
@@ -915,21 +1305,21 @@ fn chip(
                         .maintain_aspect_ratio(true)
                         .fit_to_exact_size(egui::Vec2::splat(ICON)),
                 )
-                .selected(current == id),
+                .selected(selected),
             )
-            .on_hover_text(id.to_string())
+            .on_hover_text(choice.id.to_string())
             .clicked(),
         // An icon that has not landed yet is not one the creator never named, and saying so would
         // have every chip claim it has no icon for as long as the icons take to arrive.
-        ManagedIcon::Failed(_) => numbered(ui, id, current, "No icon"),
-        _ => numbered(ui, id, current, "Loading"),
+        ManagedIcon::Failed(_) => numbered(ui, choice, selected, "No icon"),
+        _ => numbered(ui, choice, selected, "Loading"),
     }
 }
 
-fn numbered(ui: &mut egui::Ui, id: u16, current: u16, why: &str) -> bool {
+fn numbered(ui: &mut egui::Ui, choice: &Choice, selected: bool, why: &str) -> bool {
     ui.add_sized(
         egui::Vec2::splat(ICON),
-        egui::Button::new(id.to_string()).selected(current == id),
+        egui::Button::new((choice.at + 1).to_string()).selected(selected),
     )
     .on_hover_text(why)
     .clicked()

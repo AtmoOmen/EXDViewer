@@ -538,6 +538,39 @@ pub struct Scene {
     pub ambient: Ambient,
     /// What the passes past the composite are run with.
     pub look: Look,
+    /// The colours the character was made with.
+    pub customize: Customize,
+}
+
+/// What character creation decides, which no file a model names holds: each is what an albedo is
+/// multiplied by or mixed toward. White leaves a texture's own colour where it is, which is what a
+/// model outside the character tab is drawn with.
+#[derive(Clone, Copy)]
+pub struct Customize {
+    pub skin: [f32; 4],
+    /// A lip tint, whose alpha is the weight it is mixed at rather than an opacity.
+    pub lip: [f32; 4],
+    pub hair: [f32; 4],
+    /// A hair highlight, drawn only where its alpha says to.
+    pub highlight: [f32; 4],
+    pub left_eye: [f32; 4],
+    pub right_eye: [f32; 4],
+    /// What a face paint or a limbal ring is tinted with.
+    pub option: [f32; 3],
+}
+
+impl Default for Customize {
+    fn default() -> Self {
+        Self {
+            skin: [1.0; 4],
+            lip: [1.0, 1.0, 1.0, 0.0],
+            hair: [1.0; 4],
+            highlight: [1.0, 1.0, 1.0, 0.0],
+            left_eye: [1.0; 4],
+            right_eye: [1.0; 4],
+            option: [1.0; 3],
+        }
+    }
 }
 
 impl Default for Scene {
@@ -553,6 +586,7 @@ impl Default for Scene {
             specular: Vec3::ONE,
             ambient: Ambient::default(),
             look: Look::default(),
+            customize: Customize::default(),
         }
     }
 }
@@ -1332,16 +1366,17 @@ impl Buffer {
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);
 
-        // The colors a character was made with, which no file a model names holds. Each is what an
-        // albedo is multiplied by or mixed toward, so white leaves the texture's own color where it
-        // is and nought takes hair and eyes to black. A lip tint is left alone: its own alpha is the
-        // weight it carries. The last lane of the two hair colors is where a decal is read from.
+        // The colors a character was made with. The last lane of the two hair colors is where a
+        // decal is read from.
+        let held = scene.customize;
         let customize = "g_CustomizeParameter";
-        for name in ["m_SkinColor", "m_MainColor", "m_LeftColor", "m_RightColor"] {
-            put(customize, name, vec![1.0; 4]);
-        }
-        put(customize, "m_MeshColor", vec![1.0, 1.0, 1.0, 0.0]);
-        put(customize, "m_OptionColor0", vec![1.0; 3]);
+        put(customize, "m_SkinColor", held.skin.to_vec());
+        put(customize, "m_LipColor", held.lip.to_vec());
+        put(customize, "m_MainColor", held.hair.to_vec());
+        put(customize, "m_MeshColor", held.highlight.to_vec());
+        put(customize, "m_LeftColor", held.left_eye.to_vec());
+        put(customize, "m_RightColor", held.right_eye.to_vec());
+        put(customize, "m_OptionColor0", held.option.to_vec());
 
         // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a
         // texture coordinate names counts from the far side of the one a fragment coordinate does,

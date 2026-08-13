@@ -10,6 +10,7 @@
 mod emotes;
 mod gating;
 mod menus;
+mod npcs;
 mod palette;
 
 use std::cell::{Ref, RefCell};
@@ -140,6 +141,8 @@ enum Attire {
     Race,
     Job,
     Smallclothes,
+    /// What the character being stood in for wears, which is not one of the creator's own.
+    Npc,
 }
 
 /// The bytes of every file read so far, by path, and one batch of them as they land.
@@ -188,6 +191,12 @@ pub struct CharacterBuilder {
     /// What a worn piece leaves showing of the body under it.
     worn_over: Option<gating::Worn>,
     reading_worn: Option<TrackedPromise<Result<gating::Worn>>>,
+    /// The game's own characters, and which of them is being stood in.
+    npcs: Vec<npcs::Npc>,
+    reading_npcs: Option<TrackedPromise<Result<Vec<npcs::Npc>>>>,
+    npc: Option<usize>,
+    npc_search: String,
+    npcs_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The emotes the game names, and which of them is being played.
     emotes: Vec<emotes::Emote>,
     reading_emotes: Option<TrackedPromise<Result<Vec<emotes::Emote>>>>,
@@ -234,6 +243,11 @@ impl Default for CharacterBuilder {
             reading_made: None,
             worn_over: None,
             reading_worn: None,
+            npcs: Vec::new(),
+            reading_npcs: None,
+            npc: None,
+            npc_search: String::new(),
+            npcs_matched: Default::default(),
             emotes: Vec::new(),
             reading_emotes: None,
             emote: None,
@@ -260,6 +274,10 @@ impl CharacterBuilder {
         self.reading_made = None;
         self.worn_over = None;
         self.reading_worn = None;
+        self.npcs.clear();
+        self.reading_npcs = None;
+        self.npc = None;
+        self.npcs_matched.take();
         self.emotes.clear();
         self.reading_emotes = None;
         self.emote = None;
@@ -331,6 +349,20 @@ impl CharacterBuilder {
             self.reading_worn = Some(TrackedPromise::spawn_local(async move {
                 gating::Worn::read(&gated).await
             }));
+            let stood = backend.clone();
+            self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
+                npcs::read(&stood, language).await
+            }));
+        }
+        if let Some(promise) = self.reading_npcs.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.npcs = read;
+                    self.npcs_matched.take();
+                }
+                Ok(Err(why)) => log::warn!("character: no characters to stand in: {why}"),
+                Err(promise) => self.reading_npcs = Some(promise),
+            }
         }
         if let Some(promise) = self.reading_worn.take() {
             match promise.try_take() {
@@ -613,6 +645,11 @@ impl CharacterBuilder {
                 }
                 outfit
             }
+            Attire::Npc => self
+                .npc
+                .and_then(|npc| self.npcs.get(npc))
+                .map(|npc| npc.outfit)
+                .unwrap_or_default(),
         }
     }
 
@@ -930,6 +967,62 @@ impl CharacterBuilder {
         picked
     }
 
+    /// The game's own characters, searched by name. Picking one is picking everything at once: it
+    /// carries the whole of what the creator would have been left at, plus what it is wearing.
+    fn npcs_ui(&mut self, ui: &mut egui::Ui) -> Option<Pick> {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Stand in for").strong());
+            if self.reading_npcs.is_some() {
+                ui.spinner();
+            }
+        });
+        ui.add(
+            TextEdit::singleline(&mut self.npc_search)
+                .hint_text("Search")
+                .desired_width(f32::INFINITY),
+        );
+        let mut picked = None;
+        let query = self.npc_search.clone();
+        let matched = self.npcs_matching(&query);
+        let row = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().button_padding.y * 2.0;
+        let step = row + ui.spacing().item_spacing.y;
+        ScrollArea::vertical()
+            .id_salt("character_npcs")
+            .max_height(step * SHOWN as f32)
+            .show_rows(ui, step, matched.len(), |ui, rows| {
+                for at in rows {
+                    let index = matched[at];
+                    if ui
+                        .selectable_label(self.npc == Some(index), &self.npcs[index].name)
+                        .clicked()
+                    {
+                        picked = Some(Pick::Npc(index));
+                    }
+                }
+            });
+        picked
+    }
+
+    /// Which characters a search names, kept the way a slot's own list is.
+    fn npcs_matching(&self, query: &str) -> Ref<'_, Vec<usize>> {
+        if self.npcs_matched.borrow().0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.npcs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, npc)| (index, npc.name.as_str())),
+                |npc| npc.1,
+            );
+            *self.npcs_matched.borrow_mut() = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.npcs_matched.borrow(), |(_, rows)| rows)
+    }
+
     /// The emotes the game names, searched by name and drawn under their own icons. Standing and
     /// its unique variant are here rather than in a control of their own: both are idles, so both
     /// are looked up exactly as an emote is.
@@ -1108,6 +1201,7 @@ impl CharacterBuilder {
                             (Attire::Race, "Race"),
                             (Attire::Job, "Job"),
                             (Attire::Smallclothes, "Smallclothes"),
+                            (Attire::Npc, "Theirs"),
                         ] {
                             if ui.selectable_label(self.attire == attire, name).clicked() {
                                 picked = Some(Pick::Attire(attire));
@@ -1137,6 +1231,7 @@ impl CharacterBuilder {
                         .inspect(|made| picked = Some(*made));
                     self.emotes_ui(ui, backend, icons)
                         .inspect(|emote| picked = Some(*emote));
+                    self.npcs_ui(ui).inspect(|npc| picked = Some(*npc));
                 });
                 picked
             })
@@ -1163,6 +1258,24 @@ impl CharacterBuilder {
             }
             Some(Pick::Attire(attire)) => self.attire = attire,
             Some(Pick::Job(job)) => self.job = job,
+            Some(Pick::Npc(npc)) => {
+                self.npc = Some(npc);
+                if let Some(held) = self.npcs.get(npc) {
+                    self.race = held.race;
+                    self.tribe = held.tribe;
+                    self.female = held.female;
+                    // A base row states a menu's choice the way the creator numbers them, counting
+                    // from one where a menu counts from nought.
+                    self.choices = held
+                        .choices
+                        .iter()
+                        .map(|(customize, choice)| (*customize, choice.saturating_sub(1)))
+                        .collect();
+                    self.attire = Attire::Npc;
+                    self.chosen = [None; 5];
+                    self.faces.clear();
+                }
+            }
             Some(Pick::Emote(emote)) => {
                 self.emote = Some(emote);
                 if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote))
@@ -1199,6 +1312,7 @@ enum Pick {
     /// The same, where the choice also names the files a face or a hairstyle is built from.
     Choice(u32, u32, u16),
     Emote(usize),
+    Npc(usize),
 }
 
 /// One choice a menu offers: where it sits in the menu, the number the file tree files it under,

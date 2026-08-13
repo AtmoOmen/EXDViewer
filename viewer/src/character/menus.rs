@@ -40,6 +40,10 @@ const PARAMS: u32 = 12;
 const PARAM_COUNT: u32 = 90;
 /// What `Lobby` calls a menu.
 const LOBBY_TEXT: u32 = 0;
+/// Where a row names the icon each facial feature is offered under, seven to a face, in the order
+/// the face menu offers the faces.
+const FEATURES: u32 = 12668;
+const PER_FACE: u32 = 7;
 /// Where a row names the race, clan and gender it is for.
 const RACE: u32 = 13064;
 const TRIBE: u32 = 13068;
@@ -75,16 +79,18 @@ const JOB_NAME: u32 = 16;
 /// How a menu is picked from, as the row states it beside the count.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// A run of numbered choices, each a `CharaMakeCustomize` row carrying an icon.
-    Listed,
-    /// The same, except that the choices are icons in their own right.
+    /// Choices the creator names rather than draws: a jaw or a nose is offered as `Type 1` and an
+    /// iris as `Large` or `Small`, and each names the `Lobby` row it is called by.
+    List,
+    /// Choices the creator draws as icons, either named outright or held by a `CharaMakeCustomize`
+    /// row alongside the number the file tree uses.
     Icons,
-    /// A palette out of `human.cmp`, of which there are two flavours the file tells apart and the
-    /// creator does not.
-    Skin,
-    Eyes,
+    /// A palette out of `human.cmp`.
+    Color,
+    /// A palette that colours two things at once, which is the eyes and nothing else.
+    DoubleColor,
     /// Several choices at once, each a facial feature the face model draws as its own part.
-    Features,
+    Checks,
     /// A run the creator draws as a bar.
     Slider,
 }
@@ -92,11 +98,11 @@ pub enum Kind {
 impl Kind {
     fn read(kind: u8) -> Option<Self> {
         match kind {
-            0 => Some(Self::Listed),
+            0 => Some(Self::List),
             1 => Some(Self::Icons),
-            2 => Some(Self::Skin),
-            3 => Some(Self::Eyes),
-            4 => Some(Self::Features),
+            2 => Some(Self::Color),
+            3 => Some(Self::DoubleColor),
+            4 => Some(Self::Checks),
             5 => Some(Self::Slider),
             _ => None,
         }
@@ -114,9 +120,12 @@ pub struct Menu {
     /// Where the creator opens the menu, which is not its first choice: a Midlander man starts at
     /// the middle of the height bar and at the fifty-fifth hair colour, which is a brown.
     pub init: u32,
-    /// What each choice is, where the menu names them: a `CharaMakeCustomize` row, or an icon
+    /// What each choice is, where the menu draws them: a `CharaMakeCustomize` row, or an icon
     /// outright where the number is too large to be one.
     pub params: Vec<i32>,
+    /// What each choice is called, where the menu names them instead. The same numbers would read
+    /// as `CharaMakeCustomize` rows, and four hairstyles are what a jaw menu draws that way.
+    pub labels: Vec<String>,
 }
 
 /// One race, clan and gender the creator offers, and what it offers for them.
@@ -129,6 +138,9 @@ pub struct Body {
     pub faces: BTreeMap<u16, u32>,
     /// The icon each hair set is offered under, by the set number the file tree uses.
     pub hairs: BTreeMap<u16, u32>,
+    /// The icon each of the seven facial features is offered under, by the place the face it
+    /// belongs to sits in the face menu. Hrothgar faces number 5 to 8, so the place is not the id.
+    pub features: Vec<[u32; 7]>,
     /// Everything the creator offers this body, in the order it offers it.
     pub menus: Vec<Menu>,
 }
@@ -226,6 +238,11 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
         if race <= 0 || tribe <= 0 {
             continue;
         }
+        let menus = menus(&row, &lobby);
+        let faces = menus
+            .iter()
+            .find(|menu| menu.customize == FACE as u32)
+            .map_or(0, |menu| menu.count);
         bodies.push(Body {
             race: race as u32,
             tribe: tribe as u32,
@@ -238,7 +255,15 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
                 .iter()
                 .filter_map(|param| offered.get(&(*param as u32)).copied())
                 .collect(),
-            menus: menus(&row, &lobby),
+            features: (0..faces)
+                .map(|face| {
+                    std::array::from_fn(|feature| {
+                        let at = FEATURES + (face * PER_FACE + feature as u32) * 4;
+                        row.read::<i32>(at).unwrap_or(0).max(0) as u32
+                    })
+                })
+                .collect(),
+            menus,
         });
     }
 
@@ -458,23 +483,40 @@ fn menus(row: &ExcelRow<'_>, lobby: &impl ExcelSheet) -> Vec<Menu> {
         let (Some(kind), true) = (Kind::read(kind), count > 0) else {
             continue;
         };
+        let params: Vec<i32> = (0..PARAM_COUNT.min(u32::from(count)))
+            .filter_map(|param| row.read::<i32>(at + PARAMS + param * 4).ok())
+            .collect();
         found.push(Menu {
-            name: lobby
-                .get_row(named)
-                .ok()
-                .and_then(|row| row.read_string(LOBBY_TEXT).ok().map(|name| name.to_string()))
-                .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| format!("Customize {customize}")),
+            name: text(lobby, named).unwrap_or_else(|| format!("Customize {customize}")),
             customize: customize.max(0) as u32,
             kind,
             count: u32::from(count),
             init: u32::from(init),
-            params: (0..PARAM_COUNT.min(u32::from(count)))
-                .filter_map(|param| row.read::<i32>(at + PARAMS + param * 4).ok())
-                .collect(),
+            labels: match kind {
+                Kind::List => params
+                    .iter()
+                    .enumerate()
+                    .map(|(at, param)| {
+                        text(lobby, (*param).max(0) as u32).unwrap_or_else(|| (at + 1).to_string())
+                    })
+                    .collect(),
+                _ => Vec::new(),
+            },
+            params,
         });
     }
     found
+}
+
+/// What `Lobby` calls a row, where it calls it anything.
+fn text(lobby: &impl ExcelSheet, row: u32) -> Option<String> {
+    lobby
+        .get_row(row)
+        .ok()?
+        .read_string(LOBBY_TEXT)
+        .ok()
+        .map(|text| text.to_string())
+        .filter(|text| !text.is_empty())
 }
 
 /// The choices the menu driving one customisation offers, as the row states them.

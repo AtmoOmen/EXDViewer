@@ -25,10 +25,6 @@ pub struct Swatches {
 }
 
 impl Swatches {
-    pub fn len(&self) -> usize {
-        self.shown.len()
-    }
-
     /// The swatch at an index, and the colour the shader takes for it.
     pub fn shown(&self, index: usize) -> Option<Color32> {
         self.shown.get(index).copied()

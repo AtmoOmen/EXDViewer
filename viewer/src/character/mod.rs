@@ -53,9 +53,23 @@ const SKIN_COLOR: u32 = 8;
 const EYE_COLOR: u32 = 9;
 const HAIR_COLOR: u32 = 10;
 const FEATURES: u32 = 12;
+const TATTOO_COLOR: u32 = 13;
 const LIP_COLOR: u32 = 20;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
+
+/// What the creator ticks beside a menu rather than offering as a menu of its own, keyed past every
+/// menu number so the two can never collide. The game holds each of them all the same: a highlight
+/// is the top bit of one byte and a colour of its own in another, and an eye is odd when the two
+/// eyes are not left the one colour.
+pub const HIGHLIGHTS: u32 = 100;
+pub const HIGHLIGHT_COLOR: u32 = 101;
+pub const ODD_EYES: u32 = 102;
+pub const LEFT_EYE_COLOR: u32 = 103;
+
+/// Where the light half of a palette the file splits in two begins. Lips and face paint are offered
+/// as a dark run and a light one; the file runs them as one, the second half starting here.
+const HALF: u32 = 128;
 
 /// The parts of a face the creator deforms, and the shape keys each is named with. A choice picks
 /// the nth shape the model declares for that part, counting the first choice as the face's own.
@@ -544,14 +558,20 @@ impl CharacterBuilder {
                 if let Some((swatches, held)) = color {
                     *held = swatches.shaded(at);
                 }
-                // A strand is mixed between the two hair colours by its mask, and the creator
-                // offers no menu for the second: with no highlight to pick, both are the one
-                // colour, and leaving the highlight white is what draws brown hair silver.
+                // A strand is mixed between the two hair colours by its mask, so with the
+                // highlight left off both are the one colour: leaving it white is what drew brown
+                // hair silver. Eyes go the same way, one colour unless they are made odd.
                 if menu.customize == HAIR_COLOR {
-                    customize.highlight = customize.hair;
+                    customize.highlight = match self.ticked(HIGHLIGHTS) {
+                        true => palettes.highlights.shaded(self.held(HIGHLIGHT_COLOR) as usize),
+                        false => customize.hair,
+                    };
                 }
                 if menu.customize == EYE_COLOR {
-                    customize.left_eye = customize.right_eye;
+                    customize.left_eye = match self.ticked(ODD_EYES) {
+                        true => palettes.eyes.shaded(self.held(LEFT_EYE_COLOR) as usize),
+                        false => customize.right_eye,
+                    };
                 }
                 if menu.customize == FACE_PAINT_COLOR {
                     let [red, green, blue, _] = palettes.face_paint.shaded(at);
@@ -562,8 +582,8 @@ impl CharacterBuilder {
                 && let Some(palettes) = &palettes
             {
                 let [short, tall] = palettes.height;
-                let last = menu.count.saturating_sub(1).max(1) as f32;
-                stature = short + (tall - short) * (at as f32 / last);
+                let last = menu.count.saturating_sub(1).max(1) as usize;
+                stature = short + (tall - short) * (at.min(last) as f32 / last as f32);
             }
             if menu.customize == FEATURES {
                 // The two menus that share this one number are halves of the same run of parts,
@@ -592,12 +612,21 @@ impl CharacterBuilder {
     }
 
     /// Where a menu has been left, which is where the creator opens it until it is picked from.
+    /// Not bounded by the count: a lip colour past the dark half is where the light one starts.
     fn choice(&self, menu: &menus::Menu) -> u32 {
         self.choices
             .get(&menu.customize)
             .copied()
             .unwrap_or(menu.init)
-            .min(menu.count.saturating_sub(1))
+    }
+
+    /// What one of the creator's own boxes has been left at, and whether it is ticked.
+    fn held(&self, key: u32) -> u32 {
+        self.choices.get(&key).copied().unwrap_or(0)
+    }
+
+    fn ticked(&self, key: u32) -> bool {
+        self.held(key) != 0
     }
 
     /// The piece picked by hand for a slot, if the list it was picked from is still the one held.
@@ -883,6 +912,13 @@ impl CharacterBuilder {
             .made
             .as_ref()
             .map(|made| made.palettes(self.tribe, self.female));
+        // Which face is being worn, since the icons a facial feature is offered under are the
+        // face's own and are held by where it sits in the menu rather than by its number.
+        let face = body
+            .menus
+            .iter()
+            .find(|menu| menu.customize == FACE)
+            .map_or(0, |menu| self.choice(menu) as usize);
         let mut picked = None;
         for (at, menu) in body.menus.iter().enumerate() {
             ui.add_space(8.0);
@@ -890,66 +926,105 @@ impl CharacterBuilder {
             let current = self.choice(menu);
             match menu.kind {
                 menus::Kind::Slider => {
-                    let mut held = current;
                     let last = menu.count.saturating_sub(1);
+                    let mut held = current.min(last);
                     if ui.add(egui::Slider::new(&mut held, 0..=last)).changed() {
                         picked = Some(Pick::Made(menu.customize, held));
                     }
                 }
-                menus::Kind::Features => {
+                menus::Kind::List => {
                     ui.horizontal_wrapped(|ui| {
-                        for bit in 0..menu.count {
-                            let on = current & 1 << bit != 0;
-                            if ui.selectable_label(on, (bit + 1).to_string()).clicked() {
-                                picked = Some(Pick::Made(menu.customize, current ^ 1 << bit));
+                        for (index, label) in menu.labels.iter().enumerate() {
+                            if ui.selectable_label(current as usize == index, label).clicked() {
+                                picked = Some(Pick::Made(menu.customize, index as u32));
                             }
                         }
                     });
                 }
-                menus::Kind::Skin | menus::Kind::Eyes => {
-                    let swatches = palettes.as_ref().map(|held| match menu.customize {
-                        SKIN_COLOR => &held.skin,
-                        HAIR_COLOR => &held.hair,
-                        EYE_COLOR => &held.eyes,
-                        LIP_COLOR => &held.lips,
-                        FACE_PAINT_COLOR => &held.face_paint,
-                        _ => &held.features,
-                    });
-                    let Some(swatches) = swatches else {
+                menus::Kind::Checks => {
+                    // Both menus that drive the features are halves of one run of parts, and the
+                    // icons are that whole run: this one's start in it is what precedes it.
+                    let first = body
+                        .menus
+                        .iter()
+                        .take_while(|held| !std::ptr::eq(*held, menu))
+                        .filter(|held| held.customize == FEATURES)
+                        .map(|held| held.count as usize)
+                        .sum::<usize>();
+                    let shown = body.features.get(face);
+                    let bits: Vec<Choice> = (0..menu.count)
+                        .map(|bit| Choice {
+                            at: bit,
+                            id: bit as u16 + 1,
+                            icon: shown
+                                .and_then(|icons| icons.get(first + bit as usize))
+                                .copied()
+                                .filter(|icon| *icon > 0),
+                        })
+                        .collect();
+                    grid(ui, &format!("character_checks_{at}"), &bits, |ui, held| {
+                        let on = current & 1 << held.at != 0;
+                        chip(ui, backend, icons, held, on)
+                            .then_some(Pick::Made(menu.customize, current ^ 1 << held.at))
+                    })
+                    .inspect(|choice| picked = Some(*choice));
+                }
+                menus::Kind::Color | menus::Kind::DoubleColor => {
+                    let Some(palettes) = &palettes else {
                         ui.spinner();
                         continue;
                     };
-                    let offered = (menu.count as usize).min(swatches.len());
-                    egui::Grid::new(("character_colors", at))
-                        .spacing(egui::Vec2::splat(2.0))
-                        .show(ui, |ui| {
-                            for index in 0..offered {
-                                if index > 0 && index % palette::COLUMNS == 0 {
-                                    ui.end_row();
-                                }
-                                let Some(color) = swatches.shown(index) else {
-                                    continue;
-                                };
-                                let (rect, response) = ui.allocate_exact_size(
-                                    egui::Vec2::splat(SWATCH),
-                                    egui::Sense::click(),
-                                );
-                                ui.painter().rect_filled(rect, 2.0, color);
-                                if current as usize == index {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        2.0,
-                                        ui.visuals().selection.stroke,
-                                        egui::StrokeKind::Inside,
-                                    );
-                                }
-                                if response.clicked() {
-                                    picked = Some(Pick::Made(menu.customize, index as u32));
+                    let swatches = match menu.customize {
+                        SKIN_COLOR => &palettes.skin,
+                        HAIR_COLOR => &palettes.hair,
+                        EYE_COLOR => &palettes.eyes,
+                        LIP_COLOR => &palettes.lips,
+                        FACE_PAINT_COLOR => &palettes.face_paint,
+                        _ => &palettes.features,
+                    };
+                    // Lips and face paint are offered as a dark run and a light one, which is one
+                    // palette in the file: the half a colour belongs to is the top bit of its own
+                    // index, so switching halves is that bit and nothing else.
+                    let mut half = 0;
+                    if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
+                        half = current / HALF;
+                        ui.horizontal(|ui| {
+                            for (at, name) in [(0, "Dark"), (1, "Light")] {
+                                if ui.selectable_label(half == at, name).clicked() {
+                                    picked =
+                                        Some(Pick::Made(menu.customize, current % HALF + at * HALF));
                                 }
                             }
                         });
+                    }
+                    let offered = half * HALF..half * HALF + menu.count;
+                    if let Some(index) = colors(ui, ("character_colors", at), swatches, offered, current) {
+                        picked = Some(Pick::Made(menu.customize, index));
+                    }
+                    // A second colour the creator only offers once its own box is ticked: a strand
+                    // is mixed between two hair colours, and an eye takes one each.
+                    let paired = match menu.customize {
+                        HAIR_COLOR => Some((HIGHLIGHTS, HIGHLIGHT_COLOR, "Highlights", &palettes.highlights)),
+                        EYE_COLOR => Some((ODD_EYES, LEFT_EYE_COLOR, "Odd eyes", &palettes.eyes)),
+                        _ => None,
+                    };
+                    if let Some((box_of, color, name, second)) = paired {
+                        let mut on = self.ticked(box_of);
+                        if ui.checkbox(&mut on, name).changed() {
+                            picked = Some(Pick::Made(box_of, u32::from(on)));
+                        }
+                        if on {
+                            let held = self.held(color);
+                            let offered = 0..menu.count;
+                            if let Some(index) =
+                                colors(ui, ("character_second", at), second, offered, held)
+                            {
+                                picked = Some(Pick::Made(color, index));
+                            }
+                        }
+                    }
                 }
-                menus::Kind::Icons | menus::Kind::Listed => {
+                menus::Kind::Icons => {
                     let choices: Vec<Choice> = (0..menu.count)
                         .map(|index| self.choice_of(menu, index))
                         .collect();
@@ -1459,6 +1534,46 @@ fn grid<T, R>(
             picked
         })
         .inner
+}
+
+/// A palette to pick a colour out of, laid out the way the creator lays one out, answering the
+/// index picked. What is offered is a window on the file's own run rather than the whole of it: a
+/// lip colour is one of ninety-six, in whichever half of the palette the dark and light box picked.
+fn colors(
+    ui: &mut egui::Ui,
+    id: (&str, usize),
+    swatches: &palette::Swatches,
+    offered: std::ops::Range<u32>,
+    current: u32,
+) -> Option<u32> {
+    let mut picked = None;
+    egui::Grid::new(id)
+        .spacing(egui::Vec2::splat(2.0))
+        .show(ui, |ui| {
+            for (place, index) in offered.enumerate() {
+                if place > 0 && place % palette::COLUMNS == 0 {
+                    ui.end_row();
+                }
+                let Some(color) = swatches.shown(index as usize) else {
+                    continue;
+                };
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
+                ui.painter().rect_filled(rect, 2.0, color);
+                if current == index {
+                    ui.painter().rect_stroke(
+                        rect,
+                        2.0,
+                        ui.visuals().selection.stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if response.clicked() {
+                    picked = Some(index);
+                }
+            }
+        });
+    picked
 }
 
 /// One set to pick from: the icon the creator offers it under where there is one, and its number

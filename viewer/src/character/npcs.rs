@@ -6,40 +6,56 @@
 use anyhow::Result;
 use ironworks::excel::Language;
 
-use super::Gear;
+use super::{Gear, HIGHLIGHT_COLOR, HIGHLIGHTS, LEFT_EYE_COLOR, ODD_EYES};
 use crate::backend::Backend;
 use crate::excel::provider::{ExcelProvider, ExcelSheet};
 
 /// What `ENpcResident` calls a base row.
 const SINGULAR: u32 = 0;
 
-/// Where `ENpcBase` states the body it is built on, then everything the creator would have picked,
-/// as byte offsets. Every one of them is a byte, and every colour is a palette index outright.
-const RACE: u32 = 202;
-const GENDER: u32 = 203;
-const TRIBE: u32 = 206;
-/// The customisations a row states as the menu's own position, which counts from one where a menu
-/// counts from nought, paired with the `Customize` each drives.
-const LISTED: [(u32, u32); 7] = [
-    (207, 5),  // Face
-    (208, 6),  // Hairstyle
-    (216, 14), // Eyebrows
-    (218, 16), // Eye shape
-    (219, 17), // Nose
-    (220, 18), // Jaw
-    (221, 19), // Mouth
+/// Where `ENpcBase` writes out the whole of what the creator would have picked. It is the game's
+/// own customisation array laid down byte for byte, so a byte's place in it is also the menu the
+/// creator drives it from, and everything below is that place rather than an offset into the row.
+const CUSTOMIZE: u32 = 202;
+const RACE: u32 = 0;
+const GENDER: u32 = 1;
+const TRIBE: u32 = 4;
+/// The customisations stated as the menu's own position, which counts from one where a menu counts
+/// from nought, each with the mask picking it out of a byte two menus share.
+const LISTED: [(u32, u8); 7] = [
+    (5, 0xFF),  // Face
+    (6, 0xFF),  // Hairstyle
+    (14, 0xFF), // Eyebrows
+    (16, 0x7F), // Eye shape
+    (17, 0xFF), // Nose
+    (18, 0xFF), // Jaw
+    (19, 0x7F), // Mouth
 ];
-/// The ones it states outright: a palette index, a slider's own place, or a mask of features.
-const STATED: [(u32, u32); 8] = [
-    (205, 3),  // Height
-    (210, 8),  // Skin colour
-    (212, 10), // Hair colour
-    (214, 12), // Facial features
-    (215, 13), // Tattoo colour
-    (217, 9),  // Eye colour
-    (222, 20), // Lip colour
-    (227, 25), // Face paint colour
+/// The ones stated outright: a palette index, a slider's own place, or a mask of features.
+const STATED: [(u32, u8); 12] = [
+    (3, 0xFF),  // Height
+    (8, 0xFF),  // Skin colour
+    (9, 0xFF),  // Eye colour
+    (10, 0xFF), // Hair colour
+    (12, 0xFF), // Facial features
+    (13, 0xFF), // Tattoo colour
+    (20, 0xFF), // Lip colour
+    (21, 0xFF), // Muscle tone
+    (22, 0xFF), // Tail or ear shape
+    (23, 0xFF), // Bust size
+    (24, 0x7F), // Face paint
+    (25, 0xFF), // Face paint colour
 ];
+/// The bytes the creator ticks a box for rather than offering a menu of its own, and the one it
+/// shares with the eye colour: an eye is odd exactly where the two are not the same colour.
+const HIGHLIGHTS_AT: u32 = 7;
+const HIGHLIGHT_COLOR_AT: u32 = 11;
+const LEFT_EYE_AT: u32 = 15;
+const EYE_AT: u32 = 9;
+/// Iris size, which is the top bit of the byte the eye shape menu holds the rest of. The creator
+/// numbers its menu fifteen even though the byte of that number is the left eye's colour.
+const IRIS_AT: u32 = 16;
+const IRIS: u32 = 15;
 /// The model quad worn in each of `Slot::ALL`, packed as the set in the low half and the variant
 /// in the high one.
 const MODELS: [u32; 5] = [148, 152, 156, 160, 164];
@@ -67,13 +83,8 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
         let Ok(row) = bases.get_row(id) else {
             continue;
         };
-        let (Ok(race), Ok(tribe), Ok(gender)) = (
-            row.read::<u8>(RACE),
-            row.read::<u8>(TRIBE),
-            row.read::<u8>(GENDER),
-        ) else {
-            continue;
-        };
+        let byte = |at: u32| u32::from(row.read::<u8>(CUSTOMIZE + at).unwrap_or(0));
+        let (race, tribe, gender) = (byte(RACE), byte(TRIBE), byte(GENDER));
         if race == 0 || tribe == 0 {
             continue;
         }
@@ -93,20 +104,27 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
                 .filter(|quad| *quad != u32::MAX)
                 .and_then(|quad| Gear::read(u64::from(quad)));
         }
+        let (left, right) = (byte(LEFT_EYE_AT), byte(EYE_AT));
         found.push(Npc {
             name,
-            race: u32::from(race),
-            tribe: u32::from(tribe),
+            race,
+            tribe,
             female: gender != 0,
             choices: LISTED
                 .into_iter()
-                .filter_map(|(at, customize)| {
-                    let held = u32::from(row.read::<u8>(at).ok()?);
-                    Some((customize, held.saturating_sub(1)))
-                })
-                .chain(STATED.into_iter().filter_map(|(at, customize)| {
-                    Some((customize, u32::from(row.read::<u8>(at).ok()?)))
-                }))
+                .map(|(at, mask)| (at, (byte(at) & u32::from(mask)).saturating_sub(1)))
+                .chain(
+                    STATED
+                        .into_iter()
+                        .map(|(at, mask)| (at, byte(at) & u32::from(mask))),
+                )
+                .chain([
+                    (IRIS, byte(IRIS_AT) >> 7),
+                    (HIGHLIGHTS, byte(HIGHLIGHTS_AT) >> 7),
+                    (HIGHLIGHT_COLOR, byte(HIGHLIGHT_COLOR_AT)),
+                    (ODD_EYES, u32::from(left != right)),
+                    (LEFT_EYE_COLOR, left),
+                ])
                 .collect(),
             outfit,
         });

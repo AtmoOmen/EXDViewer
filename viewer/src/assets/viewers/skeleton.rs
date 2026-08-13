@@ -5,6 +5,7 @@
 //! which is a rig rather than the character it moves.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 
 use egui::{RichText, Sense};
 use glam::{Mat4, Quat, Vec3};
@@ -113,6 +114,37 @@ impl Rig {
         let span = extent(&rig.world(&rig.reference));
         rig.span = span;
         rig
+    }
+
+    /// This rig with another skeleton's bones hung off the ones it already names. A name both
+    /// carry stays this one's: an extra skeleton states the head where its own file put it rather
+    /// than where the body's chain carries it. New bones are appended, so the indices a motion's
+    /// tracks name still reach the bones they were authored against.
+    pub fn merged(&self, names: &[String], parents: &[i16], reference: &[Transform]) -> Self {
+        let mut held = self.names.clone();
+        let mut hung = self.parents.clone();
+        let mut rest = self.reference.clone();
+        let mut at: HashMap<String, usize> = held
+            .iter()
+            .enumerate()
+            .map(|(bone, name)| (name.clone(), bone))
+            .collect();
+        for (bone, name) in names.iter().enumerate() {
+            if at.contains_key(name) {
+                continue;
+            }
+            // A bone whose parent is nowhere to be found would stand at the world origin, which is
+            // further from where it belongs than leaving it out entirely.
+            let Some(parent) = parent_of(parents, bone).and_then(|parent| at.get(&names[parent]))
+            else {
+                continue;
+            };
+            hung.push(*parent as i16);
+            rest.push(reference[bone]);
+            at.insert(name.clone(), held.len());
+            held.push(name.clone());
+        }
+        Self::new(&held, &hung, &rest)
     }
 
     pub fn bones(&self) -> usize {

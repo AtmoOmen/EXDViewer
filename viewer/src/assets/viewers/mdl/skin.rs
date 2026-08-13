@@ -8,9 +8,14 @@
 //! The skeleton is guessed from the model's own path and fetched on the first frame that draws a
 //! skinned mesh, the way the model's `.imc` is. The packs are read off the install's own listing,
 //! since nothing in the model, the skeleton or the sheets names the ones a model can play.
+//!
+//! A body's own skeleton names none of the bones a face, a hairstyle or a piece of headgear moves
+//! on: those hang off skeletons of their own, and `.est` is what says which. They are merged into
+//! the body's rather than posed apart, since each is stated as bones hanging off one the body
+//! already names.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::rc::Rc;
 
@@ -18,8 +23,9 @@ use anyhow::Result;
 use egui::{Color32, RichText};
 use glam::{Mat4, Vec3};
 use ironworks::file::File;
+use ironworks::file::est::ExtraSkeletonTemplate;
 use ironworks::file::pap::{AnimationPack, Binding};
-use ironworks::file::sklb::SkeletonBinary;
+use ironworks::file::sklb::{SkeletonBinary, Transform};
 
 use super::super::skeleton::{Placement, Rig, middle};
 use super::super::{link, placed, section};
@@ -85,6 +91,57 @@ impl Skin {
                 None => Mat4::IDENTITY,
             })
             .collect()
+    }
+}
+
+/// A skeleton as its own file states it, held unbuilt so several can be merged into one rig.
+struct Skeleton {
+    names: Vec<String>,
+    parents: Vec<i16>,
+    reference: Vec<Transform>,
+}
+
+impl Skeleton {
+    fn read(bytes: &[u8]) -> Result<Self> {
+        let file = SkeletonBinary::read(Cursor::new(bytes.to_vec()))?;
+        let skeleton = file.parse_skeleton()?;
+        Ok(Self {
+            names: skeleton.bones().to_vec(),
+            parents: skeleton.parent_indices().to_vec(),
+            reference: skeleton.reference_pose().to_vec(),
+        })
+    }
+}
+
+/// A skeleton a part is posed on beyond the body's own, which is one table each.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Extra {
+    Face,
+    Hair,
+    Head,
+    Body,
+}
+
+impl Extra {
+    const ALL: [Self; 4] = [Self::Face, Self::Hair, Self::Head, Self::Body];
+
+    fn table(self) -> &'static str {
+        match self {
+            Self::Face => "chara/xls/charadb/faceSkeletonTemplate.est",
+            Self::Hair => "chara/xls/charadb/hairSkeletonTemplate.est",
+            Self::Head => "chara/xls/charadb/extra_met.est",
+            Self::Body => "chara/xls/charadb/extra_top.est",
+        }
+    }
+
+    /// The directory its skeletons are filed under, and the letter their files carry.
+    fn filed(self) -> (&'static str, char) {
+        match self {
+            Self::Face => ("face", 'f'),
+            Self::Hair => ("hair", 'h'),
+            Self::Head => ("met", 'm'),
+            Self::Body => ("top", 't'),
+        }
     }
 }
 
@@ -191,9 +248,23 @@ struct Pack {
 
 /// What plays a model: the skeleton it is skinned to, a pack of motions, and the clock.
 pub struct Animation {
-    /// Where the model's own path says its skeleton is, and the rig that came of it.
+    /// Where the model's own path says its skeleton is, and the file that came of it.
     skeleton: Option<String>,
-    skin: RefCell<Option<Fetch<Skin>>>,
+    base: RefCell<Option<Fetch<Skeleton>>>,
+    /// The body a code names, which is what the tables key their answers on.
+    body: Option<u16>,
+    /// Which extra skeleton each part on screen asks for, out of the parts' own file names.
+    needs: RefCell<Vec<(Extra, u16)>>,
+    /// The tables naming which skeleton a set is posed on, fetched only where a part needs one.
+    tables: RefCell<[Option<Fetch<ExtraSkeletonTemplate>>; 4]>,
+    /// Every extra skeleton asked for so far, by path, kept across a change of clothes.
+    extras: RefCell<BTreeMap<String, Option<Fetch<Skeleton>>>>,
+    /// The rig everything is posed on, and which extras it was built from, so it is built again as
+    /// more of them land.
+    skin: RefCell<Option<Skin>>,
+    built: RefCell<Vec<String>>,
+    /// Whether the bones this rig cannot name have been counted since it was last built.
+    counted: Cell<bool>,
     /// Where the model's own path says its packs are filed, and the ones the listing names there.
     root: Option<String>,
     packs: RefCell<Option<Result<Vec<Pack>, Rc<str>>>>,
@@ -211,11 +282,19 @@ pub struct Animation {
 }
 
 impl Animation {
-    pub fn new(model: &str) -> Self {
-        let code = code(model);
+    pub fn new<'a>(models: impl IntoIterator<Item = &'a str>) -> Self {
+        let models: Vec<&str> = models.into_iter().collect();
+        let code = models.iter().find_map(|model| code(model));
         Self {
             skeleton: code.as_deref().and_then(skeleton_path),
+            base: RefCell::new(None),
+            body: code.as_deref().and_then(|code| code[1..].parse().ok()),
+            needs: RefCell::new(needed(&models)),
+            tables: Default::default(),
+            extras: Default::default(),
             skin: RefCell::new(None),
+            built: Default::default(),
+            counted: Cell::new(false),
             root: code.as_deref().and_then(pack_root),
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
@@ -227,21 +306,20 @@ impl Animation {
         }
     }
 
+    /// Points the extra skeletons at what is being worn now, keeping everything already fetched:
+    /// a hat that comes back off a picker is not worth asking for twice.
+    pub fn rewear<'a>(&self, models: impl IntoIterator<Item = &'a str>) {
+        *self.needs.borrow_mut() = needed(&models.into_iter().collect::<Vec<_>>());
+    }
+
     /// Asks for the skeleton, the listing and the pack, and takes up whichever has landed. Only
     /// called for a model that carries bone indices, so nothing is fetched for one that could not
     /// be posed.
     pub fn poll(&self, ctx: &egui::Context, backend: &Backend) {
         if let Some(path) = &self.skeleton {
-            Fetch::poll(&mut self.skin.borrow_mut(), backend, path, |bytes| {
-                let file = SkeletonBinary::read(Cursor::new(bytes.to_vec()))?;
-                let skeleton = file.parse_skeleton()?;
-                Ok(Skin::new(Rig::new(
-                    skeleton.bones(),
-                    skeleton.parent_indices(),
-                    skeleton.reference_pose(),
-                )))
-            });
+            Fetch::poll(&mut self.base.borrow_mut(), backend, path, Skeleton::read);
         }
+        self.poll_extras(backend);
         let mut held = self.packs.borrow_mut();
         if let Some(root) = &self.root
             && held.is_none()
@@ -270,6 +348,76 @@ impl Animation {
         }
     }
 
+    /// Asks for the tables the parts on screen need, for the skeletons those tables name, and
+    /// builds the rig again whenever another of them lands.
+    fn poll_extras(&self, backend: &Backend) {
+        let Some(body) = self.body else {
+            return;
+        };
+        for kind in Extra::ALL {
+            if self.needs.borrow().iter().any(|(held, _)| *held == kind) {
+                let mut tables = self.tables.borrow_mut();
+                Fetch::poll(&mut tables[kind as usize], backend, kind.table(), |bytes| {
+                    Ok(ExtraSkeletonTemplate::read(Cursor::new(bytes.to_vec()))?)
+                });
+            }
+        }
+        for path in self.named(body) {
+            let mut extras = self.extras.borrow_mut();
+            let held = extras.entry(path.clone()).or_default();
+            Fetch::poll(held, backend, &path, Skeleton::read);
+        }
+
+        let base = self.base.borrow();
+        let Some(base) = base.as_ref().and_then(Fetch::ready) else {
+            return;
+        };
+        let extras = self.extras.borrow();
+        let landed: Vec<String> = self
+            .named(body)
+            .into_iter()
+            .filter(|path| extras[path].as_ref().and_then(Fetch::ready).is_some())
+            .collect();
+        if landed == *self.built.borrow() && self.skin.borrow().is_some() {
+            return;
+        }
+        let mut rig = Rig::new(&base.names, &base.parents, &base.reference);
+        for held in landed
+            .iter()
+            .filter_map(|path| extras[path].as_ref().and_then(Fetch::ready))
+        {
+            rig = rig.merged(&held.names, &held.parents, &held.reference);
+        }
+        *self.skin.borrow_mut() = Some(Skin::new(rig));
+        *self.built.borrow_mut() = landed;
+        self.counted.set(false);
+    }
+
+    /// Where every extra skeleton the parts need is filed, for the ones whose table has landed and
+    /// names one. A set the table says nothing about is worn on the body's own bones.
+    fn named(&self, body: u16) -> Vec<String> {
+        let tables = self.tables.borrow();
+        let mut found: Vec<String> = self
+            .needs
+            .borrow()
+            .iter()
+            .filter_map(|(kind, set)| {
+                let id = tables[*kind as usize]
+                    .as_ref()
+                    .and_then(Fetch::ready)?
+                    .skeleton(body, *set)
+                    .filter(|id| *id > 0)?;
+                let (under, letter) = kind.filed();
+                Some(format!(
+                    "chara/human/c{body:04}/skeleton/{under}/{letter}{id:04}/skl_c{body:04}{letter}{id:04}.sklb"
+                ))
+            })
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+
     /// Stands it where its own file put it, which is what a file being inspected should show.
     pub fn rest(&self) {
         self.motion.set(None);
@@ -286,7 +434,7 @@ impl Animation {
     /// Where the model stands this frame: one walk of the rig, and everything read off it.
     pub fn pose(&self, tables: &[Vec<String>], skeleton: bool) -> Pose {
         let skin = self.skin.borrow();
-        let Some(skin) = skin.as_ref().and_then(Fetch::ready) else {
+        let Some(skin) = skin.as_ref() else {
             return Pose {
                 joints: tables
                     .iter()
@@ -295,6 +443,17 @@ impl Animation {
                 ..Default::default()
             };
         };
+        if !self.counted.replace(true) {
+            // A bone the rig cannot name poses nothing and leaves its vertices where the file put
+            // them, which is a face standing still while the head it hangs on turns.
+            let wanted: usize = tables.iter().map(Vec::len).sum();
+            let missing = tables
+                .iter()
+                .flatten()
+                .filter(|name| !skin.named.contains_key(*name))
+                .count();
+            log::info!("mdl: {missing} of {wanted} bones are named by no skeleton");
+        }
         let pack = self.pack.borrow();
         let binding = self
             .motion
@@ -425,7 +584,7 @@ impl Animation {
                 if link(ui, file_name(path), path) {
                     *follow = Some(path.clone());
                 }
-                if let Some(Fetch::Failed(why)) = self.skin.borrow().as_ref() {
+                if let Some(Fetch::Failed(why)) = self.base.borrow().as_ref() {
                     ui.label(RichText::new(why).color(Color32::LIGHT_RED));
                 }
             }
@@ -465,6 +624,30 @@ pub fn code(model: &str) -> Option<String> {
     let (letter, digits) = code.split_at(1);
     let known = matches!(letter, "c" | "m" | "d" | "w");
     (known && digits.bytes().all(|byte| byte.is_ascii_digit())).then(|| code.to_owned())
+}
+
+/// Which extra skeleton each part asks for, out of the parts' own file names. Every model of one
+/// face is posed on the same one, so the answers are worth deduplicating before they are looked up.
+fn needed(models: &[&str]) -> Vec<(Extra, u16)> {
+    let mut found: Vec<_> = models.iter().filter_map(|model| extra(model)).collect();
+    found.dedup();
+    found
+}
+
+/// What one part asks for: `c0101f0002_fac` names the face set it draws, and a piece of equipment
+/// names the set it belongs to and, in its suffix, which of the two tables covers that slot.
+fn extra(model: &str) -> Option<(Extra, u16)> {
+    let name = file_name(model).strip_suffix(".mdl")?;
+    let rest = name.get(5..)?;
+    let set = rest.get(1..5)?.parse().ok()?;
+    let kind = match (rest.as_bytes().first()?, rest.get(5..)?) {
+        (b'f', _) => Extra::Face,
+        (b'h', _) => Extra::Hair,
+        (b'e', "_met") => Extra::Head,
+        (b'e', "_top") => Extra::Body,
+        _ => return None,
+    };
+    Some((kind, set))
 }
 
 /// Where the model class a code names files its skeletons and animations.
@@ -538,7 +721,7 @@ mod tests {
     use ironworks::file::sklb::Transform;
 
     use super::super::super::skeleton::{Rig, middle};
-    use super::{Skin, code, found, pack_path, pack_root, skeleton_path};
+    use super::{Extra, Skin, code, extra, found, pack_path, pack_root, skeleton_path};
 
     fn transform(translation: [f32; 3]) -> Transform {
         Transform {
@@ -611,6 +794,68 @@ mod tests {
         let held = skin.palette(&["n_root".to_owned(), "j_kubi".to_owned()], &posed);
         assert!(held[0].abs_diff_eq(Mat4::IDENTITY, 1e-5));
         assert_eq!(held[1].w_axis.truncate(), Vec3::new(0.0, 3.0, 0.0));
+    }
+
+    /// A face is skinned to bones the body's own skeleton has never heard of, and its own skeleton
+    /// hangs them off one the body does name.
+    #[test]
+    fn a_face_bone_is_posed_once_its_own_skeleton_is_merged_in() {
+        let base = rig();
+        assert_eq!(base.bones(), 2);
+        let merged = base.merged(
+            &[
+                "j_kubi".to_owned(),
+                "j_f_ago".to_owned(),
+                "j_nowhere".to_owned(),
+                "j_f_orphan".to_owned(),
+            ],
+            &[-1, 0, -1, 2],
+            &[
+                // The head where the face's own file put it, which is nowhere near where the
+                // body's chain carries it: the base's placement has to win.
+                transform([0.0, 9.0, 0.0]),
+                transform([0.0, 1.0, 0.0]),
+                transform([0.0, 1.0, 0.0]),
+                transform([0.0, 1.0, 0.0]),
+            ],
+        );
+        // The body's own bones keep their places, since a motion's tracks name them by index, and
+        // a bone hanging off nothing the merge could find is left out rather than put at the origin.
+        assert_eq!(merged.names(), ["n_root", "j_kubi", "j_f_ago"]);
+
+        let skin = Skin::new(merged);
+        let mut locals = skin.rig.reference().to_vec();
+        locals[1] = transform([0.0, 5.0, 0.0]);
+        let posed = skin.rig.world(&locals);
+        let held = skin.palette(&["j_f_ago".to_owned()], &posed);
+        assert_eq!(held[0].w_axis.truncate(), Vec3::new(0.0, 3.0, 0.0));
+    }
+
+    #[test]
+    fn a_part_names_the_extra_skeleton_it_is_posed_on() {
+        let named = |path| extra(path).map(|(kind, set)| (kind as usize, set));
+        assert_eq!(
+            named("chara/human/c0101/obj/face/f0002/model/c0101f0002_fac.mdl"),
+            Some((Extra::Face as usize, 2))
+        );
+        assert_eq!(
+            named("chara/human/c0101/obj/hair/h0115/model/c0101h0115_hir.mdl"),
+            Some((Extra::Hair as usize, 115))
+        );
+        assert_eq!(
+            named("chara/equipment/e0279/model/c0101e0279_met.mdl"),
+            Some((Extra::Head as usize, 279))
+        );
+        assert_eq!(
+            named("chara/equipment/e0279/model/c0101e0279_top.mdl"),
+            Some((Extra::Body as usize, 279))
+        );
+        // Gloves are worn on the body's own bones, and so is its own smallclothes top.
+        assert_eq!(named("chara/equipment/e0279/model/c0101e0279_glv.mdl"), None);
+        assert_eq!(
+            named("chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl"),
+            None
+        );
     }
 
     #[test]

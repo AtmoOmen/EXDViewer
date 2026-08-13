@@ -417,7 +417,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 /// rest hang off: its path is what names the skeleton they are all posed on. A character is drawn
 /// the way the game draws it, standing in its idle rather than in the pose its files hold.
 pub fn compose(parts: &[Source]) -> Result<Rendered> {
-    let first = parts.first().context("a model of no files")?;
+    parts.first().context("a model of no files")?;
     let pieces: Vec<_> = parts.iter().map(Piece::new).collect();
     let drawn = drawn_levels(&pieces)?;
     let level = level_of(&pieces, 0)?;
@@ -434,7 +434,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         arrays: Default::default(),
         parameters: Default::default(),
         translated: Default::default(),
-        animation: skin::Animation::new(&first.path),
+        animation: skin::Animation::new(parts.iter().map(|part| part.path.as_str())),
         lighting: Default::default(),
         post: Default::default(),
         graded: Cell::new(false),
@@ -2249,8 +2249,10 @@ impl Rendered {
                 .first()
                 .and_then(|piece| skin::code(&piece.path))
         {
-            self.animation = skin::Animation::new(&first.path);
+            self.animation = skin::Animation::new(parts.iter().map(|part| part.path.as_str()));
         }
+        self.animation
+            .rewear(parts.iter().map(|part| part.path.as_str()));
         self.pieces = pieces;
         self.drawn = drawn;
         self.lod.set(lod);

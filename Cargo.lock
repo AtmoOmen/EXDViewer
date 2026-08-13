@@ -7285,6 +7285,7 @@ name = "viewer"
 version = "1.9.0"
 dependencies = [
  "anyhow",
+ "async-channel 2.5.0",
  "async-trait",
  "base64 0.23.0",
  "binrw",

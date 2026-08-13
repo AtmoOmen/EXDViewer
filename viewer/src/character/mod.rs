@@ -437,13 +437,7 @@ impl CharacterBuilder {
         }
 
         if self.faces.is_empty() {
-            let code = resolve(
-                &listing,
-                &self.codes,
-                &self.creator,
-                self.tribe,
-                self.female,
-            );
+            let code = resolve(&self.codes, self.tribe, self.female);
             // Which model a set is worn as is the code's to say, so the answers held for the last
             // one say nothing about this one.
             if code != self.code {
@@ -453,12 +447,11 @@ impl CharacterBuilder {
             self.body = body(&listing, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
-            // Where nothing has been picked, the creator's own opening choice, which is not the
-            // first of either: a Midlander man does not start bald and white-haired.
+            // Both name the files the character is built from, so both are read out of what the
+            // menus have been left at rather than kept alongside it. Where nothing has been picked
+            // that is the creator's own opening choice, which is not the first of either: a
+            // Midlander man does not start bald and white-haired.
             for customize in [FACE, HAIRSTYLE] {
-                if self.choices.contains_key(&customize) {
-                    continue;
-                }
                 let Some(menu) = self
                     .creator
                     .body(self.tribe, self.female)
@@ -469,10 +462,16 @@ impl CharacterBuilder {
                 else {
                     continue;
                 };
-                let opens = self.choice_of(&menu, menu.init.min(menu.count.saturating_sub(1))).id;
+                let held = match self.choices.get(&customize) {
+                    Some(id) => *id as u16,
+                    None => {
+                        self.choice_of(&menu, menu.init.min(menu.count.saturating_sub(1)))
+                            .id
+                    }
+                };
                 match customize {
-                    FACE => self.face = opens,
-                    _ => self.hair = opens,
+                    FACE => self.face = held,
+                    _ => self.hair = held,
                 }
             }
             self.face = pick(&self.faces, self.face);
@@ -935,7 +934,10 @@ impl CharacterBuilder {
             .menus
             .iter()
             .find(|menu| menu.customize == FACE)
-            .map_or(0, |menu| self.choice(menu) as usize);
+            .and_then(|menu| {
+                (0..menu.count).position(|index| self.choice_of(menu, index).id == self.face)
+            })
+            .unwrap_or(0);
         let mut picked = None;
         for (at, menu) in body.menus.iter().enumerate() {
             ui.add_space(8.0);
@@ -1047,23 +1049,15 @@ impl CharacterBuilder {
                         }
                     }
                 }
+                // What a choice is worth is the number the file tree files it under and not where
+                // it sits: an NPC states a face of 216, which is a face on disk that no menu lists.
                 menus::Kind::Icons => {
                     let choices: Vec<Choice> = (0..menu.count)
                         .map(|index| self.choice_of(menu, index))
                         .collect();
-                    let current = match menu.customize {
-                        FACE => choices.iter().position(|held| held.id == self.face),
-                        HAIRSTYLE => choices.iter().position(|held| held.id == self.hair),
-                        _ => Some(current as usize),
-                    }
-                    .unwrap_or(usize::MAX);
                     grid(ui, &format!("character_menu_{at}"), &choices, |ui, held| {
-                        let selected = choices
-                            .iter()
-                            .position(|other| std::ptr::eq(other, held))
-                            .is_some_and(|index| index == current);
-                        chip(ui, backend, icons, held, selected)
-                            .then_some(Pick::Choice(menu.customize, held.at, held.id))
+                        chip(ui, backend, icons, held, u32::from(held.id) == current)
+                            .then_some(Pick::Choice(menu.customize, held.id))
                     })
                     .inspect(|choice| picked = Some(*choice));
                 }
@@ -1389,8 +1383,8 @@ impl CharacterBuilder {
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }
-            Some(Pick::Choice(customize, choice, id)) => {
-                self.choices.insert(customize, choice);
+            Some(Pick::Choice(customize, id)) => {
+                self.choices.insert(customize, u32::from(id));
                 match customize {
                     FACE => self.face = id,
                     HAIRSTYLE => self.hair = id,
@@ -1411,8 +1405,8 @@ enum Pick {
     Job(usize),
     /// A menu left at a choice, by the customisation it drives.
     Made(u32, u32),
-    /// The same, where the choice also names the files a face or a hairstyle is built from.
-    Choice(u32, u32, u16),
+    /// The same, where what a menu holds is the number the file tree files the choice under.
+    Choice(u32, u16),
     Emote(usize),
     Npc(usize),
 }
@@ -1425,29 +1419,26 @@ struct Choice {
     icon: Option<u32>,
 }
 
-/// The model code a clan and gender are built on. A code does not name a clan, and two clans share
-/// one, so it is found by which of them ships the hair the creator offers for that clan rather than
-/// by a table pairing them up.
-fn resolve(
-    listing: &Listing,
-    codes: &[u16],
-    creator: &menus::Creator,
-    tribe: u32,
-    female: bool,
-) -> u16 {
-    let Some(body) = creator.body(tribe, female) else {
-        return *codes.first().unwrap_or(&101);
-    };
-    codes
-        .iter()
-        .max_by_key(|code| {
-            sets(listing, code, "hair")
-                .iter()
-                .filter(|set| body.hairs.contains_key(&set.id))
-                .count()
-        })
+/// The model code a clan and gender are built on. Nothing in the files pairs the two: the bodies
+/// are numbered in the order the game's races were first built, which is not the order `Tribe`
+/// states them in, and neither sheet names a code. Counting which code ships the hair a clan is
+/// offered does not tell them apart either: a man's hair is filed under every man's body, so five
+/// codes score the whole of Wildwood's forty-eight and the last of them wins.
+///
+/// A woman is built on the body after her man's, and both Hyur clans have one of their own where
+/// every other race shares.
+const BUILT_ON: [u16; 16] = [1, 3, 5, 5, 11, 11, 7, 7, 9, 9, 13, 13, 15, 15, 17, 17];
+
+fn resolve(codes: &[u16], tribe: u32, female: bool) -> u16 {
+    let body = BUILT_ON
+        .get(tribe.max(1) as usize - 1)
         .copied()
-        .unwrap_or(101)
+        .unwrap_or(1);
+    let wanted = (body + u16::from(female)) * 100 + 1;
+    match codes.contains(&wanted) {
+        true => wanted,
+        false => *codes.first().unwrap_or(&101),
+    }
 }
 
 fn root(code: u16) -> String {
@@ -1621,12 +1612,15 @@ fn chip(
         TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
     match held {
+        // Sized rather than fitted, so a cell is the same size whichever way it is drawn: a grid
+        // that grows as its icons land walks every control under it down the panel.
         ManagedIcon::Loaded(source) => ui
-            .add(
+            .add_sized(
+                egui::Vec2::splat(ICON),
                 egui::Button::image(
                     egui::Image::new(source)
                         .maintain_aspect_ratio(true)
-                        .fit_to_exact_size(egui::Vec2::splat(ICON)),
+                        .shrink_to_fit(),
                 )
                 .selected(selected),
             )

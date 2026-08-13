@@ -9,11 +9,12 @@
 
 mod menus;
 
+use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use anyhow::Result;
-use egui::{CentralPanel, Color32, RichText, ScrollArea, containers::panel::Panel};
+use egui::{CentralPanel, Color32, RichText, ScrollArea, TextEdit, containers::panel::Panel};
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -22,7 +23,9 @@ use crate::data::get_icon_path;
 use crate::data::listing::{Listed, Listing};
 use crate::excel::provider::ExcelProvider;
 use crate::settings::{LANGUAGE, api_base};
-use crate::utils::{CollapsibleSidePanel, IconManager, ManagedIcon, Side, TrackedPromise};
+use crate::utils::{
+    CollapsibleSidePanel, FuzzyMatcher, IconManager, ManagedIcon, Side, TrackedPromise,
+};
 
 /// The bodies a code's first pair can name, and the variants its second can. Every pairing is
 /// offered only where the listing holds a body model for it.
@@ -32,6 +35,11 @@ const VARIANTS: [u16; 2] = [1, 4];
 /// How big a set's icon is drawn, and how far apart the grid sets them.
 const ICON: f32 = 40.0;
 const GAP: f32 = 4.0;
+
+/// How big a piece of equipment's icon is drawn beside its name, and how many of them a slot's
+/// picker shows at once.
+const PIECE: f32 = 24.0;
+const SHOWN: usize = 10;
 
 /// Smallclothes, which is what everything else is worn over.
 const SMALLCLOTHES: Gear = Gear { set: 0, variant: 1 };
@@ -50,6 +58,16 @@ impl Slot {
     pub const ALL: [Slot; 5] = [Self::Head, Self::Body, Self::Hands, Self::Legs, Self::Feet];
     /// The slots a race has clothing of its own for, in the order `Race` states them.
     pub const RACIAL: [Slot; 4] = [Self::Body, Self::Hands, Self::Legs, Self::Feet];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Head => "Head",
+            Self::Body => "Body",
+            Self::Hands => "Hands",
+            Self::Legs => "Legs",
+            Self::Feet => "Feet",
+        }
+    }
 
     fn suffix(self) -> &'static str {
         match self {
@@ -107,6 +125,7 @@ pub struct CharacterBuilder {
     /// What the creator offers, and which of its races, clans and genders is being built.
     creator: menus::Creator,
     reading: Option<TrackedPromise<Result<menus::Creator>>>,
+    reading_pieces: Option<TrackedPromise<Result<[Vec<menus::Piece>; 5]>>>,
     race: u32,
     tribe: u32,
     female: bool,
@@ -119,6 +138,16 @@ pub struct CharacterBuilder {
     hair: u16,
     attire: Attire,
     job: usize,
+    /// What has been picked by hand for a slot, over whatever the attire puts there, and which
+    /// slot's picker is open. Both index [`menus::Creator::pieces`].
+    chosen: [Option<usize>; 5],
+    picking: Option<Slot>,
+    search: [String; 5],
+    matched: RefCell<[(Option<String>, Vec<usize>); 5]>,
+    matcher: FuzzyMatcher,
+    /// The models each set is worn as under the current code, by slot. The picker asks about every
+    /// set it lists, and a directory listing is too dear to pay for one on every frame.
+    sets: RefCell<BTreeMap<u16, [Option<String>; 5]>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<(String, u16)>,
     /// Every file read so far, so a change of clothes only asks for what it newly needs.
@@ -134,6 +163,7 @@ impl Default for CharacterBuilder {
             codes: Vec::new(),
             creator: menus::Creator::default(),
             reading: None,
+            reading_pieces: None,
             race: 1,
             tribe: 1,
             female: false,
@@ -145,6 +175,12 @@ impl Default for CharacterBuilder {
             hair: 1,
             attire: Attire::default(),
             job: 0,
+            chosen: [None; 5],
+            picking: None,
+            search: Default::default(),
+            matched: Default::default(),
+            matcher: FuzzyMatcher::new(),
+            sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
             held: Files::new(),
             fetching: None,
@@ -160,9 +196,14 @@ impl CharacterBuilder {
         self.codes.clear();
         self.creator = menus::Creator::default();
         self.reading = None;
+        self.reading_pieces = None;
         self.body.clear();
         self.faces.clear();
         self.hairs.clear();
+        // What was picked by hand is where a piece sat in a list that is about to be read again.
+        self.chosen = [None; 5];
+        self.matched.take();
+        self.sets.borrow_mut().clear();
         self.worn.clear();
         self.held.clear();
         self.fetching = None;
@@ -212,35 +253,49 @@ impl CharacterBuilder {
                 menus::read(&backend, language).await
             }));
         }
-        if matches!(&self.reading, Some(promise) if promise.try_get().is_some())
-            && let Some(promise) = self.reading.take()
-            && let Some(Ok(read)) = promise.try_get()
-        {
-            self.creator = menus::Creator {
-                bodies: read.bodies.clone(),
-                races: read.races.clone(),
-                tribes: read.tribes.clone(),
-                attire: read.attire.clone(),
-                jobs: read
-                    .jobs
-                    .iter()
-                    .map(|job| menus::Job {
-                        name: job.name.clone(),
-                        outfit: job.outfit,
-                    })
-                    .collect(),
-            };
-            self.faces.clear();
+        if let Some(promise) = self.reading.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.creator = read;
+                    self.faces.clear();
+                    // Only once the character is dressed: both walk the same sheet, and the one
+                    // that gets there first is the one that finishes first.
+                    let backend = backend.clone();
+                    let language = LANGUAGE.get(ctx);
+                    self.reading_pieces = Some(TrackedPromise::spawn_local(async move {
+                        menus::pieces(&backend, language).await
+                    }));
+                }
+                Ok(Err(why)) => self.model = Some(Err(why.to_string())),
+                Err(promise) => self.reading = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_pieces.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.creator.pieces = read;
+                    // A picker open while they were still arriving matched against nothing.
+                    self.matched.take();
+                }
+                Ok(Err(why)) => log::warn!("character: nothing to pick equipment from: {why}"),
+                Err(promise) => self.reading_pieces = Some(promise),
+            }
         }
 
         if self.faces.is_empty() {
-            self.code = resolve(
+            let code = resolve(
                 &listing,
                 &self.codes,
                 &self.creator,
                 self.tribe,
                 self.female,
             );
+            // Which model a set is worn as is the code's to say, so the answers held for the last
+            // one say nothing about this one.
+            if code != self.code {
+                self.sets.borrow_mut().clear();
+            }
+            self.code = code;
             self.body = body(&listing, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
@@ -287,6 +342,36 @@ impl CharacterBuilder {
         }
     }
 
+    /// The piece picked by hand for a slot, if the list it was picked from is still the one held.
+    fn picked(&self, slot: Slot) -> Option<&menus::Piece> {
+        self.creator.pieces[slot as usize].get(self.chosen[slot as usize]?)
+    }
+
+    /// What the character is dressed in: the attire, then anything picked by hand over it, then
+    /// the slots those pieces cover themselves, which draw nothing at all rather than falling back
+    /// to the body's own model. A slot picked for is never covered, since a pick is an instruction.
+    fn dressed(&self) -> (Outfit, [bool; 5]) {
+        let mut outfit = self.outfit();
+        let mut hidden = [false; 5];
+        for slot in Slot::ALL {
+            if let Some(piece) = self.picked(slot) {
+                outfit[slot as usize] = Some(piece.gear);
+            }
+        }
+        for slot in Slot::ALL {
+            let Some(piece) = self.picked(slot) else {
+                continue;
+            };
+            for (at, covered) in piece.hides.iter().enumerate() {
+                if *covered && self.chosen[at].is_none() {
+                    outfit[at] = None;
+                    hidden[at] = true;
+                }
+            }
+        }
+        (outfit, hidden)
+    }
+
     /// The outfit the picked attire dresses the character in.
     fn outfit(&self) -> Outfit {
         match self.attire {
@@ -328,19 +413,32 @@ impl CharacterBuilder {
             .chain(held(&self.hairs, self.hair))
             .map(|path| (path, 0))
             .collect();
-        let outfit = self.outfit();
+        let (outfit, hidden) = self.dressed();
         for slot in Slot::ALL {
             let worn = outfit[slot as usize].and_then(|gear| {
-                equipment(listing, self.code, slot, gear).map(|path| (path, gear.variant))
+                self.worn_as(listing, gear.set)[slot as usize]
+                    .clone()
+                    .map(|path| (path, gear.variant))
             });
             match worn {
                 Some(part) => found.push(part),
                 // Nothing stands in for a bare head: the body ships no model for it, and the face
                 // and the hair are what draw one.
+                None if hidden[slot as usize] => {}
                 None => found.extend(part(&self.body, slot).map(|path| (path, 0))),
             }
         }
         found
+    }
+
+    /// The model each slot of a set is worn as under the current code, answered out of the memo
+    /// and read off the listing the first time a set is asked about.
+    fn worn_as(&self, listing: &Listing, set: u16) -> Ref<'_, [Option<String>; 5]> {
+        if !self.sets.borrow().contains_key(&set) {
+            let found = equipment(listing, self.code, set);
+            self.sets.borrow_mut().insert(set, found);
+        }
+        Ref::map(self.sets.borrow(), |sets| &sets[&set])
     }
 
     /// Puts what has arrived on screen, keeping the character that is already there where there is
@@ -376,7 +474,141 @@ impl CharacterBuilder {
         }
     }
 
+    /// One slot to dress: what is in it, and, while its picker is open, everything the game names
+    /// that could be. A piece the code has no model of would draw the body's own part instead of
+    /// what was asked for, so it is offered but not pickable; one the game bars this race or
+    /// gender from is picked all the same, since only the game bars it and the files do not.
+    fn slot_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        backend: &Backend,
+        icons: &IconManager,
+        listing: &Listing,
+        slot: Slot,
+    ) {
+        let at = slot as usize;
+        let (outfit, hidden) = self.dressed();
+        let worn = match (
+            outfit[at]
+                .and_then(|gear| self.creator.pieces[at].iter().find(|piece| piece.gear == gear)),
+            outfit[at],
+        ) {
+            (Some(piece), _) => piece.name.clone(),
+            (None, Some(gear)) => format!("Set {}", gear.set),
+            (None, None) => match hidden[at] {
+                true => "Covered".to_owned(),
+                false => "Bare".to_owned(),
+            },
+        };
+        let open = self.picking == Some(slot);
+        if ui
+            .selectable_label(open, format!("{}: {worn}", slot.name()))
+            .clicked()
+        {
+            self.picking = (!open).then_some(slot);
+        }
+        if !open {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.add(
+                TextEdit::singleline(&mut self.search[at])
+                    .hint_text("Search")
+                    .desired_width(ui.available_width() - 60.0),
+            );
+            if ui
+                .add_enabled(self.chosen[at].is_some(), egui::Button::new("Attire"))
+                .on_hover_text("Wear what the attire puts here")
+                .clicked()
+            {
+                self.chosen[at] = None;
+            }
+        });
+
+        let mut picked = None;
+        {
+            let query = self.search[at].clone();
+            let matched = self.matches(slot, &query);
+            let step = PIECE + 2.0 * ui.spacing().button_padding.y + ui.spacing().item_spacing.y;
+            ScrollArea::vertical()
+                .id_salt(("character_pieces", at))
+                .max_height(step * SHOWN as f32)
+                .show_rows(ui, step, matched.len(), |ui, rows| {
+                    for row in rows {
+                        let index = matched[row];
+                        let piece = &self.creator.pieces[at][index];
+                        let held = self.worn_as(listing, piece.gear.set)[at].is_some();
+                        let suits = piece.suits(self.race, self.female);
+                        let name = match suits {
+                            true => RichText::new(&piece.name),
+                            false => RichText::new(&piece.name).color(Color32::KHAKI),
+                        };
+                        let icon = get_icon_path(backend.icons(), piece.icon, false, Language::None);
+                        let excel = backend.excel().clone();
+                        let source = icons.get_or_insert_icon(&icon, ui.ctx(), || {
+                            let icon = icon.clone();
+                            TrackedPromise::spawn_local(async move { excel.get_icon(&icon).await })
+                        });
+                        let button = match source {
+                            ManagedIcon::Loaded(source) => egui::Button::image_and_text(
+                                egui::Image::new(source)
+                                    .maintain_aspect_ratio(true)
+                                    .fit_to_exact_size(egui::Vec2::splat(PIECE)),
+                                name,
+                            ),
+                            _ => egui::Button::new(name),
+                        };
+                        // One line to a row, since the rows are scrolled by a fixed step and a name
+                        // long enough to wrap would walk the list out from under it.
+                        let response = ui.add_enabled(
+                            held,
+                            button
+                                .truncate()
+                                .selected(self.chosen[at] == Some(index))
+                                .min_size(egui::vec2(ui.available_width(), PIECE)),
+                        );
+                        let response = match (held, suits) {
+                            (false, _) => {
+                                response.on_disabled_hover_text("This body has no model of it")
+                            }
+                            (_, false) => response
+                                .on_hover_text("The game does not offer this to this race and gender"),
+                            _ => response,
+                        };
+                        if response.clicked() {
+                            picked = Some(index);
+                        }
+                    }
+                });
+        }
+        if let Some(index) = picked {
+            self.chosen[at] = Some(index);
+        }
+    }
+
+    /// Which of a slot's pieces its search names, kept since matching every name again on every
+    /// frame costs more than reading them all did.
+    fn matches(&self, slot: Slot, query: &str) -> Ref<'_, Vec<usize>> {
+        let at = slot as usize;
+        if self.matched.borrow()[at].0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.creator.pieces[at]
+                    .iter()
+                    .enumerate()
+                    .map(|(index, piece)| (index, piece.name.as_str())),
+                |piece| piece.1,
+            );
+            self.matched.borrow_mut()[at] = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.matched.borrow(), |matched| &matched[at].1)
+    }
+
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend, icons: &IconManager) {
+        let listing = self.listing.clone();
         let picked = CollapsibleSidePanel::new("character_pick", Side::Left)
             .show(ui, |ui, is_open| {
                 let mut picked = None;
@@ -392,7 +624,6 @@ impl CharacterBuilder {
                     ui.add_space(4.0);
                 });
                 ScrollArea::vertical().show(ui, |ui| {
-                    let held = self.creator.body(self.tribe, self.female);
                     ui.label(RichText::new("Race").strong());
                     for race in self.creator.races.keys() {
                         if !self.creator.bodies.iter().any(|body| body.race == *race) {
@@ -446,10 +677,23 @@ impl CharacterBuilder {
                             }
                         }
                     }
+                    if let Some(listing) = &listing {
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Equipment").strong());
+                            if self.reading_pieces.is_some() {
+                                ui.spinner();
+                            }
+                        });
+                        for slot in Slot::ALL {
+                            self.slot_ui(ui, backend, icons, listing, slot);
+                        }
+                    }
                     ui.add_space(8.0);
                     ui.label(RichText::new("Face").strong());
                     grid(ui, "character_faces", &self.faces, |ui, set| {
-                        let icon = held.and_then(|body| body.faces.get(&set.id));
+                        let body = self.creator.body(self.tribe, self.female);
+                        let icon = body.and_then(|body| body.faces.get(&set.id));
                         chip(ui, backend, icons, set.id, self.face, icon)
                             .then_some(Pick::Face(set.id))
                     })
@@ -457,7 +701,8 @@ impl CharacterBuilder {
                     ui.add_space(8.0);
                     ui.label(RichText::new("Hair").strong());
                     grid(ui, "character_hairs", &self.hairs, |ui, set| {
-                        let icon = held.and_then(|body| body.hairs.get(&set.id));
+                        let body = self.creator.body(self.tribe, self.female);
+                        let icon = body.and_then(|body| body.hairs.get(&set.id));
                         chip(ui, backend, icons, set.id, self.hair, icon)
                             .then_some(Pick::Hair(set.id))
                     })
@@ -566,21 +811,24 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
         .collect()
 }
 
-/// The model a code wears a set as in one slot.
+/// The model a code wears a set as, by slot. A set is one directory, so the whole of it is listed
+/// once and answered for every slot at once.
 ///
 /// Not every race has one of its own: the ones that do not are drawn from the base body of their
 /// gender, which the game then deforms onto their own build. The fallback is taken here; the
 /// deformation is not, so a piece worn this way is the right garment on the wrong build.
-fn equipment(listing: &Listing, code: u16, slot: Slot, gear: Gear) -> Option<String> {
-    let under = format!("chara/equipment/e{:04}/model", gear.set);
+fn equipment(listing: &Listing, code: u16, set: u16) -> [Option<String>; 5] {
+    let under = format!("chara/equipment/e{set:04}/model");
     let held = listing.under(&under);
     let base = match code % 2 {
         1 => 101,
         _ => 201,
     };
-    [code, base].into_iter().find_map(|code| {
-        let path = format!("{under}/c{code:04}e{:04}_{}.mdl", gear.set, slot.suffix());
-        held.contains(&path).then_some(path)
+    Slot::ALL.map(|slot| {
+        [code, base].into_iter().find_map(|code| {
+            let path = format!("{under}/c{code:04}e{set:04}_{}.mdl", slot.suffix());
+            held.contains(&path).then_some(path)
+        })
     })
 }
 

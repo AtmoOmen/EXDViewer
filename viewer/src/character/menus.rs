@@ -10,13 +10,21 @@
 //! menu is 452 bytes, so `SubMenuParam` holds 90 and not the 100 the schema states.
 
 use std::collections::BTreeMap;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use ironworks::excel::Language;
+#[cfg(target_arch = "wasm32")]
+use web_time::{Duration, Instant};
 
 use super::{Gear, Outfit, Slot};
 use crate::backend::Backend;
 use crate::excel::provider::{ExcelProvider, ExcelRow, ExcelSheet};
+use crate::utils::yield_to_ui;
+
+/// How long the walk over every item holds the thread before letting the interface draw.
+const MAX_FRAME_TIME: Duration = Duration::from_millis(250);
 
 /// Menus a row holds, and the bytes one menu is.
 const MENUS: u32 = 28;
@@ -40,8 +48,18 @@ const FEMININE: u32 = 4;
 
 /// Where `Race` names the item worn in each of [`Slot::RACIAL`], masculine then feminine.
 const RSE: u32 = 8;
-/// `Item`'s model quad.
+/// `Item`'s model quad, name, icon, equip slot category and race restriction.
 const MODEL: u32 = 24;
+const ITEM_NAME: u32 = 12;
+const ITEM_ICON: u32 = 136;
+const SLOTS: u32 = 154;
+const RESTRICTION: u32 = 80;
+/// Where `EquipSlotCategory` states each of [`Slot::ALL`]. It runs over every slot the game has, of
+/// which the five a body is dressed in are not adjacent.
+const FILLS: [u32; 5] = [2, 3, 4, 6, 7];
+/// `EquipRaceCategory`'s eight races, then the two genders packed into one byte after them.
+const WORN_BY: u32 = 0;
+const GENDERS: u32 = 8;
 /// `CharaMakeClassEquip`'s class, after the seven quads it dresses that class in.
 const CLASS_JOB: u32 = 56;
 /// `ClassJob`'s name as the creator writes it, rather than the lowercase one it is filed under.
@@ -65,6 +83,26 @@ pub struct Job {
     pub outfit: Outfit,
 }
 
+/// One piece of equipment the game names, and what wearing it does to a character's slots.
+pub struct Piece {
+    pub name: String,
+    pub gear: Gear,
+    pub icon: u32,
+    /// The slots it covers itself, so nothing else is drawn in them.
+    pub hides: [bool; 5],
+    /// The races and genders it is made for, one bit each. A character outside them still has a
+    /// model to wear: the game bars the pairing, the files do not.
+    races: u8,
+    genders: u8,
+}
+
+impl Piece {
+    /// Whether the game would let this race and gender wear it.
+    pub fn suits(&self, race: u32, female: bool) -> bool {
+        self.races & 1 << (race.clamp(1, 8) - 1) != 0 && self.genders & 1 << u8::from(female) != 0
+    }
+}
+
 #[derive(Default)]
 pub struct Creator {
     pub bodies: Vec<Body>,
@@ -74,6 +112,8 @@ pub struct Creator {
     /// The clothing a race wears when it wears nothing else, by race and gender.
     pub attire: BTreeMap<(u32, bool), Outfit>,
     pub jobs: Vec<Job>,
+    /// Everything there is to wear, by the slot it is worn in.
+    pub pieces: [Vec<Piece>; 5],
 }
 
 impl Creator {
@@ -147,7 +187,102 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
         tribes: names(backend, "Tribe", language).await?,
         attire: attire(backend, language).await?,
         jobs: jobs(backend, language).await?,
+        pieces: Default::default(),
     })
+}
+
+/// Everything the game names that a body can be dressed in, by the slot it goes in. A category
+/// fills at most one of the five, so a piece belongs to a slot rather than carrying a mask of them.
+///
+/// Read on its own, since walking every item there is takes long enough that waiting for it would
+/// hold up the character it is going to dress.
+pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>; 5]> {
+    let excel = backend.excel();
+    let items = excel.get_sheet("Item", language).await?;
+    let categories = excel.get_sheet("EquipSlotCategory", language).await?;
+    let restrictions = excel.get_sheet("EquipRaceCategory", language).await?;
+
+    let mut worn = BTreeMap::new();
+    for id in categories.get_row_ids() {
+        let Ok(row) = categories.get_row(id) else {
+            continue;
+        };
+        let mut fills = None;
+        let mut hides = [false; 5];
+        for (slot, at) in FILLS.into_iter().enumerate() {
+            match row.read::<i8>(at) {
+                Ok(1) => fills = Some(slot),
+                Ok(-1) => hides[slot] = true,
+                _ => {}
+            }
+        }
+        if let Some(slot) = fills {
+            worn.insert(id, (slot, hides));
+        }
+    }
+
+    let mut allowed = BTreeMap::new();
+    for id in restrictions.get_row_ids() {
+        let Ok(row) = restrictions.get_row(id) else {
+            continue;
+        };
+        let races = (0..8).fold(0u8, |races, race| {
+            let worn = row.read_bool(WORN_BY + race).unwrap_or(false);
+            races | u8::from(worn) << race
+        });
+        let genders = (0..2).fold(0u8, |genders, gender| {
+            let worn = row.read_packed_bool(GENDERS, gender).unwrap_or(false);
+            genders | u8::from(worn) << gender
+        });
+        allowed.insert(id, (races, genders));
+    }
+
+    let mut found: [Vec<Piece>; 5] = Default::default();
+    let mut drawn = Instant::now();
+    for id in items.get_row_ids() {
+        if drawn.elapsed() >= MAX_FRAME_TIME {
+            yield_to_ui().await;
+            drawn = Instant::now();
+        }
+        let Ok(row) = items.get_row(id) else {
+            continue;
+        };
+        let Some((slot, hides)) = row
+            .read::<u8>(SLOTS)
+            .ok()
+            .and_then(|category| worn.get(&u32::from(category)))
+        else {
+            continue;
+        };
+        let Some(gear) = row.read::<u64>(MODEL).ok().and_then(Gear::read) else {
+            continue;
+        };
+        let Ok(name) = row.read_string(ITEM_NAME) else {
+            continue;
+        };
+        let (races, genders) = row
+            .read::<u8>(RESTRICTION)
+            .ok()
+            .and_then(|worn| allowed.get(&u32::from(worn)))
+            .copied()
+            .unwrap_or_default();
+        found[*slot].push(Piece {
+            name: name.to_string(),
+            gear,
+            icon: row.read::<u16>(ITEM_ICON).unwrap_or(0).into(),
+            hides: *hides,
+            races,
+            genders,
+        });
+    }
+    for pieces in &mut found {
+        pieces.sort_by(|left, right| left.name.cmp(&right.name));
+    }
+    log::info!(
+        "character: {} pieces to wear",
+        found.iter().map(Vec::len).sum::<usize>()
+    );
+    Ok(found)
 }
 
 /// What each race stands in when it is wearing nothing else. `Race` names an item per slot and

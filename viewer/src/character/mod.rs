@@ -8,6 +8,7 @@
 //! What each set is offered under comes from the creator's own menus, in [`menus`].
 
 mod emotes;
+mod gating;
 mod menus;
 mod palette;
 
@@ -184,6 +185,9 @@ pub struct CharacterBuilder {
     /// The colours the creator offers, read once.
     made: Option<palette::Made>,
     reading_made: Option<TrackedPromise<Result<palette::Made>>>,
+    /// What a worn piece leaves showing of the body under it.
+    worn_over: Option<gating::Worn>,
+    reading_worn: Option<TrackedPromise<Result<gating::Worn>>>,
     /// The emotes the game names, and which of them is being played.
     emotes: Vec<emotes::Emote>,
     reading_emotes: Option<TrackedPromise<Result<Vec<emotes::Emote>>>>,
@@ -228,6 +232,8 @@ impl Default for CharacterBuilder {
             choices: BTreeMap::new(),
             made: None,
             reading_made: None,
+            worn_over: None,
+            reading_worn: None,
             emotes: Vec::new(),
             reading_emotes: None,
             emote: None,
@@ -252,6 +258,8 @@ impl CharacterBuilder {
         self.reading_pieces = None;
         self.made = None;
         self.reading_made = None;
+        self.worn_over = None;
+        self.reading_worn = None;
         self.emotes.clear();
         self.reading_emotes = None;
         self.emote = None;
@@ -319,6 +327,17 @@ impl CharacterBuilder {
             self.reading_emotes = Some(TrackedPromise::spawn_local(async move {
                 emotes::read(&played, language).await
             }));
+            let gated = backend.clone();
+            self.reading_worn = Some(TrackedPromise::spawn_local(async move {
+                gating::Worn::read(&gated).await
+            }));
+        }
+        if let Some(promise) = self.reading_worn.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.worn_over = Some(read),
+                Ok(Err(why)) => log::warn!("character: nothing gates what is worn: {why}"),
+                Err(promise) => self.reading_worn = Some(promise),
+            }
         }
         if let Some(promise) = self.reading_emotes.take() {
             match promise.try_take() {
@@ -383,6 +402,28 @@ impl CharacterBuilder {
             self.body = body(&listing, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
+            // Where nothing has been picked, the creator's own opening choice, which is not the
+            // first of either: a Midlander man does not start bald and white-haired.
+            for customize in [FACE, HAIRSTYLE] {
+                if self.choices.contains_key(&customize) {
+                    continue;
+                }
+                let Some(menu) = self
+                    .creator
+                    .body(self.tribe, self.female)
+                    .and_then(|body| {
+                        body.menus.iter().find(|menu| menu.customize == customize)
+                    })
+                    .cloned()
+                else {
+                    continue;
+                };
+                let opens = self.choice_of(&menu, menu.init.min(menu.count.saturating_sub(1))).id;
+                match customize {
+                    FACE => self.face = opens,
+                    _ => self.hair = opens,
+                }
+            }
             self.face = pick(&self.faces, self.face);
             self.hair = pick(&self.hairs, self.hair);
         }
@@ -505,12 +546,12 @@ impl CharacterBuilder {
         (customize, hidden, shapes, stature)
     }
 
-    /// Where a menu has been left, which is its first choice until it is picked from.
+    /// Where a menu has been left, which is where the creator opens it until it is picked from.
     fn choice(&self, menu: &menus::Menu) -> u32 {
         self.choices
             .get(&menu.customize)
             .copied()
-            .unwrap_or(0)
+            .unwrap_or(menu.init)
             .min(menu.count.saturating_sub(1))
     }
 
@@ -580,12 +621,19 @@ impl CharacterBuilder {
         if self.body.is_empty() {
             return Vec::new();
         }
+        let (outfit, hidden) = self.dressed();
+        let hair = match (outfit[Slot::Head as usize], &self.worn_over) {
+            (Some(hat), Some(worn)) => worn.keeps_hair(hat.set),
+            _ => true,
+        };
         let mut found: Vec<_> = held(&self.faces, self.face)
             .into_iter()
-            .chain(held(&self.hairs, self.hair))
+            .chain(match hair {
+                true => held(&self.hairs, self.hair),
+                false => Vec::new(),
+            })
             .map(|path| (path, 0))
             .collect();
-        let (outfit, hidden) = self.dressed();
         for slot in Slot::ALL {
             let worn = outfit[slot as usize].and_then(|gear| {
                 self.worn_as(listing, gear.set)[slot as usize]
@@ -597,10 +645,23 @@ impl CharacterBuilder {
                 // Nothing stands in for a bare head: the body ships no model for it, and the face
                 // and the hair are what draw one.
                 None if hidden[slot as usize] => {}
+                None if !self.bared(&outfit, slot) => {}
                 None => found.extend(part(&self.body, slot).map(|path| (path, 0))),
             }
         }
         found
+    }
+
+    /// Whether the body's own model for a slot still draws, which is what a piece worn over it
+    /// states rather than anything the two meshes could be told apart by: where a race's
+    /// smallclothes are its bare skin the two are the very same geometry.
+    fn bared(&self, outfit: &Outfit, slot: Slot) -> bool {
+        let Some(worn) = &self.worn_over else {
+            return true;
+        };
+        Slot::ALL.into_iter().all(|over| {
+            outfit[over as usize].is_none_or(|gear| worn.shows(over, gear.set, slot))
+        })
     }
 
     /// The model each slot of a set is worn as under the current code, answered out of the memo

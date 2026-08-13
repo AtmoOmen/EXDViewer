@@ -29,10 +29,11 @@ const MAX_FRAME_TIME: Duration = Duration::from_millis(250);
 /// Menus a row holds, and the bytes one menu is.
 const MENUS: u32 = 28;
 const STRIDE: u32 = 452;
-/// A menu's name, what it drives, how it is picked from and how many it offers, as byte offsets
-/// into one menu, then the first of its choices.
+/// A menu's name, what it drives, where it opens, how it is picked from and how many it offers, as
+/// byte offsets into one menu, then the first of its choices.
 const LOBBY: u32 = 0;
 const CUSTOMIZE: u32 = 8;
+const INIT: u32 = 436;
 const KIND: u32 = 437;
 const COUNT: u32 = 438;
 const PARAMS: u32 = 12;
@@ -110,6 +111,9 @@ pub struct Menu {
     pub customize: u32,
     pub kind: Kind,
     pub count: u32,
+    /// Where the creator opens the menu, which is not its first choice: a Midlander man starts at
+    /// the middle of the height bar and at the fifty-fifth hair colour, which is a brown.
+    pub init: u32,
     /// What each choice is, where the menu names them: a `CharaMakeCustomize` row, or an icon
     /// outright where the number is too large to be one.
     pub params: Vec<i32>,
@@ -442,9 +446,10 @@ fn menus(row: &ExcelRow<'_>, lobby: &impl ExcelSheet) -> Vec<Menu> {
     let mut found = Vec::new();
     for menu in 0..MENUS {
         let at = menu * STRIDE;
-        let (Ok(count), Ok(kind), Ok(named), Ok(customize)) = (
+        let (Ok(count), Ok(kind), Ok(init), Ok(named), Ok(customize)) = (
             row.read::<u8>(at + COUNT),
             row.read::<u8>(at + KIND),
+            row.read::<u8>(at + INIT),
             row.read::<u32>(at + LOBBY),
             row.read::<i32>(at + CUSTOMIZE),
         ) else {
@@ -463,6 +468,7 @@ fn menus(row: &ExcelRow<'_>, lobby: &impl ExcelSheet) -> Vec<Menu> {
             customize: customize.max(0) as u32,
             kind,
             count: u32::from(count),
+            init: u32::from(init),
             params: (0..PARAM_COUNT.min(u32::from(count)))
                 .filter_map(|param| row.read::<i32>(at + PARAMS + param * 4).ok())
                 .collect(),

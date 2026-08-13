@@ -1214,17 +1214,20 @@ impl CharacterBuilder {
     /// offered under. A menu either names icons outright or names rows that carry one.
     fn choice_of(&self, menu: &menus::Menu, index: u32) -> Choice {
         let param = menu.params.get(index as usize).copied().unwrap_or(0);
-        let (id, icon) = match self.creator.offered.get(&(param.max(0) as u32)) {
-            Some((id, icon)) => (*id, *icon),
-            None => (
-                menus::face(param).unwrap_or(index as u16 + 1),
-                param.max(0) as u32,
-            ),
-        };
-        Choice {
-            at: index,
-            id,
-            icon: (icon > 0).then_some(icon),
+        // A row's icon stands whatever it is: nought is the empty box wearing no face paint is
+        // offered under, not a choice the creator left undrawn. One no row holds falls back to
+        // naming the icon outright, and to its own number where it names nothing.
+        match self.creator.offered.get(&(param.max(0) as u32)) {
+            Some((id, icon)) => Choice {
+                at: index,
+                id: *id,
+                icon: Some(*icon),
+            },
+            None => Choice {
+                at: index,
+                id: menus::face(param).unwrap_or(index as u16 + 1),
+                icon: (param > 0).then_some(param as u32),
+            },
         }
     }
 

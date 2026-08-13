@@ -91,6 +91,7 @@ symphonia = { version = "0.6", default-features = false, features = [
     "vorbis",
 ] }
 cridecoder = "0.3"
+async-channel = "2"
 ehttp = { version = "0.7", features = ["streaming", "native-async"] }
 lru = "0.18"
 url = "2"

@@ -1,5 +1,12 @@
 use ehttp::{Method, Request};
 
+use super::yield_to_ui;
+
+/// How many times a request is made before its failure is the caller's. A name that fails to
+/// resolve, a connection refused or a socket that times out is a fault of the moment rather than of
+/// the URL, and one that answers at all -- even to say the file is not there -- is not retried.
+const ATTEMPTS: usize = 3;
+
 pub struct HttpResponse {
     pub status: u16,
     pub ok: bool,
@@ -39,17 +46,37 @@ pub async fn request(
         req.headers.insert(*key, *value);
     }
 
-    let resp = ehttp::fetch_async(req)
-        .await
-        .map_err(|msg| anyhow::anyhow!(msg))?;
+    Ok(send(req).await?.into())
+}
 
-    Ok(resp.into())
+/// Makes the request, and makes it again where the transport rather than the server was what
+/// failed.
+///
+/// The channel is ours rather than [`ehttp::fetch_async`]'s: that one unwraps the send back to the
+/// caller, so abandoning a request -- which is what dropping whatever asked for it does -- takes
+/// down the thread carrying the answer.
+async fn send(request: Request) -> anyhow::Result<ehttp::Response> {
+    let mut failed = String::new();
+    for attempt in 0..ATTEMPTS {
+        if attempt > 0 {
+            yield_to_ui().await;
+        }
+        let (tx, rx) = async_channel::bounded(1);
+        ehttp::fetch(request.clone(), move |received| {
+            // Nowhere to send it is not a fault: whatever asked has been dropped.
+            let _ = tx.try_send(received);
+        });
+        match rx.recv().await {
+            Ok(Ok(response)) => return Ok(response),
+            Ok(Err(why)) => failed = why,
+            Err(why) => failed = why.to_string(),
+        }
+    }
+    Err(anyhow::anyhow!(failed))
 }
 
 pub async fn fetch(url: impl ToString) -> anyhow::Result<HttpResponse> {
-    let resp = ehttp::fetch_async(Request::get(url))
-        .await
-        .map_err(|msg| anyhow::anyhow!(msg))?;
+    let resp = send(Request::get(url)).await?;
 
     if !resp.ok {
         anyhow::bail!(

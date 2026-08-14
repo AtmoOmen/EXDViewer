@@ -183,6 +183,9 @@ pub struct CharacterBuilder {
     race: u32,
     tribe: u32,
     female: bool,
+    /// Whether the sets on hand are the picked clan's. A pick drops it rather than the sets
+    /// themselves, so a clan this version ships nothing for is read once and not on every frame.
+    stood: bool,
     /// The code the picked clan and gender resolve to, the body whose skin it is drawn with, and
     /// the sets it carries.
     code: u16,
@@ -250,6 +253,7 @@ impl Default for CharacterBuilder {
             race: 1,
             tribe: 1,
             female: false,
+            stood: false,
             code: 101,
             skin: None,
             body: Vec::new(),
@@ -311,6 +315,7 @@ impl CharacterBuilder {
         self.reading_emotes = None;
         self.emote = None;
         self.emotes_matched.take();
+        self.stood = false;
         self.body.clear();
         self.faces.clear();
         self.hairs.clear();
@@ -367,9 +372,9 @@ impl CharacterBuilder {
         self.reading_worn = Some(TrackedPromise::spawn_local(async move {
             gating::Worn::read(&gated).await
         }));
-        let stood = backend.clone();
+        let standing = backend.clone();
         self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
-            npcs::read(&stood, language).await
+            npcs::read(&standing, language).await
         }));
     }
 
@@ -438,7 +443,7 @@ impl CharacterBuilder {
             match promise.try_take() {
                 Ok(Ok(read)) => {
                     self.creator = read;
-                    self.faces.clear();
+                    self.stood = false;
                     // Only once the character is dressed: both walk the same sheet, and the one
                     // that gets there first is the one that finishes first.
                     let backend = backend.clone();
@@ -469,7 +474,8 @@ impl CharacterBuilder {
             return;
         };
 
-        if self.faces.is_empty() {
+        if !self.stood {
+            self.stood = true;
             let code = resolve(self.tribe, self.female);
             // Which model a set is worn as is the code's to say, so the answers held for the last
             // one say nothing about this one.
@@ -816,14 +822,15 @@ impl CharacterBuilder {
             .worn
             .iter()
             .filter_map(|(path, variant)| {
-                let made_for = made_for(path)?;
-                let deform = shaped
-                    .entry(made_for)
-                    .or_insert_with(|| {
-                        let deformers = self.deformers.as_ref()?;
-                        deformers.between(made_for, self.code).map(Arc::new)
-                    })
-                    .clone();
+                let deform = made_for(path).and_then(|made_for| {
+                    shaped
+                        .entry(made_for)
+                        .or_insert_with(|| {
+                            let deformers = self.deformers.as_ref()?;
+                            deformers.between(made_for, self.code).map(Arc::new)
+                        })
+                        .clone()
+                });
                 Some(mdl::Source {
                     path: path.clone(),
                     bytes: self.held.get(path)?.clone(),
@@ -1401,15 +1408,15 @@ impl CharacterBuilder {
                     .iter()
                     .find(|body| body.race == race)
                     .map_or(self.tribe, |body| body.tribe);
-                self.faces.clear();
+                self.stood = false;
             }
             Some(Pick::Tribe(tribe)) => {
                 self.tribe = tribe;
-                self.faces.clear();
+                self.stood = false;
             }
             Some(Pick::Gender(female)) => {
                 self.female = female;
-                self.faces.clear();
+                self.stood = false;
             }
             Some(Pick::Attire(attire)) => self.attire = attire,
             Some(Pick::Job(job)) => self.job = job,
@@ -1422,7 +1429,7 @@ impl CharacterBuilder {
                     self.choices = held.choices.iter().copied().collect();
                     self.attire = Attire::Npc;
                     self.chosen = [None; 5];
-                    self.faces.clear();
+                    self.stood = false;
                 }
             }
             Some(Pick::Emote(emote)) => {

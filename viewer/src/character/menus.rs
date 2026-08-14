@@ -6,8 +6,8 @@
 //! menu holds icon ids outright, and the hair menu holds `CharaMakeCustomize` rows, which carry the
 //! set number the file tree uses alongside the icon.
 //!
-//! Every offset is measured from the file rather than taken from EXDSchema, which is stale here: a
-//! menu is 452 bytes, so `SubMenuParam` holds 90 and not the 100 the schema states.
+//! Every offset is measured from the file rather than taken from EXDSchema, which names the fields
+//! but not where they sit: a menu is 452 bytes, of which `SubMenuParam` is 12 to 436.
 
 use std::collections::BTreeMap;
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,7 +37,7 @@ const INIT: u32 = 436;
 const KIND: u32 = 437;
 const COUNT: u32 = 438;
 const PARAMS: u32 = 12;
-const PARAM_COUNT: u32 = 90;
+const PARAM_COUNT: u32 = 106;
 /// What `Lobby` calls a menu.
 const LOBBY_TEXT: u32 = 0;
 /// Where a row names the icon each facial feature is offered under, seven to a face, in the order

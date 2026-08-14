@@ -16,6 +16,7 @@ mod palette;
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use egui::{CentralPanel, Color32, RichText, ScrollArea, TextEdit, containers::panel::Panel};
@@ -31,10 +32,12 @@ use crate::utils::{
     CollapsibleSidePanel, FuzzyMatcher, IconManager, ManagedIcon, Side, TrackedPromise,
 };
 
-/// The bodies a code's first pair can name, and the variants its second can. Every pairing is
-/// offered only where the listing holds a body model for it.
-const BODIES: std::ops::RangeInclusive<u16> = 1..=18;
-const VARIANTS: [u16; 2] = [1, 4];
+/// The set every character is built from. The game holds one body mesh, `c0101b0001`, and stands
+/// every other one on it: no other code ships a model of the set at all, while twelve of them ship
+/// its material, which is the skin their own body is drawn with.
+const BODY_SET: u16 = 1;
+/// What each body differs from the one it is built on by.
+const DEFORMERS: &str = "chara/xls/boneDeformer/human.pbd";
 
 /// How big a set's icon is drawn, and how far apart the grid sets them.
 const ICON: f32 = 40.0;
@@ -173,8 +176,6 @@ struct Set {
 
 pub struct CharacterBuilder {
     listing: Option<Rc<Listing>>,
-    /// Codes the install ships a body for, in order.
-    codes: Vec<u16>,
     /// What the creator offers, and which of its races, clans and genders is being built.
     creator: menus::Creator,
     reading: Option<TrackedPromise<Result<menus::Creator>>>,
@@ -182,8 +183,10 @@ pub struct CharacterBuilder {
     race: u32,
     tribe: u32,
     female: bool,
-    /// The code the picked clan and gender resolve to, and the sets it carries.
+    /// The code the picked clan and gender resolve to, the body whose skin it is drawn with, and
+    /// the sets it carries.
     code: u16,
+    skin: Option<u16>,
     body: Vec<String>,
     faces: Vec<Set>,
     hairs: Vec<Set>,
@@ -204,6 +207,10 @@ pub struct CharacterBuilder {
     /// The colours the creator offers, read once.
     made: Option<palette::Made>,
     reading_made: Option<TrackedPromise<Result<palette::Made>>>,
+    /// What each body differs from the one it is built on by, which is both what says where a
+    /// borrowed model comes from and what shapes it onto the body wearing it.
+    deformers: Option<Rc<mdl::Deformers>>,
+    reading_deformers: Option<TrackedPromise<Result<mdl::Deformers>>>,
     /// What a worn piece leaves showing of the body under it.
     worn_over: Option<gating::Worn>,
     reading_worn: Option<TrackedPromise<Result<gating::Worn>>>,
@@ -237,7 +244,6 @@ impl Default for CharacterBuilder {
     fn default() -> Self {
         Self {
             listing: None,
-            codes: Vec::new(),
             creator: menus::Creator::default(),
             reading: None,
             reading_pieces: None,
@@ -245,6 +251,7 @@ impl Default for CharacterBuilder {
             tribe: 1,
             female: false,
             code: 101,
+            skin: None,
             body: Vec::new(),
             faces: Vec::new(),
             hairs: Vec::new(),
@@ -260,6 +267,8 @@ impl Default for CharacterBuilder {
             choices: BTreeMap::new(),
             made: None,
             reading_made: None,
+            deformers: None,
+            reading_deformers: None,
             worn_over: None,
             reading_worn: None,
             npcs: Vec::new(),
@@ -285,12 +294,13 @@ impl CharacterBuilder {
     /// Drop everything that came from the install, so a reconnect reads it all again.
     pub fn reset(&mut self) {
         self.listing = None;
-        self.codes.clear();
         self.creator = menus::Creator::default();
         self.reading = None;
         self.reading_pieces = None;
         self.made = None;
         self.reading_made = None;
+        self.deformers = None;
+        self.reading_deformers = None;
         self.worn_over = None;
         self.reading_worn = None;
         self.npcs.clear();
@@ -332,11 +342,47 @@ impl CharacterBuilder {
         });
     }
 
+    /// Asks the install for everything the tab is built out of: what the creator offers, the
+    /// colours it offers them in, the deformers, the emotes, what a worn piece covers, and the
+    /// characters the game stands itself.
+    fn read(&mut self, ctx: &egui::Context, backend: &Backend) {
+        let language = LANGUAGE.get(ctx);
+        let creator = backend.clone();
+        self.reading = Some(TrackedPromise::spawn_local(async move {
+            menus::read(&creator, language).await
+        }));
+        let colors = backend.clone();
+        self.reading_made = Some(TrackedPromise::spawn_local(async move {
+            palette::Made::read(&colors).await
+        }));
+        let shaped = backend.files().clone();
+        self.reading_deformers = Some(TrackedPromise::spawn_local(async move {
+            mdl::Deformers::read(&shaped.read(DEFORMERS).await?)
+        }));
+        let played = backend.clone();
+        self.reading_emotes = Some(TrackedPromise::spawn_local(async move {
+            emotes::read(&played, language).await
+        }));
+        let gated = backend.clone();
+        self.reading_worn = Some(TrackedPromise::spawn_local(async move {
+            gating::Worn::read(&gated).await
+        }));
+        let stood = backend.clone();
+        self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
+            npcs::read(&stood, language).await
+        }));
+    }
+
     fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
         if self.listing.is_none() {
             match backend.listing(&api_base(ctx)) {
                 Listed::Loading => return,
-                Listed::Ready(listing) => self.listing = Some(listing),
+                // Everything else the install answers is asked for the moment the listing lands,
+                // which happens once: a reconnect drops it and asks again.
+                Listed::Ready(listing) => {
+                    self.listing = Some(listing);
+                    self.read(ctx, backend);
+                }
                 Listed::Failed(why) => {
                     self.model = Some(Err(why.to_string()));
                     return;
@@ -346,33 +392,7 @@ impl CharacterBuilder {
         let Some(listing) = self.listing.clone() else {
             return;
         };
-        if self.codes.is_empty() {
-            self.codes = BODIES
-                .flat_map(|body| VARIANTS.map(|variant| body * 100 + variant))
-                .filter(|code| !body(&listing, *code).is_empty())
-                .collect();
-            let language = LANGUAGE.get(ctx);
-            let creator = backend.clone();
-            self.reading = Some(TrackedPromise::spawn_local(async move {
-                menus::read(&creator, language).await
-            }));
-            let colors = backend.clone();
-            self.reading_made = Some(TrackedPromise::spawn_local(async move {
-                palette::Made::read(&colors).await
-            }));
-            let played = backend.clone();
-            self.reading_emotes = Some(TrackedPromise::spawn_local(async move {
-                emotes::read(&played, language).await
-            }));
-            let gated = backend.clone();
-            self.reading_worn = Some(TrackedPromise::spawn_local(async move {
-                gating::Worn::read(&gated).await
-            }));
-            let stood = backend.clone();
-            self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
-                npcs::read(&stood, language).await
-            }));
-        }
+
         if let Some(promise) = self.reading_npcs.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => {
@@ -407,6 +427,13 @@ impl CharacterBuilder {
                 Err(promise) => self.reading_made = Some(promise),
             }
         }
+        if let Some(promise) = self.reading_deformers.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.deformers = Some(Rc::new(read)),
+                Ok(Err(why)) => self.model = Some(Err(why.to_string())),
+                Err(promise) => self.reading_deformers = Some(promise),
+            }
+        }
         if let Some(promise) = self.reading.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => {
@@ -436,15 +463,22 @@ impl CharacterBuilder {
             }
         }
 
+        // Nothing is built until the deformers have landed: what a body wears a piece as, and its
+        // own model, are both the tree's to answer.
+        let Some(deformers) = self.deformers.clone() else {
+            return;
+        };
+
         if self.faces.is_empty() {
-            let code = resolve(&self.codes, self.tribe, self.female);
+            let code = resolve(self.tribe, self.female);
             // Which model a set is worn as is the code's to say, so the answers held for the last
             // one say nothing about this one.
             if code != self.code {
                 self.sets.borrow_mut().clear();
             }
             self.code = code;
-            self.body = body(&listing, self.code);
+            self.skin = skin(&listing, &deformers, self.code);
+            self.body = body(&listing, &deformers, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
             // Both name the files the character is built from, so both are read out of what the
@@ -478,7 +512,7 @@ impl CharacterBuilder {
             self.hair = pick(&self.hairs, self.hair);
         }
 
-        let wanted = self.wearing(&listing);
+        let wanted = self.wearing(&listing, &deformers);
         if wanted != self.worn && !wanted.is_empty() {
             self.worn = wanted;
             let missing: Vec<String> = self
@@ -712,7 +746,7 @@ impl CharacterBuilder {
     ///
     /// The face leads, since the first file is what names the skeleton the rest are posed on and a
     /// piece of equipment worn by a race that has no model of its own is filed under another's code.
-    fn wearing(&self, listing: &Listing) -> Vec<(String, u16)> {
+    fn wearing(&self, listing: &Listing, deformers: &mdl::Deformers) -> Vec<(String, u16)> {
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -731,7 +765,7 @@ impl CharacterBuilder {
             .collect();
         for slot in Slot::ALL {
             let worn = outfit[slot as usize].and_then(|gear| {
-                self.worn_as(listing, gear.set)[slot as usize]
+                self.worn_as(listing, deformers, gear.set)[slot as usize]
                     .clone()
                     .map(|path| (path, gear.variant))
             });
@@ -761,9 +795,14 @@ impl CharacterBuilder {
 
     /// The model each slot of a set is worn as under the current code, answered out of the memo
     /// and read off the listing the first time a set is asked about.
-    fn worn_as(&self, listing: &Listing, set: u16) -> Ref<'_, [Option<String>; 5]> {
+    fn worn_as(
+        &self,
+        listing: &Listing,
+        deformers: &mdl::Deformers,
+        set: u16,
+    ) -> Ref<'_, [Option<String>; 5]> {
         if !self.sets.borrow().contains_key(&set) {
-            let found = equipment(listing, self.code, set);
+            let found = equipment(listing, deformers, self.code, set);
             self.sets.borrow_mut().insert(set, found);
         }
         Ref::map(self.sets.borrow(), |sets| &sets[&set])
@@ -772,14 +811,25 @@ impl CharacterBuilder {
     /// Puts what has arrived on screen, keeping the character that is already there where there is
     /// one so a change of clothes neither moves the view nor asks for anything twice.
     fn dress(&mut self) {
+        let mut shaped: BTreeMap<u16, Option<Arc<mdl::Deform>>> = BTreeMap::new();
         let parts: Vec<_> = self
             .worn
             .iter()
             .filter_map(|(path, variant)| {
+                let made_for = made_for(path)?;
+                let deform = shaped
+                    .entry(made_for)
+                    .or_insert_with(|| {
+                        let deformers = self.deformers.as_ref()?;
+                        deformers.between(made_for, self.code).map(Arc::new)
+                    })
+                    .clone();
                 Some(mdl::Source {
                     path: path.clone(),
                     bytes: self.held.get(path)?.clone(),
                     variant: *variant,
+                    deform,
+                    skin: self.skin,
                 })
             })
             .collect();
@@ -855,6 +905,7 @@ impl CharacterBuilder {
 
         let mut picked = None;
         {
+            let deformers = self.deformers.clone();
             let query = self.search[at].clone();
             let matched = self.matches(slot, &query);
             let step = PIECE + 2.0 * ui.spacing().button_padding.y + ui.spacing().item_spacing.y;
@@ -865,7 +916,9 @@ impl CharacterBuilder {
                     for row in rows {
                         let index = matched[row];
                         let piece = &self.creator.pieces[at][index];
-                        let held = self.worn_as(listing, piece.gear.set)[at].is_some();
+                        let held = deformers.as_ref().is_none_or(|deformers| {
+                            self.worn_as(listing, deformers, piece.gear.set)[at].is_some()
+                        });
                         let suits = piece.suits(self.race, self.female);
                         let name = match suits {
                             true => RichText::new(&piece.name),
@@ -1429,16 +1482,18 @@ struct Choice {
 /// every other race shares.
 const BUILT_ON: [u16; 16] = [1, 3, 5, 5, 11, 11, 7, 7, 9, 9, 13, 13, 15, 15, 17, 17];
 
-fn resolve(codes: &[u16], tribe: u32, female: bool) -> u16 {
+fn resolve(tribe: u32, female: bool) -> u16 {
     let body = BUILT_ON
         .get(tribe.max(1) as usize - 1)
         .copied()
         .unwrap_or(1);
-    let wanted = (body + u16::from(female)) * 100 + 1;
-    match codes.contains(&wanted) {
-        true => wanted,
-        false => *codes.first().unwrap_or(&101),
-    }
+    (body + u16::from(female)) * 100 + 1
+}
+
+/// The body a model was made for, which its own file name states.
+fn made_for(model: &str) -> Option<u16> {
+    let name = model.rsplit('/').next()?;
+    name.strip_prefix('c')?.get(..4)?.parse().ok()
 }
 
 fn root(code: u16) -> String {
@@ -1479,30 +1534,37 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
 /// The model a code wears a set as, by slot. A set is one directory, so the whole of it is listed
 /// once and answered for every slot at once.
 ///
-/// Not every race has one of its own: the ones that do not are drawn from the base body of their
-/// gender, which the game then deforms onto their own build. The fallback is taken here; the
-/// deformation is not, so a piece worn this way is the right garment on the wrong build.
-fn equipment(listing: &Listing, code: u16, set: u16) -> [Option<String>; 5] {
+/// Few bodies have a model of their own for a given slot: the rest wear the nearest one they are
+/// built on, which is what the deformers between the two then shape onto them.
+fn equipment(listing: &Listing, deformers: &mdl::Deformers, code: u16, set: u16) -> [Option<String>; 5] {
     let under = format!("chara/equipment/e{set:04}/model");
     let held = listing.under(&under);
-    let base = match code % 2 {
-        1 => 101,
-        _ => 201,
-    };
     Slot::ALL.map(|slot| {
-        [code, base].into_iter().find_map(|code| {
+        deformers.lineage(code).find_map(|code| {
             let path = format!("{under}/c{code:04}e{set:04}_{}.mdl", slot.suffix());
             held.contains(&path).then_some(path)
         })
     })
 }
 
-/// The body a code is built on, which is the lowest set it ships: only one code carries `b0001`,
-/// and the rest start wherever their own files do.
-fn body(listing: &Listing, code: u16) -> Vec<String> {
-    sets(listing, &code, "body")
-        .first()
-        .map(|set| set.parts.clone())
+/// The body whose skin another one's model is drawn with: its own where it ships a material for
+/// the set, and the nearest body it is built on where it does not. Elezen, Miqo'te, Roegadyn women
+/// and Lalafell women ship none, and each of those is a body whose skin is its parent's.
+fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16> {
+    deformers.lineage(code).find(|code| {
+        let under = format!("{}/obj/body/b{BODY_SET:04}/material/", root(*code));
+        !listing.under(&under).is_empty()
+    })
+}
+
+/// The models a body is built out of. The game holds one of them, `c0101b0001`, and stands every
+/// other body on it deformed, which is why no other code ships a model of the set while twelve of
+/// them ship the skin it is drawn with.
+fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String> {
+    deformers
+        .lineage(code)
+        .map(|code| parts(listing, &format!("{}/obj/body", root(code)), BODY_SET))
+        .find(|parts| !parts.is_empty())
         .unwrap_or_default()
 }
 

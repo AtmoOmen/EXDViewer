@@ -278,7 +278,11 @@ fn pack(table: &mtrl::ColorTable) -> Option<Vec<f32>> {
 /// A worn piece states which of a set's colourways it is worn in, and that is the directory its own
 /// materials sit in. The ones it borrows from the body it is worn over are not its to vary, and a
 /// piece being inspected rather than worn states nothing, so both take the base.
-pub fn path(name: &str, variant: u16) -> Option<String> {
+///
+/// A body drawn from another body's model reads its own skin all the same, which is `skin`: the one
+/// mesh the game holds is named for the body it was modelled on and every body wearing it names a
+/// material of its own.
+pub fn path(name: &str, variant: u16, skin: Option<u16>) -> Option<String> {
     let name = name.trim_start_matches('/');
     if name.contains('/') {
         return Some(name.to_owned());
@@ -286,9 +290,14 @@ pub fn path(name: &str, variant: u16) -> Option<String> {
     let stem = name.strip_prefix("mt_")?;
     let kind = stem.as_bytes().first().copied()? as char;
     let set = stem.as_bytes().get(5).copied()? as char;
-    let body: u32 = stem.get(1..5)?.parse().ok()?;
+    let mut body: u32 = stem.get(1..5)?.parse().ok()?;
     let part: u32 = stem.get(6..10)?.parse().ok()?;
     let worn = variant.max(1);
+    let mut name = name.to_owned();
+    if let ('c', 'b', Some(skin)) = (kind, set, skin) {
+        body = u32::from(skin);
+        name = format!("mt_c{body:04}b{part:04}{}", stem.get(10..)?);
+    }
     let directory = match (kind, set) {
         ('c', 'e') => format!("chara/equipment/e{part:04}/material/v{worn:04}"),
         ('c', 'a') => format!("chara/accessory/a{part:04}/material/v{worn:04}"),

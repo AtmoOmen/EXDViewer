@@ -13,12 +13,14 @@
 //! than a blend, so a shape is either on or off.
 
 pub(super) mod deferred;
+mod deform;
 pub(super) mod gpu;
 mod grid;
 pub(super) mod material;
 pub(super) mod program;
 mod skin;
 
+pub use deform::{Deform, Deformers};
 pub use program::Customize;
 
 use std::cell::{Cell, RefCell};
@@ -292,6 +294,8 @@ struct Piece {
     /// Which of that imc's variants a part's default visibility is drawn from. Nought is the file's
     /// own default entry.
     variant: Cell<u16>,
+    deform: Option<Arc<Deform>>,
+    skin: Option<u16>,
 }
 
 /// One file to build a model out of, and the imc variant it is worn at. Nought is the file's own
@@ -300,6 +304,11 @@ pub struct Source {
     pub path: String,
     pub bytes: Vec<u8>,
     pub variant: u16,
+    /// What to move the file's vertices by, where it was modelled for a body other than the one
+    /// wearing it.
+    pub deform: Option<Arc<Deform>>,
+    /// The body whose skin to draw it with, where it is a body's own model.
+    pub skin: Option<u16>,
 }
 
 impl Piece {
@@ -309,6 +318,8 @@ impl Piece {
             bytes: source.bytes.clone(),
             imc: RefCell::new(None),
             variant: Cell::new(source.variant),
+            deform: source.deform.clone(),
+            skin: source.skin,
         }
     }
 
@@ -406,6 +417,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         path: path.to_owned(),
         bytes: bytes.to_vec(),
         variant: 0,
+        deform: None,
+        skin: None,
     }])?;
     model.chrome.set(Chrome::Asset);
     model.shaded.set(false);
@@ -469,7 +482,12 @@ fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
     let containers = containers(pieces)?;
     let sources: Vec<_> = pieces
         .iter()
-        .map(|piece| (piece.path.as_str(), piece.variant.get()))
+        .map(|piece| Worn {
+            path: piece.path.as_str(),
+            variant: piece.variant.get(),
+            deform: piece.deform.as_deref(),
+            skin: piece.skin,
+        })
         .zip(&containers)
         .collect();
     read_level(&sources, lod)
@@ -582,7 +600,15 @@ fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> 
     count >= 2
 }
 
-fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Level> {
+/// What a piece contributes to a level beyond the file it was decoded from.
+struct Worn<'a> {
+    path: &'a str,
+    variant: u16,
+    deform: Option<&'a Deform>,
+    skin: Option<u16>,
+}
+
+fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level> {
     let mut names: Vec<String> = Vec::new();
     let mut meshes = Vec::new();
     let mut unreadable = Vec::new();
@@ -595,7 +621,7 @@ fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Lev
     let mut skipped: Vec<MeshKind> = Vec::new();
     let mut skinned = false;
 
-    for (piece, ((_, variant), container)) in sources.iter().enumerate() {
+    for (piece, (worn, container)) in sources.iter().enumerate() {
         let model = container.model(detail(lod));
 
         let attributes = model.attribute_names().unwrap_or_default();
@@ -622,13 +648,27 @@ fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Lev
                 }
                 (Err(why), _) | (_, Err(why)) => Err(why.to_string()),
             };
-            let (vertices, indices) = match built {
+            let (mut vertices, indices) = match built {
                 Ok(built) => built,
                 Err(why) => {
                     unreadable.push((index, why));
                     continue;
                 }
             };
+
+            let table: Vec<String> = mesh
+                .bone_table()
+                .iter()
+                .map(|bone| {
+                    bone_names
+                        .get(usize::from(*bone))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            if let Some(deform) = worn.deform {
+                deform.apply(&mut vertices, &table);
+            }
 
             for vertex in &vertices {
                 let position = Vec3::from_array(vertex.position);
@@ -637,7 +677,7 @@ fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Lev
             }
 
             let name = mesh.material().unwrap_or_default();
-            let resolved = material::path(&name, *variant).unwrap_or(name);
+            let resolved = material::path(&name, worn.variant, worn.skin).unwrap_or(name);
             let material = names
                 .iter()
                 .position(|held| *held == resolved)
@@ -669,17 +709,7 @@ fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Lev
                     touched.push((meshes.len(), values));
                 }
             }
-            bones.push(
-                mesh.bone_table()
-                    .iter()
-                    .map(|bone| {
-                        bone_names
-                            .get(usize::from(*bone))
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .collect(),
-            );
+            bones.push(table);
             meshes.push(Mesh {
                 piece,
                 material,
@@ -764,7 +794,7 @@ fn read_level(sources: &[((&str, u16), &ModelContainer)], lod: u8) -> Result<Lev
         "assets/mdl: {} {} meshes, {vertices} vertices, {} materials, {} unreadable",
         sources
             .iter()
-            .map(|((path, _), _)| crate::utils::file_name(path))
+            .map(|(worn, _)| crate::utils::file_name(worn.path))
             .collect::<Vec<_>>()
             .join(" + "),
         meshes.len(),

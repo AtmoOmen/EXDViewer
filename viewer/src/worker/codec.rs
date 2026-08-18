@@ -3,6 +3,11 @@ use gloo_worker::Codec;
 
 pub struct PreservingCodec;
 
+/// A split index hash never fits a JS number: the directory's crc32 fills its upper half. Without
+/// bigints it fails to encode, and the panic leaves the bridge's queue borrowed for good.
+const SERIALIZER: serde_wasm_bindgen::Serializer =
+    serde_wasm_bindgen::Serializer::new().serialize_large_number_types_as_bigints(true);
+
 // This codec implementation relys on some internal implementation details about gloo worker message types.
 // Fields marked with `#[serde(with = "serde_wasm_bindgen::preserve")]` will be passed as-is.
 impl Codec for PreservingCodec {
@@ -10,7 +15,7 @@ impl Codec for PreservingCodec {
     where
         I: serde::Serialize,
     {
-        serde_wasm_bindgen::to_value(&input).expect("failed to encode")
+        input.serialize(&SERIALIZER).expect("failed to encode")
     }
 
     fn decode<O>(input: wasm_bindgen::JsValue) -> O

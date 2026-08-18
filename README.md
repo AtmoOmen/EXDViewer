@@ -1,4 +1,4 @@
-# EXDViewer
+# XIViewer
 <img align="right" src="https://github.com/WorkingRobot/EXDViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
 
 [![Native Build](https://img.shields.io/github/actions/workflow/status/WorkingRobot/EXDViewer/build-native.yml?style=for-the-badge&label=Native%20Build
@@ -6,15 +6,15 @@
 [![Web Build](https://img.shields.io/github/actions/workflow/status/WorkingRobot/EXDViewer/build-web.yml?style=for-the-badge&label=Web%20Build
 )](https://github.com/WorkingRobot/EXDViewer/pkgs/container/exdviewer-web)
 [![License](https://img.shields.io/github/license/WorkingRobot/EXDViewer?style=for-the-badge&)](/LICENSE)
-[![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fexd.camora.dev%2Fapi%2Fglobal%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
+[![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fxiviewer.app%2Fapi%2Fglobal%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
 )](https://thaliak.xiv.dev/repository/4e9a232b)
 
 
-EXDViewer is a modern, fast, and user-friendly tool for exploring [Excel files](https://xiv.dev/game-data/file-formats/excel) from Final Fantasy XIV Online. Excel files are structured data tables that store various in-game information, such as item stats, NPC data, and more.
+XIViewer is a modern, fast, and user-friendly tool for exploring [Excel files](https://xiv.dev/game-data/file-formats/excel) from Final Fantasy XIV Online. Excel files are structured data tables that store various in-game information, such as item stats, NPC data, and more.
 
 ## Features
 
-- **Web and Native:** Instantly use the web version at [exd.camora.dev](https://exd.camora.dev) or download [a native build](https://github.com/WorkingRobot/EXDViewer/releases).
+- **Web and Native:** Instantly use the web version at [xiviewer.app](https://xiviewer.app) or download [a native build](https://github.com/WorkingRobot/EXDViewer/releases).
 - **Easy Deployment:** Host your own web instance via Docker.
 - **Performance:** Efficiently handles all sheets, even huge ones like `Item`, `Action`, or `Quest`.
 - **EXDSchema Support:** Provides tight integration with [EXDSchema](https://github.com/xivdev/EXDSchema) for enhanced data exploration and dynamic in-viewer schema editing.
@@ -24,7 +24,7 @@ EXDViewer is a modern, fast, and user-friendly tool for exploring [Excel files](
 
 ### Online
 
-Visit [exd.camora.dev](https://exd.camora.dev) to use the latest version, directly in your browser. Supports local game installs, schema files ([Chromium-based browsers only](https://developer.mozilla.org/en-US/docs/Web/API/Window/showDirectoryPicker#browser_compatibility)), and all four regions (Taiwan is listed but disabled until it's published on [Thaliak](https://thaliak.xiv.dev/)).
+Visit [xiviewer.app](https://xiviewer.app) to use the latest version, directly in your browser. Supports local game installs, schema files ([Chromium-based browsers only](https://developer.mozilla.org/en-US/docs/Web/API/Window/showDirectoryPicker#browser_compatibility)), and all four regions (Taiwan is listed but disabled until it's published on [Thaliak](https://thaliak.xiv.dev/)).
 
 ### Locally
 

@@ -167,5 +167,5 @@ see it. Of the three bugs this exists for, the browser is the only place the oth
 links the deferred lighting programs. A pass in that mode says nothing either way about anything
 `Program::screen` selects, translates or links, which once cost a correct change a revert.
 
-It needs the network: the app reads from `https://exd.camora.dev`, and the run uses the live API
+It needs the network: the app reads from `https://xiviewer.app`, and the run uses the live API
 so that the real decode path is what gets exercised.

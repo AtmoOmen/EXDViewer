@@ -210,7 +210,7 @@ mod tests {
         assert!(is_dev_origin("http://127.0.0.1:3000"));
         assert!(is_dev_origin("http://10.0.0.5:3000"));
         assert!(is_dev_origin("https://172.20.1.1"));
-        assert!(!is_dev_origin("https://exd.camora.dev")); // same-origin, no CORS needed
+        assert!(!is_dev_origin("https://xiviewer.app")); // same-origin, no CORS needed
         assert!(!is_dev_origin("https://8.8.8.8"));
         assert!(!is_dev_origin("https://172.32.0.1")); // outside 172.16-31 private range
         assert!(!is_dev_origin("https://evil.com:8080"));

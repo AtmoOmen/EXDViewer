@@ -44,7 +44,7 @@ impl GithubClient {
             ("Accept", "application/vnd.github+json"),
             ("X-GitHub-Api-Version", "2022-11-28"),
             // Ignored by browsers but required on native
-            ("User-Agent", "EXDViewer"),
+            ("User-Agent", "XIViewer"),
         ];
         let body_bytes = match body {
             Some(value) => {

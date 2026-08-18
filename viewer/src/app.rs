@@ -267,7 +267,7 @@ pub struct App {
 
 fn create_router(ctx: egui::Context) -> Result<Router<App>> {
     let mut builder = Router::<App>::new(ctx);
-    builder.set_title_formatter(|title| format!("{title} - EXDViewer"));
+    builder.set_title_formatter(|title| format!("{title} - XIViewer"));
     builder.add_route("/", App::on_setup, App::draw_setup, static_title("Setup"))?;
     builder.add_route(
         "/sheet",
@@ -1999,7 +1999,7 @@ impl eframe::App for App {
 fn add_links(ui: &mut egui::Ui, open_about: &mut bool) {
     ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
         if ui
-            .link(format!("EXDViewer v{}", crate::build::PKG_VERSION))
+            .link(format!("XIViewer v{}", crate::build::PKG_VERSION))
             .clicked()
         {
             *open_about = true;

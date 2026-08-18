@@ -1,6 +1,6 @@
 [package]
 name = "web"
-description = "Backend web server for EXDViewer"
+description = "Backend web server for XIViewer"
 authors.workspace = true
 repository.workspace = true
 version.workspace = true

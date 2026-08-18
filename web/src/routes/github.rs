@@ -91,7 +91,7 @@ async fn fetch_json(url: &str, known: Option<&Entry>) -> anyhow::Result<Entry> {
         .get(url)
         .header("Accept", "application/vnd.github+json")
         .header("X-GitHub-Api-Version", "2022-11-28")
-        .header("User-Agent", "EXDViewer");
+        .header("User-Agent", "XIViewer");
     if let Some(etag) = known.and_then(|entry| entry.etag.as_deref()) {
         request = request.header(reqwest::header::IF_NONE_MATCH, etag);
     }
@@ -265,7 +265,7 @@ pub async fn bundle(owner: &str, repo: &str, git_ref: &str) -> Result<Bytes> {
 async fn fetch_bundle(url: &str) -> anyhow::Result<Bytes> {
     let response = CLIENT
         .get(url)
-        .header("User-Agent", "EXDViewer")
+        .header("User-Agent", "XIViewer")
         .send()
         .await?
         .error_for_status()?;

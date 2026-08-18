@@ -65,7 +65,7 @@ async fn github_json<T: DeserializeOwned>(url: &str, token: Option<&str>) -> Res
         ("Accept", "application/vnd.github+json"),
         ("X-GitHub-Api-Version", "2022-11-28"),
         // Ignored by browsers but required on native
-        ("User-Agent", "EXDViewer"),
+        ("User-Agent", "XIViewer"),
     ];
     if let Some(auth) = &auth {
         headers.push(("Authorization", auth.as_str()));

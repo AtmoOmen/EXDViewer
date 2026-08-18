@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "EXDViewer",
+        "XIViewer",
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )

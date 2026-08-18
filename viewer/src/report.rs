@@ -275,7 +275,7 @@ pub fn notice(ui: &mut egui::Ui, backend: Option<&Backend>) {
             if ui
                 .button("Report")
                 .on_hover_text(
-                    "Sends these names to ResLogger2 through the EXDViewer API so everyone's \
+                    "Sends these names to ResLogger2 through the XIViewer API so everyone's \
                      browser can show them. Nothing else about your session is sent.",
                 )
                 .clicked()
@@ -309,7 +309,7 @@ pub fn menu_item(ui: &mut egui::Ui) {
         .checkbox(&mut enabled, "Report New Paths to ResLogger2")
         .on_hover_text(
             "File names this install carries that the community path list does not know are sent \
-             on through the EXDViewer API. Paths only; nothing identifies you.",
+             on through the XIViewer API. Paths only; nothing identifies you.",
         )
         .changed()
     {

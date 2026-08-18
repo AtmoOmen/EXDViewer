@@ -62,9 +62,9 @@ pub const IRONWORKS_URL: &str = "https://github.com/ackwell/ironworks";
 pub const EGUI_URL: &str = "https://github.com/emilk/egui";
 pub const EFRAME_URL: &str = "https://github.com/emilk/egui/tree/master/crates/eframe";
 pub const CREATE_PAT_URL: &str =
-    "https://github.com/settings/tokens/new?scopes=public_repo&description=EXDViewer";
+    "https://github.com/settings/tokens/new?scopes=public_repo&description=XIViewer";
 
-pub const DEFAULT_API_URL: &str = "https://exd.camora.dev/api";
+pub const DEFAULT_API_URL: &str = "https://xiviewer.app/api";
 pub const DEFAULT_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/xivdev/EXDSchema/refs/heads/latest";
 pub const DEFAULT_GITHUB_REPO: (&str, &str) = ("xivdev", "EXDSchema");

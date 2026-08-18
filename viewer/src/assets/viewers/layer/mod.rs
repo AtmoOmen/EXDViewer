@@ -86,6 +86,36 @@ fn files(scene: &Scene) -> Vec<(&'static str, String)> {
     files
 }
 
+/// What each slot of the scene header's general block is, where anything has established one. The
+/// blanks are real: nothing has identified them yet, and the viewer shows their bytes rather than
+/// pretending otherwise.
+const HEADER_NAMES: [&str; 24] = [
+    "flags",
+    "bg path",
+    "environment list",
+    "environments",
+    "sun tilt, degrees",
+    "sky visibility path",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "light culling path",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+];
+
 /// Where a row sits in the tree.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum At {
@@ -158,6 +188,8 @@ pub struct Rendered {
     identity: Vec<(&'static str, String)>,
     /// The files the scene names, each of which the browser can open.
     files: Vec<(&'static str, String)>,
+    /// The scene header's general block, a slot at a time, so what is not named is still readable.
+    header: Vec<u32>,
     /// The territories the scene is used from, and the duty each is entered through.
     filters: Vec<(u16, u16)>,
     source: Source,
@@ -696,6 +728,7 @@ fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Sourc
         path: path.to_owned(),
         identity,
         files: source.scene().map(files).unwrap_or_default(),
+        header: source.scene().map(|held| held.general().to_vec()).unwrap_or_default(),
         filters: source
             .scene()
             .map(|scene| {
@@ -754,6 +787,34 @@ pub fn ui(
                     if link(ui, crate::utils::file_name(path), path) {
                         follow = Some(path.clone());
                     }
+                    ui.allocate_space(vec2(ui.available_width(), 0.0));
+                    ui.end_row();
+                }
+            });
+        ui.add_space(8.0);
+        ui.separator();
+    }
+
+    if !file.header.is_empty() {
+        section(ui, "Scene header");
+        egui::Grid::new("layer_header")
+            .num_columns(4)
+            .striped(true)
+            .show(ui, |ui| {
+                for (slot, held) in file.header.iter().enumerate() {
+                    ui.label(RichText::new(format!("+{:#06x}", slot * 4)).weak());
+                    ui.label(RichText::new(held.to_string()).monospace());
+                    // Both readings, since the block mixes offsets and counts with distances and
+                    // angles, and only some of them are named yet.
+                    let held = f32::from_bits(*held);
+                    ui.label(
+                        RichText::new(match held.is_finite() && held.abs() < 1e9 {
+                            true => format!("{held:.3}"),
+                            false => String::new(),
+                        })
+                        .monospace(),
+                    );
+                    ui.label(RichText::new(HEADER_NAMES.get(slot).copied().unwrap_or("")).weak());
                     ui.allocate_space(vec2(ui.available_width(), 0.0));
                     ui.end_row();
                 }

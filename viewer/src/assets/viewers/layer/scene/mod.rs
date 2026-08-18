@@ -16,8 +16,9 @@
 
 mod ambient;
 mod gpu;
+mod preset;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -25,10 +26,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
-use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, Transform};
-use ironworks::file::mdl::{MeshKind, ModelContainer};
+use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, SceneTimeline, Transform};
+use ironworks::file::tmb;
+use ironworks::file::mdl::ModelContainer;
 use ironworks::file::spm::ShaderParameters;
-use ironworks::file::{File, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera};
+use ironworks::sqpack::IndexHash;
+use ironworks::file::{
+    File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera,
+};
 
 use super::super::mdl;
 use super::super::{facts, section};
@@ -71,16 +76,31 @@ const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
 const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
 const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 
+/// `ApplyDetailMap`, and the value that lays the tiled arrays over a surface. Left at the package's
+/// own default a wall is its albedo and nothing finer however close the camera stands.
+const APPLY_DETAIL_MAP: u32 = 0x6313_fd87;
+const APPLY_DETAIL_MAP_ON: u32 = 0x7a3d_9efd;
+
+/// `ApplyWavingAnim`, and the value that lets the wind reach a surface. Only the models whose own
+/// header allows it are drawn through the variant it selects.
+const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
+const APPLY_WAVING_ANIM_ON: u32 = 0xf801_b859;
+
 /// The keys the engine sets rather than the material. A package that declares none of them resolves
 /// exactly as it did, since a key the package never declares is never looked up.
-const KEYS: [(u32, u32); 2] = [
+const KEYS: [(u32, u32); 3] = [
     (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
     (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
+    (APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON),
 ];
 
 /// What a light is worth where the zone states no box for it. Nothing in the placement carries the
 /// reach: the file's own `range` is one in nearly every light a zone places.
 const REACH: f32 = 6.0;
+
+/// How fast a shared group's timeline runs. No file names the unit its keys are stated in; this is
+/// the rate the game's own timelines are read at.
+const TICKS: f32 = 30.0;
 
 /// Requests of each kind in flight at once.
 const FILES: usize = 12;
@@ -120,6 +140,10 @@ const BULK: f32 = 0.9;
 /// overestimate only loads a plate sooner than it needs to.
 const PLATE: f32 = 128.0;
 
+/// How many grass grids are asked for at once. A zone sorts hundreds of them and each is small, so
+/// what this bounds is how much of the fetch budget grass takes from the models and materials.
+const GRIDS: usize = 4;
+
 /// One layer of one of the scene's files, as the picker offers it.
 struct Layer {
     name: String,
@@ -132,11 +156,70 @@ struct Layer {
     placements: usize,
 }
 
+/// A placement one or more timelines move rather than leaving where the file put it: each motion
+/// along the way with whatever fixed transform stands in front of it, and the tail below the last.
+///
+/// A chain rather than a single motion, since a group a timeline turns can hold another the same
+/// timeline system turns again: composing them is what keeps a part turning with its parent instead
+/// of against it.
+struct Driven {
+    chain: Vec<(usize, Mat4)>,
+    tail: Mat4,
+}
+
+/// What one node of a shared group's timeline does to it, as nine curves over a span. Nothing states
+/// the unit of that span; the game's own timelines run at thirty to the second.
+struct Motion {
+    curves: Vec<(tmb::Channel, tmb::Curve)>,
+    duration: f32,
+}
+
+impl Motion {
+    /// Where the node stands at a time, which the curves state outright rather than as an offset
+    /// from wherever the file placed it.
+    fn at(&self, time: f32) -> Mat4 {
+        let span = self.duration.max(1.0);
+        let along = time.rem_euclid(span);
+        let mut turn = Vec3::ZERO;
+        let mut shift = Vec3::ZERO;
+        let mut size = Vec3::ONE;
+        for (channel, curve) in &self.curves {
+            let Some(held) = curve.at(along) else {
+                continue;
+            };
+            let lane = |into: &mut Vec3, at: usize| into[at] = held;
+            match channel {
+                tmb::Channel::TranslationX => lane(&mut shift, 0),
+                tmb::Channel::TranslationY => lane(&mut shift, 1),
+                tmb::Channel::TranslationZ => lane(&mut shift, 2),
+                tmb::Channel::RotationX => lane(&mut turn, 0),
+                tmb::Channel::RotationY => lane(&mut turn, 1),
+                tmb::Channel::RotationZ => lane(&mut turn, 2),
+                tmb::Channel::ScaleX => lane(&mut size, 0),
+                tmb::Channel::ScaleY => lane(&mut size, 1),
+                tmb::Channel::ScaleZ => lane(&mut size, 2),
+            }
+        }
+        Mat4::from_scale_rotation_translation(
+            size,
+            Quat::from_euler(
+                glam::EulerRot::XYZ,
+                turn.x.to_radians(),
+                turn.y.to_radians(),
+                turn.z.to_radians(),
+            ),
+            shift,
+        )
+    }
+}
+
 /// One `BgPart`, in world space.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Placement {
     model: usize,
     transform: Mat4,
+    /// Set where a timeline moves this, in which case the transform above is only where it starts.
+    driven: Option<Rc<Driven>>,
     center: Vec3,
     /// The instance's own bounding sphere, which the file states in world units.
     radius: f32,
@@ -185,17 +268,45 @@ enum Package {
     Failed,
 }
 
+/// Whether a package is one of the surfaces that blend themselves into the frame.
+fn wet_name(held: &str) -> bool {
+    ["water.shpk", "river.shpk", "crystal.shpk"]
+        .iter()
+        .any(|one| held.ends_with(one))
+}
+
+/// Which repository and category the shader files sit in.
+const SHADER: (u8, u8) = (0, 5);
+
+/// The index hash a shader path names where its last segment is the hash itself rather than a file
+/// name. The install ships one shader that way and the path list has no name for it, so it is asked
+/// for the way the asset browser asks for any file it can only see as a hash.
+fn unnamed(path: &str) -> Option<u64> {
+    let (directory, name) = path.rsplit_once('/')?;
+    if name.len() != 8 || !name.bytes().all(|held| held.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (Some(IndexHash::Split(held)), _) = IndexHash::of(&format!("{directory}/x")) else {
+        return None;
+    };
+    Some(held & !0xffff_ffff | u64::from(u32::from_str_radix(name, 16).ok()?))
+}
+
 /// One material's shaders, and how much of the G-buffer they were translated for.
 struct Translated {
     attachments: usize,
     buffer: Vec<Arc<program::Program>>,
     depth: Option<Arc<program::Program>>,
+    shadow: Option<Arc<program::Program>>,
+    resolve: Option<Arc<program::Program>>,
 }
 
 /// One light the zone places. The box it is clipped against is stated in its own space, so the
 /// placement carries where it stands and the box how far it carries.
 struct Light {
     placement: Mat4,
+    /// How far it stays at full strength, which its own record states.
+    range: f32,
     center: Vec3,
     min: Vec3,
     max: Vec3,
@@ -240,6 +351,32 @@ enum Terrain {
     Done,
 }
 
+/// The grass, which no layer places either: a zone file beside the layer groups names the models
+/// and sorts the grids, and a grid file per cell holds the placements themselves.
+enum Grass {
+    Wanted(String),
+    Fetching(String, TrackedPromise<Result<Vec<u8>>>),
+    Placing(Box<Placing>),
+    Done,
+}
+
+struct Placing {
+    directory: String,
+    /// The scene's model for each grass slot, in the order the zone names them.
+    models: Vec<usize>,
+    grids: Vec<Patch>,
+    layer: usize,
+}
+
+/// One grid of grass, which is only asked for once the eye reaches the sphere the zone sorts it by.
+struct Patch {
+    center: Vec3,
+    radius: f32,
+    file: String,
+    fetch: Option<TrackedPromise<Result<Vec<u8>>>>,
+    taken: bool,
+}
+
 /// A file named but not yet walked.
 struct Expand {
     path: String,
@@ -252,6 +389,10 @@ struct Expand {
     /// anything itself, so what it names brings layers of its own.
     layer: Option<usize>,
     depth: u8,
+    /// The motions this subtree hangs under, each with the fixed transform in front of it.
+    chain: Vec<(usize, Mat4)>,
+    /// What has accumulated since the last of them, which the walk goes on adding to.
+    since: Mat4,
 }
 
 #[derive(Clone, Copy)]
@@ -277,6 +418,16 @@ impl Camera {
 pub struct Scene {
     camera: Camera,
     home: Camera,
+    /// The level this view was opened for, which is what a preset's own is checked against.
+    path: String,
+    /// The last TitleEdit preset read, which is where a capture was taken from.
+    preset: Option<preset::Preset>,
+    /// A preset being picked or written, since a file dialog answers a frame or more later. Held
+    /// rather than forgotten: dropping a promise cancels the future behind it.
+    picking: Option<TrackedPromise<Option<Vec<u8>>>>,
+    /// A preset pasted in whole, for a window nothing can open a file dialog over.
+    pasted: String,
+    saving: Option<TrackedPromise<()>>,
     /// Where the eye stood when the instance buffers were last written.
     written: Vec3,
     dirty: bool,
@@ -288,6 +439,8 @@ pub struct Scene {
     models: Vec<Model>,
     model_at: HashMap<String, usize>,
     materials: Vec<(String, Slot)>,
+    /// Materials a model the wind may reach is drawn with, which is what its own header states.
+    waving: HashSet<usize>,
     material_at: HashMap<String, usize>,
     packages: HashMap<String, Package>,
     /// Parameter files folded into the table the card holds, so a later one uploads it again.
@@ -295,6 +448,26 @@ pub struct Scene {
     translated: HashMap<usize, Translated>,
     tables: HashMap<usize, Arc<(Vec<u16>, usize, usize)>>,
     lighting: Option<Arc<mdl::gpu::Lighting>>,
+    /// The chain that works the frame's brightness out and reads it back through a curve, once its
+    /// six shaders have arrived. Absent where the environment states no tone mapping of its own.
+    exposure: Option<Arc<mdl::gpu::Exposure>>,
+    /// The pass that fills whatever the frame did not cover, and the size and resource id of the
+    /// volume it reads: a sky is addressed by its own texel centers, so the pass needs its shape.
+    skybox: Option<Arc<program::Program>>,
+    /// The pass that fades a distant pixel toward the weather's own fog and then toward that sky.
+    haze: Option<Arc<program::Program>>,
+    /// The two cloud draws, the band first, and the texture each reads: the weather names one per
+    /// mesh by id, so moving the hour or the weather fetches the next.
+    clouds: [Option<Arc<program::Program>>; 2],
+    cloud_files: [Aside; 2],
+    cloud_wanted: [Option<u16>; 2],
+    sky_volume: Option<(u32, (f32, f32))>,
+    /// The sky the volume was fetched for, so moving the picker fetches the next one.
+    sky_wanted: Option<u16>,
+    sky_file: Aside,
+    /// The pair that smooths its edges, and the chain that works out how much sky reaches a pixel.
+    smoothing: Option<Arc<mdl::gpu::Smoothing>>,
+    occlusion: Option<Arc<mdl::gpu::Occlusion>>,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
@@ -312,12 +485,17 @@ pub struct Scene {
     files: HashMap<String, Held>,
     waiting: Vec<Expand>,
     terrain: Terrain,
+    grass: Grass,
     /// Placements the view was last framed over, so a scene that arrived empty frames itself once
     /// its first file lands rather than leaving the camera at the origin.
     fitted: usize,
     renderer: Arc<Mutex<gpu::Renderer>>,
     /// Where each model stands at each detail level, as the last rebuild left them.
     placed: Vec<[Vec<program::Instance>; 3]>,
+    /// What the zone's shared groups animate, and how far along their timelines it stands. The unit
+    /// is not named by any file; the game's own timelines run at thirty of these to the second.
+    motions: Vec<Motion>,
+    clock: f32,
     /// Placements the last rebuild would have drawn had their model arrived.
     absent: usize,
 }
@@ -409,6 +587,11 @@ impl Scene {
         let mut scene = Self {
             camera: home,
             home,
+            path: path.to_owned(),
+            preset: preset::taken(path),
+            picking: None,
+            pasted: String::new(),
+            saving: None,
             written: Vec3::splat(f32::INFINITY),
             dirty: true,
             load: LOADED,
@@ -419,12 +602,24 @@ impl Scene {
             models: Vec::new(),
             model_at: HashMap::new(),
             materials: Vec::new(),
+            waving: HashSet::new(),
             material_at: HashMap::new(),
             packages: HashMap::new(),
             typed: 0,
             translated: HashMap::new(),
             tables: HashMap::new(),
             lighting: None,
+            exposure: None,
+            skybox: None,
+            haze: None,
+            clouds: [None, None],
+            cloud_files: [Aside::Done, Aside::Done],
+            cloud_wanted: [None, None],
+            sky_volume: None,
+            sky_wanted: None,
+            sky_file: Aside::Done,
+            smoothing: None,
+            occlusion: None,
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             clips: HashMap::new(),
@@ -443,9 +638,15 @@ impl Scene {
                 Some(root) => Terrain::Wanted(format!("{root}/bgplate/terrain.tera")),
                 None => Terrain::Done,
             },
+            grass: match root {
+                Some(root) => Grass::Wanted(format!("{root}/grass/grass_zone_data.gzd")),
+                None => Grass::Done,
+            },
             fitted: 0,
             renderer: gpu::Renderer::new(),
             placed: Vec::new(),
+            motions: Vec::new(),
+            clock: 0.0,
             absent: 0,
         };
         match source.scene() {
@@ -460,17 +661,22 @@ impl Scene {
                         scale: 1.0,
                         layer: None,
                         depth: 0,
+                        chain: Vec::new(),
+                        since: Mat4::IDENTITY,
                     });
                 }
             }
             _ => scene.walk(
                 source.groups(),
+                source.scene().map_or(&[][..], SceneTimeline::of),
                 Mat4::IDENTITY,
                 (0, [0; 4]),
                 1.0,
                 None,
                 0,
                 None,
+                &[],
+                Mat4::IDENTITY,
             ),
         }
         scene.fit();
@@ -479,15 +685,77 @@ impl Scene {
 
     /// Reads placements out of a file's layers, queueing every shared group it names.
     #[allow(clippy::too_many_arguments)]
+    /// The motion a scene's timelines give one of its own instances, where they give it one.
+    fn motion(&mut self, timelines: &[SceneTimeline], instance: u32) -> Option<usize> {
+        for timeline in timelines {
+            if !timeline.auto_play() {
+                continue;
+            }
+            let Some((actor, _)) = timeline
+                .animated()
+                .iter()
+                .find(|(_, held)| *held as u32 == instance)
+            else {
+                continue;
+            };
+            let held = timeline.timeline();
+            // The scene names an actor by the key the actor itself carries, not by its item id.
+            let tracks = held.items().iter().find_map(|item| match item {
+                tmb::Item::Actor(held) if i32::from(held.time()) == *actor => Some(held.tracks()),
+                _ => None,
+            })?;
+            let commands = tracks.iter().find_map(|id| {
+                held.items().iter().find_map(|item| match item {
+                    tmb::Item::Track(held) if held.id() == *id => Some(held.commands()),
+                    _ => None,
+                })
+            })?;
+            let curve_id = commands.iter().find_map(|id| {
+                held.items().iter().find_map(|item| match item {
+                    tmb::Item::Command(held) if held.id() == *id => match held.kind() {
+                        tmb::CommandKind::C013(held) => Some(held.curve_id()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+            })?;
+            let curves = held.items().iter().find_map(|item| match item {
+                tmb::Item::Curves(held) if i32::from(held.id()) == curve_id => Some(held.curves()),
+                _ => None,
+            })?;
+            let duration = held
+                .items()
+                .iter()
+                .find_map(|item| match item {
+                    tmb::Item::Header(held) => Some(f32::from(held.duration())),
+                    _ => None,
+                })
+                .unwrap_or(1.0);
+            self.motions.push(Motion {
+                curves: curves
+                    .iter()
+                    .map(|curve| (curve.channel(), curve.clone()))
+                    .collect(),
+                duration,
+            });
+            return Some(self.motions.len() - 1);
+        }
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         &mut self,
         groups: &[LayerGroup],
+        timelines: &[SceneTimeline],
         transform: Mat4,
         key: (u32, [u8; 4]),
         scale: f32,
         under: Option<usize>,
         depth: u8,
         origin: Option<&str>,
+        chain: &[(usize, Mat4)],
+        since: Mat4,
     ) {
         for group in groups {
             for layer in group.layers() {
@@ -507,7 +775,24 @@ impl Scene {
                 };
                 for instance in layer.instances() {
                     let placed = instance.transform();
-                    let here = transform * matrix(placed);
+                    // What a timeline moves stands where the curves put it rather than where the
+                    // file did, and everything under it follows.
+                    let moved = self.motion(timelines, instance.id());
+                    let local = match moved {
+                        Some(at) => self.motions[at].at(0.0),
+                        None => matrix(placed),
+                    };
+                    let here = transform * local;
+                    // A moved node joins the chain with whatever fixed transform led up to it, and
+                    // what follows accumulates from there. Everything else just lengthens the tail.
+                    let (chain, since) = match moved {
+                        Some(at) => {
+                            let mut held = chain.to_vec();
+                            held.push((at, since));
+                            (held, Mat4::IDENTITY)
+                        }
+                        None => (chain.to_vec(), since * local),
+                    };
                     match instance.data() {
                         InstanceData::BgPart(part)
                             if part.visible() && !part.asset_path().is_empty() =>
@@ -518,6 +803,12 @@ impl Scene {
                             self.placements.push(Placement {
                                 model,
                                 transform: here,
+                                driven: (!chain.is_empty()).then(|| {
+                                    Rc::new(Driven {
+                                        chain: chain.clone(),
+                                        tail: since,
+                                    })
+                                }),
                                 center: here.transform_point3(Vec3::ZERO),
                                 radius: part.bounding_sphere_size() * scale,
                                 fade: part.fade_out_distance(),
@@ -539,6 +830,16 @@ impl Scene {
                                         .max(0.001),
                                 layer: Some(at),
                                 depth: depth + 1,
+                                chain,
+                                since,
+                            });
+                        }
+                        InstanceData::EnvSpace(space) => {
+                            self.ambient.spaces.push(ambient::Space {
+                                placement: here,
+                                shape: space.shape() as i32 as f32,
+                                range: space.effective_range(),
+                                bound: space.bound_instance_id(),
                             });
                         }
                         InstanceData::EnvLocation(env) => {
@@ -552,14 +853,23 @@ impl Scene {
                                 f32::from(held.green()),
                                 f32::from(held.blue()),
                             ) / 255.0;
+                            // Without the scale a parent carries: a light's own space is where the
+                            // box it is clipped against is stated, so a shared group placed at
+                            // eight tenths over would light a volume of a different size than the
+                            // one the zone cut for it.
+                            let (_, turn, at) = here.to_scale_rotation_translation();
+                            let here = Mat4::from_rotation_translation(turn, at);
                             self.lights.push(Light {
                                 placement: here,
-                                center: here.transform_point3(Vec3::ZERO),
+                                center: at,
                                 min: Vec3::splat(-REACH),
                                 max: Vec3::splat(REACH),
+                                range: light.range(),
                                 color: color * held.intensity(),
                                 kind: match light.kind() {
                                     LightKind::Spot => program::LampKind::Spot,
+                                    LightKind::Line => program::LampKind::Line,
+                                    LightKind::Flat => program::LampKind::Plane,
                                     _ => program::LampKind::Point,
                                 },
                                 direction: here.transform_vector3(Vec3::Z).normalize_or_zero(),
@@ -648,6 +958,7 @@ impl Scene {
             self.placements.push(Placement {
                 model,
                 transform: Mat4::from_translation(center),
+                driven: None,
                 center,
                 radius: PLATE,
                 fade: 0.0,
@@ -688,6 +999,176 @@ impl Scene {
         }
     }
 
+    /// The zone's grass file, which names the models and sorts the grids but places nothing itself.
+    fn open_grass(&mut self, path: &str, bytes: Vec<u8>) {
+        let zone = match gzd::GrassZone::read(Cursor::new(bytes)) {
+            Ok(zone) => zone,
+            Err(why) => {
+                log::error!("assets/layer: {path}: {why}");
+                return;
+            }
+        };
+        let directory = path.trim_end_matches("grass_zone_data.gzd").to_owned();
+        // The zone names its models by full path, and shares them across zones: an s1f2 grid places
+        // s1f1's plants.
+        let models = zone
+            .model_paths()
+            .iter()
+            .map(|path| self.model(path))
+            .collect();
+        let grids: Vec<Patch> = [gzd::Detail::High, gzd::Detail::Medium, gzd::Detail::Low]
+            .into_iter()
+            .flat_map(|detail| zone.grids(detail))
+            .map(|grid| Patch {
+                center: Vec3::from_array(grid.center()),
+                radius: grid.radius(),
+                file: grid.file(),
+                fetch: None,
+                taken: false,
+            })
+            .collect();
+        self.layers.push(Layer {
+            name: "grass".to_owned(),
+            origin: Some(path.to_owned()),
+            visible: true,
+            festival: 0,
+            shown: true,
+            placements: 0,
+        });
+        self.grass = Grass::Placing(Box::new(Placing {
+            directory,
+            models,
+            grids,
+            layer: self.layers.len() - 1,
+        }));
+    }
+
+    /// Every placement of one grid, each an instance of whatever model its count slot names. The
+    /// leading slots are the procedural layers, which name no model and so only advance the cursor.
+    fn place_grass(&mut self, grid: usize, bytes: Vec<u8>) {
+        let Grass::Placing(placing) = &self.grass else {
+            return;
+        };
+        let (models, layer) = (placing.models.clone(), placing.layer);
+        let file = match ggd::GrassGrid::read(Cursor::new(bytes)) {
+            Ok(file) => file,
+            Err(why) => {
+                log::error!("assets/layer: grass grid {grid}: {why}");
+                return;
+            }
+        };
+        let origin = Vec3::from_array(file.world_origin());
+        for chunk in file.chunks() {
+            let mut at = 0;
+            for (slot, count) in chunk.counts().iter().enumerate() {
+                let model = slot
+                    .checked_sub(ggd::Chunk::AUTO_LAYERS)
+                    .and_then(|slot| models.get(slot).copied());
+                for placement in &chunk.placements()[at..at + usize::from(*count)] {
+                    let Some(model) = model else { continue };
+                    let scale = Vec3::new(
+                        placement.scale_xz(),
+                        placement.scale_y(),
+                        placement.scale_xz(),
+                    );
+                    let center = origin + Vec3::from_array(placement.position());
+                    self.models[model].instances += 1;
+                    self.layers[layer].placements += 1;
+                    self.placements.push(Placement {
+                        model,
+                        driven: None,
+                        transform: Mat4::from_scale_rotation_translation(
+                            scale,
+                            Quat::from_array(placement.rotation()),
+                            center,
+                        ),
+                        center,
+                        radius: scale.max_element(),
+                        fade: 0.0,
+                        layer,
+                        key: (0, [0; 4]),
+                    });
+                }
+                at += usize::from(*count);
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn load_grass(&mut self, backend: &Backend) {
+        let mut arrived = None;
+        let next = match &self.grass {
+            Grass::Wanted(path) => {
+                let files = backend.files().clone();
+                let wanted = path.clone();
+                Some(Grass::Fetching(
+                    path.clone(),
+                    TrackedPromise::spawn_local(async move { files.read(&wanted).await }),
+                ))
+            }
+            Grass::Fetching(path, promise) => match promise.try_get() {
+                Some(Ok(bytes)) => {
+                    arrived = Some((path.clone(), bytes.clone()));
+                    None
+                }
+                // Interiors and instanced zones place no grass of their own.
+                Some(Err(_)) => Some(Grass::Done),
+                None => None,
+            },
+            Grass::Placing(_) | Grass::Done => None,
+        };
+        if let Some(next) = next {
+            self.grass = next;
+        }
+        if let Some((path, bytes)) = arrived {
+            self.open_grass(&path, bytes);
+        }
+        self.load_grids(backend);
+    }
+
+    /// Asks for the grids the eye has reached, a few at a time, and places each as it lands.
+    fn load_grids(&mut self, backend: &Backend) {
+        let (eye, load) = (self.camera.position, self.load);
+        let mut arrived = Vec::new();
+        let Grass::Placing(placing) = &mut self.grass else {
+            return;
+        };
+        let mut flight = placing
+            .grids
+            .iter()
+            .filter(|grid| grid.fetch.is_some())
+            .count();
+        for (at, grid) in placing.grids.iter_mut().enumerate() {
+            let landed = match &grid.fetch {
+                Some(promise) => match promise.try_get() {
+                    Some(Ok(bytes)) => {
+                        arrived.push((at, bytes.clone()));
+                        true
+                    }
+                    Some(Err(_)) => true,
+                    None => false,
+                },
+                None => false,
+            };
+            if landed {
+                grid.fetch = None;
+                flight -= 1;
+            } else if !grid.taken && flight < GRIDS && eye.distance(grid.center) < load + grid.radius
+            {
+                let files = backend.files().clone();
+                let wanted = format!("{}{}", placing.directory, grid.file);
+                grid.fetch = Some(TrackedPromise::spawn_local(
+                    async move { files.read(&wanted).await },
+                ));
+                grid.taken = true;
+                flight += 1;
+            }
+        }
+        for (grid, bytes) in arrived {
+            self.place_grass(grid, bytes);
+        }
+    }
+
     /// Where every model stands for where the eye now is. The transforms go to the card each frame
     /// rather than here, since a record carries the object into view space and the camera turns.
     fn rebuild(&mut self) {
@@ -701,7 +1182,7 @@ impl Scene {
         self.absent = 0;
 
         for at in 0..self.placements.len() {
-            let placement = self.placements[at];
+            let placement = self.placements[at].clone();
             if !self.layers[placement.layer].shown {
                 continue;
             }
@@ -719,7 +1200,12 @@ impl Scene {
                 continue;
             };
             placed[placement.model][level].push(program::Instance {
-                transform: placement.transform,
+                transform: match &placement.driven {
+                    Some(held) => held.chain.iter().fold(Mat4::IDENTITY, |into, (at, fixed)| {
+                        into * *fixed * self.motions[*at].at(self.clock)
+                    }) * held.tail,
+                    None => placement.transform,
+                },
                 sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
             });
         }
@@ -751,6 +1237,7 @@ impl Scene {
                     placement: light.placement,
                     min,
                     max,
+                    range: light.range,
                     color: light.color,
                     kind: light.kind,
                     direction: light.direction,
@@ -764,8 +1251,40 @@ impl Scene {
     /// against, how much of the sky reaches each of its parts, and the game's own textures its
     /// shaders read.
     fn load_asides(&mut self, backend: &Backend) {
-        for held in [&mut self.clip, &mut self.sky]
+        // The volume the sky pass reads, which is named by the id rather than by the zone. Asked for
+        // only once the pass itself has translated, since the pass is what says which resource the
+        // volume is bound under.
+        if self.skybox.is_some() && self.sky_wanted != self.ambient.sky() {
+            self.sky_wanted = self.ambient.sky();
+            self.sky_volume = None;
+            self.sky_file = match self.ambient.sky() {
+                Some(id) => Aside::Wanted(program::sky_texture(id)),
+                None => Aside::Done,
+            };
+        }
+        // The two cloud textures, each named by the weather rather than by the zone, and asked for
+        // only once the draw that reads it has translated.
+        if self.clouds[0].is_some() {
+            let held = self.ambient.clouds();
+            let wanted = [
+                held.as_ref().and_then(|held| held.band),
+                held.as_ref().and_then(|held| held.sheet),
+            ];
+            for (at, id) in wanted.into_iter().enumerate() {
+                if self.cloud_wanted[at] == id {
+                    continue;
+                }
+                self.cloud_wanted[at] = id;
+                self.cloud_files[at] = match (at, id) {
+                    (0, Some(id)) => Aside::Wanted(program::cloudside_texture(id)),
+                    (_, Some(id)) => Aside::Wanted(program::cloud_texture(id)),
+                    _ => Aside::Done,
+                };
+            }
+        }
+        for held in [&mut self.clip, &mut self.sky, &mut self.sky_file]
             .into_iter()
+            .chain(&mut self.cloud_files)
             .chain(self.engine.values_mut())
         {
             *held = match std::mem::replace(held, Aside::Done) {
@@ -797,6 +1316,13 @@ impl Scene {
         };
         let clip = taken(&mut self.clip);
         let sky = taken(&mut self.sky);
+        let volume = taken(&mut self.sky_file);
+        let overcast: Vec<(usize, String, Vec<u8>)> = self
+            .cloud_files
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(at, held)| taken(held).map(|(path, bytes)| (at, path, bytes)))
+            .collect();
         let supplied: Vec<(u32, String, Vec<u8>)> = self
             .engine
             .iter_mut()
@@ -833,6 +1359,32 @@ impl Scene {
                 Err(why) => log::error!("assets/layer: {path}: {why}"),
             }
         }
+        if let Some((path, bytes)) = volume
+            && let Some(held) = self
+                .skybox
+                .as_ref()
+                .and_then(|held| held.textures.first())
+                .map(|texture| texture.id)
+        {
+            // Read between its texels rather than at them: a sky is a handful of texels across a
+            // whole sky, and the hour falls between two of its slices.
+            match mdl::layered(&bytes, &path, glow::LINEAR) {
+                Ok(decoded) => {
+                    self.sky_volume =
+                        Some((held, (decoded.size.0 as f32, decoded.size.1 as f32)));
+                    self.renderer.lock().unwrap().queue_supplied(held, decoded);
+                }
+                Err(why) => log::error!("assets/layer: {path}: {why}"),
+            }
+        }
+        for (at, path, bytes) in overcast {
+            // Read between its texels: a cloud sheet is tiled over tens of thousands of units, so
+            // one texel of it covers a good deal of sky.
+            match mdl::layered(&bytes, &path, glow::LINEAR) {
+                Ok(held) => self.renderer.lock().unwrap().queue_overcast(at, path, held),
+                Err(why) => log::error!("assets/layer: {path}: {why}"),
+            }
+        }
         for (id, path, bytes) in supplied {
             let Some((_, _, filter)) = mdl::deferred::ENGINE
                 .into_iter()
@@ -850,6 +1402,7 @@ impl Scene {
     /// Asks for whatever the scene still needs and takes in whatever arrived. Runs every frame.
     fn poll(&mut self, ui: &egui::Ui, backend: &Backend) {
         self.load_terrain(backend);
+        self.load_grass(backend);
         self.load_asides(backend);
         self.ambient.poll(backend);
         self.expand(backend);
@@ -959,6 +1512,8 @@ impl Scene {
                     expand.scale,
                     expand.layer,
                     expand.depth,
+                    expand.chain.clone(),
+                    expand.since,
                 ));
                 false
             }
@@ -968,8 +1523,19 @@ impl Scene {
             _ => true,
         });
         self.waiting = waiting;
-        for (source, transform, key, scale, layer, depth) in ready {
-            self.walk(source.groups(), transform, key, scale, layer, depth, None);
+        for (source, transform, key, scale, layer, depth, chain, since) in ready {
+            self.walk(
+                source.groups(),
+                source.scene().map_or(&[][..], SceneTimeline::of),
+                transform,
+                key,
+                scale,
+                layer,
+                depth,
+                None,
+                &chain,
+                since,
+            );
         }
     }
 
@@ -1048,7 +1614,7 @@ impl Scene {
             let mut built = Vec::new();
             let mut used = Vec::new();
             for mesh in model.meshes() {
-                if !mesh.kinds().contains(&MeshKind::Standard) {
+                if !mdl::draws(&mesh) {
                     continue;
                 }
                 let (Ok(attributes), Ok(indices)) = (mesh.attributes(), mesh.indices()) else {
@@ -1061,6 +1627,9 @@ impl Scene {
                 let resolved = mdl::material::path(&name, 0, None).unwrap_or(name);
                 used.push(self.material(&resolved));
                 built.push(geometry);
+            }
+            if model.waving() {
+                self.waving.extend(&used);
             }
             drawn[usize::from(level)] = !built.is_empty();
             levels.push(built);
@@ -1136,9 +1705,37 @@ impl Scene {
         .map(str::to_owned)
         .to_vec();
         wanted.extend(program::PARAMETERS.map(|(_, path)| path.to_owned()));
+        // Only where the environment states an exposure to run them under. A zone with no tone
+        // mapping set of its own is left as the composite resolved it, so the six files it would
+        // take are never asked for.
+        if self.ambient.exposure(0.0).is_some() {
+            wanted.extend(program::MEASURE.map(str::to_owned));
+        }
+        wanted.extend([
+            program::FXAA_LUMA.to_owned(),
+            program::FXAA.to_owned(),
+            program::SKY.to_owned(),
+            program::SHADOW.to_owned(),
+        ]);
+        // Only where the weather states a fog of its own, the same way the exposure chain is only
+        // asked for where there is something to run it under.
+        if self.ambient.fog().is_some() {
+            wanted.push(program::FOG.to_owned());
+        }
+        if self.ambient.clouds().is_some() {
+            wanted.push(program::CLOUD.to_owned());
+        }
         // A spot's package is twice the size of a point's and nothing can be lit with it until the
         // four above are in hand, so it is only worth a fetch of its own once they are and the zone
         // turns out to place one.
+        for (kind, path) in [
+            (program::LampKind::Line, program::LINE),
+            (program::LampKind::Plane, program::PLANE),
+        ] {
+            if self.lighting.is_some() && self.lights.iter().any(|light| light.kind == kind) {
+                wanted.push(path.to_owned());
+            }
+        }
         if self.lighting.is_some()
             && self
                 .lights
@@ -1170,7 +1767,10 @@ impl Scene {
             let files = backend.files().clone();
             let wanted = path.clone();
             *held = Package::Fetching(TrackedPromise::spawn_local(async move {
-                files.read(&wanted).await
+                match unnamed(&wanted) {
+                    Some(hash) => files.read_by_hash(SHADER.0, SHADER.1, hash, true).await,
+                    None => files.read(&wanted).await,
+                }
             }));
             fetching += 1;
         }
@@ -1234,14 +1834,59 @@ impl Scene {
         path: &str,
         pass: program::Pass,
         attachments: usize,
+        keys: &[(u32, u32)],
     ) -> Option<Arc<program::Program>> {
         let Some(Package::Ready(bytes)) = self.packages.get(path) else {
             return None;
         };
-        program::Program::screen(bytes, pass, attachments)
+        program::Program::screen(bytes, pass, attachments, keys)
             .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
             .ok()
             .map(Arc::new)
+    }
+
+    /// One member of the post chain, translated where its file has arrived.
+    fn effect(&self, path: &str, vertex: &str) -> Option<Arc<program::Program>> {
+        let Some(Package::Ready(bytes)) = self.packages.get(path) else {
+            return None;
+        };
+        program::Program::posteffect(path, bytes, vertex)
+            .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+            .ok()
+            .map(Arc::new)
+    }
+
+    /// The pair that smooths the frame's edges, and the three that work out how much sky reaches
+    /// each pixel, each translated once all of its own shaders have arrived.
+    fn edges(&self) -> Option<Arc<mdl::gpu::Smoothing>> {
+        Some(Arc::new(mdl::gpu::Smoothing {
+            luma: self.effect(program::FXAA_LUMA, program::POST_VERTEX)?,
+            fxaa: self.effect(program::FXAA, program::POST_VERTEX)?,
+        }))
+    }
+
+    /// Withheld until its thresholds mean something here. The occlusion pass takes the distance past
+    /// which two samples stop being one surface as a fraction of the depth the frame spans, and the
+    /// fractions are the model viewer's, where a frame spans one model. A zone spans thousands of
+    /// units, so the same fraction is hundreds of them: every tap would read as the same surface. No
+    /// file states the pass's own constants, so there is nothing to scale them by yet.
+    fn occluders(&self) -> Option<Arc<mdl::gpu::Occlusion>> {
+        None
+    }
+
+    /// The exposure chain, translated once all six of its shaders have arrived. The three that
+    /// halve the frame read four texels of a square rather than one, so they are drawn with the
+    /// vertex shader that names those four.
+    fn measure(&self) -> Option<Arc<mdl::gpu::Exposure>> {
+        let held = |path: &str, vertex| self.effect(path, vertex);
+        Some(Arc::new(mdl::gpu::Exposure {
+            initial: held(program::MEASURE_INITIAL, program::SAMPLING_VERTEX)?,
+            iterative: held(program::MEASURE_ITERATIVE, program::SAMPLING_VERTEX)?,
+            last: held(program::MEASURE_FINAL, program::SAMPLING_VERTEX)?,
+            adapt: held(program::ADAPT_LUM, program::POST_VERTEX)?,
+            curve: held(program::TONE_MAP_LUT, program::POST_VERTEX)?,
+            tone: held(program::TONE_MAPPING, program::POST_VERTEX)?,
+        }))
     }
 
     /// Every ready material's shaders, translated once its package has arrived. A context that
@@ -1250,10 +1895,10 @@ impl Scene {
         let attachments = self.renderer.lock().unwrap().attachments();
         if self.lighting.is_none()
             && let (Some(position), Some(directional), Some(point), Some(composite)) = (
-                self.screen(program::VIEW_POSITION, program::Pass::Lighting, attachments),
-                self.screen(program::DIRECTIONAL, program::Pass::Lighting, attachments),
-                self.screen(program::POINT, program::Pass::Lamp, attachments),
-                self.screen(program::COMPOSITE, program::Pass::Composite, attachments),
+                self.screen(program::VIEW_POSITION, program::Pass::Lighting, attachments, &[]),
+                self.screen(program::DIRECTIONAL, program::Pass::Lighting, attachments, &[]),
+                self.screen(program::POINT, program::Pass::Lamp, attachments, &[]),
+                self.screen(program::COMPOSITE, program::Pass::Composite, attachments, &[]),
             )
         {
             self.lighting = Some(Arc::new(mdl::gpu::Lighting {
@@ -1261,6 +1906,10 @@ impl Scene {
                 directional,
                 point,
                 spot: None,
+                shadow: None,
+                line: None,
+                plane: None,
+                subsurface: None,
                 // The fifth target's alpha is a background surface's emissive flag rather than the
                 // scale a strand is marched along, so the fur pass has nothing here to read.
                 fur: None,
@@ -1274,7 +1923,7 @@ impl Scene {
             && lighting.spot.is_none()
             && matches!(self.packages.get(program::SPOT), Some(Package::Ready(_)))
         {
-            let spot = self.screen(program::SPOT, program::Pass::Lamp, attachments);
+            let spot = self.screen(program::SPOT, program::Pass::Lamp, attachments, &[]);
             if spot.is_none() {
                 self.packages
                     .insert(program::SPOT.to_owned(), Package::Failed);
@@ -1283,6 +1932,86 @@ impl Scene {
                 spot,
                 ..(*lighting).clone()
             }));
+        }
+        for (path, take) in [
+            (program::LINE, 0usize),
+            (program::PLANE, 1usize),
+        ] {
+            let Some(lighting) = self.lighting.clone() else {
+                continue;
+            };
+            let held = match take {
+                0 => lighting.line.is_none(),
+                _ => lighting.plane.is_none(),
+            };
+            if !held || !matches!(self.packages.get(path), Some(Package::Ready(_))) {
+                continue;
+            }
+            let built = self.screen(path, program::Pass::Lamp, attachments, &[]);
+            if built.is_none() {
+                self.packages.insert(path.to_owned(), Package::Failed);
+            }
+            self.lighting = Some(Arc::new(match take {
+                0 => mdl::gpu::Lighting {
+                    line: built,
+                    ..(*lighting).clone()
+                },
+                _ => mdl::gpu::Lighting {
+                    plane: built,
+                    ..(*lighting).clone()
+                },
+            }));
+        }
+        // The same, for the pass that works out how much of the sun reaches a pixel: a zone lights
+        // unshadowed until its package is in hand rather than waiting on one.
+        if let Some(lighting) = self.lighting.clone()
+            && lighting.shadow.is_none()
+            && matches!(self.packages.get(program::SHADOW), Some(Package::Ready(_)))
+        {
+            // Nine taps rather than one: a single comparison shows every texel of the map as a
+            // step, and this key is asked for here alone so no other package moves with it.
+            let shadow = self.screen(
+                program::SHADOW,
+                program::Pass::Lighting,
+                attachments,
+                &[(program::SHADOW_SOFT, program::SHADOW_SOFT_3X3)],
+            );
+            if shadow.is_none() {
+                self.packages
+                    .insert(program::SHADOW.to_owned(), Package::Failed);
+            }
+            self.lighting = Some(Arc::new(mdl::gpu::Lighting {
+                shadow,
+                ..(*lighting).clone()
+            }));
+        }
+        if self.exposure.is_none() {
+            self.exposure = self.measure();
+        }
+        if self.skybox.is_none() {
+            self.skybox = self.effect(program::SKY, program::SKY_VERTEX);
+        }
+        if self.haze.is_none() {
+            self.haze = self.effect(program::FOG, program::POST_VERTEX);
+        }
+        if self.clouds[0].is_none()
+            && let Some(Package::Ready(bytes)) = self.packages.get(program::CLOUD)
+        {
+            for (at, pass) in [program::Pass::CloudBand, program::Pass::CloudSheet]
+                .into_iter()
+                .enumerate()
+            {
+                self.clouds[at] = program::Program::cloud(bytes, pass, attachments)
+                    .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::CLOUD))
+                    .ok()
+                    .map(Arc::new);
+            }
+        }
+        if self.smoothing.is_none() {
+            self.smoothing = self.edges();
+        }
+        if self.occlusion.is_none() {
+            self.occlusion = self.occluders();
         }
 
         for (at, (_, slot)) in self.materials.iter().enumerate() {
@@ -1299,25 +2028,41 @@ impl Scene {
             let Some(Package::Ready(bytes)) = self.packages.get(&material.package()) else {
                 continue;
             };
-            let page = |page| {
+            let mut keys = KEYS.to_vec();
+            if self.waving.contains(&at) {
+                keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
+            }
+            let page = |pass, page| {
                 program::Program::build(
                     bytes,
                     material,
-                    &KEYS,
-                    program::Pass::Buffer,
+                    &keys,
+                    pass,
                     program::SUB_VIEW_MAIN,
                     page,
                     attachments,
                 )
             };
-            let Ok(first) = page(0).inspect_err(|why| {
-                log::warn!("assets/layer: {}: {why}", material.package());
-            }) else {
-                continue;
+            // A package with no opaque pass is a surface that blends itself into the frame - water,
+            // and the glass a zone places. It fills the same G-buffer through a pass of its own and
+            // answers into the lit frame afterward, so which one it took has to be remembered.
+            let (blended, first) = match page(program::Pass::Buffer, 0) {
+                Ok(held) => (false, held),
+                Err(opaque) => match page(program::Pass::Blended, 0) {
+                    Ok(held) => (true, held),
+                    Err(_) => {
+                        log::warn!("assets/layer: {}: {opaque}", material.package());
+                        continue;
+                    }
+                },
+            };
+            let pass = match blended {
+                true => program::Pass::Blended,
+                false => program::Pass::Buffer,
             };
             let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
             let mut buffer = vec![Arc::new(first)];
-            buffer.extend((1..pages).filter_map(|held| page(held).ok().map(Arc::new)));
+            buffer.extend((1..pages).filter_map(|held| page(pass, held).ok().map(Arc::new)));
             // The engine binds these rather than the material, so nothing names them as a path;
             // what a surface's own shaders declare is what says the file is worth reading at all.
             for texture in buffer.iter().flat_map(|held| &held.textures) {
@@ -1330,21 +2075,54 @@ impl Scene {
                         .or_insert_with(|| Aside::Wanted(path.to_string()));
                 }
             }
-            let depth = program::Program::build(
+            // Only where the same vertex shader settled the depth. A blending surface fills the
+            // buffer through a pass whose vertices are lifted by its own waves, and the depth pass
+            // leaves them where the file put them: every later test against it fails.
+            let depth = match blended {
+                true => Err("a blending surface writes its own depth".into()),
+                false => program::Program::build(
+                    bytes,
+                    material,
+                    &keys,
+                    program::Pass::Depth,
+                    program::SUB_VIEW_MAIN,
+                    0,
+                    attachments,
+                ),
+            };
+            // The same depth pass as the light sees it. A package that answers no shadow subview
+            // casts none, which is what the flag on a placed instance says anyway.
+            let shadow = program::Program::build(
                 bytes,
                 material,
-                &KEYS,
+                &keys,
                 program::Pass::Depth,
-                program::SUB_VIEW_MAIN,
+                program::SUB_VIEW_SHADOW_0,
                 0,
                 attachments,
             );
+            // What it answers into the lit frame with, which only a blending surface has.
+            // Water reads the lit frame back and shades itself from it, where anything else that
+            // blends is lit where it stands.
+            let resolve = blended
+                .then(|| {
+                    page(program::Pass::Water, 0)
+                        .or_else(|_| page(program::Pass::BlendedLighting, 0))
+                        .inspect_err(|why| {
+                            log::warn!("assets/layer: {} resolve: {why}", material.package());
+                        })
+                        .ok()
+                        .map(Arc::new)
+                })
+                .flatten();
             self.translated.insert(
                 at,
                 Translated {
                     attachments,
                     buffer,
                     depth: depth.ok().map(Arc::new),
+                    shadow: shadow.ok().map(Arc::new),
+                    resolve,
                 },
             );
             if let Some((values, columns, rows)) =
@@ -1500,6 +2278,14 @@ impl Scene {
         if (self.camera.position - self.written).length() > STEP * self.speed {
             self.dirty = true;
         }
+        // A timeline states where its node stands rather than how far it has moved, so what a frame
+        // draws follows the clock rather than the frame before it. The placements themselves are
+        // already worked out; only where the moving ones stand is done again.
+        if !self.motions.is_empty() {
+            self.clock += ui.input(|input| input.stable_dt).min(0.25) * TICKS;
+            self.dirty = true;
+            ui.ctx().request_repaint();
+        }
         if self.dirty {
             self.rebuild();
         }
@@ -1548,9 +2334,34 @@ impl Scene {
                 diffuse: color,
                 specular: color,
                 ambient: self.ambient.scene(),
+                // How far the adaptation moves is stated per second, so it needs to know how long a
+                // frame took. A frame after an idle spell is capped by the pass itself.
+                exposure: self
+                    .ambient
+                    .exposure(ui.input(|input| input.stable_dt))
+                    .unwrap_or_default(),
+                fog: self.ambient.fog().unwrap_or_default(),
+                cloud: self
+                    .ambient
+                    .clouds()
+                    .map_or_else(program::Cloud::default, |held| held.scene),
+                clock: self.clock / TICKS,
+                sky: program::Sky {
+                    time: self.ambient.time,
+                    tilt: self.ambient.tilt,
+                    size: self
+                        .sky_volume
+                        .map_or_else(|| program::Sky::default().size, |(_, size)| size),
+                },
                 ..Default::default()
             },
             lighting: self.lighting.clone(),
+            exposure: self.exposure.clone(),
+            skybox: self.skybox.clone(),
+            haze: self.haze.clone(),
+            clouds: self.clouds.clone(),
+            smoothing: self.smoothing.clone(),
+            occlusion: self.occlusion.clone(),
             lamps: self.lamps(),
             batches,
         };
@@ -1585,7 +2396,8 @@ impl Scene {
             .map(|(material, held)| mdl::gpu::Shaded {
                 buffer: held.buffer.clone(),
                 depth: held.depth.clone(),
-                resolve: None,
+                shadow: held.shadow.clone(),
+                resolve: held.resolve.clone(),
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()
@@ -1600,6 +2412,28 @@ impl Scene {
         }
     }
 
+    /// Stands the view where a preset says a capture was taken from: the camera and what it looks
+    /// at, the lens, and the weather and hour the frame was under. The level it names is left to the
+    /// link beside it, since opening one builds a scene of its own and would undo all of this.
+    fn stand_where(&mut self, held: &preset::Preset) {
+        let (yaw, pitch) = held.angles();
+        self.camera.position = held.camera;
+        self.camera.yaw = yaw;
+        self.camera.pitch = pitch;
+        if let Some(fov) = held.fov {
+            self.fov = fov;
+        }
+        if let Some(time) = held.time {
+            self.ambient.time = time;
+        }
+        if let Some(id) = held.weather
+            && !self.ambient.stand_in_weather(id)
+        {
+            log::warn!("assets/layer: this zone states no weather {id}");
+        }
+        self.dirty = true;
+    }
+
     pub fn details_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1609,8 +2443,110 @@ impl Scene {
     ) {
         let mut refit = false;
         let mut changed = false;
+        // A preset dropped on the window, or picked with the button below, stands this view where a
+        // capture was taken from, which is what makes the two comparable at all.
+        let mut arrived: Vec<Vec<u8>> = ui.ctx().input(|input| {
+            input
+                .raw
+                .dropped_files
+                .iter()
+                .filter_map(|held| held.bytes.as_ref().map(|held| held.to_vec()))
+                .collect()
+        });
+        if let Some(promise) = &self.picking
+            && let Some(held) = promise.try_get()
+        {
+            arrived.extend(held.clone());
+            self.picking = None;
+        }
+        for bytes in &arrived {
+            match preset::Preset::read(bytes) {
+                Ok(held) => {
+                    // A preset for somewhere else opens that level instead, and is applied on the
+                    // other side: opening one builds a scene of its own.
+                    match held.level == self.path {
+                        true => self.stand_where(&held),
+                        false => {
+                            *follow = Some(held.level.clone());
+                            preset::hold(held);
+                            return;
+                        }
+                    }
+                    self.preset = Some(held);
+                    changed = true;
+                }
+                Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
+            }
+        }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "View");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.pasted)
+                    .hint_text("paste a TitleEdit preset")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Import preset").clicked() {
+                    self.picking = Some(TrackedPromise::spawn_local(async {
+                        let held = rfd::AsyncFileDialog::new()
+                            .set_title("Import a TitleEdit preset")
+                            .add_filter("TitleEdit preset", &["json"])
+                            .pick_file()
+                            .await?;
+                        Some(held.read().await)
+                    }));
+                }
+                // Pasted rather than picked, since a file dialog is the one way in that nothing
+                // outside the window can drive: a headless run positions the camera through here.
+                if ui.button("Load pasted").clicked() {
+                    match preset::Preset::read(self.pasted.as_bytes()) {
+                        Ok(held) => {
+                            match held.level == self.path {
+                                true => self.stand_where(&held),
+                                false => {
+                                    *follow = Some(held.level.clone());
+                                    preset::hold(held);
+                                    return;
+                                }
+                            }
+                            self.preset = Some(held);
+                            changed = true;
+                        }
+                        Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
+                    }
+                }
+                if ui.button("Export preset").clicked() {
+                    let held = preset::Preset::of(
+                        &self.path,
+                        self.camera.position,
+                        self.camera.forward(),
+                        self.fov,
+                        self.ambient.weather_id(),
+                        self.ambient.time,
+                    );
+                    match held.write() {
+                        Ok(text) => {
+                            let name = format!("TE_{}.json", held.name);
+                            self.saving = Some(TrackedPromise::spawn_local(async move {
+                                if let Some(file) = rfd::AsyncFileDialog::new()
+                                    .set_title("Export a TitleEdit preset")
+                                    .set_file_name(&name)
+                                    .save_file()
+                                    .await
+                                    && let Err(why) = file.write(text.as_bytes()).await
+                                {
+                                    log::error!("assets/layer: {name}: {why}");
+                                }
+                            }));
+                        }
+                        Err(why) => log::error!("assets/layer: {why}"),
+                    }
+                }
+            });
+            if let Some(held) = &self.preset {
+                ui.label(RichText::new(format!("Preset  {}", held.name)).weak());
+                ui.add_space(4.0);
+            }
             ui.horizontal(|ui| {
                 if ui.button("Fit").clicked() {
                     refit = true;
@@ -1661,6 +2597,119 @@ impl Scene {
                         "Lights",
                         format!("{} of {}", self.lamps().len(), self.lights.len()),
                     ),
+                    (
+                        "Wind",
+                        format!(
+                            "clock {:.1}s, reach {:.2} toward ({:.2}, {:.2}), {} material{}",
+                            self.clock / TICKS,
+                            program::WIND.length(),
+                            program::WIND[0],
+                            program::WIND[2],
+                            self.waving.len(),
+                            match self.waving.len() {
+                                1 => "",
+                                _ => "s",
+                            },
+                        ),
+                    ),
+                    (
+                        "Exposure",
+                        match self.exposure.is_some() {
+                            true => {
+                                let held = self.renderer.lock().unwrap();
+                                format!(
+                                    "{:.3} from a frame measuring {:.3}",
+                                    held.exposed(),
+                                    held.measured()
+                                )
+                            }
+                            false => "not run".to_owned(),
+                        },
+                    ),
+                    // Which of the passes past the lighting ran. A weather that names no clouds
+                    // draws none, and so does a draw that quietly went wrong; only the graph knows
+                    // which of the two a frame without any is.
+                    // How much of the sky reaches each part, which the zone's own `.svb` states by
+                    // the same key an `.lcb` reaches a light by. A part it does not name stands in
+                    // full sky, so a file that matches nothing looks exactly like no file at all.
+                    (
+                        "Sky visibility",
+                        format!(
+                            "{} of {} placed",
+                            self.placements
+                                .iter()
+                                .filter(|held| self.visibility.contains_key(&held.key))
+                                .count(),
+                            self.placements.len()
+                        ),
+                    ),
+                    ("Water materials", {
+                        let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+                        for (at, (_, slot)) in self.materials.iter().enumerate() {
+                            let Slot::Ready(material) = slot else { continue };
+                            let name = material.package();
+                            if !wet_name(&name) {
+                                continue;
+                            }
+                            let held = tally.entry(name).or_default();
+                            held.0 += 1;
+                            match self.translated.get(&at) {
+                                Some(one) if one.resolve.is_some() => held.1 += 1,
+                                Some(_) => held.2 += 1,
+                                None => {}
+                            }
+                        }
+                        match tally.is_empty() {
+                            true => "none named".to_owned(),
+                            false => tally
+                                .iter()
+                                .map(|(name, (all, wet, dry))| {
+                                    format!("{name} {all}: {wet} blended, {dry} opaque")
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        }
+                    }),
+                    (
+                        "Blended surfaces",
+                        format!(
+                            "{} of {} translated",
+                            self.translated.values().filter(|held| held.resolve.is_some()).count(),
+                            self.translated.len()
+                        ),
+                    ),
+                    (
+                        "Shadow pass",
+                        match (
+                            self.packages.get(program::SHADOW),
+                            self.lighting.as_ref().map(|held| held.shadow.is_some()),
+                        ) {
+                            (Some(Package::Ready(_)), Some(true)) => "translated",
+                            (Some(Package::Ready(_)), _) => "arrived, not translated",
+                            (Some(Package::Failed), _) => "failed",
+                            (Some(Package::Fetching(_)), _) => "fetching",
+                            (Some(Package::Wanted), _) => "wanted",
+                            (None, _) => "never asked for",
+                        }
+                        .to_owned(),
+                    ),
+                    ("Passes", {
+                        let held = self.renderer.lock().unwrap().drawn();
+                        let ran: Vec<&str> = [
+                            (held.shadow, "shadow"),
+                            (held.sky, "sky"),
+                            (held.clouds[0], "band"),
+                            (held.clouds[1], "sheet"),
+                            (held.fog, "fog"),
+                        ]
+                        .into_iter()
+                        .filter_map(|(ran, name)| ran.then_some(name))
+                        .collect();
+                        match ran.is_empty() {
+                            true => "none".to_owned(),
+                            false => ran.join(", "),
+                        }
+                    }),
                     (
                         "Textures",
                         format!(

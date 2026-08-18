@@ -29,6 +29,9 @@ const points = flag("click", "")
     .filter((one) => one !== "")
     .map(Number);
 const zoom = Number(flag("zoom", "0"));
+// How far to drag the viewport before shooting, as dx,dy in pixels. A flat mesh framed by its own
+// bounds is seen edge-on and covers nothing.
+const orbit = flag("orbit", "").split(",").filter((one) => one !== "").map(Number);
 const settle = Number(flag("settle", "8000"));
 const wait = Number(flag("wait", "9000"));
 const hold = Number(flag("hold", "2500"));
@@ -186,6 +189,25 @@ async function main() {
                     deltaX: 0,
                     deltaY: -120,
                 });
+                await sleep(400);
+            }
+            if (orbit.length >= 2) {
+                const from = { x: Math.round(WIDTH * 0.47), y: Math.round(HEIGHT * 0.55) };
+                const to = { x: from.x + orbit[0], y: from.y + orbit[1] };
+                await cdp.send("Input.dispatchMouseEvent", { type: "mouseMoved", ...from, buttons: 0 });
+                await sleep(80);
+                await cdp.send("Input.dispatchMouseEvent", { type: "mousePressed", ...from, button: "left", clickCount: 1, buttons: 1 });
+                for (let step = 1; step <= 12; step++) {
+                    await cdp.send("Input.dispatchMouseEvent", {
+                        type: "mouseMoved",
+                        x: Math.round(from.x + ((to.x - from.x) * step) / 12),
+                        y: Math.round(from.y + ((to.y - from.y) * step) / 12),
+                        button: "left",
+                        buttons: 1,
+                    });
+                    await sleep(40);
+                }
+                await cdp.send("Input.dispatchMouseEvent", { type: "mouseReleased", ...to, button: "left", buttons: 0 });
                 await sleep(400);
             }
             await cdp.send("Input.dispatchMouseEvent", {

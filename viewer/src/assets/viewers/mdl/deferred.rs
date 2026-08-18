@@ -20,9 +20,25 @@ const GBUFFER: [u32; 5] = [
 ];
 const DEPTH: u32 = 0x2c8f_f4b0;
 const VIEW_POSITION: u32 = 0xbc61_5663;
+/// The same buffer under the name water and river know it by.
+const WATER_VIEW_POSITION: u32 = 0x34a0_4363;
+/// What water reads for whatever stands behind it, which is the frame as the lighting left it.
+const REFRACTION: u32 = 0xa38e_45e1;
 const LIGHT_DIFFUSE: u32 = 0x23d0_f850;
 const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
 const OCCLUSION: u32 = 0x3266_7bd7;
+/// What the lighting reads a shadow through. Not the same as the occlusion above: shadows and
+/// ambient occlusion are separate consumers and the lighting package declares both.
+const SHADOW_MASK: u32 = 0x8187_d13f;
+/// The sun's own depth map, which the resolve compares a pixel against.
+const SHADOW_DEPTH: u32 = 0x58ad_2b38;
+/// The table the subsurface blur reads its taps out of. The engine builds it per frame and no file
+/// states one, so what ships here is the table read whole off a frame the game drew: 32 taps by 64
+/// rows, `.xyz` a weight per channel and `.w` the offset.
+const SUBSURFACE_KERNEL: u32 = 0x3b44_510e;
+const SUBSURFACE: &[u8] = include_bytes!("subsurface.bin");
+const SUBSURFACE_TAPS: i32 = 32;
+const SUBSURFACE_ROWS: i32 = 64;
 const ATTENUATION: u32 = 0x008c_d1ca;
 
 /// The frame as the composite left it, which is what a semitransparent pass blends over.
@@ -60,7 +76,20 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 6] = [
+pub const ENGINE: [(u32, &str, u32); 8] = [
+    // The two tiled arrays a background surface lays over its own textures up close, which its
+    // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
+    // finer, however near the camera stands.
+    (
+        0xc8b8_827e,
+        "bgcommon/nature/detail/texture/detail_n_array.tex",
+        glow::LINEAR,
+    ),
+    (
+        0x9f68_44e2,
+        "bgcommon/nature/detail/texture/detail_d_array.tex",
+        glow::LINEAR,
+    ),
     (
         0x92f0_3e53,
         "chara/common/texture/tile_norm_array.tex",
@@ -94,8 +123,24 @@ pub const GRADING: (u32, &str, u32) = (
     glow::LINEAR,
 );
 
-/// Where the grading pass is linked, past the slots the lighting and the composite take.
-const POST: usize = 5;
+/// Where the passes past the lighting are linked. The lighting and the composite take nought to
+/// five, the smoothing and the occlusion six to ten, and each of these is one program of its own:
+/// two sharing a slot would relink both every frame.
+const POST: usize = 11;
+const SKY: usize = 12;
+const EXPOSURE: usize = 13;
+/// How wide the sun's own depth map is drawn. One square, since one cascade covers the frame.
+const SHADOW: i32 = program::SHADOW_MAP;
+
+const FOG: usize = 19;
+const CLOUD: usize = 20;
+const SHADE: usize = 21;
+const SCATTER: usize = 22;
+
+/// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
+/// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
+/// factor.
+const OVERHEAD_SCALE: i32 = 4;
 
 /// Channels of the G-buffer, which is what its pages add up to however many a context can write at
 /// once, and the channel past the last of them: the frame the composite resolved.
@@ -117,9 +162,16 @@ const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 /// leaves the term it drives where it was. `g_SamplerToneMapLut` divides the resolved color, so the
 /// flat stand-in would double every pixel; a fog weight of nought keeps the color it mixes toward
 /// out of the frame entirely.
-const NEUTRAL: [(u32, [u8; 4]); 2] = [
+///
+/// The last two are what the shadowed lighting reads beside its mask, and they are neutral at
+/// opposite ends: a cloud shadow multiplies, so nothing overhead is white, while caustics are light
+/// added by water, so none of it is black. The flat grey every unnamed sampler otherwise answers
+/// with is half a cloud shadow over the whole zone and half a pool's worth of light on top of it.
+const NEUTRAL: [(u32, [u8; 4]); 4] = [
     (0x342f_2734, [255, 255, 255, 255]),
     (0x6e23_1669, [0, 0, 0, 0]),
+    (0xb821_f0d3, [255, 255, 255, 255]),
+    (0x0efb_24f7, [0, 0, 0, 0]),
 ];
 
 /// What a buffer nothing here fills answers with where a lighting pass wants a weight: nothing
@@ -168,6 +220,77 @@ const VOLUME: [f32; 32] = [
     1.0, 1.0, 1.0, 1.0, //
     -1.0, 1.0, 1.0, 1.0,
 ];
+/// The two meshes the engine builds for its clouds, which no file holds: a band of columns around a
+/// unit cylinder, and a sheet over a square. Both are drawn as one serpentine strip, and both take a
+/// position and a coordinate apiece.
+const BAND: (usize, usize) = (25, 5);
+const SHEET: usize = 17;
+
+/// A vertex of either: a place and where to read the cloud out of.
+const CLOUD_STRIDE: i32 = 24;
+
+/// The band as its columns and rows state it: a unit circle a column at a time, hanging from nought
+/// down to minus one, with the texture wrapped three times around it.
+fn band() -> Vec<f32> {
+    let (columns, rows) = BAND;
+    let mut out = Vec::with_capacity(columns * rows * 6);
+    for row in 0..rows {
+        for column in 0..columns {
+            let turn = std::f32::consts::TAU * column as f32 / (columns - 1) as f32;
+            let height = -(row as f32) / (rows - 1) as f32;
+            out.extend([turn.sin(), height, -turn.cos(), 1.0]);
+            out.extend([
+                3.0 * column as f32 / (columns - 1) as f32,
+                row as f32 / (rows - 1) as f32,
+            ]);
+        }
+    }
+    out
+}
+
+/// The sheet the same way: a square whose points crowd toward the middle, bent down at the edges by
+/// the square of how far out they stand, which is what carries it below the horizon at range.
+fn sheet() -> Vec<f32> {
+    let mut out = Vec::with_capacity(SHEET * SHEET * 6);
+    let at = |step: usize| {
+        let held = (step as f32 - (SHEET / 2) as f32) / (SHEET / 2) as f32;
+        held.signum() * held * held
+    };
+    for row in 0..SHEET {
+        for column in 0..SHEET {
+            let (x, z) = (at(SHEET - 1 - column), at(row));
+            out.extend([x, -(x * x + z * z), z, 1.0]);
+            out.extend([-x, z]);
+        }
+    }
+    out
+}
+
+/// One strip over a grid that many columns wide, turning at the ends rather than restarting: a band
+/// runs one way, the next runs back, and the column they share stands on the axis so the triangle
+/// that turns between them has no area.
+fn strip(columns: usize, rows: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    let at = |row: usize, column: usize| (row * columns + column) as u16;
+    for row in 0..rows - 1 {
+        let forward = row % 2 == 0;
+        for step in 0..columns {
+            let column = match forward {
+                true => step,
+                false => columns - 1 - step,
+            };
+            // Every band but the first starts where the one before it stopped, and needs only the
+            // one point that carries the strip down a row.
+            if row > 0 && step == 0 {
+                out.push(at(row + 1, column));
+                continue;
+            }
+            out.extend([at(row, column), at(row + 1, column)]);
+        }
+    }
+    out
+}
+
 const VOLUME_FACES: [u16; 36] = [
     0, 2, 1, 0, 3, 2, // back
     4, 5, 6, 4, 6, 7, // front
@@ -190,6 +313,58 @@ enum Over {
     /// A pass of the occlusion chain, which is drawn over a fraction of the frame rather than the
     /// whole of it.
     Fraction,
+    /// A pass of the exposure chain, which halves what it reads until one texel holds the frame, so
+    /// each stands over a size of its own and reads what the one before it left.
+    Exposing((i32, i32), Reads),
+    /// A pass drawn over the whole of a target smaller than the frame.
+    Sized((i32, i32)),
+    /// The fog, which reads the frame's own depth, the sky on its plane, and the table it takes the
+    /// curve out of.
+    Fogging(Fogged),
+    /// One of the cloud meshes, over the strip it is drawn as and against the sheet it reads.
+    Clouding(Clouded),
+    /// The skin blur, which walks the diffuse light around a pixel and writes the same buffer, so
+    /// what it reads is a copy taken before it ran.
+    Scattering(glow::Texture),
+}
+
+/// One cloud mesh as the card holds it, and what it is drawn with.
+#[derive(Clone, Copy)]
+struct Clouded {
+    layout: glow::VertexArray,
+    indices: i32,
+    texture: glow::Texture,
+}
+
+/// Which of the passes a zone runs over and above the lighting actually drew this frame. A picture
+/// alone cannot say whether a weather that states no clouds drew none or the draw quietly failed, so
+/// the graph says which of them it ran.
+#[derive(Clone, Copy, Default)]
+pub struct Drawn {
+    pub sky: bool,
+    pub fog: bool,
+    /// Whether the sun's own depth was drawn and resolved into a mask this frame.
+    pub shadow: bool,
+    /// The horizon band and the overhead sheet, in that order.
+    pub clouds: [bool; 2],
+}
+
+/// What the fog pass reads, by the names its file gives them.
+#[derive(Clone, Copy)]
+struct Fogged {
+    depth: glow::Texture,
+    sky: glow::Texture,
+    table: glow::Texture,
+}
+
+/// What a pass of the exposure chain reads, by the names its file gives them: the frame, the measure
+/// the halvings leave, and the exposure the adaptation carries. Each pass takes one or two of the
+/// three, and one nothing fills is a pass reading a buffer nothing wrote.
+#[derive(Clone, Copy, Default)]
+struct Reads {
+    input: Option<glow::Texture>,
+    measure: Option<glow::Texture>,
+    adapted: Option<glow::Texture>,
 }
 
 const PRESENT_VERTEX: &str = include_str!("present.vert");
@@ -241,8 +416,16 @@ pub struct Lighting {
     pub point: std::sync::Arc<program::Program>,
     /// Absent until a zone's own spot package has arrived, and always where nothing places a spot.
     pub spot: Option<std::sync::Arc<program::Program>>,
+    /// The same for the two kinds a zone places besides those, each drawn over its own volume.
+    pub line: Option<std::sync::Arc<program::Program>>,
+    pub plane: Option<std::sync::Arc<program::Program>>,
     /// The same for fur, which only a surface whose own record states a length has any of.
     pub fur: Option<std::sync::Arc<program::Program>>,
+    /// What softens the light inside skin, which only a surface the type table marks has any of.
+    pub subsurface: Option<std::sync::Arc<program::Program>>,
+    /// What turns the sun's own depth into how much of it reaches each pixel. Absent until the
+    /// package arrives, and the frame lights unshadowed until it does.
+    pub shadow: Option<std::sync::Arc<program::Program>>,
     pub composite: std::sync::Arc<program::Program>,
 }
 
@@ -250,6 +433,17 @@ pub struct Lighting {
 pub struct Smoothing {
     pub luma: std::sync::Arc<program::Program>,
     pub fxaa: std::sync::Arc<program::Program>,
+}
+
+/// The chain that works out how bright the frame turned out and reads it back through a curve, in
+/// the order it runs.
+pub struct Exposure {
+    pub initial: std::sync::Arc<program::Program>,
+    pub iterative: std::sync::Arc<program::Program>,
+    pub last: std::sync::Arc<program::Program>,
+    pub adapt: std::sync::Arc<program::Program>,
+    pub curve: std::sync::Arc<program::Program>,
+    pub tone: std::sync::Arc<program::Program>,
 }
 
 /// The chain that works out how much of the sky reaches each pixel, in the order it runs.
@@ -291,6 +485,21 @@ pub struct Buffers {
     position: Option<(glow::Framebuffer, glow::Texture)>,
     light: Option<(glow::Framebuffer, [glow::Texture; 2])>,
     lit: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The same color, over a copy of the depth rather than the depth itself: a pass that reads the
+    /// depth back as a texture cannot write through a framebuffer that same texture is attached to.
+    bare: Option<glow::Framebuffer>,
+    cutoff: Option<glow::Texture>,
+    /// The depth the scene leaves as the sun sees it, which a shadow is tested against. One cascade:
+    /// the resolve shader takes a single matrix and has no cascade index at all, so the count is a
+    /// property of how many times the engine draws, not of what the shader can read.
+    shadow: Option<(glow::Framebuffer, glow::Texture)>,
+    /// What the resolve leaves for the lighting: one channel, one where the sun reaches.
+    mask: Option<(glow::Framebuffer, glow::Texture)>,
+    shadowing: bool,
+    /// The diffuse light as it stood before the skin blur read it, since a pass cannot read the
+    /// channel it writes, and the table of taps that blur walks.
+    scattered: Option<glow::Texture>,
+    kernel: Option<glow::Texture>,
     /// What the composite left, kept apart from the frame a semitransparent pass writes: that pass
     /// reads the one and writes the other, and a texture cannot be both at once.
     resolved: Option<glow::Texture>,
@@ -310,6 +519,27 @@ pub struct Buffers {
     /// Whether that chain ran this frame. Every pass reads the flat stand-in until it has, and again
     /// from the frame the viewer stops asking for it.
     occluding: bool,
+    /// The exposure chain's buffers: the frame halved until one texel holds it, the pair the
+    /// adaptation carries the answer between, and the curve the tone pass reads the frame through.
+    /// The pair is two rather than one because the adaptation reads the frame before it and cannot
+    /// sample the texture it is writing.
+    luminance: Vec<((i32, i32), glow::Framebuffer, glow::Texture)>,
+    adapted: Option<[(glow::Framebuffer, glow::Texture); 2]>,
+    /// Which of the pair the last frame wrote, which is the one this frame reads.
+    adaptation: usize,
+    /// What that one holds, read back because two passes take the exposure as a constant rather than
+    /// as the texture the rest of the chain carries it in. Read a frame after it was written, which
+    /// is the lag the game runs with anyway.
+    exposed: f32,
+    measured: f32,
+    curve: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The sky on a plane of its own, drawn over the whole of it rather than only where the frame
+    /// left a hole: the fog fades a distant pixel toward the sky in that direction, which is not the
+    /// direction anything happens to have left uncovered.
+    overhead: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The table the fog reads its curve out of, and the numbers it was built from, so a weather or
+    /// an hour that has not moved keeps it.
+    haze: Option<(glow::Texture, program::Fog)>,
     size: (i32, i32),
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
@@ -328,17 +558,42 @@ pub struct Buffers {
     sky: Option<([glam::Vec4; 3], f32)>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
     volume: Option<(glow::VertexArray, glow::Buffer, glow::Buffer)>,
+    /// The two meshes the clouds are drawn over, in the order the passes take them: the band first,
+    /// then the sheet. Built once, since neither depends on the frame.
+    strips: [Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>; 2],
+    /// The texture each draws, under the file it came from so a weather that has not moved keeps it.
+    sheets: [Option<(String, glow::Texture)>; 2],
     resolvers: BTreeMap<usize, Linked>,
     present: Option<glow::Program>,
     blocks: Vec<glow::Buffer>,
     /// Whether the graph has already brought the frame into the range a screen holds, which is what
     /// keeps the pass that puts it up from bending it a second time.
     toned: bool,
+    /// Which of the optional passes ran over the frame, cleared as the lighting starts again.
+    drawn: Drawn,
+    /// Whether a sky stands behind the frame. The pass that puts one up drops the pixels nothing
+    /// drew at, since those belong to the widget rather than to the frame; once a sky has filled
+    /// them they are the frame's, and dropping them throws the sky away.
+    covered: bool,
 }
 
 impl Buffers {
     pub fn size(&self) -> (i32, i32) {
         self.size
+    }
+
+    /// The exposure the chain settled on, which is a reading of the frame rather than of any file.
+    /// Which of the optional passes ran over the last frame.
+    pub fn drawn(&self) -> Drawn {
+        self.drawn
+    }
+
+    pub fn measured(&self) -> f32 {
+        self.measured
+    }
+
+    pub fn exposed(&self) -> f32 {
+        self.exposed
     }
 
     /// How much of the G-buffer one pass can write. Four until a frame has asked the context, since
@@ -414,6 +669,9 @@ impl Buffers {
             sampler(gl, program, "u_depth", 1, depth);
             if let Some(location) = gl.get_uniform_location(program, "u_tone") {
                 gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && !self.toned));
+            }
+            if let Some(location) = gl.get_uniform_location(program, "u_cover") {
+                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && self.covered));
             }
             gl.bind_vertex_array(Some(layout));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -523,6 +781,17 @@ impl Buffers {
         dead.extend(self.depth.take().map(Dead::Texture));
         dead.extend(self.resolved.take().map(Dead::Texture));
         dead.extend(self.frames.drain(..).map(Dead::Frame));
+        dead.extend(self.bare.take().map(Dead::Frame));
+        dead.extend(self.cutoff.take().map(Dead::Texture));
+        if let Some((frame, held)) = self.shadow.take() {
+            dead.push(Dead::Frame(frame));
+            dead.push(Dead::Texture(held));
+        }
+        if let Some((frame, held)) = self.mask.take() {
+            dead.push(Dead::Frame(frame));
+            dead.push(Dead::Texture(held));
+        }
+        dead.extend(self.scattered.take().map(Dead::Texture));
         for (frame, textures) in [
             self.position
                 .take()
@@ -542,9 +811,20 @@ impl Buffers {
             self.occluded
                 .take()
                 .map(|(frame, held)| (frame, vec![held])),
+            self.curve.take().map(|(frame, held)| (frame, vec![held])),
+            self.overhead
+                .take()
+                .map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()
+        .chain(
+            self.luminance
+                .drain(..)
+                .map(|(_, frame, held)| (frame, held))
+                .chain(self.adapted.take().into_iter().flatten())
+                .map(|(frame, held)| (frame, vec![held])),
+        )
         {
             dead.push(Dead::Frame(frame));
             dead.extend(textures.into_iter().map(Dead::Texture));
@@ -615,6 +895,57 @@ impl Buffers {
             // test put to it.
             let lit = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
             self.lit = Some((frame_of(gl, &[lit], Some(depth))?, lit));
+            // The same frame again, over a copy of that depth rather than the depth itself: the fog
+            // samples the one the G-buffer left, and a texture cannot be read and drawn into at
+            // once. The copy is what the pass tests against, so it is blitted in before the draw.
+            let cutoff = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(cutoff));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::DEPTH_COMPONENT24 as i32,
+                size.0,
+                size.1,
+                0,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_INT,
+                glow::PixelUnpackData::Slice(None),
+            );
+            point(gl);
+            self.cutoff = Some(cutoff);
+            self.bare = Some(frame_of(gl, &[lit], Some(cutoff))?);
+            let shadow = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(shadow));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::DEPTH_COMPONENT24 as i32,
+                SHADOW,
+                SHADOW,
+                0,
+                glow::DEPTH_COMPONENT,
+                glow::UNSIGNED_INT,
+                glow::PixelUnpackData::Slice(None),
+            );
+            // Compared rather than sampled, and off the edge of the map a pixel is lit: the game's
+            // own sampler is LESS_OR_EQUAL, LINEAR and clamped.
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_COMPARE_MODE,
+                glow::COMPARE_REF_TO_TEXTURE as i32,
+            );
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_COMPARE_FUNC,
+                glow::LEQUAL as i32,
+            );
+            self.shadow = Some((frame_of(gl, &[], Some(shadow))?, shadow));
+            let mask = plane(gl, size, glow::R8, glow::RED, glow::UNSIGNED_BYTE)?;
+            self.mask = Some((frame_of(gl, &[mask], None)?, mask));
             self.resolved = Some(plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?);
             // The channel the fur pass answers into is one of the G-buffer's own, reached through a
             // framebuffer of its own so a pass writing one channel does not have to name a page.
@@ -639,6 +970,53 @@ impl Buffers {
             let occluded = plane(gl, held, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
             smooth(gl, occluded);
             self.occluded = Some((frame_of(gl, &[occluded], None)?, occluded));
+
+            // One channel at whole-float width: what the halving accumulates is the reciprocal of a
+            // luminance, which runs far past what a byte or a half holds once a pixel is dark.
+            let mut level = ((size.0 / 2).max(1), (size.1 / 2).max(1));
+            loop {
+                let held = plane(gl, level, glow::R32F, glow::RED, glow::FLOAT)?;
+                self.luminance
+                    .push((level, frame_of(gl, &[held], None)?, held));
+                if level == (1, 1) {
+                    break;
+                }
+                level = ((level.0 / 2).max(1), (level.1 / 2).max(1));
+            }
+            // Four channels rather than the one the pass writes: the exposure is read back off this
+            // to fill the two buffers that hold it, and reading a plane back a channel at a time is
+            // not something a context has to accept.
+            let (first, second) = (
+                plane(gl, (1, 1), glow::RGBA32F, glow::RGBA, glow::FLOAT)?,
+                plane(gl, (1, 1), glow::RGBA32F, glow::RGBA, glow::FLOAT)?,
+            );
+            let pair = [
+                (frame_of(gl, &[first], None)?, first),
+                (frame_of(gl, &[second], None)?, second),
+            ];
+            // At an exposure of one rather than at nothing. The pass carries the frame before this
+            // one toward what it measures, and nought reads as a scene too dark to have been lit,
+            // which it would then climb out of over as many frames as the rate takes.
+            for (frame, _) in pair {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(frame));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.clear_color(1.0, 1.0, 1.0, 1.0);
+                gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+            self.adapted = Some(pair);
+            self.exposed = 1.0;
+            // Addressed by a coordinate the tone pass works out rather than by texel, so it reads
+            // between them.
+            let curve = plane(gl, (program::CURVE, 1), glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+            smooth(gl, curve);
+            self.curve = Some((frame_of(gl, &[curve], None)?, curve));
+
+            // Read back over the whole frame from a plane a fraction of its size, so between texels
+            // rather than at their centers.
+            let held = self.overhead();
+            let overhead = plane(gl, held, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+            smooth(gl, overhead);
+            self.overhead = Some((frame_of(gl, &[overhead], None)?, overhead));
         }
         Ok(())
     }
@@ -647,6 +1025,12 @@ impl Buffers {
     /// that fills it is named for.
     fn fraction(&self) -> (i32, i32) {
         let held = program::OCCLUSION_SCALE;
+        ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
+    }
+
+    /// What the sky is drawn onto for the fog to read it back.
+    fn overhead(&self) -> (i32, i32) {
+        let held = OVERHEAD_SCALE;
         ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
     }
 
@@ -689,12 +1073,7 @@ impl Buffers {
             .and_then(|texture| self.supplied(texture.kind, GRADING.0))
             .ok_or("the grading table has not arrived")?;
         let source = self.resolved.ok_or("no resolved frame")?;
-        // The pass that puts a frame up drops the pixels the depth buffer says nothing drew at,
-        // which belong to egui. Here every pixel is the frame's, and the depth buffer is attached to
-        // what this draws into: sampling it would be reading a buffer it is writing.
-        let covered = self.stand_in(gl)?;
         let layout = self.screen(gl)?;
-        let shoulder = self.presenter(gl)?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
@@ -705,18 +1084,27 @@ impl Buffers {
             gl.viewport(0, 0, self.size.0, self.size.1);
         }
 
-        self.keep(gl)?;
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(lit));
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            gl.use_program(Some(shoulder));
-            sampler(gl, shoulder, "u_frame", 0, source);
-            sampler(gl, shoulder, "u_depth", 1, covered);
-            if let Some(location) = gl.get_uniform_location(shoulder, "u_tone") {
-                gl.uniform_1_i32(Some(&location), 1);
+        // Only where the game's own chain has not already done it. That chain is what this stands
+        // in for, and a frame put through both is bent twice.
+        if !self.toned {
+            // The pass that puts a frame up drops the pixels the depth buffer says nothing drew at,
+            // which belong to egui. Here every pixel is the frame's, and the depth buffer is
+            // attached to what this draws into: sampling it would be reading a buffer it is writing.
+            let covered = self.stand_in(gl)?;
+            let shoulder = self.presenter(gl)?;
+            self.keep(gl)?;
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(lit));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.use_program(Some(shoulder));
+                sampler(gl, shoulder, "u_frame", 0, source);
+                sampler(gl, shoulder, "u_depth", 1, covered);
+                if let Some(location) = gl.get_uniform_location(shoulder, "u_tone") {
+                    gl.uniform_1_i32(Some(&location), 1);
+                }
+                gl.bind_vertex_array(Some(layout));
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
-            gl.bind_vertex_array(Some(layout));
-            gl.draw_arrays(glow::TRIANGLES, 0, 3);
         }
 
         self.keep(gl)?;
@@ -802,6 +1190,513 @@ impl Buffers {
     /// occlusion on is lit against.
     pub fn unocclude(&mut self) {
         self.occluding = false;
+    }
+
+    /// How much of the sun reaches each pixel, worked out from the depth it left of its own view.
+    /// One channel, one where nothing stands between the pixel and the light, which is what a
+    /// lighting pass multiplies its own term by.
+    pub fn shade(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (into, _) = self.mask.ok_or("no shadow mask")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            // Lit, so a pixel the pass leaves alone is one the sun reaches rather than one in the
+            // dark: an unwritten mask has to read as no shadow at all.
+            gl.clear_color(1.0, 1.0, 1.0, 1.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        let drawn = self.pass(gl, SHADE, held, into, scene, Over::Screen);
+        self.shadowing = drawn.is_ok();
+        self.drawn.shadow = self.shadowing;
+        drawn
+    }
+
+    /// Leaves the lighting reading a lit mask again.
+    pub fn unshade(&mut self) {
+        self.shadowing = false;
+    }
+
+    /// The sky, drawn over whatever the frame did not cover, and again onto a plane of its own.
+    ///
+    /// Into the frame it writes no depth and tests against what the geometry left, so it lands only
+    /// where nothing drew. Run before the exposure rather than after: the measure reads the whole
+    /// frame, and a frame with a black hole where the sky belongs reads as far darker than it is.
+    ///
+    /// The plane takes the whole sky rather than the holes in the frame, because the fog fades a
+    /// distant pixel toward the sky standing behind *it*, which is a direction something already
+    /// drew over.
+    pub fn sky(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+        }
+        if let Some((frame, _)) = self.overhead {
+            let size = self.overhead();
+            self.pass(gl, SKY, held, frame, scene, Over::Sized(size))?;
+        }
+        unsafe {
+            // The quad sits at the far plane and the buffer was cleared to it, so this passes where
+            // nothing drew and nowhere else. It writes no depth, the way the game's own does.
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+        }
+        let held = self.pass(gl, SKY, held, lit, scene, Over::Screen);
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+        }
+        self.covered = true;
+        self.drawn.sky = held.is_ok();
+        held
+    }
+
+    /// One of the two cloud meshes, drawn over the sky and behind everything the frame covered.
+    ///
+    /// Premultiplied: the shader answers with its color already taken up by how much of the pixel it
+    /// covers, so what lands is added rather than mixed.
+    ///
+    /// Held at the far plane rather than at the distance the mesh really stands: the game draws its
+    /// clouds into a buffer of their own and composites that where nothing drew, and a cloud is a
+    /// backdrop rather than something at four thousand units that a mountain at six could cover.
+    /// Squashing the range says the same thing in one line.
+    pub fn cloud(
+        &mut self,
+        gl: &glow::Context,
+        at: usize,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let Some(texture) = self
+            .sheets
+            .get(at)
+            .and_then(Option::as_ref)
+            .map(|(_, held)| *held)
+        else {
+            return Ok(());
+        };
+        let (layout, _, _, indices) = self.strip(gl, at)?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_range_f32(1.0, 1.0);
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+        }
+        let drawn = self.pass(
+            gl,
+            CLOUD + at,
+            held,
+            lit,
+            scene,
+            Over::Clouding(Clouded {
+                layout,
+                indices,
+                texture,
+            }),
+        );
+        unsafe {
+            gl.depth_range_f32(0.0, 1.0);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+        }
+        if let Some(held) = self.drawn.clouds.get_mut(at) {
+            *held = drawn.is_ok();
+        }
+        drawn
+    }
+
+    /// The texture one of the cloud draws reads, taken up under the file it came from. Wrapped
+    /// rather than clamped: the band's coordinate runs three times round its own circle, and the
+    /// sheet's ten times across itself.
+    pub fn overcast(
+        &mut self,
+        gl: &glow::Context,
+        at: usize,
+        path: &str,
+        held: &Layered,
+    ) -> Result<(), String> {
+        if self.sheets[at].as_ref().is_some_and(|(from, _)| from == path) {
+            return Ok(());
+        }
+        unsafe {
+            let texture = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                held.size.0,
+                held.size.1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&held.pixels)),
+            );
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::REPEAT),
+                (glow::TEXTURE_WRAP_T, glow::REPEAT),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+            }
+            if let Some((_, stale)) = self.sheets[at].replace((path.to_owned(), texture)) {
+                graveyard().lock().unwrap().push(Dead::Texture(stale));
+            }
+        }
+        Ok(())
+    }
+
+    /// One of the cloud meshes on the card, built the first time it is drawn.
+    fn strip(
+        &mut self,
+        gl: &glow::Context,
+        at: usize,
+    ) -> Result<(glow::VertexArray, glow::Buffer, glow::Buffer, i32), String> {
+        if let Some(held) = self.strips[at] {
+            return Ok(held);
+        }
+        let (vertices, indices) = match at {
+            0 => (band(), strip(BAND.0, BAND.1)),
+            _ => (sheet(), strip(SHEET, SHEET)),
+        };
+        let held = upload_strip(gl, &vertices, &indices)?;
+        self.strips[at] = Some(held);
+        Ok(held)
+    }
+
+    /// The frame with the weather's own fog over it: a pixel's distance addresses a table, whose two
+    /// channels say how opaque the fog is there and how far the color it mixes toward has gone from
+    /// the fog's own to the sky's. Near geometry is left alone, the middle distance is dragged toward
+    /// the fog color, and the far distance toward the sky itself.
+    ///
+    /// Before the exposure, like the sky: this is one of the things the frame's brightness is
+    /// measured over rather than something done to a frame already read back.
+    pub fn fog(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let into = self.bare.ok_or("no lit frame")?;
+        let (from, _) = self.lit.ok_or("no lit frame")?;
+        let depth = self.depth.ok_or("no depth")?;
+        let (_, sky) = self.overhead.ok_or("no sky plane")?;
+        let table = self.table(gl, scene.fog)?;
+        unsafe {
+            // Ahead of the copy: a blit is one of the few things the scissor still reaches.
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(into));
+            let (width, height) = self.size;
+            gl.blit_framebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                glow::DEPTH_BUFFER_BIT,
+                glow::NEAREST,
+            );
+            gl.disable(glow::CULL_FACE);
+            gl.depth_mask(false);
+            // The shader was built against a reversed depth and drops the pixels its own far plane
+            // holds, which here are the ones nothing was drawn into: the sky fogs itself. Keeping
+            // the quad at the far plane and letting only nearer pixels through says the same thing
+            // in state, and leaves the shader as the file wrote it.
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::GREATER);
+            gl.depth_range_f32(1.0, 1.0);
+            // The pass answers with what the pixel fades toward and how far it has gone, which is a
+            // mix rather than something added to the frame.
+            gl.enable(glow::BLEND);
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        }
+        let drawn = self.pass(
+            gl,
+            FOG,
+            held,
+            into,
+            scene,
+            Over::Fogging(Fogged { depth, sky, table }),
+        );
+        unsafe {
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LESS);
+            gl.depth_range_f32(0.0, 1.0);
+        }
+        self.drawn.fog = drawn.is_ok();
+        drawn
+    }
+
+    /// The table the fog reads its curve out of, built again where the weather or the hour has moved
+    /// it. Filtered: the pass addresses it by a distance rather than by texel.
+    /// The taps the skin blur walks, uploaded once. Filtered, since the pass addresses it by a
+    /// fraction of the kernel rather than by texel.
+    fn subsurface(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
+        if let Some(held) = self.kernel {
+            return Ok(held);
+        }
+        let held = unsafe {
+            let held = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(held));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA16F as i32,
+                SUBSURFACE_TAPS,
+                SUBSURFACE_ROWS,
+                0,
+                glow::RGBA,
+                glow::HALF_FLOAT,
+                glow::PixelUnpackData::Slice(Some(SUBSURFACE)),
+            );
+            point(gl);
+            held
+        };
+        smooth(gl, held);
+        self.kernel = Some(held);
+        Ok(held)
+    }
+
+    /// The sun's own depth of the scene, and the frame it is drawn into.
+    pub fn shadow(&self) -> Option<(glow::Framebuffer, glow::Texture)> {
+        self.shadow
+    }
+
+    /// How wide that map is, which the resolve needs to address a texel of it.
+    pub fn shadow_size(&self) -> i32 {
+        SHADOW
+    }
+
+    fn table(
+        &mut self,
+        gl: &glow::Context,
+        held: program::Fog,
+    ) -> Result<glow::Texture, String> {
+        if let Some((texture, built)) = self.haze
+            && built == held
+        {
+            return Ok(texture);
+        }
+        let texture = match self.haze {
+            Some((texture, _)) => texture,
+            None => unsafe { gl.create_texture()? },
+        };
+        unsafe {
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RG16F as i32,
+                program::FOG_TABLE,
+                1,
+                0,
+                glow::RG,
+                glow::FLOAT,
+                glow::PixelUnpackData::Slice(Some(bytemuck::cast_slice(&held.table()))),
+            );
+            point(gl);
+        }
+        smooth(gl, texture);
+        self.haze = Some((texture, held));
+        Ok(texture)
+    }
+
+    /// The exposure the chain settled on last frame, taken off the plane it was left in. Two of the
+    /// passes read it as a constant rather than as a texture, so it has to come back across; reading
+    /// it a frame late is what keeps that from waiting on the card, and is the lag the game runs
+    /// with regardless.
+    fn readback(&mut self, gl: &glow::Context) {
+        let Some(pair) = self.adapted else {
+            return;
+        };
+        let mut held = [0f32; 4];
+        unsafe {
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(pair[self.adaptation].0));
+            gl.read_buffer(glow::COLOR_ATTACHMENT0);
+            gl.read_pixels(
+                0,
+                0,
+                1,
+                1,
+                glow::RGBA,
+                glow::FLOAT,
+                glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(&mut held))),
+            );
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+        }
+        // A context that would not answer leaves the last exposure standing rather than taking the
+        // frame to nothing, and the pass clamps its own answer into the range the file states.
+        if held[0].is_finite() && held[0] > 0.0 {
+            self.exposed = held[0];
+        }
+        // What the frame actually measured, which the exposure alone cannot show once it sits on
+        // either end of the range the file states.
+        if let Some((_, from, _)) = self.luminance.last() {
+            let mut lit = [0f32; 4];
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(*from));
+                gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                gl.read_pixels(
+                    0,
+                    0,
+                    1,
+                    1,
+                    glow::RGBA,
+                    glow::FLOAT,
+                    glow::PixelPackData::Slice(Some(bytemuck::cast_slice_mut(&mut lit))),
+                );
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            }
+            if lit[0].is_finite() {
+                self.measured = lit[0];
+            }
+        }
+    }
+
+    /// How bright the frame turned out, and the frame read back through what that makes of it.
+    ///
+    /// Six passes: the frame halved until one texel holds the harmonic mean of its luminance, that
+    /// carried toward the exposure the last frame settled on, a curve built across the range the
+    /// result spans, and the frame read through it. What lands is in the range a screen holds, which
+    /// is what the passes after this one expect.
+    pub fn expose(
+        &mut self,
+        gl: &glow::Context,
+        held: &Exposure,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, frame) = self.lit.ok_or("no lit frame")?;
+        let source = self.resolved.ok_or("no resolved frame")?;
+        let pair = self.adapted.ok_or("no adaptation")?;
+        let (into, curve) = self.curve.ok_or("no tone curve")?;
+        let levels = self.luminance.clone();
+        let last = levels.len().checked_sub(1).ok_or("no measure")?;
+        self.readback(gl);
+        // The exposure the passes are run under is the chain's own rather than the caller's: it is
+        // what the card answered, and only this side of the graph knows it.
+        let scene = &program::Scene {
+            exposure: program::Exposure {
+                adapted: self.exposed,
+                ..scene.exposure
+            },
+            ..scene.clone()
+        };
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+        }
+
+        let mut read = frame;
+        for (at, (size, into, plane)) in levels.into_iter().enumerate() {
+            // The first reads the frame, the last turns the sum back into a luminance, and every one
+            // between them is the same pass over a smaller square. Those share a slot, since they
+            // share a source and a linked program is kept by what it was built from.
+            let (program, slot) = match at {
+                0 => (&held.initial, 0),
+                at if at == last => (&held.last, 2),
+                _ => (&held.iterative, 1),
+            };
+            let reads = match at {
+                0 => Reads {
+                    input: Some(read),
+                    ..Default::default()
+                },
+                _ => Reads {
+                    measure: Some(read),
+                    ..Default::default()
+                },
+            };
+            self.pass(gl, EXPOSURE + slot, program, into, scene, Over::Exposing(size, reads))?;
+            read = plane;
+        }
+
+        // Into the plane the last frame did not write, since the pass reads the one it is carrying
+        // from and a texture being written cannot also be sampled.
+        let next = 1 - self.adaptation;
+        self.pass(
+            gl,
+            EXPOSURE + 3,
+            &held.adapt,
+            pair[next].0,
+            scene,
+            Over::Exposing(
+                (1, 1),
+                Reads {
+                    measure: Some(read),
+                    adapted: Some(pair[self.adaptation].1),
+                    ..Default::default()
+                },
+            ),
+        )?;
+        self.adaptation = next;
+
+        self.pass(
+            gl,
+            EXPOSURE + 4,
+            &held.curve,
+            into,
+            scene,
+            Over::Exposing(
+                (program::CURVE, 1),
+                Reads {
+                    adapted: Some(pair[next].1),
+                    ..Default::default()
+                },
+            ),
+        )?;
+
+        // The last pass writes the frame it reads, so it reads the copy instead.
+        self.keep(gl)?;
+        self.pass(
+            gl,
+            EXPOSURE + 5,
+            &held.tone,
+            lit,
+            scene,
+            Over::Exposing(
+                self.size,
+                Reads {
+                    input: Some(source),
+                    measure: Some(curve),
+                    ..Default::default()
+                },
+            ),
+        )?;
+        self.toned = true;
+        Ok(())
     }
 
     /// The frame with its edges smoothed, which is the last thing the graph does to it.
@@ -1162,15 +2057,20 @@ impl Buffers {
                 .get(NORMAL_CHANNEL)
                 .copied()
                 .ok_or("the G-buffer has no normal channel")?,
-            VIEW_POSITION => self.position.ok_or("no view position")?.1,
+            VIEW_POSITION | WATER_VIEW_POSITION => self.position.ok_or("no view position")?.1,
             LIGHT_DIFFUSE => self.light.ok_or("no light buffer")?.1[0],
             LIGHT_SPECULAR => self.light.ok_or("no light buffer")?.1[1],
-            FINAL_COLOR | INPUT => self.resolved.ok_or("no resolved frame")?,
+            FINAL_COLOR | INPUT | REFRACTION => self.resolved.ok_or("no resolved frame")?,
             DEPTH_NORMAL_Z => self.scaled.ok_or("no scaled depth")?.1,
             GATHER_DEPTH => self.gathered.ok_or("no gathered depth")?.1[0],
             GATHER_NORMAL_Z => self.gathered.ok_or("no gathered depth")?.1[1],
             OCCLUSION if self.occluding => self.occluded.ok_or("no occlusion")?.1,
-            OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
+            SHADOW_DEPTH => self.shadow.ok_or("no shadow map")?.1,
+            SUBSURFACE_KERNEL => self.subsurface(gl)?,
+            SHADOW_MASK if self.shadowing => self.mask.ok_or("no shadow mask")?.1,
+            // White rather than the flat grey every other unfilled sampler answers with: grey here
+            // is half the frame in shadow, which is a plausible-looking wrong answer.
+            SHADOW_MASK | OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
             _ => self.stand_in(gl)?,
         })
     }
@@ -1224,6 +2124,7 @@ impl Buffers {
     ) -> Result<(), String> {
         let size = match over {
             Over::Fraction => self.fraction(),
+            Over::Exposing(size, _) | Over::Sized(size) => size,
             _ => self.size,
         };
         let source = format!("{}\n{}", held.vertex, held.fragment);
@@ -1247,6 +2148,7 @@ impl Buffers {
             }
         };
         let layout = match over {
+            Over::Clouding(held) => held.layout,
             Over::Volume => {
                 let held = match self.volume {
                     Some(held) => held,
@@ -1278,6 +2180,25 @@ impl Buffers {
                 program::Kind::Plane => match over {
                     Over::Softening(held) if texture.id == GBUFFER[3] => held,
                     Over::Reading(held) if texture.id == INPUT => held,
+                    Over::Exposing(_, reads) => match texture.name.as_str() {
+                        program::POST_INPUT => reads.input,
+                        program::POST_MEASURE => reads.measure,
+                        program::POST_ADAPTED => reads.adapted,
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        format!("the exposure chain reads {}, which nothing fills", texture.name)
+                    })?,
+                    Over::Scattering(held) if texture.id == LIGHT_DIFFUSE => held,
+                    Over::Fogging(reads) => match texture.name.as_str() {
+                        program::FOG_DEPTH => reads.depth,
+                        program::FOG_SKY => reads.sky,
+                        program::FOG_LUT => reads.table,
+                        _ => self.engine(gl, texture.id)?,
+                    },
+                    // Both meshes read one sampler under the same name, so which sheet is bound is
+                    // the draw's to say rather than the resource id's.
+                    Over::Clouding(held) => held.texture,
                     _ => self.engine(gl, texture.id)?,
                 },
                 kind => self.absent(gl, kind, texture.id)?,
@@ -1316,6 +2237,9 @@ impl Buffers {
                     glow::UNSIGNED_SHORT,
                     0,
                 ),
+                Over::Clouding(held) => {
+                    gl.draw_elements(glow::TRIANGLE_STRIP, held.indices, glow::UNSIGNED_SHORT, 0)
+                }
                 _ => gl.draw_arrays(glow::TRIANGLES, 0, 3),
             }
             gl.bind_vertex_array(None);
@@ -1333,10 +2257,17 @@ impl Buffers {
         scene: &program::Scene,
         lamps: &[program::Lamp],
     ) -> Result<(), String> {
+        // The frame starts again here, so what ran over the last one is forgotten - except the
+        // sun's own pass, which runs ahead of this one and would be forgotten before it was read.
+        self.drawn = Drawn {
+            shadow: self.shadowing,
+            ..Drawn::default()
+        };
         let (position, _) = self.position.ok_or("no view position")?;
         let (light, _) = self.light.ok_or("no light buffer")?;
         let (lit, _) = self.lit.ok_or("no lit frame")?;
         self.toned = false;
+        self.covered = false;
         self.reflect(gl, &scene.ambient)?;
         unsafe {
             // A screen-wide pass covers every pixel and reads the depth rather than testing against
@@ -1390,18 +2321,57 @@ impl Buffers {
         for lamp in lamps {
             let held = program::Scene {
                 lamp: *lamp,
-                ..*scene
+                ..scene.clone()
             };
-            let (slot, program) = match (lamp.kind, &lighting.spot) {
-                (program::LampKind::Spot, Some(spot)) => (3, spot),
-                _ => (2, &lighting.point),
+            // Each kind is one pass over a volume of its own, linked once at a slot of its own. A
+            // kind whose package has not arrived draws through the point one, which reads neither
+            // its length nor its area: a lit box rather than nothing.
+            let (slot, program) = match lamp.kind {
+                program::LampKind::Spot if lighting.spot.is_some() => (3, lighting.spot.as_ref()),
+                program::LampKind::Line if lighting.line.is_some() => (6, lighting.line.as_ref()),
+                program::LampKind::Plane if lighting.plane.is_some() => {
+                    (7, lighting.plane.as_ref())
+                }
+                _ => (2, None),
             };
+            let program = program.unwrap_or(&lighting.point);
             self.pass(gl, slot, program, light, &held, Over::Volume)?;
         }
         unsafe {
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
         };
+        // Skin scatters the light that fell on it before the composite reads it. The pass walks the
+        // diffuse channel around a pixel and writes that same channel, so what it reads is a copy
+        // taken here; it discards where the type table marks no scattering, leaving the rest as the
+        // lamps left it.
+        // The copy is made the first time something scatters rather than with the rest of the
+        // frame: a zone has no skin in it and would carry a full-size float buffer for nothing.
+        if lighting.subsurface.is_some() && self.scattered.is_none() {
+            self.scattered = Some(plane(
+                gl,
+                self.size,
+                glow::RGBA16F,
+                glow::RGBA,
+                glow::FLOAT,
+            )?);
+        }
+        if let Some(held) = &lighting.subsurface
+            && let Some(scattered) = self.scattered
+        {
+            unsafe {
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(light));
+                gl.read_buffer(glow::COLOR_ATTACHMENT0);
+                gl.active_texture(glow::TEXTURE0);
+                gl.bind_texture(glow::TEXTURE_2D, Some(scattered));
+                gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, self.size.0, self.size.1);
+                gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(light));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            }
+            let held = held.clone();
+            self.pass(gl, SCATTER, &held, light, scene, Over::Scattering(scattered))?;
+        }
         self.pass(gl, 4, &lighting.composite, lit, scene, Over::Screen)
     }
 }
@@ -1417,6 +2387,7 @@ impl Drop for Buffers {
                 self.reflection.take(),
                 self.resolved.take(),
                 self.depth.take(),
+                self.haze.take().map(|(held, _)| held),
             ]
             .into_iter()
             .flatten()
@@ -1430,6 +2401,17 @@ impl Drop for Buffers {
             .map(Dead::Texture),
         );
         dead.extend(self.frames.drain(..).map(Dead::Frame));
+        dead.extend(self.bare.take().map(Dead::Frame));
+        dead.extend(self.cutoff.take().map(Dead::Texture));
+        if let Some((frame, held)) = self.shadow.take() {
+            dead.push(Dead::Frame(frame));
+            dead.push(Dead::Texture(held));
+        }
+        if let Some((frame, held)) = self.mask.take() {
+            dead.push(Dead::Frame(frame));
+            dead.push(Dead::Texture(held));
+        }
+        dead.extend(self.scattered.take().map(Dead::Texture));
         for (frame, textures) in [
             self.position
                 .take()
@@ -1449,6 +2431,9 @@ impl Drop for Buffers {
             self.occluded
                 .take()
                 .map(|(frame, held)| (frame, vec![held])),
+            self.overhead
+                .take()
+                .map(|(frame, held)| (frame, vec![held])),
         ]
         .into_iter()
         .flatten()
@@ -1465,6 +2450,17 @@ impl Drop for Buffers {
             dead.push(Dead::Buffer(held));
             dead.push(Dead::Buffer(faces));
         }
+        for (layout, held, faces, _) in self.strips.iter_mut().filter_map(Option::take) {
+            dead.push(Dead::Layout(layout));
+            dead.push(Dead::Buffer(held));
+            dead.push(Dead::Buffer(faces));
+        }
+        dead.extend(
+            self.sheets
+                .iter_mut()
+                .filter_map(Option::take)
+                .map(|(_, held)| Dead::Texture(held)),
+        );
         dead.extend(self.blocks.drain(..).map(Dead::Buffer));
         dead.extend(self.present.take().map(Dead::Program));
         dead.extend(
@@ -1676,6 +2672,40 @@ fn upload_screen(gl: &glow::Context) -> Result<(glow::VertexArray, glow::Buffer)
     }
 }
 
+/// One cloud mesh on the card, with its own vertex array: a place and a coordinate a vertex, which
+/// is what the cloud package's own signature asks for and nothing else.
+fn upload_strip(
+    gl: &glow::Context,
+    vertices: &[f32],
+    indices: &[u16],
+) -> Result<(glow::VertexArray, glow::Buffer, glow::Buffer, i32), String> {
+    unsafe {
+        let layout = gl.create_vertex_array()?;
+        gl.bind_vertex_array(Some(layout));
+        let held = gl.create_buffer()?;
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(held));
+        gl.buffer_data_u8_slice(
+            glow::ARRAY_BUFFER,
+            bytemuck::cast_slice(vertices),
+            glow::STATIC_DRAW,
+        );
+        for (location, lanes, offset) in [(0, 4, 0), (1, 2, 16)] {
+            gl.enable_vertex_attrib_array(location);
+            gl.vertex_attrib_pointer_f32(location, lanes, glow::FLOAT, false, CLOUD_STRIDE, offset);
+        }
+        let faces = gl.create_buffer()?;
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(faces));
+        gl.buffer_data_u8_slice(
+            glow::ELEMENT_ARRAY_BUFFER,
+            bytemuck::cast_slice(indices),
+            glow::STATIC_DRAW,
+        );
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        Ok((layout, held, faces, indices.len() as i32))
+    }
+}
+
 fn upload_volume(
     gl: &glow::Context,
 ) -> Result<(glow::VertexArray, glow::Buffer, glow::Buffer), String> {
@@ -1800,5 +2830,51 @@ pub fn build_pair(
             return Err(why);
         }
         Ok(program)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{BAND, SHEET, band, sheet, strip};
+
+    /// Both meshes and both strips, against what the buffers a capture of the running game bound
+    /// hold. The engine builds these rather than reading them out of a file, so the counts and the
+    /// order are the whole statement of what they are.
+    #[test]
+    fn the_cloud_meshes_come_out_as_the_game_built_them() {
+        let held = band();
+        assert_eq!(held.len(), BAND.0 * BAND.1 * 6);
+        // A unit circle a column at a time, with the last column back on the first.
+        let point = |at: usize| &held[at * 6..at * 6 + 6];
+        assert_eq!(point(0), [0.0, 0.0, -1.0, 1.0, 0.0, 0.0]);
+        let seam = point(BAND.0 - 1);
+        assert!(seam[0].abs() < 1e-6 && (seam[2] + 1.0).abs() < 1e-6);
+        // The texture wraps three times around it and once from top to bottom.
+        assert_eq!(seam[4], 3.0);
+        assert_eq!(point(BAND.0 * (BAND.1 - 1))[1], -1.0);
+
+        let held = sheet();
+        assert_eq!(held.len(), SHEET * SHEET * 6);
+        let point = |at: usize| &held[at * 6..at * 6 + 6];
+        // A square whose points crowd toward the middle, bent down by the square of how far out
+        // they stand, and read at a coordinate that runs the other way across.
+        assert_eq!(point(0)[0], 1.0);
+        assert_eq!(point(SHEET - 1)[0], -1.0);
+        assert_eq!(point(SHEET / 2)[0], 0.0);
+        assert_eq!(point(1)[0], 0.765_625);
+        for at in [0, SHEET / 2, SHEET * SHEET - 1] {
+            let held = point(at);
+            assert!((held[1] + held[0] * held[0] + held[2] * held[2]).abs() < 1e-6);
+            assert_eq!([held[4], held[5]], [-held[0], held[2]]);
+        }
+
+        // One strip apiece, turning at the ends rather than restarting.
+        assert_eq!(strip(BAND.0, BAND.1).len(), 197);
+        assert_eq!(strip(SHEET, SHEET).len(), 529);
+        assert_eq!(strip(BAND.0, BAND.1)[..4], [0, 25, 1, 26]);
+        assert_eq!(strip(SHEET, SHEET)[..4], [0, 17, 1, 18]);
+        // The turn goes down a row at the column the band stopped on, which stands on the axis, so
+        // the triangle that turns between them has no area.
+        assert_eq!(strip(BAND.0, BAND.1)[48..52], [24, 49, 74, 48]);
     }
 }

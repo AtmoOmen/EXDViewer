@@ -18,7 +18,7 @@ use super::grid::{Grid, Ground};
 use super::material::Family;
 use super::{Vertex, program};
 
-pub use super::deferred::{Dead, LIT, Lighting, Occlusion, Smoothing, bury, graveyard};
+pub use super::deferred::{Dead, Exposure, LIT, Lighting, Occlusion, Smoothing, bury, graveyard};
 
 /// Attribute locations, in the order [`Vertex`] stores them.
 const ATTRIBUTES: [(u32, i32, i32); 4] = [(0, 3, 0), (1, 3, 12), (2, 4, 24), (3, 2, 56)];
@@ -76,6 +76,9 @@ pub struct Shaded {
     pub buffer: Vec<Arc<program::Program>>,
     /// The depth pass, which runs first so the buffer pass shades nothing it covers.
     pub depth: Option<Arc<program::Program>>,
+    /// The same geometry as the light sees it, which is the depth a shadow is tested against. The
+    /// package answers this under a subview of its own rather than as a pass of the main one.
+    pub shadow: Option<Arc<program::Program>>,
     /// What the material resolves itself into the frame with, drawn as its own geometry over what
     /// the lighting left. A semitransparent package has only this: it writes no G-buffer at all,
     /// and what it blends over is the frame the composite already resolved.
@@ -616,7 +619,7 @@ impl Game {
         // has nothing else to turn a fragment into a texel with.
         let scene = program::Scene {
             size: (size.0 as f32, size.1 as f32),
-            ..frame.scene
+            ..frame.scene.clone()
         };
         self.palettes(gl, &frame.joints, scene.view * scene.model)?;
 
@@ -773,6 +776,11 @@ impl Game {
                     }
                     false => gl.disable(glow::BLEND),
                 }
+            }
+            // Water reads whatever stands behind it out of the frame it is about to write, so the
+            // copy is taken once before the leg rather than between its draws.
+            if !behind {
+                self.buffers.keep(gl)?;
             }
             for at in held {
                 if behind {

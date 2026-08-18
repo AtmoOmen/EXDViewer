@@ -24,8 +24,17 @@ const PASS_Z_OPAQUE: u32 = 0xe412_a2d4;
 const PASS_LIGHTING_OPAQUE: u32 = 0xfbde_0a8f;
 const PASS_COMPOSITE_OPAQUE: u32 = 0x955c_0b73;
 const PASS_COMPOSITE_SEMITRANSPARENCY: u32 = 0xc885_bbd3;
-/// The one furblur marches along a strand at. Its other pass is a plain four-tap square.
-const PASS_FUR: u32 = 0x5bc1_ad3f;
+/// What a surface that lights itself answers into the frame with. Water resolves through this rather
+/// than through the composite pass a glass package takes.
+const PASS_LIGHTING_SEMITRANSPARENCY: u32 = 0x1f19_7698;
+const PASS_WATER: u32 = 0x8ef4_0d56;
+
+/// Which way a leaf leans at the far end of one sway, in world units. No file found states a wind,
+/// so this is a reach and a heading rather than a reading.
+pub const WIND: Vec3 = Vec3::new(0.24, 0.0, 0.1);
+/// The pass with no name of its own, which two packages use for the one thing each of them does:
+/// furblur marches along a strand at it, and every cloud node holds it and nothing else.
+const PASS_7: u32 = 0x5bc1_ad3f;
 
 /// The render pass a node is selected under. Holding everything else fixed, a drawing package
 /// answers `SUB_VIEW_SHADOW_0` with its depth pass alone, which is what a shadow map is.
@@ -41,17 +50,87 @@ pub const VIEW_POSITION: &str = "shader/sm5/shpk/createviewposition.shpk";
 pub const DIRECTIONAL: &str = "shader/sm5/shpk/directionallighting.shpk";
 pub const POINT: &str = "shader/sm5/shpk/pointlighting.shpk";
 pub const SPOT: &str = "shader/sm5/shpk/spotlighting.shpk";
+pub const LINE: &str = "shader/sm5/shpk/linelighting.shpk";
+pub const PLANE: &str = "shader/sm5/shpk/planelighting.shpk";
+pub const SHADOW: &str = "shader/sm5/shpk/directionalshadow.shpk";
 pub const COMPOSITE: &str = "shader/sm5/shpk/bg_composite.shpk";
 /// Softens the surface a strand grows out of, between the G-buffer and the light it is read under.
 pub const FUR: &str = "shader/sm5/shpk/furblur.shpk";
+pub const SCATTER: &str = "shader/sm5/shpk/subsurfaceblur.shpk";
 
-/// The members of the game's post chain the viewer runs. The first reads a table a file holds, where
-/// the exposure and the tone curve before it are targets the engine builds a frame at a time off
-/// constants no file states. The other two smooth the frame's edges, in the order they run: one
-/// writes each pixel's brightness into the alpha the next reads its edges off.
+/// The members of the game's post chain the viewer runs. The first reads a table a file holds. The
+/// other two smooth the frame's edges, in the order they run: one writes each pixel's brightness
+/// into the alpha the next reads its edges off.
 pub const TONE_ADJUST: &str = "shader/sm5/posteffect/ToneAdjust.shcd";
 pub const FXAA_LUMA: &str = "shader/sm5/posteffect/FXAALuma.shcd";
 pub const FXAA: &str = "shader/sm5/posteffect/FXAA.shcd";
+
+/// How bright the frame turned out and what that does to it. The first three halve the frame down
+/// to one texel, accumulating the reciprocal of each tap's luminance, so what lands is a harmonic
+/// mean; the fourth carries that toward the last frame's rather than jumping to it; the fifth builds
+/// the curve as a 1024-wide strip; the last reads the frame through it.
+pub const MEASURE_INITIAL: &str = "shader/sm5/posteffect/MeasureLumInitial.shcd";
+pub const MEASURE_ITERATIVE: &str = "shader/sm5/posteffect/MeasureLumIterative.shcd";
+pub const MEASURE_FINAL: &str = "shader/sm5/posteffect/MeasureLumFinal.shcd";
+pub const ADAPT_LUM: &str = "shader/sm5/posteffect/AdaptLum.shcd";
+pub const TONE_MAP_LUT: &str = "shader/sm5/posteffect/ToneMapLut.shcd";
+pub const TONE_MAPPING: &str = "shader/sm5/posteffect/ToneMapping.shcd";
+
+/// The six of them, for asking after at once.
+pub const MEASURE: [&str; 6] = [
+    MEASURE_INITIAL,
+    MEASURE_ITERATIVE,
+    MEASURE_FINAL,
+    ADAPT_LUM,
+    TONE_MAP_LUT,
+    TONE_MAPPING,
+];
+
+/// Texels of the curve the tone pass reads, which the buffer states as the half-texel bounds
+/// `(0.5/1024, 1 - 0.5/1024)`.
+pub const CURVE: i32 = 1024;
+
+/// The sky, drawn over whatever the frame did not cover.
+pub const SKY: &str = "shader/sm5/posteffect/Sky.shcd";
+
+/// The volume one is read out of. A sky is a strip a few texels wide by a few dozen tall, stacked
+/// once per hour of the day, and the id picks which of them a place stands under.
+pub fn sky_texture(id: u16) -> String {
+    format!("bgcommon/nature/sky/texture/sky_{id:03}.tex")
+}
+
+/// The clouds, which the engine draws over two meshes it builds itself: a band around the horizon
+/// and a sheet overhead. One package holds both, under a technique apiece.
+pub const CLOUD: &str = "shader/sm5/shpk/cloud.shpk";
+pub const CLOUD_BAND: u32 = 0xa2f7_6b97;
+pub const CLOUD_SHEET: u32 = 0xd9d5_8038;
+
+/// The textures each draws, which the environment's cloud set names by id. A sheet of nought is a
+/// weather that draws none: no such file exists.
+pub fn cloud_texture(id: u16) -> String {
+    format!("bgcommon/nature/cloud/texture/cloud_{id:03}.tex")
+}
+
+pub fn cloudside_texture(id: u16) -> String {
+    format!("bgcommon/nature/cloud/texture/cloudside_{id:03}.tex")
+}
+
+/// The fog, which drags a distant pixel toward the color the weather states and a further one toward
+/// the sky itself, and hazes a near one by how much air stands between it and the camera.
+///
+/// The install ships this under no name: the shader category records 319 files against 318 known
+/// names, and the one left over is this. `Fog.shcd` is an older shader that runs in no frame the
+/// game draws. Named the way the asset browser shows an unnamed file, and read the same way.
+pub const FOG: &str = "shader/sm5/posteffect/e8bf3721";
+pub const FOG_DIRECTORY: &str = "shader/sm5/posteffect";
+
+/// Texels of the table it reads the curve out of, which is what its own scale and bias address.
+pub const FOG_TABLE: i32 = 256;
+
+/// What the pass reads: the frame's depth, the sky on a plane of its own, and that table.
+pub const FOG_DEPTH: &str = "sDepth";
+pub const FOG_SKY: &str = "sSky";
+pub const FOG_LUT: &str = "sLut";
 
 /// The two passes that stand between the G-buffer and the occlusion read off it: one linearizes the
 /// depth and brings the normal into view space, the other packs a square of four of those into the
@@ -78,18 +157,59 @@ pub const OCCLUDERS: [&str; 8] = [
     "20 taps, depth and normal",
 ];
 
-/// The buffer it reads, and the frame and the table it reads them through.
+/// The buffers the exposure chain reads, and the frame, the measure and the table the passes read
+/// them through. `cToneMapParam` is shared with the grading pass, which reads the same two lanes as
+/// something else entirely: `.z` as how much of its table reaches the frame, `.w` as an exponent.
 const TONE_MAP_PARAM: &str = "cToneMapParam";
+const ADAPT_LUM_PARAM: &str = "cAdaptLumParam";
+const SKY_PARAM: &str = "cSkyParam";
+const FOG_PARAM: &str = "cFogParam";
+const HEIGHT_FOG_PARAM: &str = "cExpHeightFogParam";
+const DIRECTIONAL_SHADOW_PARAM: &str = "g_DirectionalShadowParameter";
+const SHADOW_BIAS_PARAM: &str = "g_ShadowBiasParameter";
+
+/// How many taps the shadow resolve reads. One is a single comparison and shows every texel of the
+/// map as a step; nine is what softens the edge.
+pub const SHADOW_SOFT: u32 = 0xa89d_89f0;
+pub const SHADOW_SOFT_3X3: u32 = 0x9915_3ff0;
+
+/// How wide the sun's own map is drawn, which is what a texel of it measures.
+pub const SHADOW_MAP: i32 = 2048;
+const CLIP_TO_WORLD: &str = "cC2W";
+
+/// What the cloud draws read themselves against. Both are named the way any package names the two
+/// buffers its own stages take, so nothing but a cloud pass fills them this way.
+const VS_PARAM: &str = "g_VSParam";
+const PS_PARAM: &str = "g_PSParam";
+
+/// How far the sheet's texture tiles across the forty thousand units it spans, which puts one period
+/// of it every four thousand.
+const SHEET_TILING: f32 = 10.0;
+const SHEET_SPAN: f32 = 20000.0;
+const SHEET_HEIGHT: f32 = 2000.0;
+const SHEET_RISE: f32 = 1000.0;
+
+/// The radius the band stands at around the camera.
+const BAND_RADIUS: f32 = 2000.0;
+
+/// How far the view direction is carried toward straight down before a cloud is lit against it, and
+/// the alpha the sheet fades toward overhead. One number does both, and it is a single sample: only
+/// the sheet's own shaders read it, and only one frame measured holds a sheet.
+const CLOUD_FLOOR: f32 = 0.5;
+const PROJECTION_INVERSE: &str = "cProjInv";
+const VIEW_INVERSE: &str = "cViewInv";
+const COMMON_TEX_PARAM: &str = "cCommonTexParam";
 pub const POST_INPUT: &str = "sInput";
 pub const POST_TABLE: &str = "sLUT";
+pub const POST_MEASURE: &str = "sToneMap";
+pub const POST_ADAPTED: &str = "sAdaptedLum";
 
-/// What the pass takes of that buffer: `w` is the exponent the frame is raised to before the table,
-/// and `z` how much of the table's answer reaches the frame, which the pass skips entirely while it
-/// is not positive. Neither is stated anywhere: every constant buffer of the chain reports no
-/// default at all. So the exponent is left where it changes nothing, and the table is left out:
-/// three of them ship, nothing states which one binds, and the exposure and tone curve a frame
-/// would reach one through are not run here, so reading a table at full strength grades a frame it
-/// was never authored over and takes the color out of it.
+/// What the grading pass takes of that buffer. Neither lane is stated anywhere: the environment's
+/// colour filter set carries a grading beside the tone mapping one, but nothing pairs its fields
+/// with these. So the exponent is left where it changes nothing, and the table is left out: three of
+/// them ship and nothing states which one binds, so reading one at full strength grades a frame it
+/// was never authored over and takes the color out of it. Only that pass reads the buffer this way,
+/// which is why it is the only one built with it.
 const TONE_MAP: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// The buffers the smoothing pass reads. The first is the rectangle of its target the frame was
@@ -123,6 +243,22 @@ void main() {
 }
 ";
 
+/// The sky's own, which hands the fragment where it stands in clip space rather than a texture
+/// coordinate: the pass unprojects that to find which way the pixel looks. Held at the far plane, so
+/// a depth test keeps it behind everything already drawn rather than over it.
+pub const SKY_VERTEX: &str = "\
+#version 300 es
+
+layout(location = 0) in vec4 a_position;
+
+out vec2 TEXCOORD;
+
+void main() {
+\tTEXCOORD = a_position.xy;
+\tgl_Position = vec4(a_position.xy, 1.0, 1.0);
+}
+";
+
 /// The same for the gathering pass, which reads four texels of one square rather than one. The
 /// pixel's own texel goes last, since that is the lane the occlusion pass takes its center from, and
 /// the other three run round the square so that a lane and the one two along from it stand either
@@ -145,15 +281,49 @@ void main() {
 }
 ";
 
+/// The same for the passes that halve the frame, which read the four source texels one destination
+/// texel covers. The game pairs these with a `VSSampling4`, whose offsets come from a buffer no file
+/// states; a halving names its own, since the source texel is half the destination's and the four
+/// taps stand at its corners.
+pub const SAMPLING_VERTEX: &str = "\
+#version 300 es
+
+layout(location = 0) in vec4 a_position;
+
+uniform vec2 u_texel;
+
+out vec4 TEXCOORD;
+out vec4 TEXCOORD1;
+
+void main() {
+\tvec2 uv = a_position.xy * 0.5 + 0.5;
+\tvec2 step = u_texel * 0.25;
+\tTEXCOORD = vec4(uv - step, uv + vec2(step.x, -step.y));
+\tTEXCOORD1 = vec4(uv + vec2(-step.x, step.y), uv + step);
+\tgl_Position = a_position;
+}
+";
+
 /// `GetDirectionalLight`, and the value that draws a light rather than nothing. The package defaults
 /// it to `_Disable`, whose shader writes no light at all.
 const GET_DIRECTIONAL_LIGHT: u32 = 0x8115_916d;
 const GET_DIRECTIONAL_LIGHT_ENABLE: u32 = 0x51ed_d496;
+/// What the shadowed frame will want instead. Left unused until a mask exists to read: drawn with a
+/// white stand-in it comes out measurably darker than the enabled variant, and why is not yet known.
+const GET_DIRECTIONAL_LIGHT_SHADOW: u32 = 0xd73b_9e89;
+
+/// `ApplyDetailMap`, and the value that lays the tiled detail arrays over a surface. A background
+/// package defaults it to `_Disable`, which draws a wall as its own textures and nothing finer.
+const APPLY_DETAIL_MAP: u32 = 0x6313_fd87;
+const APPLY_DETAIL_MAP_ENABLE: u32 = 0x7a3d_9efd;
 
 /// `SpecularLighting`, and the value that works a specular out rather than moving nought into the
 /// target the composite reads it back from. A placed light's package defaults it to `_Disable`.
 const SPECULAR_LIGHTING: u32 = 0x0d81_2fa4;
 const SPECULAR_LIGHTING_ENABLE: u32 = 0xaba1_f498;
+
+/// Entries the array holds, which is what its own extent divides into twelve registers apiece.
+const ENTRIES: usize = 64;
 
 /// Records of `g_ShaderTypeParameter`, which `SV_Target.w` indexes as `(32 + type) / 255`.
 const SHADER_TYPES: usize = 256;
@@ -221,8 +391,14 @@ pub enum Pass {
     Lighting,
     Lamp,
     Fur,
+    CloudBand,
+    CloudSheet,
     Composite,
     CompositeBlended,
+    /// What a semitransparent surface that lights itself resolves through.
+    BlendedLighting,
+    /// What water shades itself with, reading the lit frame back rather than filling the G-buffer.
+    Water,
 }
 
 impl Pass {
@@ -232,9 +408,11 @@ impl Pass {
             Self::Buffer => PASS_G_OPAQUE,
             Self::Blended => PASS_G_SEMITRANSPARENCY,
             Self::Lighting | Self::Lamp => PASS_LIGHTING_OPAQUE,
-            Self::Fur => PASS_FUR,
+            Self::Fur | Self::CloudBand | Self::CloudSheet => PASS_7,
             Self::Composite => PASS_COMPOSITE_OPAQUE,
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
+            Self::BlendedLighting => PASS_LIGHTING_SEMITRANSPARENCY,
+            Self::Water => PASS_WATER,
         }
     }
 }
@@ -323,11 +501,15 @@ impl Default for Instance {
 }
 
 /// The shape a placed light throws, which is a package of its own reading the one `g_LightParam`
-/// differently. Every kind the game states other than a spot draws as a point.
-#[derive(Clone, Copy)]
+/// differently. A kind whose package a zone has not fetched draws as a point.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LampKind {
     Point,
     Spot,
+    /// A light with length rather than a point, and one with area: the file calls them line and
+    /// flat, and each has a package of its own that reads the same buffer differently.
+    Line,
+    Plane,
 }
 
 /// One placed light, as `g_LightParam` reads it. The box is the one a zone's `.lcb` clips the light
@@ -339,6 +521,11 @@ pub struct Lamp {
     pub placement: Mat4,
     pub min: Vec3,
     pub max: Vec3,
+    /// How far the light stays at full strength, which its own record states and the box it is
+    /// clipped against does not. The shading saturates an inverse-distance term against it, so a
+    /// light given its whole clip volume here is at full strength everywhere inside it and falls off
+    /// only over the last tenth of the way out.
+    pub range: f32,
     pub color: Vec3,
     pub kind: LampKind,
     /// Which way the light throws, in world space. Its own space points it along positive z: that
@@ -355,6 +542,7 @@ impl Default for Lamp {
             placement: Mat4::IDENTITY,
             min: Vec3::splat(-1.0),
             max: Vec3::ONE,
+            range: 1.0,
             color: Vec3::ONE,
             kind: LampKind::Point,
             direction: Vec3::Z,
@@ -378,29 +566,65 @@ impl Lamp {
     }
 }
 
+/// One volume a zone swaps its own ambient inside: the boxes a roofed part of a town is lit by
+/// rather than by the sky over it.
+///
+/// The shape codes are the file's own - an `EnvShape` is `Ellipsoid = 1`, `Cuboid = 2`,
+/// `Cylinder = 3`, and the composite tests for 1 and 3 and takes everything else as the box.
+#[derive(Clone, Copy)]
+pub struct Volume {
+    /// Takes a place in front of the camera into the volume's own space, where it stands as the unit
+    /// shape its kind names.
+    pub into: Mat4,
+    /// How sharply it takes over across each face, in units of its own half extent. The composite
+    /// weighs a pixel by this against how far into the volume it stands and drops the volume where
+    /// that reaches nought.
+    pub fade: Vec3,
+    pub shape: f32,
+    /// The light inside, which is another place's harmonics rather than the zone's own.
+    pub light: [Vec4; 3],
+    pub scale: f32,
+}
+
+impl Default for Volume {
+    fn default() -> Self {
+        Self {
+            into: Mat4::IDENTITY,
+            fade: Vec3::ONE,
+            shape: 0.0,
+            light: [Vec4::ZERO; 3],
+            scale: 1.0,
+        }
+    }
+}
+
 /// The light a place stands in, as `g_AmbientParamArray` holds one entry of it.
 ///
 /// Each set of harmonics is three rows a shader dots against a normal and a one. A zone states its
 /// own per time of day in the `.amb` its `EnvLocation` names, the sky's own come out of
-/// `skylight.amb`, and `scale` is what a zone's `.envb` calls `ambient_light_scale`. Nothing in any
-/// file states the rest of the entry.
-#[derive(Clone, Copy)]
+/// `skylight.amb`, `scale` is what a zone's `.envb` calls `ambient_light_scale` and the fade's floor
+/// what it calls `parameter_1`.
+#[derive(Clone)]
 pub struct Ambient {
     pub sky: [Vec4; 3],
     /// What the sky's harmonics are taken back up by.
     pub sky_scale: f32,
     pub light: [Vec4; 3],
     pub scale: f32,
-    /// How the ambient fades with depth: a scale, a bias and a floor.
+    /// How the ambient fades with the depth of the pixel. The composite squares `x * depth + y`
+    /// keeping its sign, then clamps that between the floor and one, so a positive ramp leaves the
+    /// ambient alone and only the floor bites.
     pub fade: Vec3,
-    /// What a reflection is scaled and biased by, and how much of it reaches the frame. A scale of
-    /// nought against a bias of one leaves the ambient where it was: the shader blends the two by
-    /// the reflection's own alpha, so a bias of nought would take the ambient with it.
+    /// What a sampled reflection is scaled and biased by, and which of the two reflected terms the
+    /// frame takes: nought the one weighed by occlusion and `3 * pi / 4`, one the term raw.
     pub reflection: Vec3,
-    /// The roughness a reflection is sampled at, which the shader offsets by a tenth.
-    pub roughness: f32,
+    /// Which cube of the reflection array a place reflects, which the composite reaches as the
+    /// slice `0.1 + this`.
+    pub capture: f32,
     /// What the ambient is mixed toward, and how far that mix reaches.
     pub haze: Vec4,
+    /// The places inside the zone that light themselves, past the one lighting the whole of it.
+    pub volumes: std::sync::Arc<[Volume]>,
 }
 
 impl Default for Ambient {
@@ -418,9 +642,10 @@ impl Default for Ambient {
             light: [Vec4::new(0.0, 0.0, 0.0, 0.12); 3],
             scale: 1.0,
             fade: Vec3::new(0.0, 1.0, 0.0),
-            reflection: Vec3::new(1.0, 0.0, 0.0),
-            roughness: 0.0,
+            reflection: Vec3::X,
+            capture: 0.0,
             haze: Vec4::W,
+            volumes: std::sync::Arc::from([] as [Volume; 0]),
         }
     }
 }
@@ -440,11 +665,18 @@ impl Ambient {
     /// against `(normal, 1)`, so the three linear terms are the first three lanes and the constant
     /// the last. What the shader does with the six second-order terms it never reads.
     pub fn row(coefficients: &[f32; 9]) -> Vec4 {
+        // Convolved with a cosine lobe rather than handed over raw. Harmonics state the light
+        // arriving from each direction; what a surface takes is that gathered over the hemisphere it
+        // faces, which weighs the constant term by `pi * Y00` and the three linear ones by
+        // `(2pi/3) * Y1m`. Handing them over unscaled leaves the ambient too dark and too flat, by
+        // these two factors and by the `2/sqrt(3)` between them.
+        const CONSTANT: f32 = 0.886_226_9;
+        const LINEAR: f32 = 1.023_326_7;
         Vec4::new(
-            coefficients[3],
-            coefficients[1],
-            coefficients[2],
-            coefficients[0],
+            coefficients[3] * LINEAR,
+            coefficients[1] * LINEAR,
+            coefficients[2] * LINEAR,
+            coefficients[0] * CONSTANT,
         )
     }
 }
@@ -519,9 +751,266 @@ impl Look {
     }
 }
 
+/// What the environment's tone mapping set states at the weather and time the frame stands at, and
+/// what the chain reading it answered for the frame before this one. Every field but the last two is
+/// the file's own.
+#[derive(Clone, Copy)]
+pub struct Exposure {
+    pub min: f32,
+    pub max: f32,
+    /// Per second: the buffer holds it scaled by how long a frame took.
+    pub rate: f32,
+    /// The buffer holds its square.
+    pub key: f32,
+    /// How much of the curve reaches the frame, and how far the curve bends toward the exposure.
+    pub strength: f32,
+    pub shoulder: f32,
+    pub step: f32,
+    /// The exposure `AdaptLum` last answered, which is what the passes here read the frame under.
+    pub adapted: f32,
+}
+
+/// What the sky pass reads itself against: the hour, which places the sun and picks the slice of the
+/// volume the frame stands under, and that volume's own width and height, which fix the coordinates
+/// it is read at.
+#[derive(Clone, Copy)]
+pub struct Sky {
+    /// Seconds since midnight.
+    pub time: f32,
+    /// How far the sun's circle leans, in degrees, which is the zone's own.
+    pub tilt: f32,
+    pub size: (f32, f32),
+}
+
+/// Which way the sun comes from at an hour of the day, in world space. It rises due `+x` at six and
+/// stands a quarter turn up at noon, and the sky, the clouds and every light that follows it read
+/// the same one.
+///
+/// The circle it runs on leans, and by how much the **zone** states in its own level file. Five
+/// captures of four zones, each exact to four decimal places against what the file holds.
+pub fn sun(time: f32, tilt: f32) -> Vec3 {
+    let turned = (time / 3600.0 - 6.0) * std::f32::consts::FRAC_PI_2 / 6.0;
+    let (flat, up) = tilt.to_radians().sin_cos();
+    Vec3::new(turned.cos(), turned.sin() * up, turned.sin() * flat)
+}
+
+/// What a place with no level file of its own stands under, which is what most zones state.
+pub const TILT: f32 = 30.0;
+
+/// How far about the point it looks at the sun's own depth map reaches. Not the game's own split:
+/// its first cascade is under five units and it draws five of them, where this draws one, so the
+/// box has to cover what one map can and still hold enough texels to a unit to read as an edge.
+pub const SHADOW_REACH: f32 = 64.0;
+
+/// Where the sun stands to draw the scene's depth, as a view and an orthographic projection about
+/// `focus`. The projection matches the one the frame is drawn with in handing back a nought-to-one
+/// depth, which is what the translator's own fixup leaves in the buffer.
+pub fn shadow_camera(light: Vec3, view: Mat4) -> (Mat4, Mat4) {
+    // Taken from the frame's own view rather than passed in, so the pass that draws the map and the
+    // matrix that reads it cannot be given different boxes.
+    let eye = view.inverse().w_axis.truncate();
+    let ahead = -view.row(2).truncate().normalize_or(Vec3::Z);
+    let focus = eye + ahead * SHADOW_REACH * 0.5;
+    let toward = light.normalize_or(Vec3::Y);
+    // A light straight overhead leaves the usual up vector parallel to it, and the look-at degenerate.
+    let up = match toward.y.abs() > 0.999 {
+        true => Vec3::Z,
+        false => Vec3::Y,
+    };
+    let reach = SHADOW_REACH;
+    let onto = Mat4::orthographic_rh(-reach, reach, -reach, reach, 0.0, reach * 2.0);
+    // Snapped to whole texels of the map. The box follows the camera, so without this every step it
+    // takes shifts the grid the depth was rasterised on and an edge crawls across its own surface,
+    // which reads as a shadow flickering in and out rather than as one standing still.
+    let held = Mat4::look_at_rh(focus + toward * reach, focus, up);
+    let texel = 2.0 * reach / SHADOW_MAP as f32;
+    let seen = held.transform_point3(focus);
+    let drift = Vec3::new(
+        seen.x - (seen.x / texel).round() * texel,
+        seen.y - (seen.y / texel).round() * texel,
+        0.0,
+    );
+    let focus = focus - held.inverse().transform_vector3(drift);
+    (Mat4::look_at_rh(focus + toward * reach, focus, up), onto)
+}
+
+/// What the environment's cloud set states at the weather and time the frame stands at: the two
+/// colors a cloud is lit and shaded with, and how far up the band reaches.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Cloud {
+    pub diffuse: Vec3,
+    pub ambient: Vec3,
+    /// The band's own share of the sky, which the two heights the vertex shader works out sum to.
+    pub reach: f32,
+}
+
+impl Cloud {
+    /// The projection to draw them under: the frame's own, with the far plane pushed past the sheet.
+    /// A zone clips at how far it loads, which is a few thousand units, and the sheet is forty
+    /// thousand across; moving it costs nothing, since both meshes are held at the far plane
+    /// whatever depth they really stand at.
+    pub fn frustum(scene: &Scene) -> Mat4 {
+        let (near, far) = scene.planes();
+        let far = far.max(SHEET_SPAN * 3.0);
+        let mut out = scene.projection;
+        out.z_axis.z = far / (near - far);
+        out.w_axis.z = near * far / (near - far);
+        out
+    }
+
+    /// Where a cloud mesh stands, which is around the camera rather than in the world: the band is a
+    /// cylinder of radius two thousand centred on it, and the sheet a paraboloid forty thousand
+    /// across. The sheet is snapped to the grid one period of its texture spans, so that it travels
+    /// with the camera without the texture sliding over it.
+    pub fn placement(pass: Pass, eye: Vec3) -> Mat4 {
+        let column = |x: f32, y: f32, z: f32| glam::Vec4::new(x, y, z, 0.0);
+        match pass {
+            Pass::CloudBand => Mat4::from_cols(
+                column(BAND_RADIUS, 0.0, 0.0),
+                column(0.0, BAND_RADIUS + eye.y, 0.0),
+                column(0.0, 0.0, BAND_RADIUS),
+                glam::Vec4::new(eye.x, -eye.y, eye.z, 1.0),
+            ),
+            _ => {
+                let period = SHEET_SPAN * 2.0 / SHEET_TILING;
+                let snap = |held: f32| (held / period).round() * period;
+                Mat4::from_cols(
+                    column(SHEET_SPAN, 0.0, 0.0),
+                    column(0.0, SHEET_HEIGHT, 0.0),
+                    column(0.0, 0.0, SHEET_SPAN),
+                    glam::Vec4::new(snap(eye.x), SHEET_RISE, snap(eye.z), 1.0),
+                )
+            }
+        }
+    }
+}
+
+/// White clouds reaching as far as every weather measured has them reach.
+impl Default for Cloud {
+    fn default() -> Self {
+        Self {
+            diffuse: Vec3::ONE,
+            ambient: Vec3::ONE,
+            reach: 0.9,
+        }
+    }
+}
+
+/// The shape every sky the game ships is but one, so a frame whose volume has not arrived still
+/// addresses it the way the rest will be addressed.
+impl Default for Sky {
+    fn default() -> Self {
+        Self {
+            time: 0.0,
+            tilt: TILT,
+            size: (8.0, 32.0),
+        }
+    }
+}
+
+/// What the environment's vertical fog set states at the weather and time the frame stands at. Every
+/// field is the file's own, and the two rates are stated per thousand and per seven thousand four
+/// hundred units rather than per one.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Fog {
+    /// What a fogged pixel is dragged toward, before the exposure divides it.
+    pub color: Vec3,
+    /// How opaque it ever gets, which is that color's own alpha.
+    pub cap: f32,
+    /// How fast the opacity climbs past `start`, and the sky's share past `fade`.
+    pub rate: f32,
+    pub blend: f32,
+    pub start: f32,
+    pub fade: f32,
+
+    /// Whether the zone runs the near haze at all, and how far in front of the camera it begins.
+    pub haze: f32,
+    pub near: f32,
+    /// The two layers the haze sums, each thinning away from a height of its own: how fast it
+    /// thins, how thick it is at that height, and where that height sits.
+    pub layers: [Vec3; 2],
+    /// How much of the frame the haze is ever allowed to leave standing.
+    pub clear: f32,
+
+    /// What the sun adds to a pixel looking into the haze: its color, how strong, how tightly it
+    /// gathers around the sun, and how far out it starts.
+    pub glow: Vec3,
+    pub glow_strength: f32,
+    pub glow_sharpness: f32,
+    pub glow_start: f32,
+}
+
+/// No fog at all, which is a frame the weather states none for.
+impl Default for Fog {
+    fn default() -> Self {
+        Self {
+            color: Vec3::ZERO,
+            cap: 0.0,
+            rate: 0.0,
+            blend: 0.0,
+            start: 0.0,
+            fade: 0.0,
+            haze: 0.0,
+            near: 0.0,
+            layers: [Vec3::ZERO; 2],
+            clear: 0.0,
+            glow: Vec3::ZERO,
+            glow_strength: 0.0,
+            glow_sharpness: 0.0,
+            glow_start: 0.0,
+        }
+    }
+}
+
+impl Fog {
+    /// Where the table stops changing, which is the later of the two channels' own saturations. One
+    /// climbing at nothing never saturates and stands for nothing here.
+    pub fn far(&self) -> f32 {
+        let held = |from: f32, over: f32, rate: f32| (rate > 0.0).then(|| from + over / rate);
+        held(self.start, self.cap, self.rate)
+            .into_iter()
+            .chain(held(self.fade, 1.0, self.blend))
+            .fold(self.start, f32::max)
+    }
+
+    /// The table itself, two channels a texel: how opaque the fog is at that distance, and how far
+    /// the color it mixes toward has gone from the fog's own to the sky's. The first is linear under
+    /// its cap and the second the square of a linear ramp, which is what the game's own tables are.
+    pub fn table(&self) -> Vec<f32> {
+        let last = FOG_TABLE as f32 - 1.0;
+        let span = self.far() - self.start;
+        (0..FOG_TABLE)
+            .flat_map(|at| {
+                let z = self.start + span * at as f32 / last;
+                let toward = ((z - self.fade) * self.blend).clamp(0.0, 1.0);
+                [
+                    ((z - self.start) * self.rate).clamp(0.0, self.cap),
+                    toward * toward,
+                ]
+            })
+            .collect()
+    }
+}
+
+/// What leaves the frame as the composite resolved it: no exposure, and a curve of no strength.
+impl Default for Exposure {
+    fn default() -> Self {
+        Self {
+            min: 1.0,
+            max: 1.0,
+            rate: 0.0,
+            key: 1.0,
+            strength: 0.0,
+            shoulder: 0.0,
+            step: 0.0,
+            adapted: 1.0,
+        }
+    }
+}
+
 /// What the engine decides rather than the files. Everything a constant buffer holds that is not the
 /// material's own comes from here, so a field that has to be reconstructed is reconstructed once.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Scene {
     pub view: Mat4,
     pub projection: Mat4,
@@ -538,8 +1027,14 @@ pub struct Scene {
     pub ambient: Ambient,
     /// What the passes past the composite are run with.
     pub look: Look,
+    pub exposure: Exposure,
+    pub sky: Sky,
+    pub fog: Fog,
+    pub cloud: Cloud,
     /// The colours the character was made with.
     pub customize: Customize,
+    /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
+    pub clock: f32,
 }
 
 /// What character creation decides, which no file a model names holds: each is what an albedo is
@@ -586,7 +1081,12 @@ impl Default for Scene {
             specular: Vec3::ONE,
             ambient: Ambient::default(),
             look: Look::default(),
+            exposure: Exposure::default(),
+            sky: Sky::default(),
+            fog: Fog::default(),
+            cloud: Cloud::default(),
             customize: Customize::default(),
+            clock: 0.0,
         }
     }
 }
@@ -646,6 +1146,7 @@ fn pair(
     material: &[mtrl::ShaderKey],
     set: &[(u32, u32)],
     pass: u32,
+    technique: u32,
     subview: u32,
 ) -> Option<(u32, u32)> {
     let mut parts: Vec<u32> = [
@@ -656,7 +1157,7 @@ fn pair(
     .iter()
     .map(|keys| selector(&values(keys, material, set)))
     .collect();
-    parts.push(selector(&[package.technique_subview()[0], subview]));
+    parts.push(selector(&[technique, subview]));
     let id = selector(&parts);
 
     // Lookup is by node id, falling back to the alias table: skin and hair only resolve through it.
@@ -862,7 +1363,8 @@ impl Program {
     ) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         let held = material.held();
-        let (vs, ps) = pair(&package, held.shader_keys(), set, pass.id(), subview)
+        let technique = package.technique_subview()[0];
+        let (vs, ps) = pair(&package, held.shader_keys(), set, pass.id(), technique, subview)
             .ok_or("this material's keys reach no such pass")?;
         Self::assemble(
             &package,
@@ -877,23 +1379,52 @@ impl Program {
 
     /// Translates a pass of a package no material names: the ones that light and resolve what the
     /// G-buffer holds, which the engine runs over the whole frame rather than over one draw.
-    pub fn screen(bytes: &[u8], pass: Pass, attachments: usize) -> Result<Self, String> {
+    pub fn screen(
+        bytes: &[u8],
+        pass: Pass,
+        attachments: usize,
+        keys: &[(u32, u32)],
+    ) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         // A key a package does not declare is never looked up, so one set serves every package here.
-        let set = [
-            (GET_DIRECTIONAL_LIGHT, GET_DIRECTIONAL_LIGHT_ENABLE),
+        // `keys` is what one package alone asks for, since a key two of them declare would move both.
+        let mut set = vec![
+            // The shadowed variant, which reads the mask the resolve leaves. Only
+            // `directionallighting` declares this key at all, so no other package here moves with
+            // it, and the blend it does is `min(mask, fade^2 * (w - mask) + mask)`: at the `w` of
+            // one that buffer states, the second term never falls below the mask, so what lands is
+            // the mask whatever the cloud term holds.
+            (GET_DIRECTIONAL_LIGHT, GET_DIRECTIONAL_LIGHT_SHADOW),
             (SPECULAR_LIGHTING, SPECULAR_LIGHTING_ENABLE),
         ];
-        let (vs, ps) = pair(&package, &[], &set, pass.id(), SUB_VIEW_MAIN)
+        set.extend_from_slice(keys);
+        let technique = package.technique_subview()[0];
+        let (vs, ps) = pair(&package, &[], &set, pass.id(), technique, SUB_VIEW_MAIN)
             .ok_or("this package reaches no such pass")?;
+        Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
+    }
+
+    /// Translates one variant of a package the engine draws with geometry it builds itself, where
+    /// the technique picks the variant rather than the package's own default: the cloud package
+    /// draws its band and its sheet from two of them, over two different meshes.
+    pub fn cloud(bytes: &[u8], pass: Pass, attachments: usize) -> Result<Self, String> {
+        let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
+        let technique = match pass {
+            Pass::CloudBand => CLOUD_BAND,
+            _ => CLOUD_SHEET,
+        };
+        let subview = package.technique_subview()[1];
+        let (vs, ps) = pair(&package, &[], &[], pass.id(), technique, subview)
+            .ok_or("the cloud package holds no such technique")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
     }
 
     /// Translates one member of the game's post chain. A `.shcd` holds one shader and no node table,
     /// so the file is the variant and there is nothing to select; what it wants is a screen-wide
     /// draw of the vertex shader given, and a frame in the range a screen holds, since the pass that
-    /// grades one saturates what it reads before it reads its table.
-    pub fn posteffect(bytes: &[u8], vertex: &str) -> Result<Self, String> {
+    /// grades one saturates what it reads before it reads its table. The path is taken because two
+    /// members read the same buffer as different things.
+    pub fn posteffect(path: &str, bytes: &[u8], vertex: &str) -> Result<Self, String> {
         let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
         let blob = bytes
             .get(code.blob_offset()..code.blob_offset() + code.blob_size())
@@ -949,7 +1480,7 @@ impl Program {
         let buffers = extents
             .into_iter()
             .map(|(name, registers)| Buffer {
-                fixed: (name == TONE_MAP_PARAM).then(|| {
+                fixed: (name == TONE_MAP_PARAM && path == TONE_ADJUST).then(|| {
                     TONE_MAP
                         .iter()
                         .flat_map(|held| held.to_le_bytes())
@@ -1181,6 +1712,7 @@ impl Buffer {
             projection,
             model,
             size,
+            clock,
             ..
         } = *scene;
         let span = self
@@ -1234,7 +1766,7 @@ impl Buffer {
             return out;
         }
         if self.name == "g_AmbientParamArray" {
-            ambient(&scene.ambient, glam::Mat3::from_mat4(view), &mut out);
+            ambient(&scene.ambient, glam::Mat3::from_mat4(view), view, &mut out);
             return out;
         }
         if self.name == "g_AmbientParam" {
@@ -1247,6 +1779,208 @@ impl Buffer {
         }
         if self.name == VIEWPORT_PARAM {
             write(&mut out, 0, &[1.0; 4]);
+            return out;
+        }
+        // A whole matrix, one register per row, for a buffer the reflection gives no members.
+        let write_rows = |out: &mut Vec<u8>, held: &[f32]| {
+            for (at, row) in held.chunks(4).enumerate() {
+                write(out, at, row);
+            }
+        };
+        let exposure = scene.exposure;
+        // The exposure the last frame settled on, which is what this one is measured and read under.
+        let adapted = exposure.adapted.max(f32::EPSILON);
+        if self.name == ADAPT_LUM_PARAM {
+            // The rate is stated per second and the buffer wants what one frame moves by. The pass
+            // reads a weight of one and over as a frame to start again from rather than carry on
+            // through, which is what a step long enough to overshoot should do anyway.
+            let step = (exposure.rate * exposure.step).min(1.0);
+            write(
+                &mut out,
+                0,
+                &[exposure.min, exposure.max, step, exposure.key * exposure.key],
+            );
+            return out;
+        }
+        if self.name == PROJECTION_INVERSE {
+            write_rows(&mut out, &rows(projection.inverse(), 4));
+            return out;
+        }
+        if self.name == VIEW_INVERSE {
+            write_rows(&mut out, &rows(view.inverse(), 4));
+            return out;
+        }
+        if self.name == SKY_PARAM {
+            let held = scene.sky;
+            let hours = held.time / 3600.0;
+            let held_sun = sun(held.time, held.tilt);
+            let eye = view.inverse().w_axis;
+            let (wide, tall) = held.size;
+            write(&mut out, 0, &[eye.x, eye.y, eye.z, 0.0]);
+            write(&mut out, 1, &[held_sun.x, held_sun.y, held_sun.z, 0.0]);
+            // Cut to the volume's own texel centers, which is what the frame's numbers work out to
+            // for the eight by thirty-two every sky but one is.
+            write(&mut out, 2, &[0.5, 1.0 - 0.5 / tall, 0.0, 0.0]);
+            write(&mut out, 3, &[(1.0 - 1.0 / wide) * 0.5, -(1.0 - 1.0 / tall), 0.0, 0.0]);
+            // The hour's own slice, and the exposure the sky is read under with everything else.
+            write(&mut out, 4, &[(hours + 0.5) / 24.0, 0.0, 1.0 / adapted, 0.0]);
+            // The color the sky is mixed toward, at the weight a real frame carried: nought, so it
+            // never reaches the frame. Nothing found states either.
+            write(&mut out, 5, &[0.0; 4]);
+            return out;
+        }
+        if matches!(pass, Pass::CloudBand | Pass::CloudSheet)
+            && let Some(register) = [VS_PARAM, PS_PARAM].iter().position(|held| self.name == *held)
+        {
+            let held = scene.cloud;
+            let sun = sun(scene.sky.time, scene.sky.tilt);
+            let eye = view.inverse().w_axis;
+            if register == 1 {
+                // The two colors go in squared, and come back out under a root: what the shader
+                // works out is a light, and it is gathered in the square of the color rather than
+                // in the color. The sky ramp and the shadow's own two numbers are the same in
+                // every frame measured.
+                let squared = |held: Vec3| held * held;
+                let (diffuse, ambient) = (squared(held.diffuse), squared(held.ambient));
+                write(&mut out, 0, &[sun.x, sun.y, sun.z, CLOUD_FLOOR]);
+                write(&mut out, 1, &[diffuse.x, diffuse.y, diffuse.z, 1.0]);
+                write(&mut out, 2, &[ambient.x, ambient.y, ambient.z, 0.0]);
+                write(&mut out, 3, &[2.0, 0.0, 10.0, -5.0]);
+                write(&mut out, 4, &[0.125, 50.0, 1.0, 0.0]);
+                return out;
+            }
+            let up = sun.y.abs();
+            match pass {
+                // A cylinder the vertex shader flares into a cone: the first pair leans it toward
+                // the sun, and the two heights it splits the reach into are how far up the band
+                // stands on the near side and on the far one.
+                Pass::CloudBand => {
+                    let lean = glam::Vec2::new(sun.x, sun.z.abs()).normalize_or_zero() * 0.5;
+                    write(&mut out, 0, &[1.0, 1.0, 0.0, 0.0]);
+                    write(
+                        &mut out,
+                        1,
+                        &[
+                            lean.x,
+                            lean.y,
+                            held.reach * (0.25 + 0.75 * up),
+                            held.reach * 0.75 * (1.0 - up),
+                        ],
+                    );
+                    write(&mut out, 2, &[0.0; 4]);
+                    write(&mut out, 3, &[sun.x, sun.y, sun.z, CLOUD_FLOOR]);
+                    write(&mut out, 4, &[eye.x, eye.y, eye.z, eye.y / 1000.0]);
+                }
+                // The sheet tiles its texture ten times across the forty thousand units it spans,
+                // and takes the whole of its first layer: the second is what the crossfading
+                // variant reads, and every frame measured leaves it no weight at all.
+                _ => {
+                    write(&mut out, 0, &[SHEET_TILING, SHEET_TILING, 0.0, 0.0]);
+                    write(&mut out, 1, &[1.0; 4]);
+                    write(&mut out, 2, &[0.0; 4]);
+                    write(&mut out, 3, &[sun.x, sun.y, sun.z, 0.0]);
+                    write(&mut out, 4, &[eye.x, eye.y, eye.z, 0.0]);
+                }
+            }
+            return out;
+        }
+        if self.name == FOG_PARAM {
+            let held = scene.fog;
+            // Divided by the exposure the frame is read under, the way the sky it fades toward
+            // already is: the two are mixed together and have to stand in one space.
+            let color = held.color / adapted;
+            let glow = held.glow / adapted;
+            let eye = view.inverse().w_axis;
+            // What the depth buffer holds and the distance in front of the camera it stands for are
+            // one over the other about the planes the projection states. The table is addressed
+            // across what the fog spans, on its own texel centers: the first holds where the fog
+            // starts and the last where it stops changing.
+            let (z, w) = (projection.z_axis.z, projection.w_axis.z);
+            let texel = 1.0 / FOG_TABLE as f32;
+            let scale = (1.0 - texel) / (held.far() - held.start).max(f32::EPSILON);
+            write(&mut out, 0, &[color.x, color.y, color.z, held.cap / adapted]);
+            // The color carries its own weight here and the set's again in the height buffer. The
+            // two only ever multiply, so the file's is folded into the color and this stays one.
+            write(&mut out, 1, &[glow.x, glow.y, glow.z, 1.0]);
+            // A one in the last lane is what keeps the pass off the froxel volume it would
+            // otherwise march, and nothing here builds one.
+            let sun = sun(scene.sky.time, scene.sky.tilt);
+            write(&mut out, 2, &[sun.x, sun.y, sun.z, 1.0]);
+            write(&mut out, 3, &[0.0, 0.0, 0.0, texel * 0.5 - scale * held.start]);
+            write(&mut out, 4, &[eye.x, eye.y, eye.z, scale]);
+            write(&mut out, 5, &[z / w, 1.0 / w, 0.0, 0.0]);
+            return out;
+        }
+        // What takes a pixel back out to where it stands. The pass hands it the depth as sampled,
+        // which the translator's own fixup leaves in the clip space the game's shaders were built
+        // for, so the projection goes in as it is.
+        if self.name == CLIP_TO_WORLD {
+            write_rows(&mut out, &rows((projection * view).inverse(), 4));
+            return out;
+        }
+        // Where a pixel stands in the sun's own map. The pass hands it a view-space position, and
+        // rows nought and one answer the coordinate while row two answers the depth to compare, so
+        // only those two take the half that turns a clip coordinate into a texture one.
+        if self.name == DIRECTIONAL_SHADOW_PARAM {
+            let (sun, onto) = shadow_camera(scene.light, view);
+            let half = Mat4::from_cols(
+                Vec4::new(0.5, 0.0, 0.0, 0.0),
+                Vec4::new(0.0, 0.5, 0.0, 0.0),
+                Vec4::new(0.0, 0.0, 1.0, 0.0),
+                Vec4::new(0.5, 0.5, 0.0, 1.0),
+            );
+            put(
+                DIRECTIONAL_SHADOW_PARAM,
+                "m_ShadowProjectionMatrix",
+                rows(half * onto * sun * view.inverse(), 4),
+            );
+            // Read by the lighting rather than by the resolve, and a nought here is what makes the
+            // shadowed variant write black whatever the mask holds.
+            put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowMapParameter", vec![
+                1.0 / SHADOW_MAP as f32,
+                1.0 / SHADOW_MAP as f32,
+                0.0,
+                1.0,
+            ]);
+            return out;
+        }
+        if self.name == SHADOW_BIAS_PARAM {
+            // Measured off a frame the game drew: no constant offset, a twentieth of a unit along
+            // the normal, and the whole of the slope term.
+            write(&mut out, 0, &[0.0, 0.05, 1.0, 0.0]);
+            return out;
+        }
+        if self.name == HEIGHT_FOG_PARAM {
+            let held = scene.fog;
+            let [near, far] = held.layers;
+            write(&mut out, 0, &[held.near, near.x, near.y, near.z]);
+            write(&mut out, 1, &[held.clear, far.x, far.y, far.z]);
+            write(
+                &mut out,
+                2,
+                &[
+                    held.haze,
+                    held.glow_strength,
+                    held.glow_sharpness,
+                    held.glow_start,
+                ],
+            );
+            return out;
+        }
+        if self.name == COMMON_TEX_PARAM {
+            write(&mut out, 0, &[1.0 / adapted, adapted, 0.0, 0.0]);
+            return out;
+        }
+        if self.name == TONE_MAP_PARAM {
+            // Half a texel of the curve, which is both where its first texel's center falls and the
+            // share of the exposure one texel of it spans.
+            let half = 0.5 / CURVE as f32;
+            write(
+                &mut out,
+                0,
+                &[exposure.strength, exposure.shoulder, 1.0 / adapted, 0.0],
+            );
+            write(&mut out, 1, &[half, 1.0 - half, adapted, adapted * half]);
             return out;
         }
         if self.name == FXAA_PARAM {
@@ -1343,12 +2077,14 @@ impl Buffer {
             held.extend(rows(world_view, 3));
             held
         });
+        // What takes an object into the world alone, which the engine's own draws carry instead of
+        // the object transform a model's instancing buffer holds.
+        put("g_WorldMatrix", "g_WorldMatrix", rows(model, 3));
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
-        // What a strand's length is scaled by, which a character's buffer pass packs into the fifth
-        // target's alpha and the fur pass marches along the flow. The engine drives it per draw and
-        // no file states one, so it goes in at the identity; nought is what leaves the march at
-        // nothing however long the parameter file states the fur. The first lane alone: nothing
-        // reads the rest of the register.
+        // Declared by the five character packages and read by none of them: nothing in `character`,
+        // `characterlegacy`, `hair`, `iris` or `skin` touches it once. Left at the identity because
+        // a package outside those five may yet read it, and one costs nothing where nought would be
+        // the lane that switches a thing off.
         put(INSTANCE, "m_Param", vec![1.0]);
         // One record an eye, picked by the vertex color. The first two lanes scale the coordinate an
         // eye's textures are read at and the third warps it toward the pupil, so ones leave that
@@ -1407,6 +2143,46 @@ impl Buffer {
             put(screen, name, vec![1.0; 2]);
         }
 
+        // The transform water is drawn through: it takes one from here rather than from the buffer
+        // every other package names, and at nought every vertex lands on the same point.
+        put(INSTANCE, "m_WorldViewMatrix", rows(world_view, 3));
+        // The fade a dither clip tests against, and the weight a mesh's own position carries into
+        // the wave it is lifted by. One leaves both as the file wrote them.
+        put(INSTANCE, "m_Misc", vec![0.0, 0.0, 1.0, 1.0]);
+
+        // Water is a sum of Gerstner waves, and each is a sine of a frequency times this plus a
+        // wavenumber times where the vertex stands; the wave maps, the noise and the caustics all
+        // scroll along it as well, at rates the material states.
+        let water = "g_WaterParameter";
+        put(water, "m_WavingParam", vec![clock; 4]);
+        for name in ["m_GBufferSize", "m_RenderTargetSize"] {
+            put(water, name, vec![width, height, 1.0 / width, 1.0 / height]);
+        }
+        for name in ["m_GBufferPixelSize", "m_RenderTargetPixelSize"] {
+            put(water, name, vec![1.0 / width, 1.0 / height, width, height]);
+        }
+        put(
+            water,
+            "m_HalfViewPositionPixelSize",
+            vec![2.0 / width, 2.0 / height, width * 0.5, height * 0.5],
+        );
+        // How far into the frame a surface may reach for what stands behind it. Sampling past this
+        // is folded back in, so the whole frame is what leaves the reading where it was aimed.
+        put(water, "m_DynamicViewportResolution", vec![1.0; 4]);
+        // Both lerp toward one against a weight the mesh carries, so a one is the reading the
+        // engine's own number would only move away from.
+        put(water, "m_Roughness", vec![1.0; 4]);
+        put(water, "m_Misc", vec![1.0; 4]);
+        put(water, "m_NoiseSize", vec![1.0; 4]);
+
+        // What a leaf sways along and how far, which nothing in the files states. The engine drives
+        // the phase per object rather than here: this is the reach of one sway and the direction it
+        // carries, and the vertical is a fraction of it the shader takes for itself.
+        let waving = "g_WavingParam";
+        put(waving, "m_WindVector", WIND.to_array().to_vec());
+        put(waving, "m_UpVector", vec![0.0, 1.0, 0.0]);
+        put(waving, "m_WavingParam", vec![1.0, 1.0, 0.0, 0.0]);
+
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.
         let axes = glam::Mat3::from_mat4(view);
@@ -1440,10 +2216,12 @@ impl Buffer {
             .to_vec(),
         );
         // The two lighting packages read this buffer differently. A sun fades with the depth of the
-        // pixel, and the fade is off here: the scale is cubed and clamped, so a constant one leaves
-        // it alone. A lamp is clipped at the square of its own reach and falls off as `w` over the
-        // distance, which the ramp the light is read off then shapes. Only a spot's own shader reads
-        // `y`, and the sun's reads the lane whatever is in it.
+        // pixel, and the fade is off: the scale is cubed and clamped, so a constant one leaves it
+        // alone, and a frame the game drew states the same `(0, 0, 1, 0.05)` - the floor never bites
+        // against a ramp already at one. A lamp reads `z` as what its squared distance is taken into
+        // the ramp by, which is its clip volume, and `w` as how far it stays at full strength before
+        // the inverse-distance term stops saturating. Only a spot's own shader reads `y`, and the
+        // sun's reads the lane whatever is in it.
         let reach = lamp.reach();
         let cone = match pass {
             Pass::Lamp => lamp.cone,
@@ -1453,8 +2231,8 @@ impl Buffer {
             light,
             "m_Attenuation",
             match pass {
-                Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.0],
-                _ => vec![0.0, cone, 1.0 / (reach * reach), reach],
+                Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.05],
+                _ => vec![0.0, cone, 1.0 / (reach * reach), lamp.range.max(0.001)],
             },
         );
         put(light, "m_LightFadeValueStatic", vec![1.0]);
@@ -1522,6 +2300,19 @@ impl Buffer {
             );
             put(at, "m_SkyVisibility", &[instance.sky_visibility]);
             put(at, "m_DitherAlpha", &[1.0]);
+            // The phase one object sways at. Its own place sets where in the cycle it starts, so a
+            // stand of the same plant does not lean as one; the noise is the same offset again,
+            // which is all the vertical bob reads it for.
+            let (x, z) = (instance.transform.w_axis.x, instance.transform.w_axis.z);
+            let offset = (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU);
+            put(at, "m_WavingAnimTime", &[scene.clock + offset]);
+            put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
+            // At the strength that leaves a surface emitting what its own material states. Left at
+            // nought the shading takes its non-emissive branch, and every glowing thing a zone
+            // places - a crystal naming an emissive colour of 2.89 among them - comes out dark. No
+            // file found states a per-object strength, so this is the identity rather than a value.
+            put(at, "m_EmissivePower", &[1.0]);
+            put(at, "m_EmissiveColor", &[1.0, 1.0, 1.0]);
         }
     }
 }
@@ -1547,13 +2338,14 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
 /// The harmonics go in turned by `axes`. The composite dots the light rows against a normal it has
 /// just taken through the view matrix and the sky rows against a reflection of that same normal, so
 /// both are read in view space; the reflection only goes back to the world to sample the cube.
-fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
+fn ambient(held: &Ambient, axes: glam::Mat3, view: Mat4, out: &mut [u8]) {
     if out.len() < 8 {
         return;
     }
     let turned = |row: &Vec4| (axes * row.truncate()).extend(row.w);
     // The count reads as a whole number rather than as the float that would print the same.
-    out[..4].copy_from_slice(&1u32.to_le_bytes());
+    let volumes = held.volumes.len().min(ENTRIES - 1);
+    out[..4].copy_from_slice(&(1 + volumes as u32).to_le_bytes());
     out[4..8].copy_from_slice(&held.sky_scale.to_le_bytes());
     for (at, row) in held.sky.iter().enumerate() {
         write(out, 1 + at, &turned(row).to_array());
@@ -1562,6 +2354,43 @@ fn ambient(held: &Ambient, axes: glam::Mat3, out: &mut [u8]) {
     // No bounding shape, so the entry covers the frame rather than a room.
     write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
     write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
+
+    // The places that light themselves, each tested against the pixel before the one above it is
+    // fallen back on. The composite reads entry `n` from `12n + 4`.
+    for (index, volume) in held.volumes.iter().take(volumes).enumerate() {
+        let at = (index + 1) * 12 + 4;
+        for (row, held) in volume.light.iter().enumerate() {
+            write(out, at + row, &turned(held).to_array());
+        }
+        write(out, at + 3, &[0.0, 0.0, 0.0, volume.scale]);
+        // A bounded entry states no attenuation and takes its reflected term raw, which is the pair
+        // the composite tests to decide the place lights itself.
+        write(out, at + 4, &[held.fade.x, held.fade.y, held.fade.z, 0.0]);
+        write(out, at + 5, &[1.0, 0.0, 1.0, held.capture]);
+        // Into the volume's own space, where it stands as the unit shape. The buffer holds the
+        // three rows a `float3x4` takes, and the pixel arrives in front of the camera, so the view
+        // is folded in here rather than at the source.
+        // A pixel arrives in front of the camera, so the view is undone before the volume's own
+        // transform takes it in.
+        let into = volume.into * view.inverse();
+        let rows = into.transpose().to_cols_array();
+        for row in 0..3 {
+            write(out, at + 6 + row, &rows[row * 4..row * 4 + 4]);
+        }
+        // How sharply it takes over across each face. The composite reads the near widths outright
+        // and works the far ones back out by subtracting them, so both sides carry the same number.
+        write(
+            out,
+            at + 9,
+            &[volume.fade.x, volume.fade.y, volume.fade.z, volume.fade.x],
+        );
+        write(
+            out,
+            at + 10,
+            &[volume.fade.y, volume.fade.z, 0.0, volume.shape],
+        );
+        write(out, at + 11, &[0.0, 1.0, 0.0, 0.0]);
+    }
 }
 
 /// The ten registers a composite reads one entry of the ambient from. A drawing package that
@@ -1583,7 +2412,7 @@ fn entry(held: &Ambient, axes: glam::Mat3, out: &mut [u8], at: usize) {
             held.reflection.x,
             held.reflection.y,
             held.reflection.z,
-            held.roughness,
+            held.capture,
         ],
     );
     for (row, held) in held.sky.iter().enumerate() {
@@ -1784,7 +2613,113 @@ mod test {
     use glam::{Mat3, Mat4, Vec3, Vec4};
     use ironworks::file::{File, spm::ShaderParameters};
 
-    use super::{Ambient, JOINT, ROW, SHADER_TYPE, ambient, joints, selector, shader_types};
+    use super::{
+        Ambient, Buffer, Exposure, FOG_PARAM, Fog, JOINT, ROW, SHADER_TYPE, Pass, Scene, Volume,
+        ambient, joints, selector, shader_types,
+    };
+
+    /// The three buffers the exposure chain reads, against the bytes a capture of the running game
+    /// held in them. What the environment stated at that time and weather goes in; what the frame
+    /// was measured and read under has to come out.
+    #[test]
+    fn the_exposure_buffers_come_out_as_the_game_held_them() {
+        let scene = Scene {
+            exposure: Exposure {
+                min: 1.0,
+                max: 3.525834,
+                rate: 2.0,
+                key: 0.347417,
+                strength: 0.5,
+                shoulder: 0.95,
+                step: 0.027_392_5,
+                adapted: 1.431022,
+            },
+            ..Default::default()
+        };
+        let filled = |name: &str, registers| {
+            let held = Buffer {
+                name: name.to_owned(),
+                members: Vec::new(),
+                registers,
+                fixed: None,
+            };
+            held.fill(&scene, Pass::Composite, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect::<Vec<f32>>()
+        };
+        let close = |held: &[f32], want: &[f32]| {
+            held.iter()
+                .zip(want)
+                .all(|(held, want)| (held - want).abs() <= want.abs() * 1e-4 + 1e-6)
+        };
+
+        // The key goes in squared and the rate scaled by the frame, which is the whole of what the
+        // capture proved and neither of which is guessable off the field names.
+        assert!(close(
+            &filled("cAdaptLumParam", 1),
+            &[1.0, 3.525834, 0.054785, 0.120698]
+        ));
+        assert!(close(&filled("cCommonTexParam", 1), &[0.698801, 1.431022, 0.0, 0.0]));
+        // The curve's bounds are half a texel in from either end of a strip 1024 wide, and its last
+        // lane is the exposure over twice that. The game held `z` a frame older than the rest, so
+        // 1.432421 there rather than the 1.431022 this fills.
+        assert!(close(
+            &filled("cToneMapParam", 2),
+            &[
+                0.5,
+                0.95,
+                0.698801,
+                0.0,
+                0.00048828125,
+                0.99951171875,
+                1.431022,
+                0.000698741,
+            ]
+        ));
+    }
+
+    /// The fog reads a distance out of the depth buffer as `1 / (y * d + x)`, and everything it then
+    /// does with that distance rests on those two lanes. Rather than argue the convention, this
+    /// pushes a distance through the projection the zone is drawn with and asks for it back.
+    #[test]
+    fn a_depth_reading_comes_back_the_distance_it_stood_for() {
+        let projection = Mat4::perspective_rh(1.0, 1.6, 0.1, 8000.0);
+        let scene = Scene {
+            projection,
+            fog: Fog {
+                cap: 0.9,
+                rate: 0.0005,
+                start: 100.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: FOG_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 3,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::Composite, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        for want in [1.0f32, 100.0, 500.0, 2000.0] {
+            // Where the projection leaves a point that far in front of the camera, and what the
+            // shaders' own fixup makes of it: they hand the card a clip depth over the whole of
+            // `[-w, w]`, and the buffer holds the half of that between nought and one.
+            let clip = projection * glam::Vec4::new(0.0, 0.0, -want, 1.0);
+            let depth = (clip.z / clip.w * 2.0 - 1.0) * 0.5 + 0.5;
+            let read = 1.0 / (filled[9] * depth + filled[8]);
+            assert!((read - want).abs() < want * 1e-3, "{want} came back {read}");
+        }
+        // Texel nought stands where the fog starts, and the last where its opacity reaches the cap.
+        let coordinate = |z: f32| filled[11] * z + filled[10];
+        assert!((coordinate(100.0) - 0.5 / 256.0).abs() < 1e-6);
+        assert!((coordinate(1900.0) - 255.5 / 256.0).abs() < 1e-6);
+    }
 
     /// The composite reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, and its header
     /// at nought through three. Nothing in the reflection lays the entry out, so this is the whole
@@ -1800,9 +2735,10 @@ mod test {
             reflection: Vec3::new(12.0, 13.0, 14.0),
             roughness: 15.0,
             haze: Vec4::ZERO,
+            volumes: std::sync::Arc::from([] as [Volume; 0]),
         };
         let mut out = vec![0u8; 16 * 16];
-        ambient(&held, Mat3::IDENTITY, &mut out);
+        ambient(&held, Mat3::IDENTITY, Mat4::IDENTITY, &mut out);
         let lane = |register: usize, at: usize| {
             let start = register * 16 + at * 4;
             f32::from_le_bytes(out[start..start + 4].try_into().unwrap())
@@ -1821,12 +2757,23 @@ mod test {
         assert!(out[16 * 16..].is_empty());
     }
 
-    /// The row is dotted against a normal and a one, and the file runs constant, `y`, `z`, `x`.
+    /// The row is dotted against a normal and a one, and the file runs constant, `y`, `z`, `x`. Each
+    /// term carries the weight a cosine lobe gathers it at, which a real frame's own buffer matches
+    /// to seven figures; the ratio between the two weights is `2/sqrt(3)`.
     #[test]
-    fn a_harmonic_row_puts_the_constant_last() {
+    fn a_harmonic_row_is_convolved_and_puts_the_constant_last() {
         let row = Ambient::row(&[1.0, 2.0, 3.0, 4.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
-        assert_eq!(row, Vec4::new(4.0, 2.0, 3.0, 1.0));
-        assert_eq!(row.dot(Vec4::new(0.0, 1.0, 0.0, 1.0)), 3.0);
+        let close = |held: f32, want: f32| (held - want).abs() < 1e-6;
+        assert!(close(row.w, 0.886_226_9));
+        assert!(close(row.x, 4.0 * 1.023_326_7));
+        assert!(close(row.y, 2.0 * 1.023_326_7));
+        assert!(close(row.z, 3.0 * 1.023_326_7));
+        assert!(close(row.x / row.w / 4.0, 2.0 / 3.0f32.sqrt()));
+        // The `y` lane is what a normal pointing up reads, beside the constant every normal reads.
+        assert!(close(
+            row.dot(Vec4::new(0.0, 1.0, 0.0, 1.0)),
+            2.0 * 1.023_326_7 + 0.886_226_9
+        ));
     }
 
     #[test]

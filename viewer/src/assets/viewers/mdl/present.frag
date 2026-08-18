@@ -7,12 +7,15 @@ in vec2 v_uv;
 uniform sampler2D u_frame;
 uniform sampler2D u_depth;
 uniform bool u_tone;
+/// Whether a sky stands behind the frame, in which case no pixel of it belongs to the widget.
+uniform bool u_cover;
 
 out vec4 fragColor;
 
 /// Where the frame stops being taken as it arrived and starts being bent toward what a screen can
-/// hold. Both this and where the bend settles are the viewer's own: nothing on disk states the
-/// exposure the game works out a frame at a time.
+/// hold. Both this and where the bend settles are the viewer's own, and stand in only for a frame
+/// under no environment: one that has an environment is exposed and read through a curve by the
+/// game's own passes, and arrives here already in range.
 const float KNEE = 0.8;
 
 float shoulder(float value) {
@@ -25,7 +28,7 @@ void main() {
 	// Nothing drew where the depth buffer still holds what it was cleared to, and those pixels
 	// belong to egui rather than to the frame.
 	float depth = texture(u_depth, v_uv).r;
-	if (depth >= 1.0) {
+	if (depth >= 1.0 && !u_cover) {
 		discard;
 	}
 	// Carried over so what is drawn on top of the frame can test against what it covered. It only

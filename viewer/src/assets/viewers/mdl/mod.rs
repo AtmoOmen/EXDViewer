@@ -85,6 +85,11 @@ const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
 const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
 const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 
+/// `ApplyWavingAnim`, and the value that lets the wind reach a surface. Set only where the model's
+/// own header allows it, which is what keeps a wall from swaying with the leaves.
+const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
+const APPLY_WAVING_ANIM_ON: u32 = 0xf801_b859;
+
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
@@ -276,6 +281,8 @@ struct Level {
     /// Whether any mesh carries bone indices, which is what decides whether the game would draw
     /// this model through its skinning variant.
     skinned: bool,
+    /// Whether the wind may reach it, which the model's own header states.
+    waving: bool,
     /// The bones each mesh's blend indices name, in the order they index them.
     bones: Vec<Vec<String>>,
     /// How many attributes each piece declares. An imc variant's mask means something over only
@@ -407,6 +414,8 @@ pub struct Rendered {
     debug: Cell<gpu::Debug>,
     /// Whether to draw with the game's own shaders rather than with this viewer's approximation.
     shaded: Cell<bool>,
+    /// Seconds the viewer has been open, which is what water and foliage move against.
+    clock: Cell<f32>,
     /// Which G-buffer channel the game's own shaders put on screen, starting at the frame their
     /// lighting resolves rather than at a channel of the buffer it is resolved from.
     target: Cell<usize>,
@@ -467,6 +476,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
         shaded: Cell::new(true),
+        clock: Cell::new(0.0),
         target: Cell::new(gpu::LIT),
     })
 }
@@ -502,7 +512,7 @@ fn drawn_levels(pieces: &[Piece]) -> Result<[bool; 3]> {
                 .model(detail(lod as u8))
                 .meshes()
                 .iter()
-                .any(|mesh| mesh.kinds().contains(&MeshKind::Standard))
+                .any(draws)
         })
     }))
 }
@@ -515,8 +525,15 @@ pub(super) fn detail(lod: u8) -> Lod {
     }
 }
 
-/// What a mesh a drawing pass leaves out is for. Only `Standard` is drawn here: the rest are the
-/// engine's own passes, which nothing in this graph runs.
+/// Whether this graph draws a mesh. Water fills the same G-buffer as anything else, through a
+/// blended pass of its own; the kinds left out are the engine's own passes, which nothing here runs.
+pub(super) fn draws(mesh: &ironworks::file::mdl::Mesh) -> bool {
+    mesh.kinds()
+        .iter()
+        .any(|kind| matches!(kind, MeshKind::Standard | MeshKind::Water))
+}
+
+/// What a mesh a drawing pass leaves out is for.
 fn kind_name(kind: MeshKind) -> &'static str {
     match kind {
         MeshKind::Water => "water",
@@ -620,9 +637,11 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
     let mut declares: Vec<usize> = Vec::new();
     let mut skipped: Vec<MeshKind> = Vec::new();
     let mut skinned = false;
+    let mut waving = false;
 
     for (piece, (worn, container)) in sources.iter().enumerate() {
         let model = container.model(detail(lod));
+        waving |= model.waving();
 
         let attributes = model.attribute_names().unwrap_or_default();
         let bone_names = model.bone_names().unwrap_or_default();
@@ -631,7 +650,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
         declares.push(attributes.len());
 
         for (index, mesh) in model.meshes().into_iter().enumerate() {
-            if !mesh.kinds().contains(&MeshKind::Standard) {
+            if !draws(&mesh) {
                 for kind in mesh.kinds() {
                     if !skipped.contains(kind) {
                         skipped.push(*kind);
@@ -812,6 +831,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
         home,
         radius,
         skinned,
+        waving,
         bones,
         attributes: declares,
         gpu: gpu::Model::new(pending),
@@ -1536,6 +1556,18 @@ impl Rendered {
                     })),
                 );
             }
+            // Skin softens the light that fell on it, and every character has some, so this is
+            // asked for as soon as the frame can be lit at all rather than off a material's own
+            // record: the pass decides per pixel from the type table which ones scatter.
+            if self.lighting.borrow().is_some() && !packages.contains_key(program::SCATTER) {
+                let files = backend.files().clone();
+                packages.insert(
+                    program::SCATTER.to_owned(),
+                    Package::Fetching(TrackedPromise::spawn_local(async move {
+                        files.read(program::SCATTER).await
+                    })),
+                );
+            }
         }
 
         let mut textures = self.textures.borrow_mut();
@@ -1619,6 +1651,13 @@ impl Rendered {
         if rect.width() < 1.0 || rect.height() < 1.0 {
             return;
         }
+        // The game's own shaders move a surface against a clock, so a frame under them is never the
+        // same twice and the viewer has to keep asking for another.
+        if self.shaded.get() {
+            let step = ui.input(|input| input.stable_dt).min(0.25);
+            self.clock.set(self.clock.get() + step);
+            ui.ctx().request_repaint();
+        }
 
         let level = self.level.borrow();
         let mut camera = self.camera.get();
@@ -1696,7 +1735,7 @@ impl Rendered {
         let attachments = level.gpu.lock().unwrap().attachments();
         let lighting = match self.shaded.get() {
             true => {
-                self.translate(level.skinned, attachments);
+                self.translate(level.skinned, level.waving, attachments);
                 self.lighting(attachments)
             }
             false => None,
@@ -1744,6 +1783,8 @@ impl Rendered {
                     Some(gpu::Shaded {
                         buffer: passes.buffer.clone(),
                         depth: passes.depth.clone(),
+                        // The model viewer lights one object against nothing, so it casts no shadow.
+                        shadow: None,
                         resolve: passes.resolve.clone(),
                         table: tables.get(&mesh.material).cloned(),
                         textures: material
@@ -1822,6 +1863,7 @@ impl Rendered {
                 },
                 look: self.look.get(),
                 customize: self.customize.get(),
+                clock: self.clock.get(),
                 ..Default::default()
             },
             lighting,
@@ -1927,7 +1969,7 @@ impl Rendered {
         let mut packages = self.packages.borrow_mut();
         let built = match packages.get(program::TONE_ADJUST) {
             Some(Package::Ready(bytes)) => {
-                program::Program::posteffect(bytes, program::POST_VERTEX)
+                program::Program::posteffect(program::TONE_ADJUST, bytes, program::POST_VERTEX)
             }
             _ => return None,
         };
@@ -1959,7 +2001,7 @@ impl Rendered {
             let Some(Package::Ready(bytes)) = packages.get(path) else {
                 return None;
             };
-            program::Program::posteffect(bytes, program::POST_VERTEX)
+            program::Program::posteffect(path, bytes, program::POST_VERTEX)
                 .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
                 .ok()
                 .map(Arc::new)
@@ -1991,7 +2033,7 @@ impl Rendered {
             let Some(Package::Ready(bytes)) = packages.get(path) else {
                 return None;
             };
-            program::Program::posteffect(bytes, vertex)
+            program::Program::posteffect(path, bytes, vertex)
                 .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
                 .ok()
                 .map(Arc::new)
@@ -2012,6 +2054,7 @@ impl Rendered {
     fn lighting(&self, attachments: usize) -> Option<Arc<gpu::Lighting>> {
         if self.lighting.borrow().is_some() {
             self.soften(attachments);
+            self.scatter(attachments);
             return self.lighting.borrow().clone();
         }
         let packages = self.packages.borrow();
@@ -2019,17 +2062,22 @@ impl Rendered {
             let Some(Package::Ready(bytes)) = packages.get(path) else {
                 return None;
             };
-            program::Program::screen(bytes, pass, attachments)
+            program::Program::screen(bytes, pass, attachments, &[])
                 .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
                 .ok()
                 .map(Arc::new)
         };
         let built = gpu::Lighting {
+            // The model viewer stands one object against nothing, so nothing casts onto it.
+            shadow: None,
+            subsurface: None,
             position: held(program::VIEW_POSITION, program::Pass::Lighting)?,
             directional: held(program::DIRECTIONAL, program::Pass::Lighting)?,
             point: held(program::POINT, program::Pass::Lamp)?,
             // A model stands under one studio light of this viewer's own, which is a point.
             spot: None,
+            line: None,
+            plane: None,
             fur: None,
             composite: held(program::COMPOSITE, program::Pass::Composite)?,
         };
@@ -2037,6 +2085,32 @@ impl Rendered {
         let built = Arc::new(built);
         *self.lighting.borrow_mut() = Some(built.clone());
         Some(built)
+    }
+
+    /// The same for the skin blur, which every character wants and which the pass itself gates per
+    /// pixel off the type table.
+    fn scatter(&self, attachments: usize) {
+        let lit = self.lighting.borrow().clone();
+        let Some(lighting) = lit.filter(|held| held.subsurface.is_none()) else {
+            return;
+        };
+        let mut packages = self.packages.borrow_mut();
+        let Some(Package::Ready(bytes)) = packages.get(program::SCATTER) else {
+            return;
+        };
+        let held = match program::Program::screen(bytes, program::Pass::Lighting, attachments, &[]) {
+            Ok(held) => Arc::new(held),
+            Err(why) => {
+                log::warn!("assets/mdl: {}: {why}", program::SCATTER);
+                packages.insert(program::SCATTER.to_owned(), Package::Failed(why));
+                return;
+            }
+        };
+        drop(packages);
+        *self.lighting.borrow_mut() = Some(Arc::new(gpu::Lighting {
+            subsurface: Some(held),
+            ..(*lighting).clone()
+        }));
     }
 
     /// Takes the fur pass up on whichever frame its package arrives on, the frame having lit without
@@ -2051,7 +2125,7 @@ impl Rendered {
         let Some(Package::Ready(bytes)) = packages.get(program::FUR) else {
             return;
         };
-        let fur = match program::Program::screen(bytes, program::Pass::Fur, attachments) {
+        let fur = match program::Program::screen(bytes, program::Pass::Fur, attachments, &[]) {
             Ok(held) => Arc::new(held),
             Err(why) => {
                 log::warn!("assets/mdl: {}: {why}", program::FUR);
@@ -2068,24 +2142,24 @@ impl Rendered {
 
     /// Translates every ready material's passes, again where the context's own limit changed how
     /// many of the G-buffer's targets one reading can write.
-    fn translate(&self, skinned: bool, attachments: usize) {
+    fn translate(&self, skinned: bool, waving: bool, attachments: usize) {
         let slots = self.slots.borrow();
         let packages = self.packages.borrow();
         let mut translated = self.translated.borrow_mut();
         let mut tables = self.tables.borrow_mut();
         // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
         // game would draw through the skinning variant.
-        let set: &[(u32, u32)] = match skinned {
-            true => &[
-                (TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN),
-                (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
-                (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
-            ],
-            false => &[
-                (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
-                (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
-            ],
-        };
+        let mut set = vec![
+            (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
+            (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
+        ];
+        if skinned {
+            set.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
+        }
+        if waving {
+            set.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
+        }
+        let set = &set[..];
         for (index, slot) in slots.iter().enumerate() {
             let Some(Slot::Ready(material)) = slot else {
                 continue;
@@ -2111,13 +2185,25 @@ impl Rendered {
                 )
             };
             let mut passes = Passes::default();
-            if let Ok(first) = build(program::Pass::Buffer, 0) {
+            // A package with no opaque pass is a surface that blends itself into the frame: water
+            // and river fill the same G-buffer through a pass of their own.
+            let filling = build(program::Pass::Buffer, 0)
+                .map(|held| (program::Pass::Buffer, held))
+                .or_else(|_| {
+                    build(program::Pass::Blended, 0).map(|held| (program::Pass::Blended, held))
+                });
+            if let Ok((pass, first)) = filling {
                 let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
                 passes.buffer.push(Arc::new(first));
-                passes.buffer.extend(
-                    (1..pages).filter_map(|at| build(program::Pass::Buffer, at).ok().map(Arc::new)),
-                );
-                passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
+                passes
+                    .buffer
+                    .extend((1..pages).filter_map(|at| build(pass, at).ok().map(Arc::new)));
+                // Only where the same vertex shader settled the depth. A blending surface fills the
+                // buffer through a pass whose vertices are lifted by its own waves, and the depth
+                // pass leaves them where the file put them: every later test against it fails.
+                if pass == program::Pass::Buffer {
+                    passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
+                }
             }
             // A package carrying a composite of its own resolves itself with it. The screen-wide
             // pass is `bg`'s, and `bg` reserves values past one in the second target as the sign
@@ -2125,6 +2211,7 @@ impl Rendered {
             // there that reaches one of its own accord, and is then read as that.
             passes.resolve = build(program::Pass::Composite, 0)
                 .or_else(|_| build(program::Pass::CompositeBlended, 0))
+                .or_else(|_| build(program::Pass::Water, 0))
                 .ok()
                 .map(Arc::new);
             let held = match passes.buffer.is_empty() && passes.resolve.is_none() {

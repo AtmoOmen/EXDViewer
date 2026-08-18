@@ -2724,7 +2724,7 @@ mod test {
         let held = Buffer {
             name: FOG_PARAM.to_owned(),
             members: Vec::new(),
-            registers: 3,
+            registers: 6,
             fixed: None,
         };
         let filled: Vec<f32> = held
@@ -2738,11 +2738,11 @@ mod test {
             // `[-w, w]`, and the buffer holds the half of that between nought and one.
             let clip = projection * glam::Vec4::new(0.0, 0.0, -want, 1.0);
             let depth = (clip.z / clip.w * 2.0 - 1.0) * 0.5 + 0.5;
-            let read = 1.0 / (filled[9] * depth + filled[8]);
+            let read = 1.0 / (filled[21] * depth + filled[20]);
             assert!((read - want).abs() < want * 1e-3, "{want} came back {read}");
         }
         // Texel nought stands where the fog starts, and the last where its opacity reaches the cap.
-        let coordinate = |z: f32| filled[11] * z + filled[10];
+        let coordinate = |z: f32| filled[19] * z + filled[15];
         assert!((coordinate(100.0) - 0.5 / 256.0).abs() < 1e-6);
         assert!((coordinate(1900.0) - 255.5 / 256.0).abs() < 1e-6);
     }
@@ -2759,7 +2759,7 @@ mod test {
             scale: 8.0,
             fade: Vec3::new(9.0, 10.0, 11.0),
             reflection: Vec3::new(12.0, 13.0, 14.0),
-            roughness: 15.0,
+            capture: 15.0,
             haze: Vec4::ZERO,
             volumes: std::sync::Arc::from([] as [Volume; 0]),
         };

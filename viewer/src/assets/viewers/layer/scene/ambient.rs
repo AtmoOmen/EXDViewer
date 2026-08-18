@@ -38,8 +38,13 @@ const WEATHER: &str = "Weather";
 /// exposure and tone curve are worked out from, and the fog, which the file calls vertical.
 const GLOBAL_LIGHTING: u32 = 0;
 const CLOUDS: u32 = 2;
+const WIND: u32 = 6;
 const TONE_MAPPING: u32 = 9;
 const VERTICAL_FOG: u32 = 13;
+
+/// How many radians of phase a sway runs a second. The wind set does not state it: the shader takes
+/// its whole phase from the engine, and nothing in the set is a rate.
+const RATE: f32 = 1.6;
 
 /// What the two fog rates are stated per, rather than per unit of distance, and what the near
 /// haze's own two are: twenty units of height and a hundredth of its density.
@@ -179,6 +184,8 @@ pub struct Ambient {
     pub weather: usize,
     /// How far the sun's circle leans, which the scene's own level file states.
     pub tilt: f32,
+    /// How fast one sway runs, which no file states.
+    pub rate: f32,
     /// The places inside the zone that light themselves, as the walk found them.
     pub spaces: Vec<Space>,
 }
@@ -212,6 +219,7 @@ impl Ambient {
             track: 0,
             weather: 0,
             tilt,
+            rate: RATE,
             spaces: Vec::new(),
         }
     }
@@ -395,6 +403,28 @@ impl Ambient {
             }
             None => false,
         }
+    }
+
+    /// What a leaf is swayed by, and nothing where the weather states no wind set. The set names two
+    /// layers, each a heading and a strength gusting between the two it states over the span it
+    /// states; the shader's buffer holds one heading, so the two sum. The span is in ticks, which is
+    /// what `at` is counted in.
+    pub fn wind(&self, at: f32) -> Option<program::Wind> {
+        let held = self.keyframes(WIND)?;
+        let layer = |which: usize| {
+            let of = |field: &str| scalar(held, &format!("layer_{which}_{field}"), 0.0);
+            let low = of("min_strength");
+            let span = of("wavelength").max(1.0);
+            let gust = 0.5 - 0.5 * (std::f32::consts::TAU * at / span).cos();
+            let heading = of("azimuth_degrees").to_radians();
+            glam::Vec2::new(heading.sin(), heading.cos()) * (low + (of("max_strength") - low) * gust)
+        };
+        let held = layer(0) + layer(1);
+        Some(program::Wind {
+            heading: Vec3::new(held.x, 0.0, held.y).normalize_or_zero(),
+            reach: held.length(),
+            rate: self.rate,
+        })
     }
 
     /// What the cloud draws are run with, and nothing where the weather states no cloud set. A
@@ -620,6 +650,13 @@ impl Ambient {
                         changed |= ui.selectable_value(&mut self.weather, at, label).changed();
                     }
                 });
+        }
+
+        if self.keyframes(WIND).is_some() {
+            ui.label(RichText::new(format!("Sway rate  {:.2} rad/s", self.rate)).weak());
+            changed |= ui
+                .add(egui::Slider::new(&mut self.rate, 0.0..=6.0).show_value(false))
+                .changed();
         }
 
         ui.add_space(8.0);

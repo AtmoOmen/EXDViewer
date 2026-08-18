@@ -901,7 +901,9 @@ pub(super) fn build(
             uv: uvs.and_then(|held| uv(held, at)).unwrap_or_default(),
             uv1: uvs1.and_then(|held| uv(held, at)).unwrap_or_default(),
             color: colors.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
-            color1: colors1.and_then(|held| bytes(held, at)).unwrap_or([255; 4]),
+            // Nought, not white: the only thing that reads this is the sway, and a mesh with no
+            // stream of its own is one the wind does not reach.
+            color1: colors1.and_then(|held| bytes(held, at)).unwrap_or([0; 4]),
             weights: influences(weights, at, [255, 0, 0, 0]),
             bones: influences(bones, at, [0; 4]),
         })
@@ -2098,7 +2100,8 @@ impl Rendered {
         let Some(Package::Ready(bytes)) = packages.get(program::SCATTER) else {
             return;
         };
-        let held = match program::Program::screen(bytes, program::Pass::Lighting, attachments, &[]) {
+        let held = match program::Program::screen(bytes, program::Pass::Lighting, attachments, &[])
+        {
             Ok(held) => Arc::new(held),
             Err(why) => {
                 log::warn!("assets/mdl: {}: {why}", program::SCATTER);

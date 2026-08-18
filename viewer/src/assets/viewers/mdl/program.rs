@@ -29,9 +29,6 @@ const PASS_COMPOSITE_SEMITRANSPARENCY: u32 = 0xc885_bbd3;
 const PASS_LIGHTING_SEMITRANSPARENCY: u32 = 0x1f19_7698;
 const PASS_WATER: u32 = 0x8ef4_0d56;
 
-/// Which way a leaf leans at the far end of one sway, in world units. No file found states a wind,
-/// so this is a reach and a heading rather than a reading.
-pub const WIND: Vec3 = Vec3::new(0.24, 0.0, 0.1);
 /// The pass with no name of its own, which two packages use for the one thing each of them does:
 /// furblur marches along a strand at it, and every cloud node holds it and nothing else.
 const PASS_7: u32 = 0x5bc1_ad3f;
@@ -1035,6 +1032,33 @@ pub struct Scene {
     pub customize: Customize,
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
     pub clock: f32,
+    pub wind: Wind,
+}
+
+/// What a leaf is swayed by, which is all three registers `g_WavingParam` holds. The heading and the
+/// reach come out of the weather's wind set; the rate does not, since the shader takes its whole
+/// phase from the engine and no file states how fast one sway runs. A mesh weights the reach by its
+/// own stream, which reaches a tenth at most, so the stated strength is already in world units.
+#[derive(Clone, Copy)]
+pub struct Wind {
+    /// Which way a leaf leans, in world space.
+    pub heading: Vec3,
+    /// How far it leans at the far end of one sway, in world units.
+    pub reach: f32,
+    /// Radians of phase a second.
+    pub rate: f32,
+}
+
+/// What a lone model is shown under, since nothing outside a zone names an environment to take a
+/// wind out of. The panel spells all three out.
+impl Default for Wind {
+    fn default() -> Self {
+        Self {
+            heading: Vec3::new(0.92, 0.0, 0.38),
+            reach: 4.0,
+            rate: 1.6,
+        }
+    }
 }
 
 /// What character creation decides, which no file a model names holds: each is what an albedo is
@@ -1087,6 +1111,7 @@ impl Default for Scene {
             cloud: Cloud::default(),
             customize: Customize::default(),
             clock: 0.0,
+            wind: Wind::default(),
         }
     }
 }
@@ -2175,11 +2200,12 @@ impl Buffer {
         put(water, "m_Misc", vec![1.0; 4]);
         put(water, "m_NoiseSize", vec![1.0; 4]);
 
-        // What a leaf sways along and how far, which nothing in the files states. The engine drives
-        // the phase per object rather than here: this is the reach of one sway and the direction it
-        // carries, and the vertical is a fraction of it the shader takes for itself.
+        // The wind carries the whole reach: a mesh weights it down to a tenth at most, which is what
+        // leaves the stated strength in world units. The pair below is read by every one of the
+        // twenty-eight shaders holding the buffer, and the two past it by none of them.
         let waving = "g_WavingParam";
-        put(waving, "m_WindVector", WIND.to_array().to_vec());
+        let wind = scene.wind.heading * scene.wind.reach;
+        put(waving, "m_WindVector", wind.to_array().to_vec());
         put(waving, "m_UpVector", vec![0.0, 1.0, 0.0]);
         put(waving, "m_WavingParam", vec![1.0, 1.0, 0.0, 0.0]);
 
@@ -2305,7 +2331,7 @@ impl Buffer {
             // which is all the vertical bob reads it for.
             let (x, z) = (instance.transform.w_axis.x, instance.transform.w_axis.z);
             let offset = (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU);
-            put(at, "m_WavingAnimTime", &[scene.clock + offset]);
+            put(at, "m_WavingAnimTime", &[scene.clock * scene.wind.rate + offset]);
             put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
             // At the strength that leaves a surface emitting what its own material states. Left at
             // nought the shading takes its non-emissive branch, and every glowing thing a zone

@@ -2346,6 +2346,10 @@ impl Scene {
                     .clouds()
                     .map_or_else(program::Cloud::default, |held| held.scene),
                 clock: self.clock / TICKS,
+                wind: self.ambient.wind(self.clock).unwrap_or(program::Wind {
+                    reach: 0.0,
+                    ..Default::default()
+                }),
                 sky: program::Sky {
                     time: self.ambient.time,
                     tilt: self.ambient.tilt,
@@ -2597,21 +2601,23 @@ impl Scene {
                         "Lights",
                         format!("{} of {}", self.lamps().len(), self.lights.len()),
                     ),
-                    (
-                        "Wind",
-                        format!(
-                            "clock {:.1}s, reach {:.2} toward ({:.2}, {:.2}), {} material{}",
-                            self.clock / TICKS,
-                            program::WIND.length(),
-                            program::WIND[0],
-                            program::WIND[2],
-                            self.waving.len(),
-                            match self.waving.len() {
-                                1 => "",
-                                _ => "s",
-                            },
-                        ),
-                    ),
+                    ("Wind", {
+                        let count = self.waving.len();
+                        let plural = match count {
+                            1 => "",
+                            _ => "s",
+                        };
+                        match self.ambient.wind(self.clock) {
+                            Some(held) => format!(
+                                "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} material{plural}",
+                                self.clock / TICKS,
+                                held.reach,
+                                held.heading.x.atan2(held.heading.z).to_degrees(),
+                                held.rate,
+                            ),
+                            None => format!("no wind set stated, {count} material{plural}"),
+                        }
+                    }),
                     (
                         "Exposure",
                         match self.exposure.is_some() {

@@ -2346,7 +2346,7 @@ impl Scene {
                     .clouds()
                     .map_or_else(program::Cloud::default, |held| held.scene),
                 clock: self.clock / TICKS,
-                wind: self.ambient.wind(self.clock).unwrap_or(program::Wind {
+                wind: self.ambient.wind().unwrap_or(program::Wind {
                     reach: 0.0,
                     ..Default::default()
                 }),
@@ -2607,7 +2607,7 @@ impl Scene {
                             1 => "",
                             _ => "s",
                         };
-                        match self.ambient.wind(self.clock) {
+                        match self.ambient.wind() {
                             Some(held) => format!(
                                 "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} material{plural}",
                                 self.clock / TICKS,

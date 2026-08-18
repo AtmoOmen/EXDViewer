@@ -406,18 +406,18 @@ impl Ambient {
     }
 
     /// What a leaf is swayed by, and nothing where the weather states no wind set. The set names two
-    /// layers, each a heading and a strength gusting between the two it states over the span it
-    /// states; the shader's buffer holds one heading, so the two sum. The span is in ticks, which is
-    /// what `at` is counted in.
-    pub fn wind(&self, at: f32) -> Option<program::Wind> {
+    /// layers, each a heading and a strength; the shader's buffer holds one heading, so the two sum.
+    ///
+    /// Each layer's `min_strength` and `wavelength` go unread. They read like a gust running between
+    /// the two strengths over the span, but nothing states that the span is a time at all, and a
+    /// calm weather names a minimum of nought: taken that way the wind stops dead for three seconds
+    /// of every seventeen, which is worse than not gusting.
+    pub fn wind(&self) -> Option<program::Wind> {
         let held = self.keyframes(WIND)?;
         let layer = |which: usize| {
             let of = |field: &str| scalar(held, &format!("layer_{which}_{field}"), 0.0);
-            let low = of("min_strength");
-            let span = of("wavelength").max(1.0);
-            let gust = 0.5 - 0.5 * (std::f32::consts::TAU * at / span).cos();
             let heading = of("azimuth_degrees").to_radians();
-            glam::Vec2::new(heading.sin(), heading.cos()) * (low + (of("max_strength") - low) * gust)
+            glam::Vec2::new(heading.sin(), heading.cos()) * of("max_strength")
         };
         let held = layer(0) + layer(1);
         Some(program::Wind {

@@ -64,7 +64,9 @@ pub const EFRAME_URL: &str = "https://github.com/emilk/egui/tree/master/crates/e
 pub const CREATE_PAT_URL: &str =
     "https://github.com/settings/tokens/new?scopes=public_repo&description=XIViewer";
 
-pub const DEFAULT_API_URL: &str = "https://xiviewer.app/api";
+/// Still the old host: the new one has no router yet, and a build that names it first cannot load
+/// anything at all.
+pub const DEFAULT_API_URL: &str = "https://exd.camora.dev/api";
 pub const DEFAULT_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/xivdev/EXDSchema/refs/heads/latest";
 pub const DEFAULT_GITHUB_REPO: (&str, &str) = ("xivdev", "EXDSchema");

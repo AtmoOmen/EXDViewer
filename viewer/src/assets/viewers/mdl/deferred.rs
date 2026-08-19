@@ -1297,6 +1297,9 @@ impl Buffers {
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
+        if program::sun_at(scene).is_none() {
+            return Ok(());
+        }
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::CULL_FACE);

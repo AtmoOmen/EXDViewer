@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
 use ironworks::file::{mtrl, shcd, spm};
 
@@ -844,6 +844,19 @@ pub struct Sky {
     pub moon: f32,
     /// What the weather states its moon looks like, and how much of it the hour lets through.
     pub moonlight: Vec4,
+}
+
+/// Where the sun stands, in the coordinates its own pass reads a pixel by. Nothing where it is
+/// behind the camera: a direction there projects onto the half of the screen it is not in, and one
+/// directly behind lands dead centre, which draws the glow over a sky the sun has left.
+pub fn sun_at(scene: &Scene) -> Option<Vec2> {
+    let held = scene.sky;
+    let at = scene.projection * scene.view * sun(held.time, held.tilt).extend(0.0);
+    if at.w <= 0.0 {
+        return None;
+    }
+    let over = at.truncate() / at.w;
+    Some(Vec2::new(over.x * 0.5 + 0.5, over.y * 0.5 + 0.5))
 }
 
 /// Where the moon's disc stands and how far it reaches, in the coordinates the pass reads a pixel
@@ -1950,14 +1963,12 @@ impl Buffer {
             return out;
         }
         if self.name == SUN_PARAM {
-            let held = scene.sky;
             let (wide, tall) = scene.size;
             // Where the sun stands as this pass reads a pixel's own coordinate, which is a texture
             // one rather than the clip xy the sky takes. The game's runs down the frame and this
             // one up it, so the vertical is the one place the two conventions part.
-            let at = projection * view * sun(held.time, held.tilt).extend(0.0);
-            let over = at.truncate() / at.w;
-            write(&mut out, 0, &[wide / tall, 1.0, over.x * 0.5 + 0.5, over.y * 0.5 + 0.5]);
+            let over = sun_at(scene).unwrap_or_default();
+            write(&mut out, 0, &[wide / tall, 1.0, over.x, over.y]);
             write(&mut out, 1, &SUN_RAYS);
             write(&mut out, 2, &SUN_FALLOFF);
             write(&mut out, 3, &SUN_CORE);

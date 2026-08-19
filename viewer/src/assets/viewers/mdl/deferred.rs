@@ -76,7 +76,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 8] = [
+pub const ENGINE: [(u32, &str, u32); 9] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -112,6 +112,11 @@ pub const ENGINE: [(u32, &str, u32); 8] = [
         glow::NEAREST,
     ),
     (0x8b73_3c20, "chara/common/texture/-toon.tex", glow::LINEAR),
+    (
+        0xdce8_add5,
+        "bgcommon/nature/moon/texture/moon.tex",
+        glow::LINEAR,
+    ),
 ];
 
 /// The table the frame is graded through, which the grading pass addresses by the color it found.
@@ -137,6 +142,7 @@ const CLOUD: usize = 20;
 const SHADE: usize = 21;
 const SCATTER: usize = 22;
 const SUN: usize = 23;
+const MOON: usize = 24;
 
 /// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
 /// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
@@ -324,6 +330,8 @@ enum Over {
     Fogging(Fogged),
     /// One of the cloud meshes, over the strip it is drawn as and against the sheet it reads.
     Clouding(Clouded),
+    /// The moon, over the disc it stands on and against the sky it blends into.
+    Mooning(Mooned),
     /// The skin blur, which walks the diffuse light around a pixel and writes the same buffer, so
     /// what it reads is a copy taken before it ran.
     Scattering(glow::Texture),
@@ -344,6 +352,7 @@ struct Clouded {
 pub struct Drawn {
     pub sky: bool,
     pub sun: bool,
+    pub moon: bool,
     pub fog: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
     pub shadow: bool,
@@ -357,6 +366,14 @@ struct Fogged {
     depth: glow::Texture,
     sky: glow::Texture,
     table: glow::Texture,
+}
+
+/// What the moon's disc is drawn over and against: the rectangle it stands on, in clip space, and
+/// the sky it blends itself into.
+#[derive(Clone, Copy)]
+struct Mooned {
+    disc: glam::Vec4,
+    sky: glow::Texture,
 }
 
 /// What a pass of the exposure chain reads, by the names its file gives them: the frame, the measure
@@ -1298,6 +1315,44 @@ impl Buffers {
         held
     }
 
+    /// The moon's own disc, over the sky it blends itself into. Nothing where the weather lets none
+    /// of it through, or where it stands behind the camera.
+    pub fn moon(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let Some(disc) = program::moon_disc(scene).filter(|_| scene.sky.moonlight.w > 0.0) else {
+            return Ok(());
+        };
+        let Some((_, sky)) = self.overhead else {
+            return Ok(());
+        };
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(false);
+        }
+        // The quad the vertex shader stands over, as clip space reads it.
+        let disc = glam::Vec4::new(
+            disc.x * 2.0 - 1.0,
+            disc.y * 2.0 - 1.0,
+            disc.z * 2.0,
+            disc.w * 2.0,
+        );
+        let held = self.pass(gl, MOON, held, lit, scene, Over::Mooning(Mooned { disc, sky }));
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+        }
+        self.drawn.moon = held.is_ok();
+        held
+    }
+
     /// One of the two cloud meshes, drawn over the sky and behind everything the frame covered.
     ///
     /// Premultiplied: the shader answers with its color already taken up by how much of the pixel it
@@ -2220,9 +2275,10 @@ impl Buffers {
                         format!("the exposure chain reads {}, which nothing fills", texture.name)
                     })?,
                     Over::Scattering(held) if texture.id == LIGHT_DIFFUSE => held,
+                    Over::Mooning(held) if texture.name == program::SKY_SAMPLER => held.sky,
                     Over::Fogging(reads) => match texture.name.as_str() {
                         program::FOG_DEPTH => reads.depth,
-                        program::FOG_SKY => reads.sky,
+                        program::SKY_SAMPLER => reads.sky,
                         program::FOG_LUT => reads.table,
                         _ => self.engine(gl, texture.id)?,
                     },
@@ -2258,6 +2314,12 @@ impl Buffers {
             // What a pass reading a square of its own source steps between the corners of it.
             if let Some(location) = gl.get_uniform_location(program, "u_texel") {
                 gl.uniform_2_f32(Some(&location), 1.0 / size.0 as f32, 1.0 / size.1 as f32);
+            }
+            if let Over::Mooning(held) = over
+                && let Some(location) = gl.get_uniform_location(program, "u_disc")
+            {
+                let [x, y, wide, tall] = held.disc.to_array();
+                gl.uniform_4_f32(Some(&location), x, y, wide, tall);
             }
             gl.bind_vertex_array(Some(layout));
             match over {

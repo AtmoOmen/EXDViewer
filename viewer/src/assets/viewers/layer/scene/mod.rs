@@ -459,6 +459,7 @@ pub struct Scene {
     /// volume it reads: a sky is addressed by its own texel centers, so the pass needs its shape.
     skybox: Option<Arc<program::Program>>,
     sunlight: Option<Arc<program::Program>>,
+    moonlight: Option<Arc<program::Program>>,
     /// The pass that fades a distant pixel toward the weather's own fog and then toward that sky.
     haze: Option<Arc<program::Program>>,
     /// The two cloud draws, the band first, and the texture each reads: the weather names one per
@@ -622,6 +623,7 @@ impl Scene {
             exposure: None,
             skybox: None,
             sunlight: None,
+            moonlight: None,
             haze: None,
             clouds: [None, None],
             cloud_files: [Aside::Done, Aside::Done],
@@ -1742,6 +1744,7 @@ impl Scene {
             program::FXAA.to_owned(),
             program::SKY.to_owned(),
             program::SUN.to_owned(),
+            program::MOON.to_owned(),
             program::SHADOW.to_owned(),
         ]);
         // Only where the weather states a fog of its own, the same way the exposure chain is only
@@ -2017,6 +2020,9 @@ impl Scene {
         }
         if self.sunlight.is_none() {
             self.sunlight = self.effect(program::SUN, program::POST_VERTEX);
+        }
+        if self.moonlight.is_none() {
+            self.moonlight = self.effect(program::MOON, program::MOON_VERTEX);
         }
         if self.skybox.is_none() {
             self.skybox = self.effect(program::SKY, program::SKY_VERTEX);
@@ -2389,6 +2395,8 @@ impl Scene {
                     depth: self
                         .sky_volume
                         .map_or_else(|| program::Sky::default().depth, |(_, _, depth)| depth),
+                    moon: self.ambient.moon,
+                    moonlight: self.ambient.moonlight(),
                 },
                 ..Default::default()
             },
@@ -2396,6 +2404,7 @@ impl Scene {
             exposure: self.exposure.clone(),
             skybox: self.skybox.clone(),
             sunlight: self.sunlight.clone(),
+            moonlight: self.moonlight.clone(),
             haze: self.haze.clone(),
             clouds: self.clouds.clone(),
             smoothing: self.smoothing.clone(),
@@ -2742,6 +2751,7 @@ impl Scene {
                             (held.shadow, "shadow"),
                             (held.sky, "sky"),
                             (held.sun, "sun"),
+                            (held.moon, "moon"),
                             (held.clouds[0], "band"),
                             (held.clouds[1], "sheet"),
                             (held.fog, "fog"),

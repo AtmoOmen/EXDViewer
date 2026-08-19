@@ -38,9 +38,15 @@ const WEATHER: &str = "Weather";
 /// exposure and tone curve are worked out from, and the fog, which the file calls vertical.
 const GLOBAL_LIGHTING: u32 = 0;
 const CLOUDS: u32 = 2;
+const STARFIELD: u32 = 12;
 const WIND: u32 = 6;
 const TONE_MAPPING: u32 = 9;
 const VERTICAL_FOG: u32 = 13;
+
+/// How far up the frame the moon's disc reaches. The one draw that states it holds a disc two and a
+/// half pixels across, and that draw covered no pixels at all, so this opens where it did and is a
+/// control rather than a reading.
+const MOON: f32 = 0.000_872_664_7;
 
 /// How many radians of phase a sway runs a second. The wind set does not state it: the shader takes
 /// its whole phase from the engine, and nothing in the set is a rate.
@@ -186,6 +192,8 @@ pub struct Ambient {
     pub tilt: f32,
     /// How fast one sway runs, which no file states.
     pub rate: f32,
+    /// How far up the frame the moon reaches, which no file states either.
+    pub moon: f32,
     /// The places inside the zone that light themselves, as the walk found them.
     pub spaces: Vec<Space>,
 }
@@ -220,6 +228,7 @@ impl Ambient {
             weather: 0,
             tilt,
             rate: RATE,
+            moon: MOON,
             spaces: Vec::new(),
         }
     }
@@ -403,6 +412,19 @@ impl Ambient {
             }
             None => false,
         }
+    }
+
+    /// What the weather says its moon looks like, and how much of the hour lets it through. The
+    /// starfield set states an alpha of nought right through the day, which is what keeps the disc
+    /// off the sky between five and eighteen without anything here deciding an hour.
+    pub fn moonlight(&self) -> Vec4 {
+        let Some(held) = self.keyframes(STARFIELD) else {
+            return Vec4::ZERO;
+        };
+        let Some((color, alpha)) = colour(held, "moon_color") else {
+            return Vec4::ZERO;
+        };
+        color.extend(alpha)
     }
 
     /// What a leaf is swayed by, and nothing where the weather states no wind set. The set names two
@@ -657,6 +679,15 @@ impl Ambient {
             ui.label(RichText::new(format!("Sway rate  {:.2} rad/s", self.rate)).weak());
             changed |= ui
                 .add(egui::Slider::new(&mut self.rate, 0.0..=6.0).show_value(false))
+                .changed();
+        }
+        if self.moonlight().w > 0.0 {
+            ui.label(
+                RichText::new(format!("Moon  {:.3} deg across", self.moon.atan().to_degrees() * 2.0))
+                    .weak(),
+            );
+            changed |= ui
+                .add(egui::Slider::new(&mut self.moon, 0.0002..=0.05).logarithmic(true).show_value(false))
                 .changed();
         }
 

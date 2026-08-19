@@ -116,6 +116,42 @@ const SUN_CORE: [f32; 4] = [
 ];
 const SUN_HALO: [f32; 4] = [1.347_855_2, 1.350_965_7, 1.350_469_2, 0.1];
 
+/// The moon, drawn over a disc of its own rather than the frame: the shader reads its coordinate as
+/// a place on that disc and throws away what falls outside it.
+pub const MOON: &str = "shader/sm5/posteffect/Moon.shcd";
+
+/// That disc's own vertex shader, which stands the screen triangle over the moon and hands each
+/// fragment where it falls on it. The far plane, so a depth test keeps it behind everything drawn.
+pub const MOON_VERTEX: &str = "\
+#version 300 es
+
+layout(location = 0) in vec4 a_position;
+
+uniform vec4 u_disc;
+
+out vec2 TEXCOORD;
+
+void main() {
+\tTEXCOORD = a_position.xy;
+\tgl_Position = vec4(u_disc.xy + a_position.xy * u_disc.zw, 1.0, 1.0);
+}
+";
+
+/// The face the moon turns and the terminator it is cut by, read out of the one draw a real frame
+/// makes of this pass. That frame's moon was full: the terminator these state leaves the whole disc
+/// lit, so the phase the shader can draw has never been exercised.
+const MOON_FACE: [f32; 4] = [0.591_309_67, 0.806_444_6, 0.0, 1.0];
+const MOON_TERMINATOR: [f32; 4] = [999_999.0, 0.999_999, 1.0, 1.0];
+
+/// What the weather's stated moon color is taken down by before it tints the disc, and its stated
+/// alpha before it weighs the blend. Both hold to eight figures across every channel of the one
+/// frame that states them, and neither is explained by anything else in that frame.
+const MOON_TINT: f32 = 5.0 / 6.0;
+const MOON_WEIGHT: f32 = 0.19;
+
+/// How far the alpha falls off across the disc.
+const MOON_FADE: f32 = 0.4;
+
 /// The clouds, which the engine draws over two meshes it builds itself: a band around the horizon
 /// and a sheet overhead. One package holds both, under a technique apiece.
 pub const CLOUD: &str = "shader/sm5/shpk/cloud.shpk";
@@ -146,7 +182,7 @@ pub const FOG_TABLE: i32 = 256;
 
 /// What the pass reads: the frame's depth, the sky on a plane of its own, and that table.
 pub const FOG_DEPTH: &str = "sDepth";
-pub const FOG_SKY: &str = "sSky";
+pub const SKY_SAMPLER: &str = "sSky";
 pub const FOG_LUT: &str = "sLut";
 
 /// The two passes that stand between the G-buffer and the occlusion read off it: one linearizes the
@@ -181,6 +217,7 @@ const TONE_MAP_PARAM: &str = "cToneMapParam";
 const ADAPT_LUM_PARAM: &str = "cAdaptLumParam";
 const SKY_PARAM: &str = "cSkyParam";
 const SUN_PARAM: &str = "cSunParam";
+const MOON_PARAM: &str = "cMoonParam";
 const FOG_PARAM: &str = "cFogParam";
 const HEIGHT_FOG_PARAM: &str = "cExpHeightFogParam";
 const DIRECTIONAL_SHADOW_PARAM: &str = "g_DirectionalShadowParameter";
@@ -801,6 +838,37 @@ pub struct Sky {
     /// Slices the volume holds, which is one an hour however deep it is: the tail of a deeper one
     /// repeats its start so that reading between them wraps past midnight.
     pub depth: f32,
+    /// How far the moon's disc reaches up the frame, as a fraction of its height. The one draw that
+    /// states it holds 0.00087, which is a disc two and a half pixels across, and that draw covered
+    /// no pixels at all, so it is a control rather than a reading.
+    pub moon: f32,
+    /// What the weather states its moon looks like, and how much of it the hour lets through.
+    pub moonlight: Vec4,
+}
+
+/// Where the moon's disc stands and how far it reaches, in the coordinates the pass reads a pixel
+/// by. Nothing where it is behind the camera, which a projected direction cannot place.
+pub fn moon_disc(scene: &Scene) -> Option<Vec4> {
+    let held = scene.sky;
+    let at = scene.projection * scene.view * moon(held.time, held.tilt).extend(0.0);
+    if at.w <= 0.0 {
+        return None;
+    }
+    let over = at.truncate() / at.w;
+    let (wide, tall) = scene.size;
+    Some(Vec4::new(
+        over.x * 0.5 + 0.5,
+        over.y * 0.5 + 0.5,
+        held.moon * tall / wide,
+        held.moon,
+    ))
+}
+
+/// Which way the moon comes from, which is taken as the far side of the sun's own circle. Measured
+/// once, in the only frame that draws one, it stood **5.19 degrees** off that point; one sample
+/// cannot say what rule the difference follows, so this is an approximation rather than a reading.
+pub fn moon(time: f32, tilt: f32) -> Vec3 {
+    -sun(time, tilt)
 }
 
 /// Which way the sun comes from at an hour of the day, in world space. It rises due `+x` at six and
@@ -926,6 +994,8 @@ impl Default for Sky {
             tilt: TILT,
             size: (8.0, 32.0),
             depth: 24.0,
+            moon: 0.000_872_664_7,
+            moonlight: Vec4::ZERO,
         }
     }
 }
@@ -1892,6 +1962,22 @@ impl Buffer {
             write(&mut out, 2, &SUN_FALLOFF);
             write(&mut out, 3, &SUN_CORE);
             write(&mut out, 4, &SUN_HALO);
+            return out;
+        }
+        if self.name == MOON_PARAM {
+            let held = scene.sky;
+            let Some(disc) = moon_disc(scene) else {
+                return out;
+            };
+            let color = held.moonlight.truncate() * MOON_TINT;
+            write(&mut out, 0, &MOON_FACE);
+            write(&mut out, 1, &MOON_TERMINATOR);
+            write(&mut out, 2, &[color.x, color.y, color.z, MOON_FADE]);
+            write(&mut out, 3, &[0.0, 0.0, 0.0, held.moonlight.w * MOON_WEIGHT]);
+            // What the frame behind the disc is read at, which is where each of its own fragments
+            // falls on the screen: the same rectangle the quad was stood over.
+            write(&mut out, 4, &[disc.z, -disc.w, disc.x, disc.y]);
+            write(&mut out, 5, &[0.0; 4]);
             return out;
         }
         if matches!(pass, Pass::CloudBand | Pass::CloudSheet)

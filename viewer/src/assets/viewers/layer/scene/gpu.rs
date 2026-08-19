@@ -102,6 +102,7 @@ pub struct Frame {
     /// The pass that fills whatever the frame did not cover, once its shader has arrived.
     pub skybox: Option<Arc<program::Program>>,
     pub sunlight: Option<Arc<program::Program>>,
+    pub moonlight: Option<Arc<program::Program>>,
     /// The one that fades what is far away toward the weather's own fog, and then toward that sky.
     pub haze: Option<Arc<program::Program>>,
     /// The two draws that put clouds over that sky, the horizon band first.
@@ -815,6 +816,9 @@ impl Renderer {
                 // Over the sky and under the clouds, which is where a real frame draws it.
                 if let Some(held) = frame.sunlight.as_ref() {
                     self.buffers.sun(gl, held, &scene)?;
+                }
+                if let Some(held) = frame.moonlight.as_ref() {
+                    self.buffers.moon(gl, held, &scene)?;
                 }
                 // Over the sky and under everything the frame covered, the sheet first so that the
                 // band stands in front of it where the two meet at the horizon.

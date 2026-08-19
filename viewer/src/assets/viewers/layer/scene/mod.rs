@@ -2194,12 +2194,15 @@ impl Scene {
             && matches!(self.packages.get(program::SHADOW), Some(Package::Ready(_)))
         {
             // Nine taps rather than one: a single comparison shows every texel of the map as a
-            // step, and this key is asked for here alone so no other package moves with it.
+            // step. Both keys are asked for here alone, so no other package moves with them.
             let shadow = self.screen(
                 program::SHADOW,
                 program::Pass::Lighting,
                 attachments,
-                &[(program::SHADOW_SOFT, program::SHADOW_SOFT_3X3)],
+                &[
+                    (program::SHADOW_SOFT, program::SHADOW_SOFT_3X3),
+                    (program::TRANSFORM_PROJ, program::TRANSFORM_PROJ_PLANE_FAR),
+                ],
             );
             if shadow.is_none() {
                 self.packages
@@ -3094,14 +3097,22 @@ impl Scene {
                             self.packages.get(program::SHADOW),
                             self.lighting.as_ref().map(|held| held.shadow.is_some()),
                         ) {
-                            (Some(Package::Ready(_)), Some(true)) => "translated",
-                            (Some(Package::Ready(_)), _) => "arrived, not translated",
-                            (Some(Package::Failed), _) => "failed",
-                            (Some(Package::Fetching(_)), _) => "fetching",
-                            (Some(Package::Wanted), _) => "wanted",
-                            (None, _) => "never asked for",
-                        }
-                        .to_owned(),
+                            (Some(Package::Ready(_)), Some(true)) => {
+                                let reaches: Vec<String> = (0..program::SPLITS)
+                                    .map(|at| format!("{:.0}", program::shadow_reach(at)))
+                                    .collect();
+                                format!(
+                                    "translated, {} splits reaching {} (the game draws 5)",
+                                    program::SPLITS,
+                                    reaches.join(", ")
+                                )
+                            }
+                            (Some(Package::Ready(_)), _) => "arrived, not translated".to_owned(),
+                            (Some(Package::Failed), _) => "failed".to_owned(),
+                            (Some(Package::Fetching(_)), _) => "fetching".to_owned(),
+                            (Some(Package::Wanted), _) => "wanted".to_owned(),
+                            (None, _) => "never asked for".to_owned(),
+                        },
                     ),
                     ("Passes", {
                         let held = self.renderer.lock().unwrap().drawn();

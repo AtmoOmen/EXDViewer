@@ -9,7 +9,7 @@ use ironworks::{
 
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
 
-fn walk(held: &layer::LayerGroup, into: &mut Vec<(u32, f32, f32, f32, [f32; 3])>) {
+fn walk(held: &layer::LayerGroup, into: &mut Vec<(u32, f32, f32, f32, [f32; 3], [bool; 2])>) {
     for layer in held.layers() {
         for instance in layer.instances() {
             if let layer::InstanceData::Light(light) = instance.data() {
@@ -19,6 +19,7 @@ fn walk(held: &layer::LayerGroup, into: &mut Vec<(u32, f32, f32, f32, [f32; 3])>
                     light.attenuation(),
                     light.spot_angle(),
                     instance.transform().translation(),
+                    [light.bg_part_shadows(), light.character_shadows()],
                 ));
             }
         }
@@ -53,11 +54,11 @@ fn main() {
     println!("{clipped} clip box entries\n");
 
     let mut zero = 0usize;
-    for (id, range, atten, cone, at) in lights.iter().take(40) {
+    for (id, range, atten, cone, at, casts) in lights.iter().take(40) {
         let span = ((at[0] + 64.0).powi(2) + (at[1] - 9.5).powi(2) + (at[2] - 44.0).powi(2)).sqrt();
         println!(
-            "  #{id:<9} range {range:>8.3}  atten {atten:>7.3}  cone {cone:>7.3}  at ({:.1}, {:.1}, {:.1})  {span:.1} from the aetheryte",
-            at[0], at[1], at[2],
+            "  #{id:<9} range {range:>8.3}  atten {atten:>7.3}  cone {cone:>7.3}  shadows {}/{}  at ({:.1}, {:.1}, {:.1})  {span:.1} from the aetheryte",
+            casts[0], casts[1], at[0], at[1], at[2],
         );
         if *range <= 0.0 {
             zero += 1;
@@ -68,6 +69,9 @@ fn main() {
         "\n{all_zero} of {} lights state a range of nought or less ({zero} in the sample above)",
         lights.len()
     );
+    let scenery = lights.iter().filter(|held| held.5[0]).count();
+    let characters = lights.iter().filter(|held| held.5[1]).count();
+    println!("{scenery} shadow the scenery, {characters} shadow characters");
     let mut ranges: Vec<f32> = lights.iter().map(|held| held.1).collect();
     ranges.sort_by(|a, b| a.partial_cmp(b).unwrap());
     if !ranges.is_empty() {

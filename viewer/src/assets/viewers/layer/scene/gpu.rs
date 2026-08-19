@@ -447,18 +447,9 @@ impl Renderer {
         let Some((into, _)) = self.buffers.shadow() else {
             return Ok(());
         };
-        let (view, projection) = program::shadow_camera(scene.light, scene.view);
-        let sun = program::Scene {
-            view,
-            projection,
-            ..scene.clone()
-        };
-        let (offsets, window) = self.windows(gl, frame, &sun, false)?;
-        let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
         let size = self.buffers.shadow_size();
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
-            gl.viewport(0, 0, size, size);
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::BLEND);
             gl.enable(glow::DEPTH_TEST);
@@ -473,70 +464,82 @@ impl Renderer {
             gl.cull_face(glow::FRONT);
             gl.front_face(glow::CCW);
         }
-        for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
-            let meshes: Vec<(glow::VertexArray, glow::Buffer, i32)> = match self
-                .models
-                .get(batch.model)
-                .and_then(Option::as_ref)
-                .and_then(|model| model.levels.get(batch.level))
-            {
-                Some(level) => level
-                    .meshes
-                    .iter()
-                    .map(|mesh| (mesh.layout, mesh.vertices, mesh.count))
-                    .collect(),
-                None => continue,
+        for split in 0..program::SPLITS {
+            let (view, projection) = program::shadow_camera(scene.light, scene.view, split);
+            let sun = program::Scene {
+                view,
+                projection,
+                split,
+                ..scene.clone()
             };
-            for (mesh, surface) in meshes.iter().zip(&batch.surfaces) {
-                if surface.hidden {
-                    continue;
-                }
-                let Some(held) = surface
-                    .shaded
-                    .as_ref()
-                    .and_then(|shaded| shaded.shadow.as_deref())
-                else {
-                    continue;
+            let (offsets, window) = self.windows(gl, frame, &sun, false)?;
+            let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
+            unsafe { gl.viewport(0, split as i32 * size, size, size) };
+            for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
+                let meshes: Vec<(glow::VertexArray, glow::Buffer, i32)> = match self
+                    .models
+                    .get(batch.model)
+                    .and_then(Option::as_ref)
+                    .and_then(|model| model.levels.get(batch.level))
+                {
+                    Some(level) => level
+                        .meshes
+                        .iter()
+                        .map(|mesh| (mesh.layout, mesh.vertices, mesh.count))
+                        .collect(),
+                    None => continue,
                 };
-                let program =
-                    deferred::link(gl, &mut self.programs, (surface.material, true, SUN), held)?;
-                unsafe { gl.use_program(Some(program)) };
-                if held.batch() > 1 {
-                    self.buffers.bind(gl, program, held, &sun, &[])?;
-                }
-                let slot = held
-                    .buffers
-                    .iter()
-                    .position(|buffer| buffer.instances() > 1)
-                    .unwrap_or(0) as u32;
-                unsafe {
-                    gl.bind_vertex_array(Some(mesh.0));
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                    for location in 0..16 {
-                        gl.disable_vertex_attrib_array(location);
+                for (mesh, surface) in meshes.iter().zip(&batch.surfaces) {
+                    if surface.hidden {
+                        continue;
                     }
-                    for held in &held.attributes {
-                        attribute(gl, held);
+                    let Some(held) = surface
+                        .shaded
+                        .as_ref()
+                        .and_then(|shaded| shaded.shadow.as_deref())
+                    else {
+                        continue;
+                    };
+                    let program =
+                        deferred::link(gl, &mut self.programs, (surface.material, true, SUN), held)?;
+                    unsafe { gl.use_program(Some(program)) };
+                    if held.batch() > 1 {
+                        self.buffers.bind(gl, program, held, &sun, &[])?;
                     }
-                    let count = held.batch() as i32;
-                    for at in 0..*windows {
-                        gl.bind_buffer_range(
-                            glow::UNIFORM_BUFFER,
-                            slot,
-                            Some(instances),
-                            offset + at * aligned(window, self.alignment),
-                            window,
-                        );
-                        let drawn = (batch.instances.len() as i32 - at * count).min(count);
-                        gl.draw_elements_instanced(
-                            glow::TRIANGLES,
-                            mesh.2,
-                            glow::UNSIGNED_SHORT,
-                            0,
-                            drawn,
-                        );
+                    let slot = held
+                        .buffers
+                        .iter()
+                        .position(|buffer| buffer.instances() > 1)
+                        .unwrap_or(0) as u32;
+                    unsafe {
+                        gl.bind_vertex_array(Some(mesh.0));
+                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                        for location in 0..16 {
+                            gl.disable_vertex_attrib_array(location);
+                        }
+                        for held in &held.attributes {
+                            attribute(gl, held);
+                        }
+                        let count = held.batch() as i32;
+                        for at in 0..*windows {
+                            gl.bind_buffer_range(
+                                glow::UNIFORM_BUFFER,
+                                slot,
+                                Some(instances),
+                                offset + at * aligned(window, self.alignment),
+                                window,
+                            );
+                            let drawn = (batch.instances.len() as i32 - at * count).min(count);
+                            gl.draw_elements_instanced(
+                                glow::TRIANGLES,
+                                mesh.2,
+                                glow::UNSIGNED_SHORT,
+                                0,
+                                drawn,
+                            );
+                        }
+                        gl.bind_vertex_array(None);
                     }
-                    gl.bind_vertex_array(None);
                 }
             }
         }

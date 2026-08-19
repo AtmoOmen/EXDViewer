@@ -113,8 +113,9 @@ fn selection(path: &str, package: &ShaderPackage) -> BTreeSet<u32> {
     let technique = package.technique_subview()[0];
     let screen: Vec<(u32, u32)> = vec![GET_DIRECTIONAL_LIGHT, SPECULAR_LIGHTING];
     let mut out = BTreeSet::new();
-    let mut take = |set: &[(u32, u32)], pass, technique, subview| {
+    let mut take = |set: &[(u32, u32)], pass: u32, technique, subview: u32| {
         if let Some((vs, ps)) = pair(package, set, pass, technique, subview) {
+            println!("  PICK pass {pass:08x} subview {subview:08x} keys {set:?} -> vs {vs} ps {ps}");
             out.insert(vs);
             out.insert(ps);
         }
@@ -240,9 +241,13 @@ struct Held {
     reading: BTreeMap<String, u32>,
     unread: BTreeMap<String, u32>,
     registers: BTreeMap<u32, u32>,
+    lanes: BTreeMap<u32, u32>,
     dynamic: u32,
     members: Vec<(String, u32, u32, String)>,
     size: u32,
+    /// Which shaders declare it, and which read each member.
+    shaders: BTreeSet<u32>,
+    readers: BTreeMap<String, BTreeSet<u32>>,
 }
 
 /// Whether a source operand's swizzle is cut down by where the instruction writes.
@@ -275,7 +280,7 @@ fn componentwise(opcode: Opcode) -> bool {
     )
 }
 
-fn walk(blob: &[u8], into: &mut BTreeMap<String, Held>) {
+fn walk(blob: &[u8], index: u32, into: &mut BTreeMap<String, Held>) {
     let chunks: Vec<_> = dxbc::scan_dxbc(blob)
         .iter()
         .flat_map(|container| &container.chunks)
@@ -304,11 +309,27 @@ fn walk(blob: &[u8], into: &mut BTreeMap<String, Held>) {
             continue;
         }
         let operands = instruction.operands();
+        // An instruction that writes nothing reads its first operand like any other source.
+        let sourced = matches!(
+            instruction.opcode,
+            Opcode::If
+                | Opcode::Discard
+                | Opcode::Breakc
+                | Opcode::Continuec
+                | Opcode::Retc
+                | Opcode::Callc
+                | Opcode::Switch
+                | Opcode::Case
+                | Opcode::Emit
+                | Opcode::Cut
+        );
         let mask = match operands.first().map(|held| &held.components) {
-            Some(ComponentSelect::Mask(bits)) if componentwise(instruction.opcode) => Some(*bits),
+            Some(ComponentSelect::Mask(bits)) if componentwise(instruction.opcode) && !sourced => {
+                Some(*bits)
+            }
             _ => None,
         };
-        for operand in operands.iter().skip(1) {
+        for operand in operands.iter().skip(usize::from(!sourced)) {
             collect(operand, mask, &slots, &mut touched);
             // A relative index is itself an operand, and it may be a buffer read of its own.
             for index in &operand.indices {
@@ -325,6 +346,7 @@ fn walk(blob: &[u8], into: &mut BTreeMap<String, Held>) {
         let members = hlsl::layout::members(buffer);
         let held = into.entry(buffer.name.to_string()).or_default();
         held.declaring += 1;
+        held.shaders.insert(index);
         held.size = held.size.max(buffer.size);
         if held.members.is_empty() {
             held.members = members
@@ -347,6 +369,7 @@ fn walk(blob: &[u8], into: &mut BTreeMap<String, Held>) {
         }
         for offset in &seen.offsets {
             *held.registers.entry(offset / 16).or_default() += 1;
+            *held.lanes.entry(offset / 4).or_default() += 1;
         }
         let hit: BTreeSet<&str> = members
             .iter()
@@ -363,6 +386,12 @@ fn walk(blob: &[u8], into: &mut BTreeMap<String, Held>) {
                 false => &mut held.unread,
             };
             *into.entry(member.name.clone()).or_default() += 1;
+            if hit.contains(member.name.as_str()) {
+                held.readers
+                    .entry(member.name.clone())
+                    .or_default()
+                    .insert(index);
+            }
         }
     }
 }
@@ -412,9 +441,10 @@ fn report(path: &str, shaders: usize, held: &BTreeMap<String, Held>) {
     for (name, buffer) in held {
         let bare = buffer.members.is_empty();
         println!(
-            "  BUFFER {name} size {} declared by {} {}{}",
+            "  BUFFER {name} size {} declared by {} in {:?} {}{}",
             buffer.size,
             buffer.declaring,
+            buffer.shaders,
             match bare {
                 true => "BARE-ARRAY",
                 false => "",
@@ -436,14 +466,23 @@ fn report(path: &str, shaders: usize, held: &BTreeMap<String, Held>) {
                 read,
                 buffer.declaring
             );
+            if read > 0 {
+                println!("        readers {:?}", buffer.readers[member]);
+            }
         }
-        if bare {
+        {
             let registers: Vec<String> = buffer
                 .registers
                 .iter()
                 .map(|(at, count)| format!("{at}({count})"))
                 .collect();
             println!("    registers read: {}", registers.join(" "));
+            let lanes: Vec<String> = buffer
+                .lanes
+                .iter()
+                .map(|(at, count)| format!("{}.{}({count})", at / 4, "xyzw".as_bytes()[(at % 4) as usize] as char))
+                .collect();
+            println!("    lanes read: {}", lanes.join(" "));
         }
     }
 }
@@ -464,6 +503,37 @@ fn main() {
             continue;
         };
         let taken = selection(&path, &package);
+        for index in &taken {
+            let Some(shader) = package.shaders().get(*index as usize) else {
+                continue;
+            };
+            let start = package.blobs_offset() + shader.blob_offset() as usize;
+            let blob = &raw[start..start + shader.blob_size() as usize];
+            for chunk in dxbc::scan_dxbc(blob)
+                .iter()
+                .flat_map(|container| &container.chunks)
+            {
+                let ChunkData::Rdef(rdef) = chunk.parse() else {
+                    continue;
+                };
+                for binding in &rdef.bindings {
+                    if binding.input_type != 0 {
+                        continue;
+                    }
+                    let named = shader
+                        .constants()
+                        .iter()
+                        .find(|held| u32::from(held.slot()) == binding.bind_point)
+                        .and_then(|held| package.name(held));
+                    if named != Some(binding.name.as_ref()) {
+                        println!(
+                            "  UNNAMED shader {index} slot {} rdef {} package {named:?}",
+                            binding.bind_point, binding.name
+                        );
+                    }
+                }
+            }
+        }
         let mut held = BTreeMap::new();
         for index in &taken {
             let Some(shader) = package.shaders().get(*index as usize) else {
@@ -471,7 +541,7 @@ fn main() {
             };
             let start = package.blobs_offset() + shader.blob_offset() as usize;
             let blob = &raw[start..start + shader.blob_size() as usize];
-            walk(blob, &mut held);
+            walk(blob, *index, &mut held);
         }
         report(&path, taken.len(), &held);
         println!("  SHADERS {taken:?}");
@@ -508,7 +578,7 @@ fn main() {
         };
         let blob = &raw[code.blob_offset()..code.blob_offset() + code.blob_size()];
         let mut held = BTreeMap::new();
-        walk(blob, &mut held);
+        walk(blob, 0, &mut held);
         report(path, 1, &held);
     }
 }

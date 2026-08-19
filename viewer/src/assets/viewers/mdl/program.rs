@@ -277,6 +277,11 @@ const SAMPLING_OFFSET: &str = "cSamplingOffset";
 pub const SHADOW_SOFT: u32 = 0xa89d_89f0;
 pub const SHADOW_SOFT_3X3: u32 = 0x9915_3ff0;
 
+/// What geometry a pass covers the frame with. The resolve's far-plane variant stands its quad at
+/// the second lane of `m_ShadowDistance`, which is where a split stops.
+pub const TRANSFORM_PROJ: u32 = 0x0950_0613;
+pub const TRANSFORM_PROJ_PLANE_FAR: u32 = 0xd6e2_1545;
+
 /// How wide the sun's own map is drawn, which is what a texel of it measures.
 pub const SHADOW_MAP: i32 = 2048;
 const CLIP_TO_WORLD: &str = "cC2W";
@@ -960,27 +965,37 @@ pub fn sun(time: f32, tilt: f32) -> Vec3 {
 /// What a place with no level file of its own stands under, which is what most zones state.
 pub const TILT: f32 = 30.0;
 
-/// How far about the point it looks at the sun's own depth map reaches. Not the game's own split:
-/// its first cascade is under five units and it draws five of them, where this draws one, so the
-/// box has to cover what one map can and still hold enough texels to a unit to read as an edge.
-pub const SHADOW_REACH: f32 = 64.0;
+/// How far about the point it looks at the nearest of the sun's own depth maps reaches, and how much
+/// further each one past it goes. Wider than the game's own, since every split is a pass over the
+/// scene.
+pub const SHADOW_REACH: f32 = 48.0;
+const SPLIT_STEP: f32 = 4.0;
 
-/// Where the sun stands to draw the scene's depth, as a view and an orthographic projection about
-/// `focus`. The projection matches the one the frame is drawn with in handing back a nought-to-one
-/// depth, which is what the translator's own fixup leaves in the buffer.
-pub fn shadow_camera(light: Vec3, view: Mat4) -> (Mat4, Mat4) {
+/// Depth maps the sun draws, stacked into one image. A pixel is read against the nearest whose own
+/// box still holds it.
+pub const SPLITS: usize = 3;
+
+/// How far the split at `at` reaches about the point it looks at.
+pub fn shadow_reach(at: usize) -> f32 {
+    SHADOW_REACH * SPLIT_STEP.powi(at as i32)
+}
+
+/// Where the sun stands to draw one split of the scene's depth, as a view and an orthographic
+/// projection about `focus`. The projection matches the one the frame is drawn with in handing back
+/// a nought-to-one depth, which is what the translator's own fixup leaves in the buffer.
+pub fn shadow_camera(light: Vec3, view: Mat4, at: usize) -> (Mat4, Mat4) {
     // Taken from the frame's own view rather than passed in, so the pass that draws the map and the
     // matrix that reads it cannot be given different boxes.
     let eye = view.inverse().w_axis.truncate();
     let ahead = -view.row(2).truncate().normalize_or(Vec3::Z);
-    let focus = eye + ahead * SHADOW_REACH * 0.5;
+    let reach = shadow_reach(at);
+    let focus = eye + ahead * reach * 0.5;
     let toward = light.normalize_or(Vec3::Y);
     // A light straight overhead leaves the usual up vector parallel to it, and the look-at degenerate.
     let up = match toward.y.abs() > 0.999 {
         true => Vec3::Z,
         false => Vec3::Y,
     };
-    let reach = SHADOW_REACH;
     let onto = Mat4::orthographic_rh(-reach, reach, -reach, reach, 0.0, reach * 2.0);
     // Snapped to whole texels of the map. The box follows the camera, so without this every step it
     // takes shifts the grid the depth was rasterised on and an edge crawls across its own surface,
@@ -1187,6 +1202,8 @@ pub struct Scene {
     pub light: Vec3,
     /// The light a lamp pass is drawing.
     pub lamp: Lamp,
+    /// Which of the sun's depth maps the pass at hand draws or reads.
+    pub split: usize,
     pub diffuse: Vec3,
     pub specular: Vec3,
     /// What the composite lights a surface with where no light reaches it.
@@ -1272,6 +1289,7 @@ impl Default for Scene {
             size: (1.0, 1.0),
             light: Vec3::Y,
             lamp: Lamp::default(),
+            split: 0,
             diffuse: Vec3::ONE,
             specular: Vec3::ONE,
             ambient: Ambient::default(),
@@ -2241,18 +2259,36 @@ impl Buffer {
         // rows nought and one answer the coordinate while row two answers the depth to compare, so
         // only those two take the half that turns a clip coordinate into a texture one.
         if self.name == DIRECTIONAL_SHADOW_PARAM {
-            let (sun, onto) = shadow_camera(scene.light, view);
+            let (sun, onto) = shadow_camera(scene.light, view, scene.split);
+            // The splits are stacked into one image, so the half that turns a clip coordinate into a
+            // texture one also takes the second lane into this split's own band of it.
+            let band = 1.0 / SPLITS as f32;
             let half = Mat4::from_cols(
                 Vec4::new(0.5, 0.0, 0.0, 0.0),
-                Vec4::new(0.0, 0.5, 0.0, 0.0),
+                Vec4::new(0.0, 0.5 * band, 0.0, 0.0),
                 Vec4::new(0.0, 0.0, 1.0, 0.0),
-                Vec4::new(0.5, 0.5, 0.0, 1.0),
+                Vec4::new(0.5, (scene.split as f32 + 0.5) * band, 0.0, 1.0),
             );
             put(
                 DIRECTIONAL_SHADOW_PARAM,
                 "m_ShadowProjectionMatrix",
                 rows(half * onto * sun * view.inverse(), 4),
             );
+            // Where this split stops, as the depth buffer holds it: the resolve draws a quad there
+            // and keeps what stands nearer, which is how a pixel reaches the nearest split that
+            // still covers it.
+            let (z, w) = (projection.z_axis.z, projection.w_axis.z);
+            let depth = |at: f32| (w / at.max(f32::EPSILON) - z).clamp(0.0, 1.0);
+            let near = match scene.split {
+                0 => 0.0,
+                at => depth(shadow_reach(at - 1)),
+            };
+            put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowDistance", vec![
+                near,
+                depth(shadow_reach(scene.split)),
+                0.0,
+                0.0,
+            ]);
             // Read by the lighting rather than by the resolve, and a nought here is what makes the
             // shadowed variant write black whatever the mask holds.
             put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowMapParameter", vec![

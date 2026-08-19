@@ -139,7 +139,7 @@ pub const GRADING: (u32, &str, u32) = (
 const POST: usize = 11;
 const SKY: usize = 12;
 const EXPOSURE: usize = 13;
-/// How wide the sun's own depth map is drawn. One square, since one cascade covers the frame.
+/// How wide the sun's own depth maps are drawn. One square a split, stacked into one image.
 const SHADOW: i32 = program::SHADOW_MAP;
 
 const FOG: usize = 19;
@@ -988,12 +988,12 @@ impl Buffers {
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
                 0,
-                glow::DEPTH_COMPONENT24 as i32,
+                glow::DEPTH_COMPONENT16 as i32,
                 SHADOW,
-                SHADOW,
+                SHADOW * program::SPLITS as i32,
                 0,
                 glow::DEPTH_COMPONENT,
-                glow::UNSIGNED_INT,
+                glow::UNSIGNED_SHORT,
                 glow::PixelUnpackData::Slice(None),
             );
             // Compared rather than sampled, and off the edge of the map a pixel is lit: the game's
@@ -1014,7 +1014,9 @@ impl Buffers {
             );
             self.shadow = Some((frame_of(gl, &[], Some(shadow))?, shadow));
             let mask = plane(gl, size, glow::R8, glow::RED, glow::UNSIGNED_BYTE)?;
-            self.mask = Some((frame_of(gl, &[mask], None)?, mask));
+            // Over the copy of the frame's depth rather than the depth itself, which the resolve
+            // samples: each split is a quad the depth test clips to what stands nearer than it.
+            self.mask = Some((frame_of(gl, &[mask], Some(cutoff))?, mask));
             self.resolved = Some(plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?);
             // The channel the fur pass answers into is one of the G-buffer's own, reached through a
             // framebuffer of its own so a pass writing one channel does not have to name a page.
@@ -1291,20 +1293,55 @@ impl Buffers {
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (into, _) = self.mask.ok_or("no shadow mask")?;
+        let (from, _) = self.lit.ok_or("no lit frame")?;
         unsafe {
+            // Ahead of the copy: a blit is one of the few things the scissor still reaches.
             gl.disable(glow::SCISSOR_TEST);
-            gl.disable(glow::DEPTH_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(into));
+            let (width, height) = self.size;
+            gl.blit_framebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                glow::DEPTH_BUFFER_BIT,
+                glow::NEAREST,
+            );
             gl.disable(glow::CULL_FACE);
             gl.disable(glow::BLEND);
-            gl.depth_mask(false);
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
             // Lit, so a pixel the pass leaves alone is one the sun reaches rather than one in the
             // dark: an unwritten mask has to read as no shadow at all.
             gl.clear_color(1.0, 1.0, 1.0, 1.0);
             gl.clear(glow::COLOR_BUFFER_BIT);
+            // Each split stands its quad where it stops and keeps what is nearer, so the nearest
+            // one covering a pixel is the one drawn over it last.
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::GREATER);
+            gl.depth_mask(false);
         }
-        let drawn = self.pass(gl, SHADE, held, into, scene, Over::Screen);
+        let mut drawn = Ok(());
+        for split in (0..program::SPLITS).rev() {
+            let scene = program::Scene {
+                split,
+                ..scene.clone()
+            };
+            drawn = self.pass(gl, SHADE, held, into, &scene, Over::Screen);
+            if drawn.is_err() {
+                break;
+            }
+        }
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(true);
+        }
         self.shadowing = drawn.is_ok();
         self.drawn.shadow = self.shadowing;
         drawn

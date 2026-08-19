@@ -1168,16 +1168,33 @@ impl Scene {
             if landed {
                 grid.fetch = None;
                 flight -= 1;
-            } else if !grid.taken && flight < GRIDS && eye.distance(grid.center) < load + grid.radius
-            {
-                let files = backend.files().clone();
-                let wanted = format!("{}{}", placing.directory, grid.file);
-                grid.fetch = Some(TrackedPromise::spawn_local(
-                    async move { files.read(&wanted).await },
-                ));
-                grid.taken = true;
-                flight += 1;
             }
+        }
+        // Nearest first, rather than in the order the zone lists them. A zone holds the same ground
+        // three times over at three levels of detail, and the models sit in the coarsest of them:
+        // taken in order, six hundred grids of nothing but procedural layers are read before the
+        // first grid that places anything at all.
+        while flight < GRIDS {
+            let wanted = placing
+                .grids
+                .iter()
+                .enumerate()
+                .filter(|(_, grid)| {
+                    !grid.taken && eye.distance(grid.center) < load + grid.radius
+                })
+                .min_by(|(_, one), (_, two)| {
+                    eye.distance(one.center).total_cmp(&eye.distance(two.center))
+                })
+                .map(|(at, _)| at);
+            let Some(at) = wanted else { break };
+            let grid = &mut placing.grids[at];
+            let files = backend.files().clone();
+            let path = format!("{}{}", placing.directory, grid.file);
+            grid.fetch = Some(TrackedPromise::spawn_local(
+                async move { files.read(&path).await },
+            ));
+            grid.taken = true;
+            flight += 1;
         }
         for (grid, bytes) in arrived {
             self.place_grass(grid, bytes);

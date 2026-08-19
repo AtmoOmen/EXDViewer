@@ -42,6 +42,8 @@ fn main() {
                 continue;
             };
             read += 1;
+            let mut here = 0;
+            let origin = held.world_origin();
             for chunk in held.chunks() {
                 let mut at = 0;
                 for (slot, count) in chunk.counts().iter().enumerate() {
@@ -50,6 +52,7 @@ fn main() {
                         Some(slot) if count > 0 => {
                             assert!(models.get(slot).is_some(), "slot {slot} names no model");
                             placed += count;
+                            here += count;
                         }
                         Some(_) => {}
                         None => auto += count,
@@ -61,6 +64,15 @@ fn main() {
                     at,
                     chunk.placements().len(),
                     "counts do not sum to placements"
+                );
+            }
+            if here > 0 {
+                println!(
+                    "   {here:>4} at {:9.1} {:7.1} {:9.1}   {}",
+                    origin[0],
+                    origin[1],
+                    origin[2],
+                    grid.file()
                 );
             }
         }

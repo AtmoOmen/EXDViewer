@@ -47,6 +47,11 @@ const FINAL_COLOR: u32 = 0x8ea9_df48;
 /// What every member of the post chain calls the frame it reads.
 const INPUT: u32 = 0x527d_95a1;
 
+/// The second buffer the bright pass reads, which nothing here writes. It decodes a strength out of
+/// two of the channels and squares the alpha away from one, so what it wants is the stand-in for a
+/// weight nothing filled rather than the flat grey every other unfilled sampler answers with.
+const GLARE_GEOMETRY: u32 = 0xc028_4c84;
+
 /// What the occlusion chain calls what it reads: the depth buffer and the G-buffer channel holding
 /// the normal, then what each of its passes leaves for the next.
 const DEPTH_PLANE: u32 = 0x70f6_bb1f;
@@ -143,6 +148,9 @@ const SHADE: usize = 21;
 const SCATTER: usize = 22;
 const SUN: usize = 23;
 const MOON: usize = 24;
+/// The glare chain: the bright pass, the blur, and the merge. Both halves of the blur share a slot,
+/// since they are one program run twice.
+const GLARE: usize = 25;
 
 /// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
 /// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
@@ -212,6 +220,16 @@ const SCREEN: [f32; 12] = [
     -1.0, -1.0, 0.0, 1.0, //
     3.0, -1.0, 0.0, 1.0, //
     -1.0, 3.0, 0.0, 1.0,
+];
+
+/// The same triangle for the passes drawn with the game's own sampling vertex shader, which reads
+/// where a vertex stands and what it samples out of one attribute rather than working the second out
+/// of the first. Kept apart from the triangle above because half the shaders drawn over that one
+/// pass the whole attribute through as a position.
+const SAMPLED: [f32; 12] = [
+    -1.0, -1.0, 0.0, 0.0, //
+    3.0, -1.0, 2.0, 0.0, //
+    -1.0, 3.0, 0.0, 2.0,
 ];
 
 /// The corners and triangles of the volume a light covers, which its own vertex shader clamps to the
@@ -335,6 +353,19 @@ enum Over {
     /// The skin blur, which walks the diffuse light around a pixel and writes the same buffer, so
     /// what it reads is a copy taken before it ran.
     Scattering(glow::Texture),
+    /// A pass of the glare chain, over a target of its own and against what the pass before it left.
+    Glaring((i32, i32), Glared),
+    /// The blur among them, drawn over the triangle that carries a coordinate of its own: the game's
+    /// own vertex shader builds its seven taps off that lane rather than off the position.
+    Blurring((i32, i32), glow::Texture),
+}
+
+/// What a pass of the glare chain reads, by the names its files give them: the frame or whatever the
+/// pass before it left, and the spread glare the merge lays back over the frame.
+#[derive(Clone, Copy)]
+struct Glared {
+    input: glow::Texture,
+    merge: Option<glow::Texture>,
 }
 
 /// One cloud mesh as the card holds it, and what it is drawn with.
@@ -465,6 +496,13 @@ pub struct Exposure {
     pub tone: std::sync::Arc<program::Program>,
 }
 
+/// The chain that spreads the bright end of the frame into a halo, in the order it runs.
+pub struct Glare {
+    pub bright: std::sync::Arc<program::Program>,
+    pub blur: std::sync::Arc<program::Program>,
+    pub merge: std::sync::Arc<program::Program>,
+}
+
 /// The chain that works out how much of the sky reaches each pixel, in the order it runs.
 pub struct Occlusion {
     pub scale: std::sync::Arc<program::Program>,
@@ -534,6 +572,10 @@ pub struct Buffers {
     scaled: Option<(glow::Framebuffer, glow::Texture)>,
     gathered: Option<(glow::Framebuffer, [glow::Texture; 2])>,
     occluded: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The glare chain's own pair, at a fraction of the frame. Two rather than one because each half
+    /// of the blur reads what the other wrote, and filtered because the blur addresses between texels
+    /// and the merge reads the pair back over the whole frame.
+    glared: Option<[(glow::Framebuffer, glow::Texture); 2]>,
     /// Whether that chain ran this frame. Every pass reads the flat stand-in until it has, and again
     /// from the frame the viewer stops asking for it.
     occluding: bool,
@@ -577,6 +619,7 @@ pub struct Buffers {
     /// The sky the reflection cube was built from, so a frame asking for the same one keeps it.
     sky: Option<([glam::Vec4; 3], f32)>,
     screen: Option<(glow::VertexArray, glow::Buffer)>,
+    sampled: Option<(glow::VertexArray, glow::Buffer)>,
     volume: Option<(glow::VertexArray, glow::Buffer, glow::Buffer)>,
     /// The two meshes the clouds are drawn over, in the order the passes take them: the band first,
     /// then the sheet. Built once, since neither depends on the frame.
@@ -666,7 +709,11 @@ impl Buffers {
             gl.enable(glow::SCISSOR_TEST);
             gl.color_mask(true, true, true, true);
             gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
+            // The frame answers with what it covers in its alpha and a color already multiplied by
+            // it, so a pixel the frame owns replaces the widget and one a halo alone reached is
+            // added to it.
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             // The frame carries its own depth up with it, so whatever is drawn over the widget
             // afterwards can test against what it covered. The pixels this pass drops would keep
             // what an earlier frame left there, hence the clear, and a fragment writes no depth at
@@ -698,6 +745,7 @@ impl Buffers {
             gl.bind_vertex_array(None);
             gl.depth_mask(false);
             gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
         }
         Ok(())
     }
@@ -843,6 +891,7 @@ impl Buffers {
                 .drain(..)
                 .map(|(_, frame, held)| (frame, held))
                 .chain(self.adapted.take().into_iter().flatten())
+                .chain(self.glared.take().into_iter().flatten())
                 .map(|(frame, held)| (frame, vec![held])),
         )
         {
@@ -991,6 +1040,19 @@ impl Buffers {
             smooth(gl, occluded);
             self.occluded = Some((frame_of(gl, &[occluded], None)?, occluded));
 
+            let held = self.spread();
+            let glared = [
+                plane(gl, held, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
+                plane(gl, held, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
+            ];
+            for held in glared {
+                smooth(gl, held);
+            }
+            self.glared = Some([
+                (frame_of(gl, &glared[..1], None)?, glared[0]),
+                (frame_of(gl, &glared[1..], None)?, glared[1]),
+            ]);
+
             // One channel at whole-float width: what the halving accumulates is the reciprocal of a
             // luminance, which runs far past what a byte or a half holds once a pixel is dark.
             let mut level = ((size.0 / 2).max(1), (size.1 / 2).max(1));
@@ -1045,6 +1107,13 @@ impl Buffers {
     /// that fills it is named for.
     fn fraction(&self) -> (i32, i32) {
         let held = program::OCCLUSION_SCALE;
+        ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
+    }
+
+    /// What the glare chain draws into, which is the frame taken down by the factor the blur's own
+    /// reach is stated in texels of.
+    fn spread(&self) -> (i32, i32) {
+        let held = program::GLARE_SCALE;
         ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
     }
 
@@ -1788,6 +1857,85 @@ impl Buffers {
         Ok(())
     }
 
+    /// The bright end of the frame spread into a halo and laid back over it.
+    ///
+    /// Four passes: the share of each pixel the composite marked as glare, kept where it is bright
+    /// enough to count, then that smoothed along each axis in turn, then the two put together. The
+    /// middle three run at a fraction of the frame, which is what settles how far a halo reaches:
+    /// the blur's own taps are six texels of whatever it reads.
+    ///
+    /// Ahead of the exposure and the grading, since a halo belongs to the frame the lighting left
+    /// rather than to what a curve made of it.
+    pub fn glare(
+        &mut self,
+        gl: &glow::Context,
+        held: &Glare,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let source = self.resolved.ok_or("no resolved frame")?;
+        let [(into, halo), (sideways, swept)] = self.glared.ok_or("no glare buffers")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+        }
+        // Both the first pass and the last read the frame while the last writes it, so the copy is
+        // taken once here and both read that.
+        self.keep(gl)?;
+        let size = self.spread();
+        self.pass(
+            gl,
+            GLARE,
+            &held.bright,
+            into,
+            scene,
+            Over::Glaring(
+                size,
+                Glared {
+                    input: source,
+                    merge: None,
+                },
+            ),
+        )?;
+        // A tap of the blur is stated in texels of what it reads, and each half reads the target the
+        // other wrote, so the step is the same for both and only its direction differs.
+        let texel = glam::Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32);
+        for (frame, read, step) in [
+            (sideways, halo, glam::Vec2::new(texel.x, 0.0)),
+            (into, swept, glam::Vec2::new(0.0, texel.y)),
+        ] {
+            let scene = program::Scene {
+                blur: step,
+                ..scene.clone()
+            };
+            self.pass(
+                gl,
+                GLARE + 1,
+                &held.blur,
+                frame,
+                &scene,
+                Over::Blurring(size, read),
+            )?;
+        }
+        self.pass(
+            gl,
+            GLARE + 2,
+            &held.merge,
+            lit,
+            scene,
+            Over::Glaring(
+                self.size,
+                Glared {
+                    input: source,
+                    merge: Some(halo),
+                },
+            ),
+        )
+    }
+
     /// The frame with its edges smoothed, which is the last thing the graph does to it.
     ///
     /// Two passes rather than one: the game works each pixel's brightness out in a pass of its own
@@ -1873,8 +2021,18 @@ impl Buffers {
         if let Some((layout, _)) = self.screen {
             return Ok(layout);
         }
-        let held = upload_screen(gl)?;
+        let held = upload_screen(gl, &SCREEN)?;
         self.screen = Some(held);
+        Ok(held.0)
+    }
+
+    /// The same triangle carrying what a sampling pass reads at, likewise.
+    fn sampled(&mut self, gl: &glow::Context) -> Result<glow::VertexArray, String> {
+        if let Some((layout, _)) = self.sampled {
+            return Ok(layout);
+        }
+        let held = upload_screen(gl, &SAMPLED)?;
+        self.sampled = Some(held);
         Ok(held.0)
     }
 
@@ -2202,8 +2360,10 @@ impl Buffers {
             SUBSURFACE_KERNEL => self.subsurface(gl)?,
             SHADOW_MASK if self.shadowing => self.mask.ok_or("no shadow mask")?.1,
             // White rather than the flat grey every other unfilled sampler answers with: grey here
-            // is half the frame in shadow, which is a plausible-looking wrong answer.
-            SHADOW_MASK | OCCLUSION | ATTENUATION => self.unoccluded(gl)?,
+            // is half the frame in shadow, which is a plausible-looking wrong answer. The last of
+            // them is squared and taken from one, where grey would throw three quarters of the
+            // glare away and white all of it.
+            SHADOW_MASK | OCCLUSION | ATTENUATION | GLARE_GEOMETRY => self.unoccluded(gl)?,
             _ => self.stand_in(gl)?,
         })
     }
@@ -2257,7 +2417,10 @@ impl Buffers {
     ) -> Result<(), String> {
         let size = match over {
             Over::Fraction => self.fraction(),
-            Over::Exposing(size, _) | Over::Sized(size) => size,
+            Over::Exposing(size, _)
+            | Over::Sized(size)
+            | Over::Glaring(size, _)
+            | Over::Blurring(size, _) => size,
             _ => self.size,
         };
         let source = format!("{}\n{}", held.vertex, held.fragment);
@@ -2282,6 +2445,7 @@ impl Buffers {
         };
         let layout = match over {
             Over::Clouding(held) => held.layout,
+            Over::Blurring(..) => self.sampled(gl)?,
             Over::Volume => {
                 let held = match self.volume {
                     Some(held) => held,
@@ -2323,6 +2487,12 @@ impl Buffers {
                         format!("the exposure chain reads {}, which nothing fills", texture.name)
                     })?,
                     Over::Scattering(held) if texture.id == LIGHT_DIFFUSE => held,
+                    Over::Blurring(_, held) if texture.id == INPUT => held,
+                    Over::Glaring(_, held) => match texture.name.as_str() {
+                        program::POST_INPUT => held.input,
+                        program::POST_MERGE => held.merge.ok_or("no glare to merge")?,
+                        _ => self.engine(gl, texture.id)?,
+                    },
                     Over::Mooning(held) if texture.name == program::SKY_SAMPLER => held.sky,
                     Over::Fogging(reads) => match texture.name.as_str() {
                         program::FOG_DEPTH => reads.depth,
@@ -2578,11 +2748,18 @@ impl Drop for Buffers {
         ]
         .into_iter()
         .flatten()
+        .chain(
+            self.glared
+                .take()
+                .into_iter()
+                .flatten()
+                .map(|(frame, held)| (frame, vec![held])),
+        )
         {
             dead.push(Dead::Frame(frame));
             dead.extend(textures.into_iter().map(Dead::Texture));
         }
-        if let Some((layout, held)) = self.screen.take() {
+        for (layout, held) in [self.screen.take(), self.sampled.take()].into_iter().flatten() {
             dead.push(Dead::Layout(layout));
             dead.push(Dead::Buffer(held));
         }
@@ -2640,6 +2817,24 @@ pub fn link<K: Ord>(
             .push(Dead::Program(stale.program));
     }
     Ok(built)
+}
+
+/// The draw buffers one reading writes, which is where each of its outputs lands. A list can only
+/// point the nth output at the nth attachment, so a channel the reading declares and skips is named
+/// as none rather than left holding whatever the draw would have put there.
+pub fn written(held: &program::Program) -> Vec<u32> {
+    match held.targets.is_empty() {
+        true => vec![glow::COLOR_ATTACHMENT0],
+        false => held
+            .targets
+            .iter()
+            .enumerate()
+            .map(|(at, target)| match held.outputs.contains(target) {
+                true => glow::COLOR_ATTACHMENT0 + at as u32,
+                false => glow::NONE,
+            })
+            .collect(),
+    }
 }
 
 /// The target a texture a sampler of this kind reads has to be bound at.
@@ -2794,7 +2989,10 @@ pub fn bind(
 
 /// The geometry the screen-wide passes and a light's volume are drawn from, in one array each so a
 /// pass can draw either without rebinding anything else.
-fn upload_screen(gl: &glow::Context) -> Result<(glow::VertexArray, glow::Buffer), String> {
+fn upload_screen(
+    gl: &glow::Context,
+    vertices: &[f32; 12],
+) -> Result<(glow::VertexArray, glow::Buffer), String> {
     unsafe {
         let layout = gl.create_vertex_array()?;
         gl.bind_vertex_array(Some(layout));
@@ -2802,7 +3000,7 @@ fn upload_screen(gl: &glow::Context) -> Result<(glow::VertexArray, glow::Buffer)
         gl.bind_buffer(glow::ARRAY_BUFFER, Some(held));
         gl.buffer_data_u8_slice(
             glow::ARRAY_BUFFER,
-            bytemuck::cast_slice(&SCREEN),
+            bytemuck::cast_slice(vertices),
             glow::STATIC_DRAW,
         );
         gl.enable_vertex_attrib_array(0);

@@ -25,12 +25,7 @@ float shoulder(float value) {
 }
 
 void main() {
-	// Nothing drew where the depth buffer still holds what it was cleared to, and those pixels
-	// belong to egui rather than to the frame.
 	float depth = texture(u_depth, v_uv).r;
-	if (depth >= 1.0 && !u_cover) {
-		discard;
-	}
 	// Carried over so what is drawn on top of the frame can test against what it covered. It only
 	// lands where the caller left depth writes on, which the pass that grades a frame does not.
 	gl_FragDepth = depth;
@@ -41,5 +36,9 @@ void main() {
 		float peak = max(color.r, max(color.g, color.b));
 		color *= peak > 0.0 ? shoulder(peak) / peak : 0.0;
 	}
-	fragColor = vec4(color, 1.0);
+	// Nothing drew where the depth buffer still holds what it was cleared to, and those pixels are
+	// egui's rather than the frame's. What the frame has there is what a halo spread onto nothing,
+	// so it is added to the widget rather than laid over it: the alpha the blend reads is coverage
+	// and the color is already multiplied by it.
+	fragColor = vec4(color, float(depth < 1.0 || u_cover));
 }

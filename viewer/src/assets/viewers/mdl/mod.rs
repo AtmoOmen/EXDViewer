@@ -392,6 +392,8 @@ pub struct Rendered {
     /// is kept against the quality it was built at, since that decides which file it came from.
     smoothing: RefCell<Option<Arc<gpu::Smoothing>>>,
     occlusion: RefCell<Option<(usize, Arc<gpu::Occlusion>)>>,
+    /// The chain that spreads the bright end of it into a halo.
+    glare: RefCell<Option<Arc<gpu::Glare>>>,
     /// What those passes are run with, and whether the settings row is open.
     look: Cell<program::Look>,
     settings: Cell<bool>,
@@ -466,6 +468,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         graded: Cell::new(false),
         smoothing: Default::default(),
         occlusion: Default::default(),
+        glare: Default::default(),
         look: Cell::new(program::Look::default()),
         settings: Cell::new(false),
         tables: Default::default(),
@@ -1201,8 +1204,9 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
 
 /// The constants the passes past the composite are run with. Every one of these is a value a shader
 /// reads and no file states, so the numbers are the user's to move rather than the viewer's to
-/// settle. The occlusion ones are a guess: that buffer reports no member names, no defaults and no
-/// units at all, and the lengths among them are taken as fractions of what the frame itself spans.
+/// settle. The occlusion and glare ones are a guess: those buffers report no member names, no
+/// defaults and no units at all, and the lengths among the first are taken as fractions of what the
+/// frame itself spans.
 fn settings(ui: &mut egui::Ui, model: &Rendered) {
     let mut look = model.look.get();
     ui.horizontal_wrapped(|ui| {
@@ -1224,6 +1228,38 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
                 .on_hover_text("FXAA's own subpixel aliasing removal, at its published default");
             ui.add(egui::Slider::new(&mut look.edge, 0.03..=0.5).text("Edge"))
                 .on_hover_text("How much local contrast counts as an edge, likewise");
+        });
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut look.bloom, "Bloom").on_hover_text(
+            "Spread the bright end of the frame with the game's own glare chain. Where its taps \
+             stand comes out of the blur's own weights, but the three below are choices: no file \
+             states them",
+        );
+        ui.add_enabled_ui(look.bloom, |ui| {
+            for (value, range, name, what) in [
+                (
+                    &mut look.threshold,
+                    0.0..=2.0,
+                    "Threshold",
+                    "What a pixel's glare has to average before any of it spreads",
+                ),
+                (
+                    &mut look.glare,
+                    0.0..=2.0,
+                    "Glare",
+                    "What the spread halo is weighted by where it goes back over the frame",
+                ),
+                (
+                    &mut look.veil,
+                    0.0..=0.5,
+                    "Veil",
+                    "How dim a pixel has to be for the merge to pull it toward a grey",
+                ),
+            ] {
+                ui.add(egui::Slider::new(value, range).text(name))
+                    .on_hover_text(what);
+            }
         });
     });
     ui.horizontal_wrapped(|ui| {
@@ -1465,6 +1501,15 @@ impl Rendered {
                         .get()
                         .antialias
                         .then_some([program::FXAA_LUMA, program::FXAA])
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_owned),
+                )
+                .chain(
+                    self.look
+                        .get()
+                        .bloom
+                        .then_some(program::GLARE)
                         .into_iter()
                         .flatten()
                         .map(str::to_owned),
@@ -1961,6 +2006,10 @@ impl Rendered {
                 true => self.smoothing(),
                 false => None,
             },
+            glare: match self.shaded.get() {
+                true => self.glare(),
+                false => None,
+            },
             occlusion: match self.shaded.get() {
                 true => self.occlusion(),
                 false => None,
@@ -2099,6 +2148,44 @@ impl Rendered {
         drop(packages);
         let built = Arc::new(built);
         *self.smoothing.borrow_mut() = Some(built.clone());
+        Some(built)
+    }
+
+    /// The chain that spreads the bright end of the frame, translated once its four shaders have
+    /// arrived. The blur reads seven coordinates rather than one, so it is drawn with the vertex
+    /// shader the game pairs it with rather than the one every other pass here takes.
+    fn glare(&self) -> Option<Arc<gpu::Glare>> {
+        if !self.look.get().bloom {
+            return None;
+        }
+        if let Some(held) = self.glare.borrow().as_ref() {
+            return Some(held.clone());
+        }
+        let packages = self.packages.borrow();
+        let ready = |path: &str| match packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let held = |path: &str| {
+            program::Program::posteffect(path, ready(path)?, program::POST_VERTEX)
+                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let sampled = |path: &str| {
+            program::Program::sampling(path, ready(path)?, ready(program::SAMPLING_7)?)
+                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let built = gpu::Glare {
+            bright: held(program::BRIGHT_PASS)?,
+            blur: sampled(program::BLOOM_BLUR)?,
+            merge: held(program::GLARE_MERGE)?,
+        };
+        drop(packages);
+        let built = Arc::new(built);
+        *self.glare.borrow_mut() = Some(built.clone());
         Some(built)
     }
 

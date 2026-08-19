@@ -87,6 +87,29 @@ pub const MEASURE: [&str; 6] = [
 /// `(0.5/1024, 1 - 0.5/1024)`.
 pub const CURVE: i32 = 1024;
 
+/// What spreads the bright end of the frame into a halo, in the order it runs. The first keeps the
+/// share of a pixel the composite left in its alpha, the second smooths that along one axis at a
+/// time, and the last lays it back over the frame.
+pub const BRIGHT_PASS: &str = "shader/sm5/posteffect/BrightPassFilter.shcd";
+pub const BLOOM_BLUR: &str = "shader/sm5/posteffect/BloomBlur_Linear.shcd";
+pub const GLARE_MERGE: &str = "shader/sm5/posteffect/GlareMerge.shcd";
+
+/// The vertex shader the game pairs the blur with, which hands it seven coordinates rather than the
+/// one every other pass here reads.
+pub const SAMPLING_7: &str = "shader/sm5/posteffect/VSSampling7.shcd";
+
+/// The four of them, for asking after at once.
+pub const GLARE: [&str; 4] = [BRIGHT_PASS, BLOOM_BLUR, GLARE_MERGE, SAMPLING_7];
+
+/// What the glare chain runs at, against the frame. The blur reaches six texels of whatever it
+/// reads, so this is what settles how far a halo spreads on screen.
+pub const GLARE_SCALE: i32 = 4;
+
+/// Where the blur's six outer taps stand, in texels of what it reads. Its weights are a Gaussian of
+/// two texels read at nought through six and paired off, and a pair taken as one bilinear tap sits
+/// at the pair's own center of mass rather than on either texel.
+const TAPS: [f32; 3] = [1.40737, 3.29421, 5.20181];
+
 /// The sky, drawn over whatever the frame did not cover.
 pub const SKY: &str = "shader/sm5/posteffect/Sky.shcd";
 
@@ -168,6 +191,19 @@ pub fn cloudside_texture(id: u16) -> String {
     format!("bgcommon/nature/cloud/texture/cloudside_{id:03}.tex")
 }
 
+/// The zone's own grass, which the engine draws off geometry it bakes per grid rather than off any
+/// model, and binds with no material naming it.
+pub const GRASS: &str = "shader/sm5/shpk/grass.shpk";
+
+/// The technique that fills the channels the default one leaves at nought. Its own vertex shader
+/// takes a clip position straight through, since the engine runs it over the pixels grass already
+/// covered; paired here with the default vertex shader, which stands those same pixels up.
+const GRASS_NORMAL: u32 = 0x5cf2_9b55;
+
+/// Which way a blade faces, at half of itself plus a half, which is how the channel holding it is
+/// read. No file states one.
+const GRASS_UP: [f32; 4] = [0.5, 1.0, 0.5, 0.0];
+
 /// The fog, which drags a distant pixel toward the color the weather states and a further one toward
 /// the sky itself, and hazes a near one by how much air stands between it and the camera.
 ///
@@ -223,6 +259,14 @@ const HEIGHT_FOG_PARAM: &str = "cExpHeightFogParam";
 const DIRECTIONAL_SHADOW_PARAM: &str = "g_DirectionalShadowParameter";
 const SHADOW_BIAS_PARAM: &str = "g_ShadowBiasParameter";
 
+/// The buffers the glare chain reads. The first two carry a threshold and a pair of weights no file
+/// states; the last two are the sampling vertex shader's own, one holding the scale and bias it
+/// builds a coordinate with and the other where each of its taps stands.
+const BRIGHT_PASS_PARAM: &str = "cBrightPassParam";
+const MERGE_WEIGHT: &str = "cMergeWeight";
+const SAMPLING_PARAM: &str = "cParam";
+const SAMPLING_OFFSET: &str = "cSamplingOffset";
+
 /// How many taps the shadow resolve reads. One is a single comparison and shows every texel of the
 /// map as a step; nine is what softens the edge.
 pub const SHADOW_SOFT: u32 = 0xa89d_89f0;
@@ -258,6 +302,8 @@ pub const POST_INPUT: &str = "sInput";
 pub const POST_TABLE: &str = "sLUT";
 pub const POST_MEASURE: &str = "sToneMap";
 pub const POST_ADAPTED: &str = "sAdaptedLum";
+/// What the merge lays over the frame, which is the glare the blur left.
+pub const POST_MERGE: &str = "sMerge1";
 
 /// What the grading pass takes of that buffer. Neither lane is stated anywhere: the environment's
 /// colour filter set carries a grading beside the tone mapping one, but nothing pairs its fields
@@ -771,10 +817,19 @@ pub struct Look {
     /// The exponent the occlusion is raised to. The pass also multiplies by it a second time, which
     /// is the file's own arithmetic and not a reading of it.
     pub power: f32,
+    pub bloom: bool,
+    /// What a pixel's emissive share has to average before any of it is spread. Nothing states it.
+    pub threshold: f32,
+    /// What the spread glare is weighted by where the merge lays it back over the frame. The blur
+    /// carries a gain of three along each axis, so a weight here is against nine.
+    pub glare: f32,
+    /// How dim a pixel has to be for the merge to pull it toward a grey of one and a half times its
+    /// own mean, which is the other thing that pass does. Nought leaves every pixel its own color.
+    pub veil: f32,
 }
 
-/// The occlusion values are a guess. Nothing states them: the buffer behind them reports no member
-/// names, no defaults, and no units.
+/// The occlusion and glare values are a guess. Nothing states them: the buffers behind them report
+/// no member names, no defaults, and no units.
 impl Default for Look {
     fn default() -> Self {
         Self {
@@ -792,6 +847,10 @@ impl Default for Look {
             bias: 0.02,
             intensity: 3.0,
             power: 1.0,
+            bloom: true,
+            threshold: 0.4,
+            glare: 1.0,
+            veil: 0.0,
         }
     }
 }
@@ -1138,6 +1197,8 @@ pub struct Scene {
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
     pub clock: f32,
     pub wind: Wind,
+    /// How far one tap of the glare blur steps and which way, in the coordinate that pass reads.
+    pub blur: Vec2,
 }
 
 /// What a leaf is swayed by, which is all three registers `g_WavingParam` holds. The heading and the
@@ -1217,6 +1278,7 @@ impl Default for Scene {
             customize: Customize::default(),
             clock: 0.0,
             wind: Wind::default(),
+            blur: Vec2::ZERO,
         }
     }
 }
@@ -1549,6 +1611,34 @@ impl Program {
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
     }
 
+    /// Translates one of the two readings the zone's grass is drawn with. The default node writes
+    /// the albedo off the color map and leaves the normal at nought, so the second stands over the
+    /// pixels it kept and fills the rest of the channels.
+    pub fn grass(
+        bytes: &[u8],
+        normal: bool,
+        target: usize,
+        attachments: usize,
+    ) -> Result<Self, String> {
+        let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
+        let [technique, subview] = package.technique_subview();
+        let held = |technique| pair(&package, &[], &[], Pass::Buffer.id(), technique, subview);
+        let (vs, ps) = held(technique).ok_or("the grass package holds no default node")?;
+        let ps = match normal {
+            true => held(GRASS_NORMAL).ok_or("the grass package holds no such technique")?.1,
+            false => ps,
+        };
+        Self::assemble(
+            &package,
+            bytes,
+            (vs, ps),
+            None,
+            Pass::Buffer,
+            target,
+            attachments,
+        )
+    }
+
     /// Translates one member of the game's post chain. A `.shcd` holds one shader and no node table,
     /// so the file is the variant and there is nothing to select; what it wants is a screen-wide
     /// draw of the vertex shader given, and a frame in the range a screen holds, since the pass that
@@ -1638,6 +1728,50 @@ impl Program {
         })
     }
 
+    /// The same, drawn with the vertex shader the game pairs it with rather than one the viewer
+    /// wrote. A pass reading more of its source than the pixel under it declares its coordinates as
+    /// varyings, and the two stages have to spell those identically for the program to link at all,
+    /// which is what taking the file rather than writing one gets.
+    pub fn sampling(path: &str, bytes: &[u8], vertex: &[u8]) -> Result<Self, String> {
+        let code = shcd::ShaderCode::parse(vertex).map_err(|why| why.to_string())?;
+        let blob = vertex
+            .get(code.blob_offset()..code.blob_offset() + code.blob_size())
+            .ok_or("the vertex shader's bytecode runs past the file")?;
+        let program = shex(blob).ok_or("no shader in the blob")?;
+        let mut names = hlsl::Names::default();
+        for resource in code.constants() {
+            if let Some(name) = code.name(resource) {
+                names.constants.insert(
+                    resource.slot(),
+                    hlsl::Buffer::new(name.to_owned(), Vec::new()),
+                );
+            }
+        }
+        signatures(blob, &mut names);
+        let extents = hlsl::glsl::extents(&program, &names);
+        let options = hlsl::glsl::Options {
+            targets: Vec::new(),
+            extents: extents.clone(),
+        };
+        let source = hlsl::glsl(&program, &names, hlsl::Reading::Plain, &options)
+            .lines
+            .join("\n");
+
+        let mut held = Self::posteffect(path, bytes, &source)?;
+        for (name, registers) in extents {
+            match held.buffers.iter_mut().find(|buffer| buffer.name == name) {
+                Some(buffer) => buffer.registers = buffer.registers.max(registers),
+                None => held.buffers.push(Buffer {
+                    name,
+                    members: Vec::new(),
+                    registers,
+                    fixed: None,
+                }),
+            }
+        }
+        Ok(held)
+    }
+
     fn assemble(
         package: &ShaderPackage,
         bytes: &[u8],
@@ -1673,11 +1807,25 @@ impl Program {
             .into_iter()
             .collect();
         let attachments = attachments.max(1);
-        let targets: Vec<u32> = outputs
+        let page = target / attachments;
+        let held: Vec<u32> = outputs
             .chunks(attachments)
-            .nth(target / attachments)
+            .nth(page)
             .unwrap_or_default()
             .to_vec();
+        // A reading that skips a channel still has to name it. A draw buffer list can only point the
+        // nth output at the nth attachment, so where the outputs do not run straight along the page
+        // they are declared at the channels they fill and the rest are left out of the list.
+        let targets: Vec<u32> = match held
+            .iter()
+            .zip(page * attachments..)
+            .all(|(target, at)| *target as usize == at)
+        {
+            true => held,
+            false => (page * attachments..(page + 1) * attachments)
+                .map(|at| at as u32)
+                .collect(),
+        };
 
         let vs_options = hlsl::glsl::Options {
             targets: Vec::new(),
@@ -1911,6 +2059,13 @@ impl Buffer {
             write(&mut out, 0, &[1.0; 4]);
             return out;
         }
+        // Where the grid a blade belongs to stands, which its own placements are measured from. The
+        // last lane reaches nothing the readings the scene runs go on to look at.
+        if self.name == "g_GrassGridParam" {
+            let held = model.w_axis;
+            write(&mut out, 0, &[held.x, held.y, held.z, 0.0]);
+            return out;
+        }
         // A whole matrix, one register per row, for a buffer the reflection gives no members.
         let write_rows = |out: &mut Vec<u8>, held: &[f32]| {
             for (at, row) in held.chunks(4).enumerate() {
@@ -2142,6 +2297,35 @@ impl Buffer {
             write(&mut out, 1, &[half, 1.0 - half, adapted, adapted * half]);
             return out;
         }
+        if self.name == BRIGHT_PASS_PARAM {
+            write(&mut out, 0, &[scene.look.threshold, 0.0, 0.0, 0.0]);
+            return out;
+        }
+        if self.name == MERGE_WEIGHT {
+            // The frame passes through at its own strength: anything else here would scale a whole
+            // exposed frame a second time.
+            let veil = 1.0 / scene.look.veil.max(f32::EPSILON);
+            write(&mut out, 0, &[1.0, scene.look.glare, veil, 0.0]);
+            return out;
+        }
+        if self.name == SAMPLING_PARAM {
+            // The quad this is drawn over already carries clip space and the coordinate to read at,
+            // so the position is only turned the way round the pass expects and the coordinate is
+            // taken as it stands.
+            write(&mut out, 0, &[0.5, -0.5, 0.5, 0.5]);
+            write(&mut out, 1, &[1.0, 1.0, 0.0, 0.0]);
+            return out;
+        }
+        if self.name == SAMPLING_OFFSET {
+            // Which tap lands in which lane is settled by the weight the blur pairs with it, and the
+            // middle of the kernel is the first lane here rather than the lone coordinate.
+            let [near, mid, far] = TAPS.map(|held| scene.blur * held);
+            write(&mut out, 0, &[0.0, 0.0, near.x, near.y]);
+            write(&mut out, 1, &[mid.x, mid.y, far.x, far.y]);
+            write(&mut out, 2, &[-near.x, -near.y, -mid.x, -mid.y]);
+            write(&mut out, 3, &[-far.x, -far.y, 0.0, 0.0]);
+            return out;
+        }
         if self.name == FXAA_PARAM {
             let look = scene.look;
             write(
@@ -2239,6 +2423,13 @@ impl Buffer {
         // What takes an object into the world alone, which the engine's own draws carry instead of
         // the object transform a model's instancing buffer holds.
         put("g_WorldMatrix", "g_WorldMatrix", rows(model, 3));
+        // The engine drives these and no file states one. A blade reads the last lane of the second
+        // as how dry it is, and the two masks as how much of the occlusion buffer reaches it.
+        let grass = "g_GrassCommonParam";
+        put(grass, "m_GrassNormal", GRASS_UP.to_vec());
+        put(grass, "m_Param", vec![0.0, 0.0, 0.0, 1.0]);
+        put(grass, "m_SSAOMaskMin", vec![1.0]);
+        put(grass, "m_SSAOMaskMax", vec![1.0]);
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
         // Declared by the five character packages and read by none of them: nothing in `character`,
         // `characterlegacy`, `hair`, `iris` or `skin` touches it once. Left at the identity because
@@ -3087,3 +3278,5 @@ mod test {
         assert!(held[..32 * SHADER_TYPE].iter().all(|held| *held == 0));
     }
 }
+
+

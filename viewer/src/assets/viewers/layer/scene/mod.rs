@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
+use half::f16;
 use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, SceneTimeline, Transform};
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
@@ -59,6 +60,16 @@ const TEXTURE_SIZE: u16 = 256;
 
 /// Decoded texture bytes one scene may hold. Past it the rest of its surfaces draw untextured.
 const TEXTURE_BUDGET: usize = 128 << 20;
+
+/// Longest edge a grass color map is decoded to. Over the cap above, since a map holds its tiles
+/// side by side and a blade reads one of them.
+const GRASS_SIZE: u16 = 1024;
+
+/// Tiles a grass color map is laid out in, which a placement's own profile picks between.
+const TILES: u8 = 8;
+
+/// Blades a scene will stand up, each a quad of its own. Past it a grid's own are left out whole.
+const BLADES: usize = 200_000;
 
 /// Lights the frame draws at once. Every one is a pass of its own over the volume it reaches, so a
 /// zone's whole set would cost more than it shows; the nearest are kept.
@@ -376,8 +387,18 @@ struct Placing {
     directory: String,
     /// The scene's model for each grass slot, in the order the zone names them.
     models: Vec<usize>,
+    /// The color map each auto layer's blades are cut out of, where the zone names one.
+    maps: Vec<String>,
     grids: Vec<Patch>,
     layer: usize,
+}
+
+/// One grid's blades at one auto layer, as the scene stood them up.
+struct Turf {
+    origin: Vec3,
+    radius: f32,
+    layer: usize,
+    blades: usize,
 }
 
 /// One grid of grass, which is only asked for once the eye reaches the sphere the zone sorts it by.
@@ -479,6 +500,8 @@ pub struct Scene {
     /// The sky the volume was fetched for, so moving the picker fetches the next one.
     sky_wanted: Option<u16>,
     sky_file: Aside,
+    /// The chain that spreads the bright end of the frame into a halo.
+    glare: Option<Arc<mdl::gpu::Glare>>,
     /// The pair that smooths its edges, and the chain that works out how much sky reaches a pixel.
     smoothing: Option<Arc<mdl::gpu::Smoothing>>,
     occlusion: Option<Arc<mdl::gpu::Occlusion>>,
@@ -503,6 +526,12 @@ pub struct Scene {
     waiting: Vec<Expand>,
     terrain: Terrain,
     grass: Grass,
+    /// The two readings the grass is drawn with, once its package has arrived.
+    sward: Option<Arc<gpu::Grass>>,
+    turf: Vec<Turf>,
+    /// The quads those stand as, and the ones a grid that arrived past the cap would have added.
+    blades: usize,
+    unsown: usize,
     /// Placements the view was last framed over, so a scene that arrived empty frames itself once
     /// its first file lands rather than leaving the camera at the origin.
     fitted: usize,
@@ -534,6 +563,35 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
         *slot = id as u8;
     }
     (key.0, held)
+}
+
+/// The quad one auto-layer placement stands as, measured from its grid's own origin. The blade
+/// itself is stated in no file: what the grid holds is where each stands, how far it is turned, and
+/// how wide and tall it is.
+fn blade(placement: &ggd::Placement, into: &mut Vec<gpu::Corner>) {
+    let turn = Quat::from_array(placement.rotation());
+    let across = turn * Vec3::X * placement.scale_xz() * 0.5;
+    let up = turn * Vec3::Y * placement.scale_y();
+    let foot = Vec3::from_array(placement.position());
+    let tile = 1.0 / f32::from(TILES);
+    let column = f32::from(placement.profile() % TILES) * tile;
+    let half = |values: [f32; 4]| values.map(f16::from_f32);
+    for (side, height, u, v) in [
+        (-1.0, 1.0, 0.0, 0.0),
+        (1.0, 1.0, tile, 0.0),
+        (-1.0, 0.0, 0.0, 1.0),
+        (1.0, 0.0, tile, 1.0),
+    ] {
+        let at = foot + across * side + up * height;
+        into.push(gpu::Corner {
+            position: half([at.x, at.y, at.z, 0.0]),
+            uv: half([u, v, 0.0, 0.0]),
+            color1: half([column, 0.0, 0.0, 0.0]),
+            // Nought weight, so the albedo is the color map's own texel: the map the tint would be
+            // read off is the engine's and no file names it.
+            color: [0; 4],
+        });
+    }
 }
 
 /// A file the scene names beside itself, wanted where it names one.
@@ -642,6 +700,7 @@ impl Scene {
             sky_volume: None,
             sky_wanted: None,
             sky_file: Aside::Done,
+            glare: None,
             smoothing: None,
             occlusion: None,
             ambient: ambient::Ambient::new(source.scene()),
@@ -667,6 +726,10 @@ impl Scene {
                 Some(root) => Grass::Wanted(format!("{root}/grass/grass_zone_data.gzd")),
                 None => Grass::Done,
             },
+            sward: None,
+            turf: Vec::new(),
+            blades: 0,
+            unsown: 0,
             fitted: 0,
             renderer: gpu::Renderer::new(),
             placed: Vec::new(),
@@ -1080,21 +1143,31 @@ impl Scene {
             shown: true,
             placements: 0,
         });
+        let maps = zone
+            .color_map()
+            .iter()
+            .map(|name| match name.is_empty() {
+                true => String::new(),
+                false => format!("{directory}{name}.tex"),
+            })
+            .collect();
         self.grass = Grass::Placing(Box::new(Placing {
             directory,
             models,
+            maps,
             grids,
             layer: self.layers.len() - 1,
         }));
     }
 
-    /// Every placement of one grid, each an instance of whatever model its count slot names. The
-    /// leading slots are the procedural layers, which name no model and so only advance the cursor.
+    /// Every placement of one grid: the leading count slots are the procedural layers, whose
+    /// placements stand as blades of the zone's own grass, and the rest name a model the zone lists.
     fn place_grass(&mut self, grid: usize, bytes: Vec<u8>) {
         let Grass::Placing(placing) = &self.grass else {
             return;
         };
         let (models, layer) = (placing.models.clone(), placing.layer);
+        let radius = placing.grids[grid].radius;
         let file = match ggd::GrassGrid::read(Cursor::new(bytes)) {
             Ok(file) => file,
             Err(why) => {
@@ -1103,14 +1176,22 @@ impl Scene {
             }
         };
         let origin = Vec3::from_array(file.world_origin());
+        let mut sown: [Vec<gpu::Corner>; ggd::Chunk::AUTO_LAYERS] = Default::default();
         for chunk in file.chunks() {
             let mut at = 0;
             for (slot, count) in chunk.counts().iter().enumerate() {
-                let model = slot
-                    .checked_sub(ggd::Chunk::AUTO_LAYERS)
-                    .and_then(|slot| models.get(slot).copied());
-                for placement in &chunk.placements()[at..at + usize::from(*count)] {
-                    let Some(model) = model else { continue };
+                let placements = &chunk.placements()[at..at + usize::from(*count)];
+                at += usize::from(*count);
+                let Some(model) = slot.checked_sub(ggd::Chunk::AUTO_LAYERS) else {
+                    for placement in placements {
+                        blade(placement, &mut sown[slot]);
+                    }
+                    continue;
+                };
+                let Some(model) = models.get(model).copied() else {
+                    continue;
+                };
+                for placement in placements {
                     let scale = Vec3::new(
                         placement.scale_xz(),
                         placement.scale_y(),
@@ -1134,10 +1215,46 @@ impl Scene {
                         key: (0, [0; 4]),
                     });
                 }
-                at += usize::from(*count);
             }
         }
+        self.sow(origin, radius, sown);
         self.dirty = true;
+    }
+
+    /// One grid's blades handed to the card, a buffer per auto layer. Past the cap a whole grid is
+    /// left out rather than half of one, and how many that came to is what the panel reports.
+    fn sow(&mut self, origin: Vec3, radius: f32, sown: [Vec<gpu::Corner>; ggd::Chunk::AUTO_LAYERS]) {
+        let Grass::Placing(placing) = &self.grass else {
+            return;
+        };
+        let cut: [bool; ggd::Chunk::AUTO_LAYERS] =
+            std::array::from_fn(|at| placing.maps.get(at).is_some_and(|path| !path.is_empty()));
+        for (layer, corners) in sown.into_iter().enumerate() {
+            let blades = corners.len() / 4;
+            // A layer the zone names no map for is cut out of nothing, so it stands nothing up.
+            if blades == 0 || !cut[layer] {
+                continue;
+            }
+            if self.blades + blades > BLADES {
+                self.unsown += blades;
+                continue;
+            }
+            let indices = (0..blades as u32)
+                .flat_map(|at| [0, 1, 2, 2, 1, 3].map(|corner| at * 4 + corner))
+                .collect();
+            self.renderer.lock().unwrap().queue_turf(gpu::Sown {
+                turf: self.turf.len(),
+                corners,
+                indices,
+            });
+            self.turf.push(Turf {
+                origin,
+                radius,
+                layer,
+                blades,
+            });
+            self.blades += blades;
+        }
     }
 
     fn load_grass(&mut self, backend: &Backend) {
@@ -1793,6 +1910,7 @@ impl Scene {
         if self.ambient.exposure(0.0).is_some() {
             wanted.extend(program::MEASURE.map(str::to_owned));
         }
+        wanted.extend(program::GLARE.map(str::to_owned));
         wanted.extend([
             program::FXAA_LUMA.to_owned(),
             program::FXAA.to_owned(),
@@ -1808,6 +1926,9 @@ impl Scene {
         }
         if self.ambient.clouds().is_some() {
             wanted.push(program::CLOUD.to_owned());
+        }
+        if matches!(self.grass, Grass::Placing(_)) {
+            wanted.push(program::GRASS.to_owned());
         }
         // A spot's package is twice the size of a point's and nothing can be lit with it until the
         // four above are in hand, so it is only worth a fetch of its own once they are and the zone
@@ -1946,6 +2067,26 @@ impl Scene {
         Some(Arc::new(mdl::gpu::Smoothing {
             luma: self.effect(program::FXAA_LUMA, program::POST_VERTEX)?,
             fxaa: self.effect(program::FXAA, program::POST_VERTEX)?,
+        }))
+    }
+
+    /// The chain that spreads the bright end of the frame, translated once its four shaders have
+    /// arrived. The blur reads seven coordinates rather than one, so it is drawn with the vertex
+    /// shader the game pairs it with rather than the one every other pass here takes.
+    fn halo(&self) -> Option<Arc<mdl::gpu::Glare>> {
+        let Some(Package::Ready(vertex)) = self.packages.get(program::SAMPLING_7) else {
+            return None;
+        };
+        let Some(Package::Ready(bytes)) = self.packages.get(program::BLOOM_BLUR) else {
+            return None;
+        };
+        let blur = program::Program::sampling(program::BLOOM_BLUR, bytes, vertex)
+            .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::BLOOM_BLUR))
+            .ok()?;
+        Some(Arc::new(mdl::gpu::Glare {
+            bright: self.effect(program::BRIGHT_PASS, program::POST_VERTEX)?,
+            blur: Arc::new(blur),
+            merge: self.effect(program::GLARE_MERGE, program::POST_VERTEX)?,
         }))
     }
 
@@ -2096,6 +2237,28 @@ impl Scene {
                     .ok()
                     .map(Arc::new);
             }
+        }
+        if self.sward.is_none()
+            && let Some(Package::Ready(bytes)) = self.packages.get(program::GRASS)
+        {
+            let read = |normal, page| {
+                program::Program::grass(bytes, normal, page, attachments)
+                    .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::GRASS))
+                    .ok()
+                    .map(Arc::new)
+            };
+            self.sward = read(false, 0).map(|first| {
+                let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
+                let mut buffer = vec![first];
+                buffer.extend((1..pages).filter_map(|page| read(false, page)));
+                Arc::new(gpu::Grass {
+                    buffer,
+                    normal: (0..pages).filter_map(|page| read(true, page)).collect(),
+                })
+            });
+        }
+        if self.glare.is_none() {
+            self.glare = self.halo();
         }
         if self.smoothing.is_none() {
             self.smoothing = self.edges();
@@ -2252,6 +2415,19 @@ impl Scene {
 
     /// Every texture the ready materials name, since the game's own shaders read all of them. Held
     /// for the whole scene rather than per model, since a zone's models share theirs heavily.
+    /// The color maps the zone's grass is cut out of, where it names any.
+    fn maps(&self) -> Vec<String> {
+        let Grass::Placing(placing) = &self.grass else {
+            return Vec::new();
+        };
+        placing
+            .maps
+            .iter()
+            .filter(|path| !path.is_empty())
+            .cloned()
+            .collect()
+    }
+
     fn load_textures(&mut self, ui: &egui::Ui, backend: &Backend) {
         let sliced = self.sliced();
         for path in sliced
@@ -2299,6 +2475,7 @@ impl Scene {
             .values()
             .filter(|texture| matches!(texture, Texture::Fetching(_)))
             .count();
+        let maps = self.maps();
         let wanted: Vec<String> = self
             .materials
             .iter()
@@ -2309,8 +2486,9 @@ impl Scene {
                 _ => None,
             })
             .flat_map(|material| material.textures())
-            .filter(|path| !self.textures.contains_key(*path) && !sliced.contains(*path))
             .cloned()
+            .chain(maps.iter().cloned())
+            .filter(|path| !self.textures.contains_key(path) && !sliced.contains(path))
             .collect();
         for path in wanted {
             if fetching >= TEXTURES {
@@ -2325,10 +2503,14 @@ impl Scene {
             }
             let files = backend.files().clone();
             let held = path.clone();
+            let size = match maps.contains(&path) {
+                true => GRASS_SIZE,
+                false => TEXTURE_SIZE,
+            };
             self.textures.insert(
                 path,
                 Texture::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read_texture(&held, Some(TEXTURE_SIZE)).await
+                    files.read_texture(&held, Some(size)).await
                 })),
             );
             fetching += 1;
@@ -2526,10 +2708,13 @@ impl Scene {
             moonlight: self.moonlight.clone(),
             haze: self.haze.clone(),
             clouds: self.clouds.clone(),
+            glare: self.glare.clone(),
             smoothing: self.smoothing.clone(),
             occlusion: self.occlusion.clone(),
             lamps: self.lamps(),
             batches,
+            grass: self.sward.clone(),
+            blades: self.sown(),
         };
 
         // The context is taken from the painter rather than captured: `glow::Context` is neither
@@ -2544,6 +2729,34 @@ impl Scene {
                     .draw(painter.gl(), painter, &frame, &info);
             })),
         });
+    }
+
+    /// Every grid's blades that stand within the distance the rest of the zone is drawn over, and
+    /// the color map each is cut out of.
+    fn sown(&self) -> Vec<gpu::Blades> {
+        let Grass::Placing(placing) = &self.grass else {
+            return Vec::new();
+        };
+        let eye = self.camera.position;
+        self.turf
+            .iter()
+            .enumerate()
+            .filter(|(_, turf)| eye.distance(turf.origin) < self.load + turf.radius)
+            .filter_map(|(at, turf)| {
+                // Nothing until the map itself is in hand. A blade is cut out of its alpha, and the
+                // flat stand-in an unfilled sampler answers with is opaque: the whole quad would
+                // stand there as a grey sheet.
+                let color_map = match self.textures.get(placing.maps.get(turf.layer)?)? {
+                    Texture::Ready(handle) => handle.id(),
+                    _ => return None,
+                };
+                Some(gpu::Blades {
+                    turf: at,
+                    origin: turf.origin,
+                    color_map,
+                })
+            })
+            .collect()
     }
 
     fn surface(&self, slot: usize) -> gpu::Surface {
@@ -2816,11 +3029,16 @@ impl Scene {
                         Grass::Done => "none".to_owned(),
                         Grass::Placing(held) => {
                             let read = held.grids.iter().filter(|grid| grid.taken).count();
+                            let over = match self.unsown {
+                                0 => String::new(),
+                                held => format!(", {held} over the cap"),
+                            };
                             format!(
-                                "{read} of {} grids, {} models, {} placed",
+                                "{read} of {} grids, {} models, {} placed, {} blades{over}",
                                 held.grids.len(),
                                 held.models.len(),
                                 self.layers.get(held.layer).map_or(0, |held| held.placements),
+                                self.blades,
                             )
                         }
                     }),

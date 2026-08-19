@@ -13,12 +13,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use glow::HasContext;
+use half::f16;
 
 use super::super::super::mdl::deferred::{
     self, Buffers, Dead, LIT, Layered, Linked, TYPES, bury, graveyard, sampler,
 };
 use super::super::super::mdl::gpu::{
-    Bound, Exposure, Lighting, Occlusion, Shaded, Smoothing, attribute,
+    Bound, Exposure, Glare, Lighting, Occlusion, Shaded, Smoothing, attribute,
 };
 use super::super::super::mdl::{Vertex, program};
 
@@ -36,12 +37,79 @@ const ALIGNMENT: i32 = 256;
 /// The page a linked program is keyed under for the sun's own pass, past any the G-buffer takes.
 const SUN: usize = usize::MAX;
 
+/// The material slot the grass readings are keyed under, which no material of a zone reaches.
+const TURF: usize = usize::MAX;
+
+/// The color map a blade is cut out of, which the zone's own grass file names per auto layer.
+const COLOR_MAP: u32 = 0x6e1d_f4a2;
+
 /// One mesh's geometry.
 struct Mesh {
     layout: glow::VertexArray,
     vertices: glow::Buffer,
     indices: glow::Buffer,
     count: i32,
+}
+
+/// One corner of one blade, in the layout the grass package's own vertex shader reads. The last lane
+/// of the position is what that shader adds one to for the homogeneous coordinate, and the first of
+/// `color1` offsets the coordinate onto the tile the placement's profile names.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Corner {
+    pub position: [f16; 4],
+    pub uv: [f16; 4],
+    pub color1: [f16; 4],
+    /// A texel of the gradation map, and the weight the tint off it is mixed at.
+    pub color: [u8; 4],
+}
+
+/// Where each semantic the grass package reads sits in one of those.
+const CORNERS: [(program::Field, i32, i32, u32); 4] = [
+    (program::Field::Position, 4, 0, glow::HALF_FLOAT),
+    (program::Field::Uv, 4, 8, glow::HALF_FLOAT),
+    (program::Field::Color1, 4, 16, glow::HALF_FLOAT),
+    (program::Field::Color, 4, 24, glow::UNSIGNED_BYTE),
+];
+
+/// One grid's blades at one auto layer, as the card holds them.
+struct Turf {
+    layout: glow::VertexArray,
+    vertices: glow::Buffer,
+    indices: glow::Buffer,
+    count: i32,
+}
+
+impl Turf {
+    fn dead(self) -> [Dead; 3] {
+        [
+            Dead::Layout(self.layout),
+            Dead::Buffer(self.vertices),
+            Dead::Buffer(self.indices),
+        ]
+    }
+}
+
+/// Blades waiting for a context to upload them under.
+pub struct Sown {
+    pub turf: usize,
+    pub corners: Vec<Corner>,
+    pub indices: Vec<u32>,
+}
+
+/// The two readings the zone's grass is drawn with, each one page of the G-buffer's targets. The
+/// first writes the albedo and settles the depth; the second fills the channels it left at nought.
+pub struct Grass {
+    pub buffer: Vec<Arc<program::Program>>,
+    pub normal: Vec<Arc<program::Program>>,
+}
+
+/// One grid's blades at one auto layer, and what they are drawn against.
+pub struct Blades {
+    pub turf: usize,
+    /// Where the grid stands, which its placements are measured from.
+    pub origin: glam::Vec3,
+    pub color_map: egui::TextureId,
 }
 
 /// One detail level of one model.
@@ -107,6 +175,9 @@ pub struct Frame {
     pub haze: Option<Arc<program::Program>>,
     /// The two draws that put clouds over that sky, the horizon band first.
     pub clouds: [Option<Arc<program::Program>>; 2],
+    /// The chain that spreads the bright end of the frame into a halo, once its four shaders have
+    /// arrived.
+    pub glare: Option<Arc<Glare>>,
     /// The pair that smooths its edges, and the chain that weights every light by how much sky
     /// reaches the pixel.
     pub smoothing: Option<Arc<Smoothing>>,
@@ -114,12 +185,17 @@ pub struct Frame {
     /// Every light the zone places that reaches the frame.
     pub lamps: Vec<program::Lamp>,
     pub batches: Vec<Batch>,
+    /// The zone's own grass, once its package has arrived, and the grids it stands over.
+    pub grass: Option<Arc<Grass>>,
+    pub blades: Vec<Blades>,
 }
 
 pub struct Renderer {
     buffers: Buffers,
     models: Vec<Option<Model>>,
     pending: Vec<Pending>,
+    turf: BTreeMap<usize, Turf>,
+    sown: Vec<Sown>,
     /// The game's own textures the shaders read that no material names, waiting for a context.
     supplied: Vec<(u32, Layered)>,
     /// The two cloud textures the weather names, the same way.
@@ -147,6 +223,8 @@ impl Renderer {
             buffers: Buffers::default(),
             models: Vec::new(),
             pending: Vec::new(),
+            turf: BTreeMap::new(),
+            sown: Vec::new(),
             supplied: Vec::new(),
             overcast: Vec::new(),
             stacks: Vec::new(),
@@ -193,6 +271,10 @@ impl Renderer {
 
     pub fn queue_model(&mut self, pending: Pending) {
         self.pending.push(pending);
+    }
+
+    pub fn queue_turf(&mut self, sown: Sown) {
+        self.sown.push(sown);
     }
 
     /// Hands one of the game's own textures over, under the resource id its shaders name it by.
@@ -243,6 +325,17 @@ impl Renderer {
                     }
                 }
                 Err(why) => log::error!("assets/layer: model {at}: {why}"),
+            }
+        }
+        for sown in std::mem::take(&mut self.sown) {
+            let at = sown.turf;
+            match upload_turf(gl, &sown.corners, &sown.indices) {
+                Ok(turf) => {
+                    if let Some(stale) = self.turf.insert(at, turf) {
+                        graveyard().lock().unwrap().extend(stale.dead());
+                    }
+                }
+                Err(why) => log::error!("assets/layer: grass {at}: {why}"),
             }
         }
         for (id, held) in std::mem::take(&mut self.supplied) {
@@ -621,6 +714,90 @@ impl Renderer {
         Ok(())
     }
 
+    /// The zone's grass, over the geometry the scene baked per grid. The albedo reading goes down
+    /// first and settles the depth; the second is tested against exactly what it left, since it
+    /// samples nothing and would otherwise paint the whole blade, cut-away and all.
+    fn grass(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        scene: &program::Scene,
+        page: usize,
+    ) -> Result<(), String> {
+        let Some(grass) = frame.grass.as_ref() else {
+            return Ok(());
+        };
+        for (normal, held) in [
+            (false, grass.buffer.get(page)),
+            (true, grass.normal.get(page)),
+        ] {
+            let Some(held) = held.filter(|held| !held.targets.is_empty()) else {
+                continue;
+            };
+            let program = deferred::link(gl, &mut self.programs, (TURF, normal, page), held)?;
+            let supplied = held
+                .textures
+                .iter()
+                .map(|texture| self.buffers.engine(gl, texture.id))
+                .collect::<Result<Vec<_>, _>>()?;
+            unsafe {
+                gl.use_program(Some(program));
+                gl.disable(glow::CULL_FACE);
+                gl.enable(glow::DEPTH_TEST);
+                gl.depth_mask(!normal);
+                gl.depth_func(match normal {
+                    true => glow::EQUAL,
+                    false => glow::LEQUAL,
+                });
+                gl.color_mask(true, true, true, true);
+                gl.draw_buffers(&deferred::written(held));
+            }
+            for blades in &frame.blades {
+                let Some(turf) = self.turf.get(&blades.turf) else {
+                    continue;
+                };
+                let (layout, vertices, count) = (turf.layout, turf.vertices, turf.count);
+                let held_scene = program::Scene {
+                    model: glam::Mat4::from_translation(blades.origin),
+                    ..scene.clone()
+                };
+                self.buffers.bind(gl, program, held, &held_scene, &[])?;
+                for (at, texture) in held.textures.iter().enumerate() {
+                    let bound = match texture.id == COLOR_MAP {
+                        true => painter.texture(blades.color_map),
+                        false => None,
+                    };
+                    deferred::bind(
+                        gl,
+                        program,
+                        &texture.name,
+                        at as u32,
+                        bound.unwrap_or(supplied[at]),
+                        deferred::target(texture.kind),
+                    );
+                }
+                unsafe {
+                    gl.bind_vertex_array(Some(layout));
+                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
+                    for location in 0..16 {
+                        gl.disable_vertex_attrib_array(location);
+                    }
+                    for held in &held.attributes {
+                        corner(gl, held);
+                    }
+                    gl.draw_elements(glow::TRIANGLES, count, glow::UNSIGNED_INT, 0);
+                    gl.bind_vertex_array(None);
+                }
+            }
+        }
+        unsafe {
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(true);
+        }
+        Ok(())
+    }
+
     fn render(
         &mut self,
         gl: &glow::Context,
@@ -687,10 +864,7 @@ impl Renderer {
                             // is what says which pixels the frame covered.
                             gl.depth_mask(depth || shaded.depth.is_none());
                             gl.color_mask(!depth, !depth, !depth, !depth);
-                            let written: Vec<u32> = (0..held.targets.len().max(1))
-                                .map(|at| glow::COLOR_ATTACHMENT0 + at as u32)
-                                .collect();
-                            gl.draw_buffers(&written);
+                            gl.draw_buffers(&deferred::written(held));
                             match surface.cull {
                                 true => {
                                     gl.enable(glow::CULL_FACE);
@@ -817,6 +991,7 @@ impl Renderer {
                     }
                 }
             }
+            self.grass(gl, painter, frame, &scene, page)?;
         }
 
         if let Some(lighting) = frame.lighting.as_ref() {
@@ -868,6 +1043,11 @@ impl Renderer {
                     self.buffers.fog(gl, haze, &scene)?;
                 }
             }
+            // Before the exposure, since a halo belongs to the frame the lighting left rather than
+            // to what a curve made of it.
+            if let Some(glare) = frame.glare.as_ref() {
+                self.buffers.glare(gl, glare, &scene)?;
+            }
             if let Some(exposure) = frame.exposure.as_ref() {
                 self.buffers.expose(gl, exposure, &scene)?;
             }
@@ -917,6 +1097,7 @@ impl Drop for Renderer {
                 .drain(..)
                 .flatten()
                 .flat_map(Model::dead)
+                .chain(std::mem::take(&mut self.turf).into_values().flat_map(Turf::dead))
                 .chain(self.instances.take().map(Dead::Buffer))
                 .chain(self.tables.values().copied().map(Dead::Texture))
                 .chain(
@@ -932,6 +1113,62 @@ impl Drop for Renderer {
 fn aligned(bytes: i32, alignment: i32) -> i32 {
     let held = alignment.max(1);
     (bytes + held - 1) / held * held
+}
+
+/// One of the grass semantics pointed at the corner it sits in.
+fn corner(gl: &glow::Context, held: &program::Attribute) {
+    let Some((_, lanes, offset, kind)) = CORNERS.iter().find(|(field, ..)| *field == held.field)
+    else {
+        return;
+    };
+    let stride = size_of::<Corner>() as i32;
+    unsafe {
+        gl.enable_vertex_attrib_array(held.location);
+        match held.components {
+            program::Components::Float => {
+                gl.vertex_attrib_pointer_f32(held.location, *lanes, *kind, false, stride, *offset)
+            }
+            _ => gl.vertex_attrib_pointer_i32(held.location, *lanes, *kind, stride, *offset),
+        }
+    }
+}
+
+/// One grid's blades and the quads over them, with a vertex array of their own for the same reason a
+/// mesh has one.
+fn upload_turf(
+    gl: &glow::Context,
+    corners: &[Corner],
+    indices: &[u32],
+) -> Result<Turf, String> {
+    unsafe {
+        let layout = gl.create_vertex_array()?;
+        gl.bind_vertex_array(Some(layout));
+
+        let vertices = gl.create_buffer()?;
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
+        gl.buffer_data_u8_slice(
+            glow::ARRAY_BUFFER,
+            bytemuck::cast_slice(corners),
+            glow::STATIC_DRAW,
+        );
+
+        let drawn = gl.create_buffer()?;
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(drawn));
+        gl.buffer_data_u8_slice(
+            glow::ELEMENT_ARRAY_BUFFER,
+            bytemuck::cast_slice(indices),
+            glow::STATIC_DRAW,
+        );
+
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        Ok(Turf {
+            layout,
+            vertices,
+            indices: drawn,
+            count: indices.len() as i32,
+        })
+    }
 }
 
 fn upload(gl: &glow::Context, pending: Pending) -> Result<Model, String> {

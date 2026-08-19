@@ -329,6 +329,32 @@ fn summary(instance: &Instance) -> String {
 }
 
 /// Everything a payload holds, for the panel that inspects one instance.
+/// What the low byte of a collision material word says a surface is made of, which is what the
+/// footstep a character makes on it is chosen by. The engine builds the sound's own path from the
+/// word, so no shipped file states the last hop; these are the names its bank and the collision
+/// swatch materials are filed under.
+fn surface(word: u64) -> String {
+    let held = match word & 0xff {
+        0 => return format!("{word:#018x}"),
+        1 => "dirt",
+        2 => "grass",
+        3 => "sand",
+        4 => "stone",
+        5 => "wood",
+        6 => "metal",
+        7 => "gravel",
+        8 => "leaf",
+        9 => "powder",
+        10 => "carpet",
+        11 => "snow",
+        12 | 13 => "water",
+        14 => "mesh",
+        15 => "sticky",
+        held => return format!("{word:#018x}, surface {held}"),
+    };
+    format!("{word:#018x}, {held}")
+}
+
 fn payload(instance: &Instance) -> Rows {
     let scale = instance.transform().scale();
     let mut rows = Rows::default();
@@ -345,10 +371,7 @@ fn payload(instance: &Instance) -> Rows {
                 );
             }
             if part.collision_material_id() != 0 {
-                rows.text(
-                    "Collision material",
-                    format!("{:#018x}", part.collision_material_id()),
-                );
+                rows.text("Collision material", surface(part.collision_material_id()));
             }
             rows.text("Visible", on(part.visible()));
             rows.text(
@@ -599,7 +622,7 @@ fn payload(instance: &Instance) -> Rows {
             );
             rows.text(
                 "Collision material",
-                format!("{:#018x}", collision.collision_material_id()),
+                surface(collision.collision_material_id()),
             );
         }
         InstanceData::LineVfx(line) => rows.text("Style", format!("{:?}", line.style())),

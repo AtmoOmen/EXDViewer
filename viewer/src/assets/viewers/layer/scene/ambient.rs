@@ -512,7 +512,7 @@ impl Ambient {
         program::Ambient {
             sky: rows(self.sky_light()),
             sky_scale: SKY_SCALE,
-            light: rows(self.harmonics()),
+            light: greyer(rows(self.harmonics()), held.saturation),
             scale: held.scale,
             fade: Vec3::new(0.0, 1.0, held.floor),
             reflection: REFLECTION,
@@ -525,7 +525,8 @@ impl Ambient {
     /// One array entry per place that lights itself, each with the harmonics of the environment it
     /// is bound to. A space whose own light has not arrived is left out rather than drawn dark.
     fn volumes(&self) -> std::sync::Arc<[program::Volume]> {
-        let scale = self.lighting().scale;
+        let held = self.lighting();
+        let (scale, saturation) = (held.scale, held.saturation);
         self.spaces
             .iter()
             .filter_map(|space| {
@@ -533,7 +534,7 @@ impl Ambient {
                     .environments
                     .iter()
                     .position(|env| env.instance == space.bound)?;
-                let light = rows(Some(self.harmonics_of(at)?));
+                let light = greyer(rows(Some(self.harmonics_of(at)?)), saturation);
                 // The composite takes a place in front of the camera into the volume's own space,
                 // where it stands as the unit shape, so the placement's own scale is its extent.
                 let (size, _, _) = space.placement.to_scale_rotation_translation();
@@ -886,6 +887,13 @@ fn switch(held: Between<'_>, name: &str) -> f32 {
         Some((Value::Flag(held), _)) => f32::from(*held),
         _ => 0.0,
     }
+}
+
+/// The harmonics taken toward grey by however far the weather's `ambient_light_saturation` says. A
+/// row is one channel, so the three of them at a lane are the colour arriving from that direction.
+fn greyer(held: [Vec4; 3], saturation: f32) -> [Vec4; 3] {
+    let grey = held[0] * 0.2126 + held[1] * 0.7152 + held[2] * 0.0722;
+    held.map(|row| grey + (row - grey) * saturation)
 }
 
 /// The three rows one set of harmonics reaches the shader as, with the linear terms weighted.

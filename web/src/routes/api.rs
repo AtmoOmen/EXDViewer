@@ -12,7 +12,10 @@ use actix_web::{
     dev::{HttpServiceFactory, ServiceResponse},
     error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorTooManyRequests},
     get,
-    http::header::{self, ContentDisposition, ETag, EntityTag, Header, IfNoneMatch},
+    http::header::{
+        self, ByteRangeSpec, ContentDisposition, ContentRange, ContentRangeSpec, ETag, EntityTag,
+        Header, IfNoneMatch, Range,
+    },
     middleware::{ErrorHandlerResponse, ErrorHandlers},
     web::{self, Bytes},
 };
@@ -138,8 +141,29 @@ async fn redirect_latest(
         .finish())
 }
 
+/// The one span of a file a `Range` header asks for. A set of them would have to be answered as a
+/// multipart body, which nothing asks for.
+fn partial(request: &HttpRequest, bytes: &Bytes) -> Option<(Bytes, ContentRange)> {
+    let length = bytes.len() as u64;
+    let Ok(Range::Bytes(asked)) = Range::parse(request) else {
+        return None;
+    };
+    let [spec] = asked.as_slice() else {
+        return None;
+    };
+    let (from, to) = ByteRangeSpec::to_satisfiable_range(spec, length)?;
+    Some((
+        bytes.slice(from as usize..=to as usize),
+        ContentRange(ContentRangeSpec::Bytes {
+            range: Some((from, to)),
+            instance_length: Some(length),
+        }),
+    ))
+}
+
 async fn serve_file(
     data: &MessageQueue,
+    request: &HttpRequest,
     target: Target,
     version: GameVersion,
     path: String,
@@ -157,11 +181,22 @@ async fn serve_file(
 
     let data = data.get_file(target, Some(version), path.clone()).await;
     match data {
-        Ok(data) => Ok(HttpResponse::Ok()
-            .insert_header(ContentDisposition::attachment(file_name))
-            .insert_header(CacheControl(directives))
-            .insert_header((STREAM_KIND, data.kind.name()))
-            .body(data.bytes.clone())),
+        Ok(data) => {
+            let asked = partial(request, &data.bytes);
+            let mut response = match asked {
+                Some(_) => HttpResponse::PartialContent(),
+                None => HttpResponse::Ok(),
+            };
+            response
+                .insert_header(ContentDisposition::attachment(file_name))
+                .insert_header(CacheControl(directives))
+                .insert_header((header::ACCEPT_RANGES, "bytes"))
+                .insert_header((STREAM_KIND, data.kind.name()));
+            Ok(match asked {
+                Some((bytes, range)) => response.insert_header(range).body(bytes),
+                None => response.body(data.bytes.clone()),
+            })
+        }
         Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
@@ -468,10 +503,11 @@ async fn get_latest_region(
 #[get("/{region}/{version}/file/{path:.*}/")]
 async fn get_file_region(
     data: web::Data<MessageQueue>,
+    request: HttpRequest,
     path_info: web::Path<(Region, GameVersion, String)>,
 ) -> Result<HttpResponse> {
     let (region, version, path) = path_info.into_inner();
-    serve_file(&data, Target::Region(region), version, path).await
+    serve_file(&data, &request, Target::Region(region), version, path).await
 }
 
 #[get("/{region}/{version}/hash/{repository}/{category}/{hash}/")]
@@ -534,10 +570,11 @@ async fn get_latest_repo(
 #[get("/repo/{slug}/{version}/file/{path:.*}/")]
 async fn get_file_repo(
     data: web::Data<MessageQueue>,
+    request: HttpRequest,
     path_info: web::Path<(Slug, GameVersion, String)>,
 ) -> Result<HttpResponse> {
     let (slug, version, path) = path_info.into_inner();
-    serve_file(&data, Target::Repo(slug), version, path).await
+    serve_file(&data, &request, Target::Repo(slug), version, path).await
 }
 
 #[get("/repo/{slug}/{version}/hash/{repository}/{category}/{hash}/")]

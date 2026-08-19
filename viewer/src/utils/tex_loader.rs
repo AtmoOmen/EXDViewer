@@ -36,7 +36,14 @@ pub fn decode_preview_sized(
     max_dim: Option<u16>,
 ) -> Result<(DynamicImage, [u16; 2])> {
     let texture = <tex::Texture as ironworks::file::File>::read(Cursor::new(bytes.to_vec()))?;
-    let level = max_dim
+    let level = preview_level(&texture, max_dim);
+    let size = [texture.width(), texture.height()];
+    Ok((decode_mip(&texture, level, path)?, size))
+}
+
+/// The coarsest mipmap that still covers `max_dim` on its longest edge; `None` picks the finest.
+pub fn preview_level(texture: &tex::Texture, max_dim: Option<u16>) -> u8 {
+    max_dim
         .and_then(|max_dim| {
             (0..texture.mip_levels())
                 .take_while(|level| {
@@ -45,9 +52,7 @@ pub fn decode_preview_sized(
                 })
                 .last()
         })
-        .unwrap_or(0);
-    let size = [texture.width(), texture.height()];
-    Ok((decode_mip(&texture, level, path)?, size))
+        .unwrap_or(0)
 }
 
 /// Decode an already-read texture. The web backend hands out bytes rather than an

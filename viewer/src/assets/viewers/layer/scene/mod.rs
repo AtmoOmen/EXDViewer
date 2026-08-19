@@ -105,9 +105,9 @@ const TICKS: f32 = 30.0;
 /// Requests of each kind in flight at once.
 const FILES: usize = 12;
 const PACKAGES: usize = 4;
-const MODELS: usize = 6;
+const MODELS: usize = 24;
 const MATERIALS: usize = 16;
-const TEXTURES: usize = 16;
+const TEXTURES: usize = 24;
 
 /// Files parsed and models decoded in one frame. Both happen on the thread that draws, so they are
 /// spread rather than done as they arrive.
@@ -233,8 +233,8 @@ struct Placement {
 enum State {
     /// Wanted, but nothing has been asked for yet.
     Wanted,
-    Fetching(TrackedPromise<Result<Vec<u8>>>),
-    Decoding(Vec<u8>),
+    Fetching(TrackedPromise<Result<(Vec<u8>, u8)>>),
+    Decoding(Vec<u8>, u8),
     Ready,
     Failed,
 }
@@ -251,6 +251,10 @@ struct Model {
     /// How far the nearest of them was at the last rebuild, which is the order models are asked for
     /// in.
     nearest: f32,
+    /// The finest detail level any of them would draw, and the level last asked for. A file is read
+    /// again only where the eye has come close enough to want more of it than was taken.
+    finest: u8,
+    asked: u8,
 }
 
 enum Slot {
@@ -539,14 +543,19 @@ fn matrix(transform: Transform) -> Mat4 {
 /// The detail level to draw an instance at, given how much of the view it covers. A model missing
 /// the level it asked for falls back to the nearest one it has.
 fn level(drawn: [bool; 3], apparent: f32) -> Option<usize> {
-    let wanted = match apparent {
-        size if size > DETAIL[0] => 0,
-        size if size > DETAIL[1] => 1,
-        _ => 2,
-    };
+    let wanted = usize::from(detail(apparent));
     (wanted..3)
         .chain((0..wanted).rev())
         .find(|level| drawn[*level])
+}
+
+/// The detail level something this size on screen is drawn at, before what the file holds is known.
+fn detail(apparent: f32) -> u8 {
+    match apparent {
+        size if size > DETAIL[0] => 0,
+        size if size > DETAIL[1] => 1,
+        _ => 2,
+    }
 }
 
 /// A point the bulk of the placements sit around, and how far out that bulk reaches, from medians
@@ -903,6 +912,8 @@ impl Scene {
             meshes: Vec::new(),
             instances: 0,
             nearest: f32::INFINITY,
+            finest: 2,
+            asked: 2,
         });
         self.model_at.insert(path.to_owned(), self.models.len() - 1);
         self.models.len() - 1
@@ -1180,6 +1191,7 @@ impl Scene {
             .collect();
         for model in &mut self.models {
             model.nearest = f32::INFINITY;
+            model.finest = 2;
         }
         self.absent = 0;
 
@@ -1192,13 +1204,14 @@ impl Scene {
             if span > self.load || (placement.fade > 0.0 && span > placement.fade) {
                 continue;
             }
+            let apparent = placement.radius / span.max(0.01);
             let model = &mut self.models[placement.model];
             model.nearest = model.nearest.min(span);
-            if !matches!(model.state, State::Ready) {
-                self.absent += 1;
-                continue;
-            }
-            let Some(level) = level(model.drawn, placement.radius / span.max(0.01)) else {
+            model.finest = model.finest.min(detail(apparent));
+            let Some(level) = level(model.drawn, apparent) else {
+                if !matches!(model.state, State::Ready | State::Failed) {
+                    self.absent += 1;
+                }
                 continue;
             };
             placed[placement.model][level].push(program::Instance {
@@ -1433,7 +1446,7 @@ impl Scene {
             || self
                 .models
                 .iter()
-                .any(|model| matches!(model.state, State::Decoding(_)))
+                .any(|model| matches!(model.state, State::Decoding(..)))
         {
             ui.ctx().request_repaint();
         }
@@ -1553,8 +1566,13 @@ impl Scene {
         if fetching < MODELS {
             let mut wanted: Vec<usize> = (0..self.models.len())
                 .filter(|at| {
-                    matches!(self.models[*at].state, State::Wanted)
-                        && self.models[*at].nearest <= self.load
+                    let model = &self.models[*at];
+                    model.nearest <= self.load
+                        && match model.state {
+                            State::Wanted => true,
+                            State::Ready => model.finest < model.asked,
+                            _ => false,
+                        }
                 })
                 .collect();
             wanted.sort_by(|a, b| {
@@ -1566,8 +1584,10 @@ impl Scene {
             for at in wanted.into_iter().take(MODELS - fetching) {
                 let files = backend.files().clone();
                 let path = self.models[at].path.clone();
+                let lod = self.models[at].finest;
+                self.models[at].asked = lod;
                 self.models[at].state = State::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read(&path).await
+                    files.read_model(&path, lod).await
                 }));
             }
         }
@@ -1580,7 +1600,7 @@ impl Scene {
                 continue;
             };
             model.state = match result {
-                Ok(bytes) => State::Decoding(bytes.clone()),
+                Ok((bytes, level)) => State::Decoding(bytes.clone(), *level),
                 Err(why) => {
                     log::error!("assets/layer: {}: {why}", model.path);
                     State::Failed
@@ -1589,16 +1609,16 @@ impl Scene {
         }
 
         let decoding: Vec<usize> = (0..self.models.len())
-            .filter(|at| matches!(self.models[*at].state, State::Decoding(_)))
+            .filter(|at| matches!(self.models[*at].state, State::Decoding(..)))
             .take(DECODES)
             .collect();
         for at in decoding {
-            let State::Decoding(bytes) =
+            let State::Decoding(bytes, level) =
                 std::mem::replace(&mut self.models[at].state, State::Failed)
             else {
                 continue;
             };
-            match self.decode(at, bytes) {
+            match self.decode(at, bytes, level) {
                 Ok(()) => {
                     self.models[at].state = State::Ready;
                     self.dirty = true;
@@ -1608,40 +1628,41 @@ impl Scene {
         }
     }
 
-    /// Reads every detail level of a model and hands its geometry to the card.
-    fn decode(&mut self, at: usize, bytes: Vec<u8>) -> Result<()> {
+    /// Reads one detail level of a model and hands its geometry to the card.
+    fn decode(&mut self, at: usize, bytes: Vec<u8>, level: u8) -> Result<()> {
         let container = ModelContainer::read(Cursor::new(bytes))?;
-        let mut levels = Vec::new();
-        let mut meshes = Vec::new();
-        let mut drawn = [false; 3];
-        for level in 0..3u8 {
-            let model = container.model(mdl::detail(level));
-            let mut built = Vec::new();
-            let mut used = Vec::new();
-            for mesh in model.meshes() {
-                if !mdl::draws(&mesh) {
-                    continue;
-                }
-                let (Ok(attributes), Ok(indices)) = (mesh.attributes(), mesh.indices()) else {
-                    continue;
-                };
-                let Ok(geometry) = mdl::build(&attributes, indices) else {
-                    continue;
-                };
-                let name = mesh.material().unwrap_or_default();
-                let resolved = mdl::material::path(&name, 0, None).unwrap_or(name);
-                used.push(self.material(&resolved));
-                built.push(geometry);
+        let model = container.model(mdl::detail(level));
+        let mut built = Vec::new();
+        let mut used = Vec::new();
+        for mesh in model.meshes() {
+            if !mdl::draws(&mesh) {
+                continue;
             }
-            if model.waving() {
-                self.waving.extend(&used);
-            }
-            drawn[usize::from(level)] = !built.is_empty();
-            levels.push(built);
-            meshes.push(used);
+            let (Ok(attributes), Ok(indices)) = (mesh.attributes(), mesh.indices()) else {
+                continue;
+            };
+            let Ok(geometry) = mdl::build(&attributes, indices) else {
+                continue;
+            };
+            let name = mesh.material().unwrap_or_default();
+            let resolved = mdl::material::path(&name, 0, None).unwrap_or(name);
+            used.push(self.material(&resolved));
+            built.push(geometry);
         }
-        // A model may carry no standard mesh at any level, which plenty of terrain plates do not.
-        // That is what the model holds rather than a failure to read it, and `drawn` already says so.
+        if model.waving() {
+            self.waving.extend(&used);
+        }
+
+        let level = usize::from(level);
+        // A model may carry no standard mesh at the level it was read at, which plenty of terrain
+        // plates do not. That is what the model holds rather than a failure to read it, and `drawn`
+        // already says so.
+        let mut drawn = [false; 3];
+        drawn[level] = !built.is_empty();
+        let mut levels: Vec<Vec<_>> = (0..3).map(|_| Vec::new()).collect();
+        levels[level] = built;
+        let mut meshes: Vec<Vec<usize>> = (0..3).map(|_| Vec::new()).collect();
+        meshes[level] = used;
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
         self.renderer

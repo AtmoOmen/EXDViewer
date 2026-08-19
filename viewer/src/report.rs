@@ -371,6 +371,14 @@ impl crate::data::FileProvider for Recording {
         decoded
     }
 
+    async fn read_model(&self, path: &str, lod: u8) -> anyhow::Result<(Vec<u8>, u8)> {
+        let read = self.inner.read_model(path, lod).await;
+        if read.is_ok() {
+            self.reporter.record(path);
+        }
+        read
+    }
+
     async fn get_icon(
         &self,
         path: &str,

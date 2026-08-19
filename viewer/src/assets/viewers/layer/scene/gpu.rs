@@ -53,6 +53,20 @@ struct Model {
     levels: Vec<Level>,
 }
 
+impl Model {
+    fn dead(self) -> impl Iterator<Item = Dead> {
+        self.levels.into_iter().flat_map(|level| {
+            level.meshes.into_iter().flat_map(|mesh| {
+                [
+                    Dead::Layout(mesh.layout),
+                    Dead::Buffer(mesh.vertices),
+                    Dead::Buffer(mesh.indices),
+                ]
+            })
+        })
+    }
+}
+
 /// One model's geometry, waiting for a context to upload it under.
 pub struct Pending {
     pub model: usize,
@@ -212,7 +226,11 @@ impl Renderer {
                     if self.models.len() <= at {
                         self.models.resize_with(at + 1, || None);
                     }
-                    self.models[at] = Some(model);
+                    // A model is read again at a finer level once the eye comes close enough, so
+                    // what it stood as goes the way of anything else the card is done with.
+                    if let Some(held) = self.models[at].replace(model) {
+                        graveyard().lock().unwrap().extend(held.dead());
+                    }
                 }
                 Err(why) => log::error!("assets/layer: model {at}: {why}"),
             }
@@ -870,16 +888,7 @@ impl Drop for Renderer {
             self.models
                 .drain(..)
                 .flatten()
-                .flat_map(|model| model.levels)
-                .flat_map(|level| {
-                    level.meshes.into_iter().flat_map(|mesh| {
-                        [
-                            Dead::Layout(mesh.layout),
-                            Dead::Buffer(mesh.vertices),
-                            Dead::Buffer(mesh.indices),
-                        ]
-                    })
-                })
+                .flat_map(Model::dead)
                 .chain(self.instances.take().map(Dead::Buffer))
                 .chain(self.tables.values().copied().map(Dead::Texture))
                 .chain(

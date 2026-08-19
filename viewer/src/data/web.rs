@@ -1,15 +1,24 @@
-use crate::utils::{GameVersion, HttpResponse, fetch, fetch_url};
+use crate::utils::{GameVersion, HttpResponse, fetch, fetch_range, fetch_url, tex_loader};
 
-use super::{FileProvider, list_url, with_list_id};
+use super::{DecodedTexture, FileProvider, ModelLods, decode_texture, list_url, with_list_id};
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
+use ironworks::file::{File, tex::Texture};
 use serde::Deserialize;
+use std::io::Cursor;
 use url::Url;
 
 /// Header the API names a file's sqpack stream kind in. Absent from a server predating it, which is
 /// why the kind is optional rather than a parse failure.
 const STREAM_KIND: &str = "x-stream-kind";
+
+/// Where a texture's mipmap offsets sit in its head.
+const SURFACES: usize = 28;
+
+/// How much of a model is asked for before its head has said where its geometry begins. Whatever
+/// of the head falls past this takes a second request.
+const HEAD: u64 = 4096;
 
 pub struct WebFileProvider(Url);
 
@@ -133,6 +142,20 @@ impl WebFileProvider {
         Ok(parsed.repositories)
     }
 
+    fn file_url(&self, path: &str) -> anyhow::Result<Url> {
+        let mut url = self.0.clone();
+        url.path_segments_mut()
+            .map_err(|()| {
+                ironworks::Error::Invalid(
+                    ironworks::ErrorValue::Other("URL".to_string()),
+                    "path parsing error".to_string(),
+                )
+            })?
+            .push("file")
+            .extend(path.split('/'));
+        Ok(url)
+    }
+
     fn presence_url(&self, list_id: u64) -> anyhow::Result<Url> {
         let mut url = self.0.clone();
         url.path_segments_mut()
@@ -156,19 +179,7 @@ fn stream(response: HttpResponse) -> (Option<String>, Vec<u8>) {
 #[async_trait(?Send)]
 impl FileProvider for WebFileProvider {
     async fn read_stream(&self, path: &str) -> anyhow::Result<(Option<String>, Vec<u8>)> {
-        let mut url = self.0.clone();
-
-        url.path_segments_mut()
-            .map_err(|()| {
-                ironworks::Error::Invalid(
-                    ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
-                )
-            })?
-            .push("file")
-            .extend(path.split('/'));
-
-        Ok(stream(fetch(url).await?))
+        Ok(stream(fetch(self.file_url(path)?).await?))
     }
 
     async fn path_index(&self, api_base: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
@@ -211,20 +222,77 @@ impl FileProvider for WebFileProvider {
         Ok(stream(fetch(url).await?))
     }
 
+    /// Only the mipmap the caller will draw at, taken from the file where it sits rather than by
+    /// reading the chain that leads up to it.
+    async fn read_texture(
+        &self,
+        path: &str,
+        max_dim: Option<u16>,
+    ) -> anyhow::Result<DecodedTexture> {
+        if max_dim.is_none() {
+            return decode_texture(path, self.read(path).await?, max_dim).await;
+        }
+        let url = self.file_url(path)?;
+        let head = fetch_range(url.clone(), 0, Some(u64::from(Texture::HEADER_SIZE) - 1)).await?;
+        // A store that will not serve part of a file answers with the whole of it.
+        if head.status != 206 || head.bytes.len() != Texture::HEADER_SIZE as usize {
+            return decode_texture(path, head.bytes, max_dim).await;
+        }
+
+        let texture = Texture::read(Cursor::new(head.bytes.clone()))?;
+        let level = tex_loader::preview_level(&texture, max_dim);
+        let Some(from) = texture.mip_offset(level) else {
+            return decode_texture(path, self.read(path).await?, max_dim).await;
+        };
+        let to = texture.mip_offset(level + 1);
+        let mip = fetch_range(url, u64::from(from), to.map(|to| u64::from(to) - 1)).await?;
+
+        let mut bytes = head.bytes;
+        let at = SURFACES + usize::from(level) * 4;
+        bytes[at..at + 4].copy_from_slice(&Texture::HEADER_SIZE.to_le_bytes());
+        if at + 8 <= Texture::HEADER_SIZE as usize {
+            bytes[at + 4..at + 8].copy_from_slice(&0u32.to_le_bytes());
+        }
+        bytes.extend(mip.bytes);
+        decode_texture(path, bytes, max_dim).await
+    }
+
+    /// Only the detail level the scene will draw, with the head that names it and nothing of the
+    /// levels either side.
+    async fn read_model(&self, path: &str, lod: u8) -> anyhow::Result<(Vec<u8>, u8)> {
+        let url = self.file_url(path)?;
+        let head = fetch_range(url.clone(), 0, Some(HEAD - 1)).await?;
+        let Some(lods) = ModelLods::read(&head.bytes) else {
+            return Ok((head.bytes, lod));
+        };
+        let level = lods.level(lod);
+        if head.status != 206 || (head.bytes.len() as u64) < HEAD {
+            return Ok((head.bytes, level));
+        }
+
+        let (Some(start), Some(span)) = (lods.head(), lods.span(level)) else {
+            return Ok((self.read(path).await?, level));
+        };
+        let mut bytes = head.bytes;
+        if u64::from(start) > HEAD {
+            bytes.extend(
+                fetch_range(url.clone(), HEAD, Some(u64::from(start) - 1))
+                    .await?
+                    .bytes,
+            );
+        }
+        bytes.truncate(start as usize);
+        lods.keep(&mut bytes, level);
+        bytes.extend(
+            fetch_range(url, u64::from(span.start), Some(u64::from(span.end) - 1))
+                .await?
+                .bytes,
+        );
+        Ok((bytes, level))
+    }
+
     async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>> {
-        let mut url = self.0.clone();
-
-        url.path_segments_mut()
-            .map_err(|()| {
-                ironworks::Error::Invalid(
-                    ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
-                )
-            })?
-            .push("file")
-            .extend(path.split('/'));
-
-        Ok(Either::Left(url))
+        Ok(Either::Left(self.file_url(path)?))
     }
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>> {

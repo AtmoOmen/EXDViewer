@@ -2422,6 +2422,21 @@ impl Buffer {
                 .to_array()
                 .to_vec(),
         );
+        // A plane throws along its own positive z and lights only what stands in front of it, so the
+        // ray back to it runs the other way; its `z` is what the pass divides the depth by, and
+        // nought there is a NaN on every pixel the light covers. The mask carries the span the
+        // light's own clip box states, which is what puts its edge where the zone put it. The fade
+        // is the one number no file states: two is where the ramp reaches full strength at the
+        // middle, and anything larger only sharpens the edge.
+        let span = lamp.min.abs().max(lamp.max.abs()).max(Vec3::splat(0.001));
+        put(light, "m_PlaneRayDirection", vec![0.0, 0.0, -1.0, 0.0]);
+        put(light, "m_ShadowTexMask", vec![0.5 / span.x, 0.5 / span.y, 0.0, 0.0]);
+        put(light, "m_PlaneFadeScale", vec![2.0, 2.0]);
+        put(
+            light,
+            "m_PlaneInversMatrix",
+            rows((view * lamp.placement).inverse(), 3),
+        );
         put(light, "m_ClipMin", min.extend(1.0).to_array().to_vec());
         put(light, "m_ClipMax", max.to_array().to_vec());
         put(

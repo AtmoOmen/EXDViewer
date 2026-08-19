@@ -81,7 +81,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 9] = [
+pub const ENGINE: [(u32, &str, u32); 13] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -120,6 +120,28 @@ pub const ENGINE: [(u32, &str, u32); 9] = [
     (
         0xdce8_add5,
         "bgcommon/nature/moon/texture/moon.tex",
+        glow::LINEAR,
+    ),
+    // What water reads beside the frame behind it: the ramp its reflectance is read off, the volume
+    // its caustics are a slice of, and the two that wobble and step where that slice is taken.
+    (
+        0xba8d_7950,
+        "common/graphics/texture/-fresnel.tex",
+        glow::LINEAR,
+    ),
+    (
+        0x0efb_24f7,
+        "common/graphics/texture/-caustics.tex",
+        glow::LINEAR,
+    ),
+    (
+        0xd703_3544,
+        "common/graphics/texture/-distortion.tex",
+        glow::LINEAR,
+    ),
+    (
+        0x2b85_7ef0,
+        "common/graphics/texture/-noise.tex",
         glow::LINEAR,
     ),
 ];

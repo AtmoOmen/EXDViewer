@@ -285,9 +285,15 @@ enum Package {
 
 /// Whether a package is one of the surfaces that blend themselves into the frame.
 fn wet_name(held: &str) -> bool {
-    ["water.shpk", "river.shpk", "crystal.shpk"]
-        .iter()
-        .any(|one| held.ends_with(one))
+    [
+        "water.shpk",
+        "river.shpk",
+        "crystal.shpk",
+        "lightshaft.shpk",
+        "verticalfog.shpk",
+    ]
+    .iter()
+    .any(|one| held.ends_with(one))
 }
 
 /// Which repository and category the shader files sit in.
@@ -2301,35 +2307,23 @@ impl Scene {
             };
             // A package with no opaque pass is a surface that blends itself into the frame - water,
             // and the glass a zone places. It fills the same G-buffer through a pass of its own and
-            // answers into the lit frame afterward, so which one it took has to be remembered.
-            let (blended, first) = match page(program::Pass::Buffer, 0) {
-                Ok(held) => (false, held),
-                Err(opaque) => match page(program::Pass::Blended, 0) {
-                    Ok(held) => (true, held),
-                    Err(_) => {
-                        log::warn!("assets/layer: {}: {opaque}", material.package());
-                        continue;
-                    }
-                },
+            // answers into the lit frame afterward, so which one it took has to be remembered. One
+            // with neither fills none of it: a light shaft and a slab of fog are drawn over the
+            // frame the lighting left and nowhere else.
+            let (pass, first, opaque) = match page(program::Pass::Buffer, 0) {
+                Ok(held) => (program::Pass::Buffer, Some(held), String::new()),
+                Err(why) => (
+                    program::Pass::Blended,
+                    page(program::Pass::Blended, 0).ok(),
+                    why,
+                ),
             };
-            let pass = match blended {
-                true => program::Pass::Blended,
-                false => program::Pass::Buffer,
-            };
-            let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
-            let mut buffer = vec![Arc::new(first)];
-            buffer.extend((1..pages).filter_map(|held| page(pass, held).ok().map(Arc::new)));
-            // The engine binds these rather than the material, so nothing names them as a path;
-            // what a surface's own shaders declare is what says the file is worth reading at all.
-            for texture in buffer.iter().flat_map(|held| &held.textures) {
-                if let Some((id, path, _)) = mdl::deferred::ENGINE
-                    .iter()
-                    .find(|(held, _, _)| *held == texture.id)
-                {
-                    self.engine
-                        .entry(*id)
-                        .or_insert_with(|| Aside::Wanted(path.to_string()));
-                }
+            let blended = pass != program::Pass::Buffer;
+            let mut buffer = Vec::new();
+            if let Some(first) = first {
+                let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
+                buffer.push(Arc::new(first));
+                buffer.extend((1..pages).filter_map(|held| page(pass, held).ok().map(Arc::new)));
             }
             // Only where the same vertex shader settled the depth. A blending surface fills the
             // buffer through a pass whose vertices are lifted by its own waves, and the depth pass
@@ -2359,18 +2353,36 @@ impl Scene {
             );
             // What it answers into the lit frame with, which only a blending surface has.
             // Water reads the lit frame back and shades itself from it, where anything else that
-            // blends is lit where it stands.
+            // blends is lit where it stands and an overlay carries its own colour.
             let resolve = blended
                 .then(|| {
-                    page(program::Pass::Water, 0)
-                        .or_else(|_| page(program::Pass::BlendedLighting, 0))
-                        .inspect_err(|why| {
-                            log::warn!("assets/layer: {} resolve: {why}", material.package());
-                        })
-                        .ok()
-                        .map(Arc::new)
+                    [
+                        program::Pass::Water,
+                        program::Pass::BlendedLighting,
+                        program::Pass::Shaft,
+                        program::Pass::Layer,
+                    ]
+                    .into_iter()
+                    .find_map(|pass| page(pass, 0).ok())
+                    .map(Arc::new)
                 })
                 .flatten();
+            if buffer.is_empty() && resolve.is_none() {
+                log::warn!("assets/layer: {}: {opaque}", material.package());
+                continue;
+            }
+            // The engine binds these rather than the material, so nothing names them as a path;
+            // what a surface's own shaders declare is what says the file is worth reading at all.
+            for texture in buffer.iter().chain(&resolve).flat_map(|held| &held.textures) {
+                if let Some((id, path, _)) = mdl::deferred::ENGINE
+                    .iter()
+                    .find(|(held, _, _)| *held == texture.id)
+                {
+                    self.engine
+                        .entry(*id)
+                        .or_insert_with(|| Aside::Wanted(path.to_string()));
+                }
+            }
             self.translated.insert(
                 at,
                 Translated {
@@ -2685,6 +2697,7 @@ impl Scene {
                     .ambient
                     .clouds()
                     .map_or_else(program::Cloud::default, |held| held.scene),
+                shaft: self.ambient.shafts().unwrap_or_default(),
                 clock: self.clock / TICKS,
                 wind: self.ambient.wind().unwrap_or(program::Wind {
                     reach: 0.0,
@@ -3056,7 +3069,7 @@ impl Scene {
                             self.placements.len()
                         ),
                     ),
-                    ("Water materials", {
+                    ("Blended materials", {
                         let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
                         for (at, (_, slot)) in self.materials.iter().enumerate() {
                             let Slot::Ready(material) = slot else { continue };

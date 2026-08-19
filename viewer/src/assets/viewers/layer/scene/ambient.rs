@@ -40,6 +40,7 @@ const GLOBAL_LIGHTING: u32 = 0;
 const CLOUDS: u32 = 2;
 const STARFIELD: u32 = 12;
 const WIND: u32 = 6;
+const LIGHT_SHAFT: u32 = 7;
 const TONE_MAPPING: u32 = 9;
 const VERTICAL_FOG: u32 = 13;
 
@@ -446,6 +447,18 @@ impl Ambient {
             heading: Vec3::new(held.x, 0.0, held.y).normalize_or_zero(),
             reach: held.length(),
             rate: self.rate,
+        })
+    }
+
+    /// What the overlays a zone places carry, and nothing where the weather states no set for them.
+    /// One set holds both: a shaft of light takes the first color, and a slab of fog takes the pair
+    /// as its own surface and far below it, thickening at the rate stated beside them.
+    pub fn shafts(&self) -> Option<program::Shaft> {
+        let held = self.keyframes(LIGHT_SHAFT)?;
+        Some(program::Shaft {
+            color: colour(held, "color_0")?.0,
+            radiance: colour(held, "radiance_color")?.0,
+            scale: scalar(held, "scale", 0.0),
         })
     }
 

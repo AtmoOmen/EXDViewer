@@ -533,11 +533,18 @@ pub(super) fn detail(lod: u8) -> Lod {
 }
 
 /// Whether this graph draws a mesh. Water fills the same G-buffer as anything else, through a
-/// blended pass of its own; the kinds left out are the engine's own passes, which nothing here runs.
+/// blended pass of its own, and the two overlays carry their own colour over the frame the lighting
+/// left; the kinds left out are the engine's own passes, which nothing here runs.
 pub(super) fn draws(mesh: &ironworks::file::mdl::Mesh) -> bool {
-    mesh.kinds()
-        .iter()
-        .any(|kind| matches!(kind, MeshKind::Standard | MeshKind::Water))
+    mesh.kinds().iter().any(|kind| {
+        matches!(
+            kind,
+            MeshKind::Standard
+                | MeshKind::Water
+                | MeshKind::LightShaft
+                | MeshKind::VerticalFog
+        )
+    })
 }
 
 /// What a mesh a drawing pass leaves out is for.

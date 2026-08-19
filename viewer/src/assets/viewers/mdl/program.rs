@@ -33,9 +33,17 @@ const PASS_WATER: u32 = 0x8ef4_0d56;
 /// furblur marches along a strand at it, and every cloud node holds it and nothing else.
 const PASS_7: u32 = 0x5bc1_ad3f;
 
+/// What the two overlays a zone places answer under, each holding this pass and no other. The
+/// second is named for a depth pass and writes colour all the same: which of the two things it does
+/// is the technique's own, and the one it defaults to is `Color`.
+const PASS_SEMITRANSPARENCY: u32 = 0x2d0c_1a37;
+const PASS_WATER_Z: u32 = 0x24cd_f1ea;
+
 /// The render pass a node is selected under. Holding everything else fixed, a drawing package
 /// answers `SUB_VIEW_SHADOW_0` with its depth pass alone, which is what a shadow map is.
 pub const SUB_VIEW_MAIN: u32 = 0xf43b_2f35;
+/// The same view, as the older generation of packages spells it. Nothing declares both.
+const MAIN: u32 = 0xa8f9_ffcc;
 pub const SUB_VIEW_SHADOW_0: u32 = 0x99b2_2d1c;
 pub const SUB_VIEW_CUBE_0: u32 = 0x6624_4231;
 pub const SUB_VIEW_ROOF: u32 = 0xae5e_6a42;
@@ -291,6 +299,11 @@ const CLIP_TO_WORLD: &str = "cC2W";
 const VS_PARAM: &str = "g_VSParam";
 const PS_PARAM: &str = "g_PSParam";
 
+/// The buffer a package fills for itself, which the two overlays a zone places read as the only
+/// thing the engine tells them beyond the object's own placement. Named the generic way, so nothing
+/// but one of their passes fills it this way.
+const PARAMETER: &str = "g_Parameter";
+
 /// How far the sheet's texture tiles across the forty thousand units it spans, which puts one period
 /// of it every four thousand.
 const SHEET_TILING: f32 = 10.0;
@@ -510,6 +523,10 @@ pub enum Pass {
     BlendedLighting,
     /// What water shades itself with, reading the lit frame back rather than filling the G-buffer.
     Water,
+    /// A shaft of light a zone places, added to the frame the lighting left.
+    Shaft,
+    /// A slab of fog a zone places, blended into that same frame.
+    Layer,
 }
 
 impl Pass {
@@ -524,6 +541,8 @@ impl Pass {
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
             Self::BlendedLighting => PASS_LIGHTING_SEMITRANSPARENCY,
             Self::Water => PASS_WATER,
+            Self::Shaft => PASS_SEMITRANSPARENCY,
+            Self::Layer => PASS_WATER_Z,
         }
     }
 }
@@ -1012,6 +1031,20 @@ pub fn shadow_camera(light: Vec3, view: Mat4, at: usize) -> (Mat4, Mat4) {
     (Mat4::look_at_rh(focus + toward * reach, focus, up), onto)
 }
 
+/// What the environment's light shaft set states at that same weather and time. One set carries both
+/// overlays a zone places: a shaft of light takes the first color, and a slab of fog takes the pair
+/// as what it looks like at its own surface and far below it, thickening at the stated rate.
+///
+/// The pairing is the shape of the two shaders rather than anything a file spells out. The set
+/// states one more number, `some_param`, which reads one everywhere and which neither shader has a
+/// lane for.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct Shaft {
+    pub color: Vec3,
+    pub radiance: Vec3,
+    pub scale: f32,
+}
+
 /// What the environment's cloud set states at the weather and time the frame stands at: the two
 /// colors a cloud is lit and shaded with, and how far up the band reaches.
 #[derive(Clone, Copy, PartialEq)]
@@ -1214,6 +1247,8 @@ pub struct Scene {
     pub sky: Sky,
     pub fog: Fog,
     pub cloud: Cloud,
+    /// What the overlays a zone places carry, where its environment states a set for them.
+    pub shaft: Shaft,
     /// The colours the character was made with.
     pub customize: Customize,
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
@@ -1298,6 +1333,7 @@ impl Default for Scene {
             sky: Sky::default(),
             fog: Fog::default(),
             cloud: Cloud::default(),
+            shaft: Shaft::default(),
             customize: Customize::default(),
             clock: 0.0,
             wind: Wind::default(),
@@ -1579,7 +1615,9 @@ impl Program {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         let held = material.held();
         let technique = package.technique_subview()[0];
-        let (vs, ps) = pair(&package, held.shader_keys(), set, pass.id(), technique, subview)
+        let node = |view| pair(&package, held.shader_keys(), set, pass.id(), technique, view);
+        let (vs, ps) = node(subview)
+            .or_else(|| (subview == SUB_VIEW_MAIN).then(|| node(MAIN)).flatten())
             .ok_or("this material's keys reach no such pass")?;
         Self::assemble(
             &package,
@@ -2064,6 +2102,35 @@ impl Buffer {
         };
         if self.name == INSTANCING {
             self.instancing(scene, instances, &mut out);
+            return out;
+        }
+        // A slab of fog is stood by a translation and nothing else: its own vertices arrive turned
+        // and scaled the way the zone placed them, and the buffer it reads holds one register.
+        if self.name == INSTANCE && pass == Pass::Layer {
+            let held = model.w_axis;
+            write(&mut out, 0, &[held.x, held.y, held.z, 0.0]);
+            return out;
+        }
+        if self.name == PARAMETER && matches!(pass, Pass::Shaft | Pass::Layer) {
+            let held = scene.shaft;
+            match pass {
+                // Which way the light the shaft carries travels, which is the way back from where
+                // the sun stands, and the color it carries where it points along it.
+                Pass::Shaft => {
+                    let aim = -scene.light.normalize_or_zero();
+                    write(&mut out, 0, &[aim.x, aim.y, aim.z, clock]);
+                    write(&mut out, 1, &[held.radiance.x, held.radiance.y, held.radiance.z, 0.0]);
+                }
+                // Where the eye stands, which the slab measures its own texture off, and the pair
+                // of colors it is read between: the first at its own surface, the second far under
+                // it. The set's own scale is what the depth below the surface is thickened at.
+                _ => {
+                    let eye = view.inverse().w_axis;
+                    write(&mut out, 0, &[eye.x, eye.y, eye.z, clock]);
+                    write(&mut out, 1, &[held.color.x, held.color.y, held.color.z, held.scale]);
+                    write(&mut out, 2, &[held.radiance.x, held.radiance.y, held.radiance.z, 0.0]);
+                }
+            }
             return out;
         }
         if self.name == "g_AmbientParamArray" {
@@ -2551,6 +2618,27 @@ impl Buffer {
         // the wave it is lifted by. One leaves both as the file wrote them.
         put(INSTANCE, "m_Misc", vec![0.0, 0.0, 1.0, 1.0]);
 
+        // A shaft of light reads the same buffer as the object's own placement: where it stands,
+        // how it turns, and what it is scaled by. The material's `g_NearClip` is read against the
+        // last lane as `saturate(clip * it - 1)`, which fades a shaft out as the eye comes up to
+        // it, so what the lane holds is how far away it stands. The colors go in beside it: the
+        // second row weighs what the surface itself carries.
+        let (scale, turn, _) = model.to_scale_rotation_translation();
+        put(INSTANCE, "transform", rows(model, 3));
+        put(INSTANCE, "rotate", rows(Mat4::from_quat(turn), 3));
+        let held = scene.shaft.color;
+        let eye = view.inverse().w_axis.truncate();
+        put(INSTANCE, "misc", vec![
+            scale.x,
+            scale.y,
+            scale.z,
+            eye.distance(model.w_axis.truncate()),
+            held.x,
+            held.y,
+            held.z,
+            0.0,
+        ]);
+
         // Water is a sum of Gerstner waves, and each is a sine of a frequency times this plus a
         // wavenumber times where the vertex stands; the wave maps, the noise and the caustics all
         // scroll along it as well, at rates the material states.
@@ -2570,6 +2658,10 @@ impl Buffer {
         // How far into the frame a surface may reach for what stands behind it. Sampling past this
         // is folded back in, so the whole frame is what leaves the reading where it was aimed.
         put(water, "m_DynamicViewportResolution", vec![1.0; 4]);
+        // The light the caustics volume adds under the surface, at the strength the material states
+        // and nothing else. The lane past it wobbles where that slice is read, and no file or frame
+        // states how far, so the slice is taken where the surface puts it.
+        put(water, "m_UnderCausticsParam", vec![0.0, 0.0, 1.0, 0.0]);
         // Both lerp toward one against a weight the mesh carries, so a one is the reading the
         // engine's own number would only move away from.
         put(water, "m_Roughness", vec![1.0; 4]);

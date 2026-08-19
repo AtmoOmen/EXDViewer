@@ -580,11 +580,7 @@ impl Renderer {
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
             gl.viewport(0, 0, size.0, size.1);
             gl.color_mask(true, true, true, true);
-            gl.disable(glow::BLEND);
             gl.enable(glow::DEPTH_TEST);
-            // Against what its own buffer pass settled, so a surface layered over itself keeps the
-            // fragment the G-buffer kept.
-            gl.depth_func(glow::EQUAL);
             gl.depth_mask(false);
         }
         for (batch, (offset, windows)) in frame.batches.iter().zip(offsets) {
@@ -613,8 +609,28 @@ impl Renderer {
                 };
                 let program =
                     deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
+                // A surface that filled the G-buffer is tested against exactly what its own buffer
+                // pass settled, so one layered over itself keeps the fragment that pass kept. An
+                // overlay filled none of it and is tested against the scene in front of it: a shaft
+                // of light adds what it carries, a slab of fog blends in by its own alpha.
+                let (test, blend) = match held.pass {
+                    program::Pass::Shaft => (glow::LESS, Some((glow::ONE, glow::ONE))),
+                    program::Pass::Layer => (
+                        glow::LESS,
+                        Some((glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA)),
+                    ),
+                    _ => (glow::EQUAL, None),
+                };
                 unsafe {
                     gl.use_program(Some(program));
+                    gl.depth_func(test);
+                    match blend {
+                        Some((source, into)) => {
+                            gl.enable(glow::BLEND);
+                            gl.blend_func(source, into);
+                        }
+                        None => gl.disable(glow::BLEND),
+                    }
                     match surface.cull {
                         true => {
                             gl.enable(glow::CULL_FACE);
@@ -708,10 +724,28 @@ impl Renderer {
                     }
                     gl.bind_vertex_array(None);
                 }
+                // The batch's windows were laid out for its buffer pass, and a resolve reading no
+                // instancing buffer of its own takes none of them: those draw one object at a time,
+                // off the transform the scene carries.
+                if *windows == 0 {
+                    for instance in &batch.instances {
+                        let held_scene = program::Scene {
+                            model: instance.transform,
+                            ..scene.clone()
+                        };
+                        self.buffers.bind(gl, program, held, &held_scene, &[])?;
+                        unsafe {
+                            gl.bind_vertex_array(Some(mesh.0));
+                            gl.draw_elements(glow::TRIANGLES, mesh.2, glow::UNSIGNED_SHORT, 0);
+                            gl.bind_vertex_array(None);
+                        }
+                    }
+                }
             }
         }
         unsafe {
             gl.depth_func(glow::LESS);
+            gl.disable(glow::BLEND);
             gl.disable(glow::DEPTH_TEST);
         }
         Ok(())

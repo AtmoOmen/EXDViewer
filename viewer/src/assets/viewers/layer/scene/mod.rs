@@ -2484,11 +2484,15 @@ impl Scene {
         }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "View");
-            ui.add(
+            // Pasted rather than picked, since a file dialog is the one way in that nothing outside
+            // the window can drive: a headless run positions the camera through here.
+            let pasted = ui.add(
                 egui::TextEdit::singleline(&mut self.pasted)
                     .hint_text("paste a TitleEdit preset")
                     .desired_width(f32::INFINITY),
             );
+            let mut load =
+                pasted.lost_focus() && ui.input(|held| held.key_pressed(egui::Key::Enter));
             ui.horizontal(|ui| {
                 if ui.button("Import preset").clicked() {
                     self.picking = Some(TrackedPromise::spawn_local(async {
@@ -2500,9 +2504,8 @@ impl Scene {
                         Some(held.read().await)
                     }));
                 }
-                // Pasted rather than picked, since a file dialog is the one way in that nothing
-                // outside the window can drive: a headless run positions the camera through here.
-                if ui.button("Load pasted").clicked() {
+                load |= ui.button("Load pasted").clicked();
+                if load {
                     match preset::Preset::read(self.pasted.as_bytes()) {
                         Ok(held) => {
                             match held.level == self.path {

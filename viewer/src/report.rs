@@ -379,6 +379,18 @@ impl crate::data::FileProvider for Recording {
         read
     }
 
+    async fn read_package(&self, path: &str) -> anyhow::Result<(Vec<u8>, bool)> {
+        let read = self.inner.read_package(path).await;
+        if read.is_ok() {
+            self.reporter.record(path);
+        }
+        read
+    }
+
+    async fn read_span(&self, path: &str, span: std::ops::Range<u32>) -> anyhow::Result<Vec<u8>> {
+        self.inner.read_span(path, span).await
+    }
+
     async fn get_icon(
         &self,
         path: &str,

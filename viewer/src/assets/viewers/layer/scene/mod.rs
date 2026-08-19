@@ -30,6 +30,7 @@ use half::f16;
 use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, SceneTimeline, Transform};
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
+use ironworks::file::shpk::ShaderPackage;
 use ironworks::file::spm::ShaderParameters;
 use ironworks::sqpack::IndexHash;
 use ironworks::file::{
@@ -275,13 +276,56 @@ enum Slot {
     Failed,
 }
 
-/// A shader package, which many materials name the same one of.
+/// A shader package, which many materials name the same one of. A fetch answers whether the
+/// bytecode came with it.
 enum Package {
     Wanted,
-    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Fetching(TrackedPromise<Result<(Vec<u8>, bool)>>),
     Ready(Vec<u8>),
     Failed,
 }
+
+/// The blobs one read of a package answered with, each under the shader it belongs to.
+type Blobbed = TrackedPromise<Result<Vec<(u32, Vec<u8>)>>>;
+
+/// A package whose bytecode was left behind: where each of its shaders' blobs sits in the file, and
+/// which of them the surfaces read so far have asked for.
+struct Blobs {
+    spans: Vec<std::ops::Range<u32>>,
+    arrived: BTreeSet<u32>,
+    wanted: BTreeSet<u32>,
+    fetching: Option<Blobbed>,
+}
+
+impl Blobs {
+    fn read(package: &ShaderPackage) -> Self {
+        let base = package.blobs_offset() as u32;
+        Self {
+            spans: package
+                .shaders()
+                .iter()
+                .map(|shader| {
+                    let at = base + shader.blob_offset();
+                    at..at + shader.blob_size()
+                })
+                .collect(),
+            arrived: BTreeSet::new(),
+            wanted: BTreeSet::new(),
+            fetching: None,
+        }
+    }
+}
+
+/// The draws a zone makes of a surface, which is what a package is read for. A shader outside these
+/// is never translated, so its bytecode is never asked for.
+const DRAWS: [(program::Pass, u32); 6] = [
+    (program::Pass::Buffer, program::SUB_VIEW_MAIN),
+    (program::Pass::Blended, program::SUB_VIEW_MAIN),
+    (program::Pass::Depth, program::SUB_VIEW_MAIN),
+    (program::Pass::Depth, program::SUB_VIEW_SHADOW_0),
+    (program::Pass::Water, program::SUB_VIEW_MAIN),
+    (program::Pass::BlendedLighting, program::SUB_VIEW_MAIN),
+];
 
 /// Whether a package is one of the surfaces that blend themselves into the frame.
 fn wet_name(held: &str) -> bool {
@@ -482,6 +526,11 @@ pub struct Scene {
     waving: HashSet<usize>,
     material_at: HashMap<String, usize>,
     packages: HashMap<String, Package>,
+    /// The bytecode still owed on the packages a store served in part.
+    blobs: HashMap<String, Blobs>,
+    /// Materials whose own shaders have been asked for, so a package is only read again when a new
+    /// one names it.
+    picked: HashSet<usize>,
     /// Parameter files folded into the table the card holds, so a later one uploads it again.
     typed: usize,
     translated: HashMap<usize, Translated>,
@@ -691,6 +740,8 @@ impl Scene {
             waving: HashSet::new(),
             material_at: HashMap::new(),
             packages: HashMap::new(),
+            blobs: HashMap::new(),
+            picked: HashSet::new(),
             typed: 0,
             translated: HashMap::new(),
             tables: HashMap::new(),
@@ -1955,10 +2006,20 @@ impl Scene {
         {
             wanted.push(program::SPOT.to_owned());
         }
-        wanted.extend(self.materials.iter().filter_map(|(_, slot)| match slot {
-            Slot::Ready(material) => Some(material.package()),
-            _ => None,
-        }));
+        // A package the frame itself is drawn with selects off no material, so it is read whole
+        // however many surfaces also name it: nothing here would know which of its blobs to ask for.
+        let mut named: HashSet<String> = self
+            .materials
+            .iter()
+            .filter_map(|(_, slot)| match slot {
+                Slot::Ready(material) => Some(material.package()),
+                _ => None,
+            })
+            .collect();
+        for path in &wanted {
+            named.remove(path);
+        }
+        wanted.extend(named.iter().cloned());
         for path in wanted {
             self.packages.entry(path).or_insert(Package::Wanted);
         }
@@ -1977,10 +2038,15 @@ impl Scene {
             }
             let files = backend.files().clone();
             let wanted = path.clone();
+            let holed = named.contains(path);
             *held = Package::Fetching(TrackedPromise::spawn_local(async move {
                 match unnamed(&wanted) {
-                    Some(hash) => files.read_by_hash(SHADER.0, SHADER.1, hash, true).await,
-                    None => files.read(&wanted).await,
+                    Some(hash) => Ok((
+                        files.read_by_hash(SHADER.0, SHADER.1, hash, true).await?,
+                        false,
+                    )),
+                    None if holed => files.read_package(&wanted).await,
+                    None => Ok((files.read(&wanted).await?, false)),
                 }
             }));
             fetching += 1;
@@ -1995,7 +2061,14 @@ impl Scene {
                 continue;
             };
             *held = match result {
-                Ok(bytes) => Package::Ready(bytes.clone()),
+                Ok((bytes, holed)) => {
+                    if *holed
+                        && let Ok(package) = ShaderPackage::parse(bytes)
+                    {
+                        self.blobs.insert(path.clone(), Blobs::read(&package));
+                    }
+                    Package::Ready(bytes.clone())
+                }
                 Err(why) => {
                     log::error!("assets/layer: {path}: {why}");
                     Package::Failed
@@ -2005,6 +2078,117 @@ impl Scene {
         }
         if arrived {
             self.load_types();
+        }
+        self.want_blobs();
+        self.load_blobs(backend);
+    }
+
+    /// Which shaders the surfaces read so far will be drawn with, asked of each package once per
+    /// wave of materials rather than once per material: reading a package's tables is what costs.
+    fn want_blobs(&mut self) {
+        let mut fresh: HashMap<String, Vec<usize>> = HashMap::new();
+        for (at, (_, slot)) in self.materials.iter().enumerate() {
+            let Slot::Ready(material) = slot else {
+                continue;
+            };
+            if self.picked.contains(&at) || !self.blobs.contains_key(&material.package()) {
+                continue;
+            }
+            fresh.entry(material.package()).or_default().push(at);
+        }
+        for (path, held) in fresh {
+            let Some(Package::Ready(bytes)) = self.packages.get(&path) else {
+                continue;
+            };
+            let package = match ShaderPackage::parse(bytes) {
+                Ok(package) => package,
+                Err(why) => {
+                    log::error!("assets/layer: {path}: {why}");
+                    continue;
+                }
+            };
+            let Some(blobs) = self.blobs.get_mut(&path) else {
+                continue;
+            };
+            for at in held {
+                let Some((_, Slot::Ready(material))) = self.materials.get(at) else {
+                    continue;
+                };
+                // Both readings of the wind, since a model that carries it may be read after the
+                // material it shares with one that does not.
+                for waving in [false, true] {
+                    let mut keys = KEYS.to_vec();
+                    if waving {
+                        keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
+                    }
+                    for (pass, subview) in DRAWS {
+                        let Some((vertex, pixel)) =
+                            program::picks(&package, material, &keys, pass, subview)
+                        else {
+                            continue;
+                        };
+                        for shader in [vertex, pixel] {
+                            if !blobs.arrived.contains(&shader)
+                                && (shader as usize) < blobs.spans.len()
+                            {
+                                blobs.wanted.insert(shader);
+                            }
+                        }
+                    }
+                }
+                self.picked.insert(at);
+            }
+        }
+    }
+
+    /// Asks for the bytecode a package still owes, and splices what arrives back where the file
+    /// itself would have carried it.
+    fn load_blobs(&mut self, backend: &Backend) {
+        for (path, blobs) in &mut self.blobs {
+            if let Some(promise) = blobs.fetching.take() {
+                match promise.try_take() {
+                    Err(promise) => blobs.fetching = Some(promise),
+                    Ok(Err(why)) => {
+                        log::error!("assets/layer: {path}: {why}");
+                        blobs.wanted.clear();
+                        self.packages.insert(path.clone(), Package::Failed);
+                    }
+                    Ok(Ok(filled)) => {
+                        let Some(Package::Ready(bytes)) = self.packages.get_mut(path) else {
+                            continue;
+                        };
+                        for (at, blob) in filled {
+                            let span = blobs.spans[at as usize].clone();
+                            if let Some(held) =
+                                bytes.get_mut(span.start as usize..span.end as usize)
+                            {
+                                held.copy_from_slice(&blob);
+                                blobs.arrived.insert(at);
+                            }
+                            blobs.wanted.remove(&at);
+                        }
+                        self.dirty = true;
+                    }
+                }
+            }
+            if blobs.fetching.is_some() || blobs.wanted.is_empty() {
+                continue;
+            }
+            let files = backend.files().clone();
+            let held = path.clone();
+            let spans: Vec<(u32, std::ops::Range<u32>)> = blobs
+                .wanted
+                .iter()
+                .map(|at| (*at, blobs.spans[*at as usize].clone()))
+                .collect();
+            blobs.fetching = Some(TrackedPromise::spawn_local(async move {
+                futures_util::future::try_join_all(spans.into_iter().map(|(at, span)| {
+                    let files = files.clone();
+                    let held = held.clone();
+                    async move { Ok((at, files.read_span(&held, span).await?)) }
+                }))
+                .await
+            }));
         }
     }
 
@@ -2290,6 +2474,15 @@ impl Scene {
             let Some(Package::Ready(bytes)) = self.packages.get(&material.package()) else {
                 continue;
             };
+            // A package still owed bytecode holds nought where a shader would be, which translates
+            // to a program that draws nothing rather than to an error worth reporting.
+            if self
+                .blobs
+                .get(&material.package())
+                .is_some_and(|held| !held.wanted.is_empty())
+            {
+                continue;
+            }
             let mut keys = KEYS.to_vec();
             if self.waving.contains(&at) {
                 keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));

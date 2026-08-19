@@ -78,6 +78,22 @@ pub trait FileProvider {
         Ok((bytes, level))
     }
 
+    /// Read a shader package, and say whether its bytecode is still to be asked for. Which blobs a
+    /// draw reads is only known once the material naming them is in hand, so a store that serves
+    /// part of a file answers the tables and the string block and leaves the rest a hole.
+    async fn read_package(&self, path: &str) -> anyhow::Result<(Vec<u8>, bool)> {
+        Ok((self.read(path).await?, false))
+    }
+
+    /// The bytes a file holds over `span`.
+    async fn read_span(&self, path: &str, span: std::ops::Range<u32>) -> anyhow::Result<Vec<u8>> {
+        let bytes = self.read(path).await?;
+        bytes
+            .get(span.start as usize..span.end as usize)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| anyhow::anyhow!("{path} does not reach {}", span.end))
+    }
+
     async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>>;
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>>;
@@ -152,6 +168,32 @@ impl ModelLods {
                 },
             );
         }
+    }
+}
+
+/// Where a shader package's sections sit, as its head states them. The bytecode between the tables
+/// and the string block is what a draw asks for a blob at a time.
+pub struct PackageSpans {
+    pub blobs: u32,
+    pub strings: u32,
+    pub size: u32,
+}
+
+impl PackageSpans {
+    pub fn read(head: &[u8]) -> Option<Self> {
+        if !head.starts_with(b"ShPk") {
+            return None;
+        }
+        let word = |at: usize| {
+            head.get(at..at + 4)
+                .map(|held| u32::from_le_bytes(held.try_into().unwrap()))
+        };
+        let held = Self {
+            size: word(12)?,
+            blobs: word(16)?,
+            strings: word(20)?,
+        };
+        (held.blobs <= held.strings && held.strings <= held.size).then_some(held)
     }
 }
 

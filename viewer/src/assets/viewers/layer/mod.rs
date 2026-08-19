@@ -329,30 +329,12 @@ fn summary(instance: &Instance) -> String {
 }
 
 /// Everything a payload holds, for the panel that inspects one instance.
-/// What the low byte of a collision material word says a surface is made of, which is what the
-/// footstep a character makes on it is chosen by. The engine builds the sound's own path from the
-/// word, so no shipped file states the last hop; these are the words the footstep bank itself is
-/// filed under. The collision swatch materials name several of the same ids differently.
+/// The surface a collision material word states, beside the word itself.
 fn surface(word: u64) -> String {
-    let held = match word & 0xff {
-        0 => return format!("{word:#018x}"),
-        1 => "dart",
-        2 => "grass",
-        3 => "sand",
-        4 => "stone",
-        5 => "wood",
-        6 => "metal",
-        7 => "gravel",
-        8 => "leaf",
-        9 => "powder",
-        10 => "carpet",
-        11 => "snow",
-        12 | 13 => "water",
-        14 => "mesh",
-        15 => "sticky",
-        held => return format!("{word:#018x}, surface {held}"),
-    };
-    format!("{word:#018x}, {held}")
+    match ironworks::file::pcb::surface(word) {
+        Some(held) => format!("{word:#018x}, {held}"),
+        None => format!("{word:#018x}"),
+    }
 }
 
 fn payload(instance: &Instance) -> Rows {

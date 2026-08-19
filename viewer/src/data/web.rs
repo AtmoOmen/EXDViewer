@@ -1,6 +1,8 @@
 use crate::utils::{GameVersion, HttpResponse, fetch, fetch_range, fetch_url, tex_loader};
 
-use super::{DecodedTexture, FileProvider, ModelLods, decode_texture, list_url, with_list_id};
+use super::{
+    DecodedTexture, FileProvider, ModelLods, PackageSpans, decode_texture, list_url, with_list_id,
+};
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
@@ -289,6 +291,56 @@ impl FileProvider for WebFileProvider {
                 .bytes,
         );
         Ok((bytes, level))
+    }
+
+    /// The tables and the string block alone, with the bytecode left a hole for whatever a draw
+    /// turns out to select.
+    async fn read_package(&self, path: &str) -> anyhow::Result<(Vec<u8>, bool)> {
+        let url = self.file_url(path)?;
+        let head = fetch_range(url.clone(), 0, Some(HEAD - 1)).await?;
+        // A store that will not serve part of a file answers with the whole of it.
+        if head.status != 206 || (head.bytes.len() as u64) < HEAD {
+            return Ok((head.bytes, false));
+        }
+        let Some(spans) = PackageSpans::read(&head.bytes) else {
+            return Ok((self.read(path).await?, false));
+        };
+
+        let mut bytes = head.bytes;
+        if u64::from(spans.blobs) > HEAD {
+            bytes.extend(
+                fetch_range(url.clone(), HEAD, Some(u64::from(spans.blobs) - 1))
+                    .await?
+                    .bytes,
+            );
+        }
+        bytes.truncate(spans.blobs as usize);
+        bytes.resize(spans.strings as usize, 0);
+        if spans.strings < spans.size {
+            bytes.extend(
+                fetch_range(url, u64::from(spans.strings), Some(u64::from(spans.size) - 1))
+                    .await?
+                    .bytes,
+            );
+        }
+        match bytes.len() == spans.size as usize {
+            true => Ok((bytes, true)),
+            false => Ok((self.read(path).await?, false)),
+        }
+    }
+
+    async fn read_span(&self, path: &str, span: std::ops::Range<u32>) -> anyhow::Result<Vec<u8>> {
+        let held = fetch_range(
+            self.file_url(path)?,
+            u64::from(span.start),
+            Some(u64::from(span.end) - 1),
+        )
+        .await?;
+        // A store that will not serve part of a file answers with the whole of it.
+        if held.status != 206 || held.bytes.len() != span.len() {
+            anyhow::bail!("{path} answered {} of {} bytes", held.bytes.len(), span.len());
+        }
+        Ok(held.bytes)
     }
 
     async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>> {

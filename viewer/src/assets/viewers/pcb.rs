@@ -1,12 +1,13 @@
 //! Collision `.pcb` files, drawn and tabulated.
 
 use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use egui::{RichText, ScrollArea};
+use egui::{Color32, RichText, ScrollArea};
 use glam::Vec3;
 use ironworks::file::{File, pcb};
 
@@ -14,12 +15,46 @@ use crate::backend::Backend;
 use crate::data::FileProvider;
 use crate::utils::TrackedPromise;
 
-use super::{Preview, facts, line, section, table};
+use super::{Preview, chip, facts, line, section, table};
 
 mod gpu;
 
 /// Sub-meshes a list may have in flight at once.
 const FETCHES: usize = 12;
+
+/// What the game's own collision swatches paint a surface, out of the `g_DiffuseColor` each of
+/// `bgcommon/collision/material/id_*.mtrl` states. Nothing paints a surface the game does not
+/// name, nor the sticky one.
+fn paint(surface: u8) -> Option<[u8; 3]> {
+    Some(match surface {
+        1 => [151, 101, 6],
+        2 => [134, 193, 82],
+        3 => [247, 185, 70],
+        4 => [141, 141, 89],
+        5 => [255, 102, 255],
+        6 => [255, 0, 0],
+        7 => [218, 218, 196],
+        8 => [67, 101, 36],
+        9 => [251, 227, 181],
+        10 => [112, 48, 160],
+        11 => [198, 217, 240],
+        12 => [84, 141, 212],
+        13 => [31, 73, 125],
+        14 => [255, 255, 0],
+        _ => return None,
+    })
+}
+
+/// The grey a surface no swatch paints is drawn in.
+const UNPAINTED: [u8; 3] = [184, 189, 199];
+
+fn color(material: u64) -> [u8; 3] {
+    paint((material & 0xff) as u8).unwrap_or(UNPAINTED)
+}
+
+/// How many triangles state each material word. The word is kept whole rather than reduced to its
+/// surface, so a mesh read at the wrong material width shows as the impossible word it is.
+type Materials = BTreeMap<u64, usize>;
 
 fn axes(values: [f32; 3]) -> String {
     format!("{:.3}, {:.3}, {:.3}", values[0], values[1], values[2])
@@ -36,6 +71,8 @@ pub struct Rendered {
     columns: Vec<(&'static str, usize)>,
     rows: Vec<Vec<String>>,
     entries: Vec<pcb::MeshListEntry>,
+    /// A list fills this in as its sub-meshes land, so it grows while the scene does.
+    materials: RefCell<Materials>,
 }
 
 #[derive(Clone, Copy)]
@@ -123,9 +160,14 @@ impl Rendered {
         ui.checkbox(&mut show_bounds, "Show wireframe bounding boxes");
         self.show_bounds.set(show_bounds);
         ui.add_space(8.0);
-        ScrollArea::vertical()
-            .auto_shrink(false)
-            .show(ui, |ui| facts(ui, "pcb_identity", &self.identity));
+        ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+            facts(ui, "pcb_identity", &self.identity);
+            ui.add_space(8.0);
+            ui.separator();
+            ui.label(RichText::new("Surfaces").weak());
+            ui.add_space(4.0);
+            legend(ui, &self.materials.borrow(), self.entries.is_empty());
+        });
     }
 
     /// Starts fetching a list's sub-meshes on first use and folds in whatever has since arrived.
@@ -138,7 +180,7 @@ impl Rendered {
         let loader = loader.get_or_insert_with(|| {
             Loader::new(backend.files().clone(), &self.path, self.entries.clone())
         });
-        loader.poll(ctx, &self.scene.borrow());
+        loader.poll(ctx, &self.scene.borrow(), &self.materials);
         (loader.loaded(), self.entries.len())
     }
 }
@@ -163,6 +205,8 @@ fn render_mesh(path: &str, mesh: pcb::Mesh) -> Rendered {
         &mut primitives,
     );
     collect_geometry(root, &mut geometry);
+    let mut materials = Materials::new();
+    collect_materials(root, &mut materials);
 
     let identity = vec![
         ("Version", mesh.version().to_string()),
@@ -193,11 +237,13 @@ fn render_mesh(path: &str, mesh: pcb::Mesh) -> Rendered {
             ("Vertices", 9),
             ("Primitives", 10),
             ("Children", 8),
+            ("Surfaces", 16),
             ("Min", 26),
             ("Max", 26),
         ],
         rows,
         entries: Vec::new(),
+        materials: RefCell::new(materials),
     }
 }
 
@@ -237,6 +283,7 @@ fn render_list(path: &str, list: pcb::MeshList) -> Rendered {
         columns: vec![("Mesh", 12), ("Min", 26), ("Max", 26)],
         rows,
         entries: list.entries().to_vec(),
+        materials: RefCell::new(Materials::new()),
     }
 }
 
@@ -265,6 +312,7 @@ fn collect_node(
         node.vertices().len().to_string(),
         node.primitives().len().to_string(),
         node.children().len().to_string(),
+        surfaces(node),
         axes(bounds.min()),
         axes(bounds.max()),
     ]);
@@ -292,6 +340,93 @@ fn collect_node(
     }
 }
 
+/// What the mesh says its surfaces are, which is also the key to the colours the scene draws them
+/// in. `whole` is false for a list, whose sub-meshes arrive one at a time.
+fn legend(ui: &mut egui::Ui, materials: &Materials, whole: bool) {
+    if materials.is_empty() {
+        let text = match whole {
+            true => "This mesh states no materials",
+            false => "Nothing has arrived to state one yet",
+        };
+        ui.label(RichText::new(text).weak());
+        return;
+    }
+    if materials.keys().all(|word| *word == 0) {
+        ui.label(RichText::new("Every triangle here states no material").weak());
+        return;
+    }
+
+    let mut held: BTreeMap<u8, (usize, BTreeSet<u64>)> = BTreeMap::new();
+    for (word, count) in materials {
+        let row = held.entry((word & 0xff) as u8).or_default();
+        row.0 += count;
+        row.1.insert(word & !0xff);
+    }
+    let mut rows: Vec<_> = held.into_iter().collect();
+    rows.sort_by_key(|(surface, (count, _))| (std::cmp::Reverse(*count), *surface));
+
+    egui::Grid::new("pcb_surfaces")
+        .num_columns(4)
+        .striped(true)
+        .show(ui, |ui| {
+            for (surface, (count, flags)) in rows {
+                let [red, green, blue] = paint(surface).unwrap_or(UNPAINTED);
+                chip(ui, Color32::from_rgb(red, green, blue))
+                    .on_hover_text(match paint(surface) {
+                        Some(_) => "the colour the game's own swatch paints this",
+                        None => "no swatch paints this",
+                    });
+                ui.label(match pcb::surface(u64::from(surface)) {
+                    Some(name) => RichText::new(name),
+                    None => RichText::new(format!("{surface:#04x}")).monospace(),
+                });
+                ui.label(RichText::new(count.to_string()).monospace());
+                ui.label(RichText::new(masks(&flags)).monospace());
+                ui.end_row();
+            }
+        });
+}
+
+/// The filter flags a surface is carrying, which only the `0x7000` group is understood in.
+fn masks(flags: &BTreeSet<u64>) -> String {
+    let mut held: Vec<String> = flags
+        .iter()
+        .take(4)
+        .map(|mask| format!("{mask:#x}"))
+        .collect();
+    if flags.len() > 4 {
+        held.push(format!("+{}", flags.len() - 4));
+    }
+    held.join(" ")
+}
+
+/// The surfaces one node's own triangles state, for the row that stands for it.
+fn surfaces(node: &pcb::Node) -> String {
+    let mut held: Vec<u8> = node
+        .primitives()
+        .iter()
+        .map(|primitive| (primitive.material() & 0xff) as u8)
+        .collect();
+    held.sort_unstable();
+    held.dedup();
+    held.iter()
+        .map(|surface| match pcb::surface(u64::from(*surface)) {
+            Some(name) => name.to_owned(),
+            None => format!("{surface:#04x}"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn collect_materials(node: &pcb::Node, into: &mut Materials) {
+    for primitive in node.primitives() {
+        *into.entry(primitive.material()).or_default() += 1;
+    }
+    for child in node.children() {
+        collect_materials(child, into);
+    }
+}
+
 fn collect_geometry(node: &pcb::Node, geometry: &mut gpu::Geometry) {
     let min = node.bounds().min();
     let max = node.bounds().max();
@@ -307,6 +442,7 @@ fn collect_geometry(node: &pcb::Node, geometry: &mut gpu::Geometry) {
             node.vertices()[usize::from(b)],
             node.vertices()[usize::from(c)],
         ];
+        let paint = color(primitive.material()).map(|channel| f32::from(channel) / 255.0);
         let normal = (Vec3::from_array(positions[1]) - Vec3::from_array(positions[0]))
             .cross(Vec3::from_array(positions[2]) - Vec3::from_array(positions[0]))
             .try_normalize()
@@ -317,7 +453,7 @@ fn collect_geometry(node: &pcb::Node, geometry: &mut gpu::Geometry) {
             geometry.triangle_vertices.push(gpu::Vertex {
                 position,
                 normal,
-                color: [0.72, 0.74, 0.78, 1.0],
+                color: [paint[0], paint[1], paint[2], 1.0],
             });
         }
         geometry.triangle_indices.extend([base, base + 1, base + 2]);
@@ -376,7 +512,7 @@ impl Loader {
         }
     }
 
-    fn poll(&mut self, ctx: &egui::Context, scene: &MeshScene) {
+    fn poll(&mut self, ctx: &egui::Context, scene: &MeshScene, materials: &RefCell<Materials>) {
         let mut fetching = self
             .state
             .iter()
@@ -407,8 +543,12 @@ impl Loader {
             let path = self.mesh_path(index);
             self.state[index] = match result {
                 Ok(bytes) => match decode_mesh(bytes.clone()) {
-                    Ok(geometry) => {
+                    Ok((geometry, held)) => {
                         scene.queue(Arc::new(geometry));
+                        let mut into = materials.borrow_mut();
+                        for (word, count) in held {
+                            *into.entry(word).or_default() += count;
+                        }
                         EntryState::Done
                     }
                     Err(why) => {
@@ -429,14 +569,16 @@ impl Loader {
     }
 }
 
-fn decode_mesh(bytes: Vec<u8>) -> Result<gpu::Geometry> {
+fn decode_mesh(bytes: Vec<u8>) -> Result<(gpu::Geometry, Materials)> {
     let mesh = match pcb::Collision::read(Cursor::new(bytes))? {
         pcb::Collision::Mesh(mesh) => mesh,
         pcb::Collision::List(_) => anyhow::bail!("a list can't name another list"),
     };
     let mut geometry = gpu::Geometry::new();
     collect_geometry(mesh.root(), &mut geometry);
-    Ok(geometry)
+    let mut materials = Materials::new();
+    collect_materials(mesh.root(), &mut materials);
+    Ok((geometry, materials))
 }
 
 impl MeshScene {

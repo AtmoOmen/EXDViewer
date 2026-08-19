@@ -139,6 +139,7 @@ winresource = "0.1"
 env_logger = "0.11"
 poll-promise = { version = "0.3", features = ["smol"] }
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+ureq = "3"
 
 # web:
 [target.'cfg(target_arch = "wasm32")'.dependencies]

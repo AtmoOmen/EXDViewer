@@ -1441,6 +1441,25 @@ fn pair(
     ))
 }
 
+/// The two shaders a draw of this material selects, as indices into the package's own list. A
+/// package read without its bytecode still carries the tables this reads, so what a draw will
+/// translate is known before the blobs it needs are in hand.
+pub fn picks(
+    package: &ShaderPackage,
+    material: &Material,
+    set: &[(u32, u32)],
+    pass: Pass,
+    subview: u32,
+) -> Option<(u32, u32)> {
+    let held = material.held();
+    let technique = package.technique_subview()[0];
+    let node = |view| pair(package, held.shader_keys(), set, pass.id(), technique, view);
+    // A package of the older generation keys its nodes on `MAIN` rather than on the main subview,
+    // and only that one falls back: a shadow request answered by the main node would draw the
+    // wrong pass rather than nothing.
+    node(subview).or_else(|| (subview == SUB_VIEW_MAIN).then(|| node(MAIN)).flatten())
+}
+
 /// One shader's blob, and the program the disassembler read out of it.
 fn program<'a>(
     package: &ShaderPackage,
@@ -1613,17 +1632,13 @@ impl Program {
         attachments: usize,
     ) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
-        let held = material.held();
-        let technique = package.technique_subview()[0];
-        let node = |view| pair(&package, held.shader_keys(), set, pass.id(), technique, view);
-        let (vs, ps) = node(subview)
-            .or_else(|| (subview == SUB_VIEW_MAIN).then(|| node(MAIN)).flatten())
+        let pair = picks(&package, material, set, pass, subview)
             .ok_or("this material's keys reach no such pass")?;
         Self::assemble(
             &package,
             bytes,
-            (vs, ps),
-            Some(held),
+            pair,
+            Some(material.held()),
             pass,
             target,
             attachments,

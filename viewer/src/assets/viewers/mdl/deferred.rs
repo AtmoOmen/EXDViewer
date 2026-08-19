@@ -479,10 +479,9 @@ pub struct Layered {
     pub layers: i32,
     pub pixels: Vec<u8>,
     pub filter: u32,
-    /// Whether the file addresses its slices as a third dimension rather than holding a stack of
-    /// separate images. A sampler is declared over one or the other, and a draw only validates where
-    /// the texture bound to its unit is of the declaration's own kind.
-    pub volumetric: bool,
+    /// What a sampler has to be declared as to read it, which the file states for itself. A draw
+    /// only validates where the texture bound to a unit is of the declaration's own kind.
+    pub kind: program::Kind,
 }
 
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
@@ -570,6 +569,8 @@ pub struct Buffers {
     /// The textures the shaders read off the game's own files, by resource id, each with the target
     /// its file was taken onto the card at.
     arrays: BTreeMap<u32, (u32, glow::Texture)>,
+    /// The same, for the ones a material names rather than the engine, under the path it named.
+    stacked: BTreeMap<String, (u32, glow::Texture)>,
     neutrals: BTreeMap<u32, glow::Texture>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
@@ -2011,20 +2012,20 @@ impl Buffers {
         Ok(())
     }
 
-    /// Takes one of the game's own textures onto the card, as a plane where it holds one slice and
-    /// an array where it holds several: a sampler is declared over one or the other, and a draw only
-    /// validates where the texture bound to its unit is of the declaration's own kind.
+    /// Takes one of the game's own textures onto the card at the target its own file calls for: a
+    /// plane, an array, a volume or a cube. A draw only validates where the texture bound to a unit
+    /// is of the declaration's own kind.
     ///
     /// An array repeats, since the shaders that read one scale the coordinate up by a tile factor
-    /// and expect the tile to come round again. A plane is clamped: it is addressed over its whole
-    /// width, and wrapping would blend its last texel against its first. What is read between the
-    /// texels is the caller's to say, since nothing about the texture tells whether it is an image
-    /// or a table.
-    pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
-        let (target, wrap) = match (held.volumetric, held.layers > 1) {
-            (true, _) => (glow::TEXTURE_3D, glow::CLAMP_TO_EDGE),
-            (false, true) => (glow::TEXTURE_2D_ARRAY, glow::REPEAT),
-            (false, false) => (glow::TEXTURE_2D, glow::CLAMP_TO_EDGE),
+    /// and expect the tile to come round again. Everything else is clamped: a plane is addressed
+    /// over its whole width, and wrapping would blend its last texel against its first. What is read
+    /// between the texels is the caller's to say, since nothing about the texture tells whether it
+    /// is an image or a table.
+    fn upload(gl: &glow::Context, held: &Layered) -> Result<(u32, glow::Texture), String> {
+        let target = target(held.kind);
+        let wrap = match held.kind {
+            program::Kind::Array => glow::REPEAT,
+            _ => glow::CLAMP_TO_EDGE,
         };
         unsafe {
             let texture = gl.create_texture()?;
@@ -2041,6 +2042,24 @@ impl Buffers {
                     glow::UNSIGNED_BYTE,
                     glow::PixelUnpackData::Slice(Some(&held.pixels)),
                 ),
+                glow::TEXTURE_CUBE_MAP => {
+                    let face = (held.size.0 * held.size.1 * 4) as usize;
+                    for at in 0..6 {
+                        gl.tex_image_2d(
+                            glow::TEXTURE_CUBE_MAP_POSITIVE_X + at as u32,
+                            0,
+                            glow::RGBA8 as i32,
+                            held.size.0,
+                            held.size.1,
+                            0,
+                            glow::RGBA,
+                            glow::UNSIGNED_BYTE,
+                            glow::PixelUnpackData::Slice(
+                                held.pixels.get(at * face..(at + 1) * face),
+                            ),
+                        );
+                    }
+                }
                 _ => gl.tex_image_3d(
                     target,
                     0,
@@ -2065,11 +2084,37 @@ impl Buffers {
             if target == glow::TEXTURE_3D {
                 gl.tex_parameter_i32(target, glow::TEXTURE_WRAP_R, wrap as i32);
             }
-            if let Some((_, stale)) = self.arrays.insert(id, (target, texture)) {
-                graveyard().lock().unwrap().push(Dead::Texture(stale));
-            }
+            Ok((target, texture))
+        }
+    }
+
+    /// One of the game's own textures under the resource id the shaders know it by, which is how
+    /// the engine's own set is reached.
+    pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
+        let held = Self::upload(gl, held)?;
+        if let Some((_, stale)) = self.arrays.insert(id, held) {
+            graveyard().lock().unwrap().push(Dead::Texture(stale));
         }
         Ok(())
+    }
+
+    /// One a material names for itself, under the path that named it. Not under its resource id:
+    /// two materials name different cubes at the same sampler, and a zone holds both.
+    pub fn stack(&mut self, gl: &glow::Context, path: &str, held: &Layered) -> Result<(), String> {
+        let held = Self::upload(gl, held)?;
+        if let Some((_, stale)) = self.stacked.insert(path.to_owned(), held) {
+            graveyard().lock().unwrap().push(Dead::Texture(stale));
+        }
+        Ok(())
+    }
+
+    /// The texture a material named at this path, where it has arrived and reads through a sampler
+    /// of this kind.
+    pub fn stacked(&self, kind: program::Kind, path: &str) -> Option<glow::Texture> {
+        self.stacked
+            .get(path)
+            .filter(|(at, _)| *at == target(kind))
+            .map(|(_, held)| *held)
     }
 
     /// The file a resource id names, where one has arrived and its own target is the one a sampler
@@ -2091,11 +2136,11 @@ impl Buffers {
         kind: program::Kind,
         id: u32,
     ) -> Result<glow::Texture, String> {
-        match kind {
-            program::Kind::Cube => self.reflection(gl),
-            held => match self.supplied(held, id) {
-                Some(texture) => Ok(texture),
-                None => self.blank(gl, target(held)),
+        match self.supplied(kind, id) {
+            Some(texture) => Ok(texture),
+            None => match kind {
+                program::Kind::Cube => self.reflection(gl),
+                held => self.blank(gl, target(held)),
             },
         }
     }
@@ -2491,6 +2536,7 @@ impl Drop for Buffers {
             .chain(
                 std::mem::take(&mut self.arrays)
                     .into_values()
+                    .chain(std::mem::take(&mut self.stacked).into_values())
                     .map(|(_, held)| held),
             )
             .map(Dead::Texture),

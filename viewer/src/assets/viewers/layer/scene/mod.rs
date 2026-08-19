@@ -18,7 +18,7 @@ mod ambient;
 mod gpu;
 mod preset;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -339,6 +339,14 @@ enum Texture {
     Absent,
 }
 
+/// A texture a material reads through a sampler declared over slices. Read whole and handed to the
+/// graph rather than to egui, which holds nothing but planes.
+enum Stack {
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready,
+    Absent,
+}
+
 /// A file the scene still has to read placements out of.
 enum Held {
     Fetching(TrackedPromise<Result<Vec<u8>>>),
@@ -487,6 +495,9 @@ pub struct Scene {
     /// are only worth their fetch once a material's own shaders turn out to declare one.
     engine: BTreeMap<u32, Aside>,
     textures: BTreeMap<String, Texture>,
+    /// The same, for the ones read through a sampler with slices. Keyed by an `Arc` so a surface
+    /// built every frame names one without copying the path.
+    stacked: BTreeMap<Arc<str>, Stack>,
     resident: usize,
     files: HashMap<String, Held>,
     waiting: Vec<Expand>,
@@ -644,6 +655,7 @@ impl Scene {
                 Aside::Wanted(mdl::deferred::RAMP.1.to_owned()),
             )]),
             textures: BTreeMap::new(),
+            stacked: BTreeMap::new(),
             resident: 0,
             files: HashMap::new(),
             waiting: Vec::new(),
@@ -2189,9 +2201,71 @@ impl Scene {
         }
     }
 
+    /// The textures a material names for a sampler its package declares over slices rather than a
+    /// plane: an environment cube, an array, a volume.
+    fn sliced(&self) -> BTreeSet<String> {
+        self.translated
+            .iter()
+            .filter_map(|(at, held)| match self.materials.get(*at) {
+                Some((_, Slot::Ready(material))) => Some((held, material)),
+                _ => None,
+            })
+            .flat_map(|(held, material)| {
+                material.bound().filter(|(id, _)| {
+                    held.buffer
+                        .iter()
+                        .flat_map(|pass| &pass.textures)
+                        .any(|texture| texture.id == *id && texture.kind != program::Kind::Plane)
+                })
+            })
+            .map(|(_, path)| path.to_owned())
+            .collect()
+    }
+
     /// Every texture the ready materials name, since the game's own shaders read all of them. Held
     /// for the whole scene rather than per model, since a zone's models share theirs heavily.
     fn load_textures(&mut self, ui: &egui::Ui, backend: &Backend) {
+        let sliced = self.sliced();
+        for path in sliced
+            .iter()
+            .filter(|path| !self.stacked.contains_key(path.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let files = backend.files().clone();
+            let held = path.clone();
+            self.stacked.insert(
+                path.into(),
+                Stack::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(&held).await
+                })),
+            );
+        }
+        for (path, stack) in &mut self.stacked {
+            let Stack::Fetching(promise) = stack else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *stack = match result
+                .as_ref()
+                .map_err(ToString::to_string)
+                .and_then(|bytes| {
+                    mdl::layered(bytes, path, glow::LINEAR).map_err(|why| why.to_string())
+                }) {
+                Ok(held) => {
+                    self.renderer.lock().unwrap().queue_stack(path.clone(), held);
+                    self.dirty = true;
+                    Stack::Ready
+                }
+                Err(why) => {
+                    log::error!("assets/layer: {path}: {why}");
+                    Stack::Absent
+                }
+            };
+        }
+
         let mut fetching = self
             .textures
             .values()
@@ -2207,7 +2281,7 @@ impl Scene {
                 _ => None,
             })
             .flat_map(|material| material.textures())
-            .filter(|path| !self.textures.contains_key(*path))
+            .filter(|path| !self.textures.contains_key(*path) && !sliced.contains(*path))
             .cloned()
             .collect();
         for path in wanted {
@@ -2450,8 +2524,11 @@ impl Scene {
             _ => None,
         });
         let bind = |path: &str| match self.textures.get(path) {
-            Some(Texture::Ready(handle)) => Some(handle.id()),
-            _ => None,
+            Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id())),
+            _ => match self.stacked.get_key_value(path) {
+                Some((held, Stack::Ready)) => Some(mdl::gpu::Bound::Stacked(held.clone())),
+                _ => None,
+            },
         };
         // Bare geometry until the material and its package arrive, rather than a hole where they
         // will be.

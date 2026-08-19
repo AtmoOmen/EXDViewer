@@ -86,7 +86,41 @@ pub struct Shaded {
     /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
     pub table: Option<Arc<(Vec<u16>, usize, usize)>>,
     /// The textures the material binds, by the resource id the package knows each by.
-    pub textures: Vec<(u32, Option<TextureId>)>,
+    pub textures: Vec<(u32, Option<Bound>)>,
+}
+
+impl Shaded {
+    /// What the material bound at one of its package's samplers.
+    pub fn bound(&self, id: u32) -> Option<&Bound> {
+        self.textures
+            .iter()
+            .find(|(held, _)| *held == id)
+            .and_then(|(_, held)| held.as_ref())
+    }
+}
+
+/// A texture a material named, where it has arrived. A plane is on the card as an egui texture;
+/// anything with slices is in the graph's own store, since egui holds nothing but planes.
+#[derive(Clone)]
+pub enum Bound {
+    Plane(TextureId),
+    Stacked(Arc<str>),
+}
+
+impl Bound {
+    pub fn plane(&self) -> Option<TextureId> {
+        match self {
+            Self::Plane(held) => Some(*held),
+            Self::Stacked(_) => None,
+        }
+    }
+
+    pub fn stacked(&self) -> Option<&str> {
+        match self {
+            Self::Stacked(held) => Some(held),
+            Self::Plane(_) => None,
+        }
+    }
 }
 
 /// What one draw call needs beyond its geometry: the material it uses, and the egui textures that
@@ -213,6 +247,8 @@ pub struct Model {
     rewritten: Vec<(usize, Vec<u16>)>,
     /// The game's own layered textures, waiting for the same.
     arrays: Vec<(u32, Layered)>,
+    /// The same, for the ones the material names rather than the engine, under the naming path.
+    stacks: Vec<(Arc<str>, Layered)>,
     /// The table the shading passes index, waiting for the same.
     types: Option<Vec<u32>>,
     grid: Grid,
@@ -231,6 +267,7 @@ impl Model {
             queued: Vec::new(),
             rewritten: Vec::new(),
             arrays: Vec::new(),
+            stacks: Vec::new(),
             types: None,
             grid: Grid::default(),
             tables: BTreeMap::new(),
@@ -262,6 +299,11 @@ impl Model {
     /// by.
     pub fn queue_array(&mut self, id: u32, held: Layered) {
         self.arrays.push((id, held));
+    }
+
+    /// The same, for a texture the material names, under the path that named it.
+    pub fn queue_stack(&mut self, path: Arc<str>, held: Layered) {
+        self.stacks.push((path, held));
     }
 
     /// Hands the table the shading passes index over, replacing the one the frame stood in with.
@@ -309,6 +351,11 @@ impl Model {
         for (id, held) in std::mem::take(&mut self.arrays) {
             if let Err(why) = self.game.buffers.layered(gl, id, &held) {
                 log::error!("assets/mdl: texture array {id:#010x}: {why}");
+            }
+        }
+        for (path, held) in std::mem::take(&mut self.stacks) {
+            if let Err(why) = self.game.buffers.stack(gl, &path, &held) {
+                log::error!("assets/mdl: {path}: {why}");
             }
         }
         if let Some(values) = self.types.take()
@@ -844,17 +891,13 @@ impl Game {
         };
         let mut unit = 0;
         for texture in &held.textures {
-            // Only a plane can come from the material: what it binds is an egui texture, and egui
-            // has nothing but two-dimensional ones.
             let bound = match texture.kind {
                 program::Kind::Plane => {
                     let held = match texture.id {
                         TABLE => table,
                         id => shaded
-                            .textures
-                            .iter()
-                            .find(|(held, _)| *held == id)
-                            .and_then(|(_, held)| *held)
+                            .bound(id)
+                            .and_then(Bound::plane)
                             .and_then(|held| painter.texture(held)),
                     };
                     match held {
@@ -862,7 +905,14 @@ impl Game {
                         None => self.buffers.engine(gl, texture.id)?,
                     }
                 }
-                kind => self.buffers.absent(gl, kind, texture.id)?,
+                kind => match shaded
+                    .bound(texture.id)
+                    .and_then(Bound::stacked)
+                    .and_then(|path| self.buffers.stacked(kind, path))
+                {
+                    Some(held) => held,
+                    None => self.buffers.absent(gl, kind, texture.id)?,
+                },
             };
             deferred::bind(
                 gl,

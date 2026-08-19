@@ -18,7 +18,7 @@ use super::super::super::mdl::deferred::{
     self, Buffers, Dead, LIT, Layered, Linked, TYPES, bury, graveyard, sampler,
 };
 use super::super::super::mdl::gpu::{
-    Exposure, Lighting, Occlusion, Shaded, Smoothing, attribute,
+    Bound, Exposure, Lighting, Occlusion, Shaded, Smoothing, attribute,
 };
 use super::super::super::mdl::{Vertex, program};
 
@@ -124,6 +124,9 @@ pub struct Renderer {
     supplied: Vec<(u32, Layered)>,
     /// The two cloud textures the weather names, the same way.
     overcast: Vec<(usize, String, Layered)>,
+    /// The textures the zone's own materials name that egui cannot hold, under the paths naming
+    /// them.
+    stacks: Vec<(Arc<str>, Layered)>,
     /// The table the shading passes index, waiting for a context.
     types: Option<Vec<u32>>,
     /// One linked pair per material, pass and page of the G-buffer.
@@ -146,6 +149,7 @@ impl Renderer {
             pending: Vec::new(),
             supplied: Vec::new(),
             overcast: Vec::new(),
+            stacks: Vec::new(),
             types: None,
             programs: BTreeMap::new(),
             tables: BTreeMap::new(),
@@ -192,6 +196,11 @@ impl Renderer {
     }
 
     /// Hands one of the game's own textures over, under the resource id its shaders name it by.
+    /// A texture one of the zone's own materials names, under the path that named it.
+    pub fn queue_stack(&mut self, path: Arc<str>, held: Layered) {
+        self.stacks.push((path, held));
+    }
+
     pub fn queue_supplied(&mut self, id: u32, held: Layered) {
         self.supplied.push((id, held));
     }
@@ -243,6 +252,11 @@ impl Renderer {
         }
         for (at, path, held) in std::mem::take(&mut self.overcast) {
             if let Err(why) = self.buffers.overcast(gl, at, &path, &held) {
+                log::error!("assets/layer: {path}: {why}");
+            }
+        }
+        for (path, held) in std::mem::take(&mut self.stacks) {
+            if let Err(why) = self.buffers.stack(gl, &path, &held) {
                 log::error!("assets/layer: {path}: {why}");
             }
         }
@@ -528,10 +542,8 @@ impl Renderer {
                             let held = match texture.id {
                                 TABLE => table,
                                 id => shaded
-                                    .textures
-                                    .iter()
-                                    .find(|(held, _)| *held == id)
-                                    .and_then(|(_, held)| *held)
+                                    .bound(id)
+                                    .and_then(Bound::plane)
                                     .and_then(|held| painter.texture(held)),
                             };
                             match held {
@@ -539,7 +551,14 @@ impl Renderer {
                                 None => self.buffers.engine(gl, texture.id)?,
                             }
                         }
-                        kind => self.buffers.absent(gl, kind, texture.id)?,
+                        kind => match shaded
+                            .bound(texture.id)
+                            .and_then(Bound::stacked)
+                            .and_then(|path| self.buffers.stacked(kind, path))
+                        {
+                            Some(held) => held,
+                            None => self.buffers.absent(gl, kind, texture.id)?,
+                        },
                     };
                     deferred::bind(
                         gl,
@@ -700,10 +719,8 @@ impl Renderer {
                                     let held = match texture.id {
                                         TABLE => table,
                                         id => shaded
-                                            .textures
-                                            .iter()
-                                            .find(|(held, _)| *held == id)
-                                            .and_then(|(_, held)| *held)
+                                            .bound(id)
+                                            .and_then(Bound::plane)
                                             .and_then(|held| painter.texture(held)),
                                     };
                                     match held {
@@ -711,7 +728,14 @@ impl Renderer {
                                         None => self.buffers.engine(gl, texture.id)?,
                                     }
                                 }
-                                kind => self.buffers.absent(gl, kind, texture.id)?,
+                                kind => match shaded
+                                    .bound(texture.id)
+                                    .and_then(Bound::stacked)
+                                    .and_then(|path| self.buffers.stacked(kind, path))
+                                {
+                                    Some(held) => held,
+                                    None => self.buffers.absent(gl, kind, texture.id)?,
+                                },
                             };
                             deferred::bind(
                                 gl,

@@ -373,6 +373,9 @@ pub struct Rendered {
     packages: RefCell<BTreeMap<String, Package>>,
     /// The textures the shaders read that no material names, by resource id.
     arrays: RefCell<BTreeMap<u32, Array>>,
+    /// The ones a material does name that egui cannot hold, since their sampler is declared over
+    /// slices. Keyed by an `Arc` so a surface built every frame names one without copying the path.
+    stacks: RefCell<BTreeMap<Arc<str>, Array>>,
     /// The parameter files the shader type table is filled from, by the record their first profile
     /// lands at.
     parameters: RefCell<BTreeMap<usize, Parameters>>,
@@ -454,6 +457,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         textures: Default::default(),
         packages: Default::default(),
         arrays: Default::default(),
+        stacks: Default::default(),
         parameters: Default::default(),
         translated: Default::default(),
         animation: skin::Animation::new(parts.iter().map(|part| part.path.as_str())),
@@ -1030,15 +1034,23 @@ fn types(parameters: &BTreeMap<usize, Parameters>) -> Option<Vec<u32>> {
 /// One of the game's own textures as the card takes it. Mip nought alone: nothing tells a translated
 /// shader how many levels a texture has, and the graph answers that with one.
 pub(super) fn layered(bytes: &[u8], path: &str, filter: u32) -> Result<deferred::Layered> {
+    use ironworks::file::tex::TextureKind;
+
     let texture = ironworks::file::tex::Texture::read(Cursor::new(bytes.to_vec()))?;
     let image = crate::utils::tex_loader::decode_stack(&texture, 0, path)?;
     let (width, height) = texture.mip_size(0);
+    let layers = texture.layers(0);
     Ok(deferred::Layered {
         size: (width.into(), height.into()),
-        layers: texture.layers(0).into(),
+        layers: layers.into(),
         pixels: image.into_rgba8().into_raw(),
         filter,
-        volumetric: texture.kind() == ironworks::file::tex::TextureKind::D3,
+        kind: match texture.kind() {
+            TextureKind::D3 => program::Kind::Volume,
+            TextureKind::Cube => program::Kind::Cube,
+            _ if layers > 1 => program::Kind::Array,
+            _ => program::Kind::Plane,
+        },
     })
 }
 
@@ -1307,6 +1319,32 @@ fn label(detail: Option<u16>) -> String {
 impl Rendered {
     /// Asks for whatever the model still needs, and hands what arrived to egui. Runs every frame;
     /// a slot that is already resolved costs a lookup.
+    /// The textures a material names for a sampler its package declares over slices rather than a
+    /// plane: an environment cube, an array, a volume.
+    fn sliced(&self, slots: &[Option<Slot>]) -> BTreeSet<String> {
+        let translated = self.translated.borrow();
+        slots
+            .iter()
+            .enumerate()
+            .filter_map(|(at, slot)| match slot {
+                Some(Slot::Ready(material)) => {
+                    Some((translated.get(&at)?.held.as_ref().ok()?, material))
+                }
+                _ => None,
+            })
+            .flat_map(|(passes, material)| {
+                material.bound().filter(|(id, _)| {
+                    passes
+                        .buffer
+                        .iter()
+                        .flat_map(|pass| &pass.textures)
+                        .any(|texture| texture.id == *id && texture.kind != program::Kind::Plane)
+                })
+            })
+            .map(|(_, path)| path.to_owned())
+            .collect()
+    }
+
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
         let level = self.level.borrow();
         if level.skinned {
@@ -1572,6 +1610,43 @@ impl Rendered {
             }
         }
 
+        let sliced = self.sliced(&slots);
+        let mut stacks = self.stacks.borrow_mut();
+        for path in &sliced {
+            let held = stacks.entry(path.as_str().into()).or_insert_with(|| {
+                let files = backend.files().clone();
+                let wanted = path.clone();
+                Array::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(&wanted).await
+                }))
+            });
+            let Array::Fetching(promise) = held else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *held = match result
+                .as_ref()
+                .map_err(ToString::to_string)
+                .and_then(|bytes| layered(bytes, path, glow::LINEAR).map_err(|why| why.to_string()))
+            {
+                Ok(decoded) => {
+                    level
+                        .gpu
+                        .lock()
+                        .unwrap()
+                        .queue_stack(path.as_str().into(), decoded.clone());
+                    Array::Ready(decoded)
+                }
+                Err(why) => {
+                    log::error!("assets/mdl: {path}: {why}");
+                    Array::Failed
+                }
+            };
+        }
+        drop(stacks);
+
         let mut textures = self.textures.borrow_mut();
         let detail = self.look.get().detail;
         for slot in slots.iter().flatten() {
@@ -1584,7 +1659,7 @@ impl Rendered {
                 false => Vec::new(),
             };
             for path in held.into_iter().chain(bound.iter()) {
-                if textures.contains_key(path) {
+                if textures.contains_key(path) || sliced.contains(path) {
                     continue;
                 }
                 if self.resident.get() >= TEXTURE_BUDGET {
@@ -1746,9 +1821,17 @@ impl Rendered {
         let tables = self.tables.borrow();
         let slots = self.slots.borrow();
         let textures = self.textures.borrow();
+        let stacks = self.stacks.borrow();
         let bind = |path: &str| match textures.get(path) {
             Some(Texture::Ready(handle)) => Some(handle.id()),
             _ => None,
+        };
+        let sampled = |path: &str| match bind(path) {
+            Some(held) => Some(gpu::Bound::Plane(held)),
+            None => match stacks.get_key_value(path) {
+                Some((held, Array::Ready(_))) => Some(gpu::Bound::Stacked(held.clone())),
+                _ => None,
+            },
         };
         // One that has not answered yet, as against one that answered with nothing. The flat
         // stand-in a draw reaches for meanwhile is opaque, so a cutout authored into a normal map's
@@ -1757,7 +1840,7 @@ impl Rendered {
             !matches!(
                 textures.get(path),
                 Some(Texture::Ready(_) | Texture::Absent)
-            )
+            ) && !matches!(stacks.get(path), Some(Array::Ready(_) | Array::Failed))
         };
         let surfaces = level
             .meshes
@@ -1791,7 +1874,7 @@ impl Rendered {
                         table: tables.get(&mesh.material).cloned(),
                         textures: material
                             .bound()
-                            .map(|(id, path)| (id, bind(path)))
+                            .map(|(id, path)| (id, sampled(path)))
                             .collect(),
                     })
                 });

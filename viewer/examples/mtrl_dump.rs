@@ -31,6 +31,19 @@ fn main() {
                 held.constant_values(constant),
             );
         }
+        if let Some(table) = held.color_table() {
+            println!("  color table {:?} {} rows", table.kind(), table.rows());
+            for at in 0..table.rows() {
+                if let Some(row) = table.row_values(at) {
+                    println!(
+                        "    row {at:>2} diffuse {:?} emissive {:?} specular {:?}",
+                        row.diffuse.map(|held| (held * 100.0).round() / 100.0),
+                        row.emissive.map(|held| (held * 100.0).round() / 100.0),
+                        row.specular.map(|held| (held * 100.0).round() / 100.0),
+                    );
+                }
+            }
+        }
         for sampler in held.samplers() {
             let texture = sampler
                 .texture_index()

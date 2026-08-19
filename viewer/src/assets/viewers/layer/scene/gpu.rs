@@ -182,6 +182,8 @@ pub struct Frame {
     /// reaches the pixel.
     pub smoothing: Option<Arc<Smoothing>>,
     pub occlusion: Option<Arc<Occlusion>>,
+    /// The one that darkens its corners, which runs after all of them.
+    pub vignette: Option<Arc<program::Program>>,
     /// Every light the zone places that reaches the frame.
     pub lamps: Vec<program::Lamp>,
     pub batches: Vec<Batch>,
@@ -1090,6 +1092,10 @@ impl Renderer {
             }
             if let Some(smoothing) = frame.smoothing.as_ref() {
                 self.buffers.antialias(gl, smoothing, &scene)?;
+            }
+            // Last, over the graded frame, which is where the game draws it.
+            if let Some(vignette) = frame.vignette.as_ref() {
+                self.buffers.vignette(gl, vignette, &scene)?;
             }
         }
         Ok(())

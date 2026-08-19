@@ -123,6 +123,11 @@ const TAPS: [f32; 3] = [1.40737, 3.29421, 5.20181];
 /// into it and the merge weight is what takes it back.
 const GLARE_GAIN: f32 = 9.0;
 
+/// What takes the frame's four corners down toward black, which the game draws last of all and over
+/// the graded frame. It measures a pixel against the middle of the frame rather than reading the
+/// frame at all, so it is the one member of the chain wanting a centered coordinate.
+pub const VIGNETTE: &str = "shader/sm5/posteffect/Vignetting.shcd";
+
 /// The sky, drawn over whatever the frame did not cover.
 pub const SKY: &str = "shader/sm5/posteffect/Sky.shcd";
 
@@ -279,6 +284,7 @@ const BRIGHT_PASS_PARAM: &str = "cBrightPassParam";
 const MERGE_WEIGHT: &str = "cMergeWeight";
 const SAMPLING_PARAM: &str = "cParam";
 const SAMPLING_OFFSET: &str = "cSamplingOffset";
+const VIGNETTING_PARAM: &str = "cVignettingParam";
 
 /// How many taps the shadow resolve reads. One is a single comparison and shows every texel of the
 /// map as a step; nine is what softens the edge.
@@ -855,6 +861,12 @@ pub struct Look {
     /// How dim a pixel has to be for the merge to pull it toward a grey of one and a half times its
     /// own mean, which is the other thing that pass does. Nought leaves every pixel its own color.
     pub veil: f32,
+    pub vignette: bool,
+    /// Where the corners start darkening, as the squared distance from the middle of the frame with
+    /// a corner at one, and how steeply the darkening deepens past that. No file states either: in
+    /// the game they follow a graphics setting.
+    pub onset: f32,
+    pub darkening: f32,
 }
 
 /// The occlusion and glare values are a guess. Nothing states them: the buffers behind them report
@@ -880,6 +892,9 @@ impl Default for Look {
             threshold: 0.4,
             glare: 1.0 / GLARE_GAIN,
             veil: 0.0,
+            vignette: true,
+            onset: 0.35,
+            darkening: 0.5,
         }
     }
 }
@@ -2447,6 +2462,22 @@ impl Buffer {
             write(&mut out, 1, &[mid.x, mid.y, far.x, far.y]);
             write(&mut out, 2, &[-near.x, -near.y, -mid.x, -mid.y]);
             write(&mut out, 3, &[-far.x, -far.y, 0.0, 0.0]);
+            return out;
+        }
+        if self.name == VIGNETTING_PARAM {
+            // The ellipse the darkening spreads over sits halfway between a circle and the frame's
+            // own shape, and its axes are taken to unit length so a corner falls at one whatever
+            // the frame's shape.
+            let shape = (1.0 + size.0 / size.1) * 0.5;
+            let span = shape.hypot(1.0);
+            let look = scene.look;
+            write(
+                &mut out,
+                0,
+                &[shape / span, 1.0 / span, look.onset, look.darkening],
+            );
+            // The second register is the color a corner is taken toward, which every frame that
+            // states it leaves at black.
             return out;
         }
         if self.name == FXAA_PARAM {

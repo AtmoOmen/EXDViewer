@@ -203,6 +203,8 @@ pub struct Frame {
     pub smoothing: Option<Arc<Smoothing>>,
     /// The chain that works out how much sky reaches each pixel, on the same terms.
     pub occlusion: Option<Arc<Occlusion>>,
+    /// The one that darkens its corners, which runs after all of them.
+    pub vignette: Option<Arc<program::Program>>,
     pub eye: [f32; 3],
     /// Key, fill and rim directions, in world space. Built once a frame from the camera, so a
     /// surface is lit by one set of lights rather than by a set of its own.
@@ -751,6 +753,10 @@ impl Game {
             }
             if let Some(smoothing) = frame.smoothing.as_ref() {
                 self.buffers.antialias(gl, smoothing, &scene)?;
+            }
+            // Last, over the graded frame, which is where the game draws it.
+            if let Some(vignette) = frame.vignette.as_ref() {
+                self.buffers.vignette(gl, vignette, &scene)?;
             }
         }
         Ok(())

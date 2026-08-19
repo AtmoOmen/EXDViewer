@@ -173,6 +173,7 @@ const MOON: usize = 24;
 /// The glare chain: the bright pass, the blur, and the merge. Both halves of the blur share a slot,
 /// since they are one program run twice.
 const GLARE: usize = 25;
+const VIGNETTE: usize = 28;
 
 /// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
 /// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
@@ -407,6 +408,7 @@ pub struct Drawn {
     pub sun: bool,
     pub moon: bool,
     pub fog: bool,
+    pub vignette: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
     pub shadow: bool,
     /// The horizon band and the overhead sheet, in that order.
@@ -2020,6 +2022,35 @@ impl Buffers {
         self.pass(gl, 7, &held.fxaa, lit, scene, Over::Reading(smoothed))
     }
 
+    /// The frame's four corners taken down toward black, which is the last thing the game does to
+    /// one and the last thing done here.
+    ///
+    /// The pass answers with that color and the share of it a pixel takes, so it is blended over the
+    /// frame rather than written; it reads no texture at all, only where the pixel stands. The
+    /// game draws it into a quarter of the frame and lays that back over one with an alpha test,
+    /// which saves it three quarters of a ramp it can work out per pixel for nothing.
+    pub fn vignette(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.depth_mask(false);
+            gl.enable(glow::BLEND);
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        }
+        let drawn = self.pass(gl, VIGNETTE, held, lit, scene, Over::Screen);
+        unsafe { gl.disable(glow::BLEND) };
+        self.drawn.vignette = drawn.is_ok();
+        drawn
+    }
+
     /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
     /// writes.
     pub fn frame(&self) -> Option<glow::Framebuffer> {
@@ -2712,8 +2743,8 @@ impl Buffers {
         };
         // Skin scatters the light that fell on it before the composite reads it. The pass walks the
         // diffuse channel around a pixel and writes that same channel, so what it reads is a copy
-        // taken here; it discards where the type table marks no scattering, leaving the rest as the
-        // lamps left it.
+        // taken here; where the type table states no width it hands the copy straight back, leaving
+        // the pixel as the lamps left it.
         // The copy is made the first time something scatters rather than with the rest of the
         // frame: a zone has no skin in it and would carry a full-size float buffer for nothing.
         if lighting.subsurface.is_some() && self.scattered.is_none() {

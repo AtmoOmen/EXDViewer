@@ -560,6 +560,9 @@ pub struct Scene {
     /// The pair that smooths its edges, and the chain that works out how much sky reaches a pixel.
     smoothing: Option<Arc<mdl::gpu::Smoothing>>,
     occlusion: Option<Arc<mdl::gpu::Occlusion>>,
+    /// The one that darkens its corners, and what the passes past the composite are run with.
+    vignette: Option<Arc<program::Program>>,
+    look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
@@ -760,6 +763,8 @@ impl Scene {
             glare: None,
             smoothing: None,
             occlusion: None,
+            vignette: None,
+            look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             clips: HashMap::new(),
@@ -1975,6 +1980,7 @@ impl Scene {
             program::SUN.to_owned(),
             program::MOON.to_owned(),
             program::SHADOW.to_owned(),
+            program::VIGNETTE.to_owned(),
         ]);
         // Only where the weather states a fog of its own, the same way the exposure chain is only
         // asked for where there is something to run it under.
@@ -2459,6 +2465,11 @@ impl Scene {
         if self.occlusion.is_none() {
             self.occlusion = self.occluders();
         }
+        if self.vignette.is_none() {
+            // Against the sky's own vertex shader, which is the one here handing a fragment where it
+            // stands rather than what to read.
+            self.vignette = self.effect(program::VIGNETTE, program::SKY_VERTEX);
+        }
 
         for (at, (_, slot)) in self.materials.iter().enumerate() {
             let Slot::Ready(material) = slot else {
@@ -2891,6 +2902,7 @@ impl Scene {
                     .clouds()
                     .map_or_else(program::Cloud::default, |held| held.scene),
                 shaft: self.ambient.shafts().unwrap_or_default(),
+                look: self.look,
                 clock: self.clock / TICKS,
                 wind: self.ambient.wind().unwrap_or(program::Wind {
                     reach: 0.0,
@@ -2920,6 +2932,7 @@ impl Scene {
             glare: self.glare.clone(),
             smoothing: self.smoothing.clone(),
             occlusion: self.occlusion.clone(),
+            vignette: self.look.vignette.then(|| self.vignette.clone()).flatten(),
             lamps: self.lamps(),
             batches,
             grass: self.sward.clone(),
@@ -3167,6 +3180,22 @@ impl Scene {
             changed |= ui
                 .add(egui::Slider::new(&mut self.fov, 20.0..=120.0).suffix("\u{b0}"))
                 .changed();
+            ui.checkbox(&mut self.look.vignette, "Vignette").on_hover_text(
+                "Darken the frame's corners with the game's own pass. The ellipse it spreads over \
+                 follows the frame's own shape, but the two below are choices: no file states \
+                 either",
+            );
+            ui.add_enabled_ui(self.look.vignette, |ui| {
+                ui.label(RichText::new("Onset").weak());
+                ui.add(egui::Slider::new(&mut self.look.onset, 0.0..=1.0))
+                    .on_hover_text(
+                        "How far out the darkening starts, as a squared distance with a corner at \
+                         one",
+                    );
+                ui.label(RichText::new("Darkening").weak());
+                ui.add(egui::Slider::new(&mut self.look.darkening, 0.0..=2.0))
+                    .on_hover_text("How steeply it deepens past that");
+            });
 
             ui.add_space(8.0);
             ui.separator();
@@ -3330,6 +3359,7 @@ impl Scene {
                             (held.clouds[0], "band"),
                             (held.clouds[1], "sheet"),
                             (held.fog, "fog"),
+                            (held.vignette, "vignette"),
                         ]
                         .into_iter()
                         .filter_map(|(ran, name)| ran.then_some(name))

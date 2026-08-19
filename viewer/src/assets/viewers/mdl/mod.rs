@@ -394,6 +394,8 @@ pub struct Rendered {
     occlusion: RefCell<Option<(usize, Arc<gpu::Occlusion>)>>,
     /// The chain that spreads the bright end of it into a halo.
     glare: RefCell<Option<Arc<gpu::Glare>>>,
+    /// The pass that darkens its corners.
+    vignette: RefCell<Option<Arc<program::Program>>>,
     /// What those passes are run with, and whether the settings row is open.
     look: Cell<program::Look>,
     settings: Cell<bool>,
@@ -469,6 +471,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         smoothing: Default::default(),
         occlusion: Default::default(),
         glare: Default::default(),
+        vignette: Default::default(),
         look: Cell::new(program::Look::default()),
         settings: Cell::new(false),
         tables: Default::default(),
@@ -1270,6 +1273,20 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
         });
     });
     ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut look.vignette, "Vignette").on_hover_text(
+            "Darken the frame's corners with the game's own pass. The ellipse it spreads over \
+             follows the frame's own shape, but the two below are choices: no file states either",
+        );
+        ui.add_enabled_ui(look.vignette, |ui| {
+            ui.add(egui::Slider::new(&mut look.onset, 0.0..=1.0).text("Onset"))
+                .on_hover_text(
+                    "How far out the darkening starts, as a squared distance with a corner at one",
+                );
+            ui.add(egui::Slider::new(&mut look.darkening, 0.0..=2.0).text("Darkening"))
+                .on_hover_text("How steeply it deepens past that");
+        });
+    });
+    ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut look.occlude, "Occlusion")
             .on_hover_text("Shade the creases with the game's own HDAO");
         ui.add_enabled_ui(look.occlude, |ui| {
@@ -1519,6 +1536,13 @@ impl Rendered {
                         .then_some(program::GLARE)
                         .into_iter()
                         .flatten()
+                        .map(str::to_owned),
+                )
+                .chain(
+                    self.look
+                        .get()
+                        .vignette
+                        .then_some(program::VIGNETTE)
                         .map(str::to_owned),
                 )
                 // Of the eight readings the quality ladder offers, only the one it is set to.
@@ -2021,6 +2045,10 @@ impl Rendered {
                 true => self.occlusion(),
                 false => None,
             },
+            vignette: match self.shaded.get() {
+                true => self.corners(),
+                false => None,
+            },
             eye: eye.to_array(),
             lights,
             surfaces,
@@ -2155,6 +2183,29 @@ impl Rendered {
         drop(packages);
         let built = Arc::new(built);
         *self.smoothing.borrow_mut() = Some(built.clone());
+        Some(built)
+    }
+
+    /// The pass that darkens the frame's corners, translated once its shader has arrived. Against
+    /// the sky's own vertex shader, which is the one here handing a fragment where it stands rather
+    /// than what to read.
+    fn corners(&self) -> Option<Arc<program::Program>> {
+        if !self.look.get().vignette {
+            return None;
+        }
+        if let Some(held) = self.vignette.borrow().as_ref() {
+            return Some(held.clone());
+        }
+        let packages = self.packages.borrow();
+        let Some(Package::Ready(bytes)) = packages.get(program::VIGNETTE) else {
+            return None;
+        };
+        let built = program::Program::posteffect(program::VIGNETTE, bytes, program::SKY_VERTEX)
+            .inspect_err(|why| log::warn!("assets/mdl: {}: {why}", program::VIGNETTE))
+            .ok()
+            .map(Arc::new)?;
+        drop(packages);
+        *self.vignette.borrow_mut() = Some(built.clone());
         Some(built)
     }
 

@@ -134,6 +134,13 @@ async function main() {
                     await sleep(40);
                     await cdp.send("Input.dispatchMouseEvent", { ...at, type: "mouseReleased", buttons: 0 });
                     await sleep(400);
+                    // The box keeps what the last press put in it, so a second insert nests one
+                    // preset inside another and the parse fails without saying which press did it.
+                    for (const type of ["keyDown", "keyUp"]) {
+                        await cdp.send("Input.dispatchKeyEvent", {
+                            type, key: "a", code: "KeyA", windowsVirtualKeyCode: 65, modifiers: 2,
+                        });
+                    }
                     await cdp.send("Input.insertText", { text });
                     await sleep(400);
                     for (const type of ["keyDown", "keyUp"]) {

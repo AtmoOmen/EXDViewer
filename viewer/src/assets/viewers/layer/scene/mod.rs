@@ -62,7 +62,7 @@ const TEXTURE_BUDGET: usize = 128 << 20;
 
 /// Lights the frame draws at once. Every one is a pass of its own over the volume it reaches, so a
 /// zone's whole set would cost more than it shows; the nearest are kept.
-const LAMPS: usize = 48;
+const LAMPS: usize = 256;
 
 /// The scene key deciding whether a background shader reads the normal map at all. A package
 /// defaults it to off, and the variant that answer selects samples no normal map, so the frame it
@@ -1280,12 +1280,19 @@ impl Scene {
 
     /// The lights the frame draws, nearest first. Each is clipped against the box its zone states
     /// for it, in the light's own space.
+    ///
+    /// Nearest by how close a light's own volume comes, not by where its middle stands: a hall's far
+    /// lamps cover more of the frame than a near one with a foot of reach, and an interior states
+    /// hundreds, so a cap taken on the middles alone leaves whole galleries lit by nothing.
     fn lamps(&self) -> Vec<program::Lamp> {
         let eye = self.camera.position;
         let mut near: Vec<(f32, &Light)> = self
             .lights
             .iter()
-            .map(|light| ((light.center - eye).length(), light))
+            .map(|light| {
+                let reach = light.min.abs().max(light.max.abs()).max_element();
+                (((light.center - eye).length() - reach).max(0.0), light)
+            })
             .filter(|(span, _)| *span <= self.load)
             .collect();
         near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));

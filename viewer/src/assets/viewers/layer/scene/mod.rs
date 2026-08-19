@@ -725,29 +725,51 @@ impl Scene {
             };
             let held = timeline.timeline();
             // The scene names an actor by the key the actor itself carries, not by its item id.
-            let tracks = held.items().iter().find_map(|item| match item {
+            let Some(tracks) = held.items().iter().find_map(|item| match item {
                 tmb::Item::Actor(held) if i32::from(held.time()) == *actor => Some(held.tracks()),
                 _ => None,
-            })?;
-            let commands = tracks.iter().find_map(|id| {
-                held.items().iter().find_map(|item| match item {
-                    tmb::Item::Track(held) if held.id() == *id => Some(held.commands()),
+            }) else {
+                continue;
+            };
+            // Every track of the actor and every command of each, since an actor states its motion
+            // across all of them: eight of the game's aetherytes hang four tracks off one actor.
+            // The first to name a channel keeps it, so a lone track reads exactly as it did.
+            let mut curves: Vec<(tmb::Channel, tmb::Curve)> = Vec::new();
+            for track in tracks {
+                let Some(commands) = held.items().iter().find_map(|item| match item {
+                    tmb::Item::Track(held) if held.id() == *track => Some(held.commands()),
                     _ => None,
-                })
-            })?;
-            let curve_id = commands.iter().find_map(|id| {
-                held.items().iter().find_map(|item| match item {
-                    tmb::Item::Command(held) if held.id() == *id => match held.kind() {
-                        tmb::CommandKind::C013(held) => Some(held.curve_id()),
+                }) else {
+                    continue;
+                };
+                for command in commands {
+                    let curve_id = held.items().iter().find_map(|item| match item {
+                        tmb::Item::Command(held) if held.id() == *command => match held.kind() {
+                            tmb::CommandKind::C013(held) => Some(held.curve_id()),
+                            _ => None,
+                        },
                         _ => None,
-                    },
-                    _ => None,
-                })
-            })?;
-            let curves = held.items().iter().find_map(|item| match item {
-                tmb::Item::Curves(held) if i32::from(held.id()) == curve_id => Some(held.curves()),
-                _ => None,
-            })?;
+                    });
+                    let Some(found) = curve_id.and_then(|curve_id| {
+                        held.items().iter().find_map(|item| match item {
+                            tmb::Item::Curves(held) if i32::from(held.id()) == curve_id => {
+                                Some(held.curves())
+                            }
+                            _ => None,
+                        })
+                    }) else {
+                        continue;
+                    };
+                    for curve in found {
+                        if curves.iter().all(|(channel, _)| *channel != curve.channel()) {
+                            curves.push((curve.channel(), curve.clone()));
+                        }
+                    }
+                }
+            }
+            if curves.is_empty() {
+                continue;
+            }
             let duration = held
                 .items()
                 .iter()
@@ -756,13 +778,7 @@ impl Scene {
                     _ => None,
                 })
                 .unwrap_or(1.0);
-            self.motions.push(Motion {
-                curves: curves
-                    .iter()
-                    .map(|curve| (curve.channel(), curve.clone()))
-                    .collect(),
-                duration,
-            });
+            self.motions.push(Motion { curves, duration });
             return Some(self.motions.len() - 1);
         }
         None

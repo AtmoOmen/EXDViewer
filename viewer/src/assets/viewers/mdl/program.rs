@@ -2515,15 +2515,18 @@ fn ambient(held: &Ambient, axes: glam::Mat3, view: Mat4, out: &mut [u8]) {
     for (at, row) in held.sky.iter().enumerate() {
         write(out, 1 + at, &turned(row).to_array());
     }
-    entry(held, axes, out, 4);
+    // Last, since that is the one the composite falls back on: it seeds itself with entry
+    // `count - 1` at full weight and walks only the entries before it.
+    let global = volumes * 12 + 4;
+    entry(held, axes, out, global);
     // No bounding shape, so the entry covers the frame rather than a room.
-    write(out, 14, &[0.0, 0.0, 0.0, 0.0]);
-    write(out, 15, &[0.0, 1.0, 0.0, 0.0]);
+    write(out, global + 10, &[0.0, 0.0, 0.0, 0.0]);
+    write(out, global + 11, &[0.0, 1.0, 0.0, 0.0]);
 
-    // The places that light themselves, each tested against the pixel before the one above it is
+    // The places that light themselves, each tested against the pixel before the global one is
     // fallen back on. The composite reads entry `n` from `12n + 4`.
     for (index, volume) in held.volumes.iter().take(volumes).enumerate() {
-        let at = (index + 1) * 12 + 4;
+        let at = index * 12 + 4;
         for (row, held) in volume.light.iter().enumerate() {
             write(out, at + row, &turned(held).to_array());
         }
@@ -2583,7 +2586,10 @@ fn entry(held: &Ambient, axes: glam::Mat3, out: &mut [u8], at: usize) {
     for (row, held) in held.sky.iter().enumerate() {
         write(out, at + 6 + row, &turned(held).to_array());
     }
-    write(out, at + 9, &[held.sky_scale, 0.0, 0.0, 0.0]);
+    // The trailing lane scales the ambient skin, eyes and stockings take, as
+    // `0.65 + 0.35 * it`, and nothing else reads it. Nought would leave those three at 65% of what
+    // the gear beside them gets.
+    write(out, at + 9, &[held.sky_scale, 0.0, 0.0, 1.0]);
 }
 
 /// The joint transforms a skinned shader reads, as the dwords of the texture standing in for a

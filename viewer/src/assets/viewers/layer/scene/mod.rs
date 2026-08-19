@@ -862,7 +862,9 @@ impl Scene {
                         InstanceData::EnvSpace(space) => {
                             self.ambient.spaces.push(ambient::Space {
                                 placement: here,
-                                shape: space.shape() as i32 as f32,
+                                // The composite reads the kind back with the bit pattern, not the
+                                // value, so it goes in as one.
+                                shape: f32::from_bits(space.shape() as u32),
                                 range: space.effective_range(),
                                 bound: space.bound_instance_id(),
                             });

@@ -539,7 +539,6 @@ impl Ambient {
             fade: Vec3::new(0.0, 1.0, held.floor),
             reflection: REFLECTION,
             capture: CAPTURE,
-            haze: held.extra,
             volumes: self.volumes(),
         }
     }

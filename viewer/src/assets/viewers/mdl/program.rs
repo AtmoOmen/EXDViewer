@@ -676,8 +676,6 @@ pub struct Ambient {
     /// Which cube of the reflection array a place reflects, which the composite reaches as the
     /// slice `0.1 + this`.
     pub capture: f32,
-    /// What the ambient is mixed toward, and how far that mix reaches.
-    pub haze: Vec4,
     /// The places inside the zone that light themselves, past the one lighting the whole of it.
     pub volumes: std::sync::Arc<[Volume]>,
 }
@@ -699,7 +697,6 @@ impl Default for Ambient {
             fade: Vec3::new(0.0, 1.0, 0.0),
             reflection: Vec3::X,
             capture: 0.0,
-            haze: Vec4::W,
             volumes: std::sync::Arc::from([] as [Volume; 0]),
         }
     }
@@ -1907,7 +1904,7 @@ impl Buffer {
             return out;
         }
         if self.name == "g_BGAmbientParameter" {
-            write(&mut out, 0, &scene.ambient.haze.to_array());
+            write(&mut out, 0, &BG_AMBIENT);
             return out;
         }
         if self.name == VIEWPORT_PARAM {
@@ -2490,6 +2487,11 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
     }
 }
 
+/// The floor a background surface's ambient never falls below, and the gain its occlusion is read
+/// at. Byte-identical across five captures of four zones, so the engine holds these rather than any
+/// file.
+const BG_AMBIENT: [f32; 4] = [0.005, 0.005, 0.005, 10.0];
+
 /// The ambient array, whose header the reflection describes and whose entries it does not: past the
 /// spherical harmonics the buffer is an array of a struct named but not laid out, so it goes in by
 /// register.
@@ -2937,7 +2939,6 @@ mod test {
             fade: Vec3::new(9.0, 10.0, 11.0),
             reflection: Vec3::new(12.0, 13.0, 14.0),
             capture: 15.0,
-            haze: Vec4::ZERO,
             volumes: std::sync::Arc::from([] as [Volume; 0]),
         };
         let mut out = vec![0u8; 16 * 16];

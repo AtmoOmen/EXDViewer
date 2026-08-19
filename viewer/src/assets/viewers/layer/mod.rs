@@ -331,12 +331,12 @@ fn summary(instance: &Instance) -> String {
 /// Everything a payload holds, for the panel that inspects one instance.
 /// What the low byte of a collision material word says a surface is made of, which is what the
 /// footstep a character makes on it is chosen by. The engine builds the sound's own path from the
-/// word, so no shipped file states the last hop; these are the names its bank and the collision
-/// swatch materials are filed under.
+/// word, so no shipped file states the last hop; these are the words the footstep bank itself is
+/// filed under. The collision swatch materials name several of the same ids differently.
 fn surface(word: u64) -> String {
     let held = match word & 0xff {
         0 => return format!("{word:#018x}"),
-        1 => "dirt",
+        1 => "dart",
         2 => "grass",
         3 => "sand",
         4 => "stone",

@@ -2214,6 +2214,9 @@ impl Scene {
                 material.bound().filter(|(id, _)| {
                     held.buffer
                         .iter()
+                        .chain(&held.depth)
+                        .chain(&held.shadow)
+                        .chain(&held.resolve)
                         .flat_map(|pass| &pass.textures)
                         .any(|texture| texture.id == *id && texture.kind != program::Kind::Plane)
                 })
@@ -2523,10 +2526,12 @@ impl Scene {
             Slot::Ready(material) => Some(material),
             _ => None,
         });
-        let bind = |path: &str| match self.textures.get(path) {
-            Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id())),
-            _ => match self.stacked.get_key_value(path) {
-                Some((held, Stack::Ready)) => Some(mdl::gpu::Bound::Stacked(held.clone())),
+        // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
+        // its package is translated, and answering with that one would pin the sampler to it.
+        let bind = |path: &str| match self.stacked.get_key_value(path) {
+            Some((held, Stack::Ready)) => Some(mdl::gpu::Bound::Stacked(held.clone())),
+            _ => match self.textures.get(path) {
+                Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id())),
                 _ => None,
             },
         };
@@ -2877,9 +2882,13 @@ impl Scene {
                     (
                         "Textures",
                         format!(
-                            "{}, {}",
+                            "{}, {}, {} with slices",
                             self.textures.len(),
-                            crate::assets::Bytes(self.resident)
+                            crate::assets::Bytes(self.resident),
+                            self.stacked
+                                .values()
+                                .filter(|held| matches!(held, Stack::Ready))
+                                .count(),
                         ),
                     ),
                 ],

@@ -27,6 +27,9 @@ fn main() {
     for (at, name) in models.iter().enumerate() {
         println!("  slot {:>2}  {name}", at + ggd::Chunk::AUTO_LAYERS);
     }
+    for (at, name) in file.color_map().iter().enumerate() {
+        println!("  auto {at}  color map {name:?}");
+    }
 
     let mut read = 0;
     let mut placed = 0;

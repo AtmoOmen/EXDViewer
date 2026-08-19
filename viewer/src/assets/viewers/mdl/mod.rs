@@ -1337,6 +1337,8 @@ impl Rendered {
                     passes
                         .buffer
                         .iter()
+                        .chain(&passes.depth)
+                        .chain(&passes.resolve)
                         .flat_map(|pass| &pass.textures)
                         .any(|texture| texture.id == *id && texture.kind != program::Kind::Plane)
                 })
@@ -1826,12 +1828,11 @@ impl Rendered {
             Some(Texture::Ready(handle)) => Some(handle.id()),
             _ => None,
         };
-        let sampled = |path: &str| match bind(path) {
-            Some(held) => Some(gpu::Bound::Plane(held)),
-            None => match stacks.get_key_value(path) {
-                Some((held, Array::Ready(_))) => Some(gpu::Bound::Stacked(held.clone())),
-                _ => None,
-            },
+        // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
+        // its package is translated, and answering with that one would pin the sampler to it.
+        let sampled = |path: &str| match stacks.get_key_value(path) {
+            Some((held, Array::Ready(_))) => Some(gpu::Bound::Stacked(held.clone())),
+            _ => bind(path).map(gpu::Bound::Plane),
         };
         // One that has not answered yet, as against one that answered with nothing. The flat
         // stand-in a draw reaches for meanwhile is opaque, so a cutout authored into a normal map's

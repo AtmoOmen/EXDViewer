@@ -33,6 +33,11 @@ const SCENE = flag("scene", "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb");
 // opens through the same tabs an lgb does.
 const LEVEL = flag("level", "bg/ex1/01_roc_r2/dun/r2d1/level/r2d1.lvb");
 
+// How long a scene is left drawing before it is shot. The default is enough to have loaded
+// something, which is what the gate asks; a frame whose exposure or fog is being judged wants the
+// zone actually filled, and under a software renderer that takes far longer.
+const SETTLE = Number(flag("settle", "8000"));
+
 // A spread of effects picked off the corpus: quad sprites only, models only under each of the two
 // model kinds, files whose keys reach no node, a powder file, and one that spawns nothing.
 const EFFECTS = flag(
@@ -598,7 +603,7 @@ async function walk(cdp: Cdp, origin: string, path: string, name: string) {
         const c = await counters(cdp).catch(() => ({}) as any);
         return (c.instanced ?? 0) > before.instanced;
     });
-    await sleep(8000);
+    await sleep(SETTLE);
     await shot(cdp, name);
     const held = await counters(cdp);
     console.log(`   instanced draws: ${held.instanced}  links: ${held.links}`);

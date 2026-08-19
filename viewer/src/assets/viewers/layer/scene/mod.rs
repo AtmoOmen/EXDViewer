@@ -2684,6 +2684,22 @@ impl Scene {
                     // How much of the sky reaches each part, which the zone's own `.svb` states by
                     // the same key an `.lcb` reaches a light by. A part it does not name stands in
                     // full sky, so a file that matches nothing looks exactly like no file at all.
+                    // A zone with no grass of its own and a grass file that would not read look the
+                    // same from the outside, and so does a grid nothing has asked for yet.
+                    ("Grass", match &self.grass {
+                        Grass::Wanted(_) => "waiting on the zone's own file".to_owned(),
+                        Grass::Fetching(_, _) => "reading the zone's own file".to_owned(),
+                        Grass::Done => "none".to_owned(),
+                        Grass::Placing(held) => {
+                            let read = held.grids.iter().filter(|grid| grid.taken).count();
+                            format!(
+                                "{read} of {} grids, {} models, {} placed",
+                                held.grids.len(),
+                                held.models.len(),
+                                self.layers.get(held.layer).map_or(0, |held| held.placements),
+                            )
+                        }
+                    }),
                     (
                         "Sky visibility",
                         format!(

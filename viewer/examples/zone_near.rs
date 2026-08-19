@@ -58,11 +58,24 @@ fn walk(
                 };
                 let scene = file.scene();
                 if near {
+                    let path = held.move_path();
                     println!(
-                        "  {:6.1}  group   {}  {} timelines  under {under}",
+                        "  {:6.1}  at {:8.1} {:6.1} {:8.1}  group {}  {} timelines  under {under}",
                         center.distance(at),
+                        center.x,
+                        center.y,
+                        center.z,
                         held.asset_path(),
-                        scene.timelines().len()
+                        scene.timelines().len(),
+                    );
+                    println!(
+                        "            move {:?} auto {} time {} loop {} rotation {:?}  state {:?}",
+                        path.mode(),
+                        path.auto_play(),
+                        path.time(),
+                        path.loop_playback(),
+                        path.rotation(),
+                        held.initial_rotation_state(),
                     );
                 }
                 for group in scene.layer_groups() {

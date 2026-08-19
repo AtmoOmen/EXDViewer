@@ -96,6 +96,26 @@ pub fn sky_texture(id: u16) -> String {
     format!("bgcommon/nature/sky/texture/sky_{id:03}.tex")
 }
 
+/// The sun's own glow, drawn over the sky: a screen-wide pass that measures every pixel against
+/// where the sun stands and answers a core, six rays and a wide halo.
+pub const SUN: &str = "shader/sm5/posteffect/Sun.shcd";
+
+/// Every lane of `cSunParam` past the two the frame decides, read out of the one draw a real frame
+/// makes of this pass. The falloffs are in half-frame-heights rather than pixels, so they carry
+/// across resolutions: the pass measures its radius after scaling x by the aspect.
+///
+/// The frame that holds them had the sun far off screen, so the rays and the core are live buffer
+/// contents that nothing has been seen to rasterize.
+const SUN_RAYS: [f32; 4] = [3.0, 0.965_246_44, 4.983_494_3, 0.499_174_03];
+const SUN_FALLOFF: [f32; 4] = [-66.537_23, -92.146_774, -127.613_18, -575.917_3];
+const SUN_CORE: [f32; 4] = [
+    std::f32::consts::SQRT_2,
+    1.0,
+    std::f32::consts::FRAC_1_SQRT_2,
+    1.0,
+];
+const SUN_HALO: [f32; 4] = [1.347_855_2, 1.350_965_7, 1.350_469_2, 0.1];
+
 /// The clouds, which the engine draws over two meshes it builds itself: a band around the horizon
 /// and a sheet overhead. One package holds both, under a technique apiece.
 pub const CLOUD: &str = "shader/sm5/shpk/cloud.shpk";
@@ -160,6 +180,7 @@ pub const OCCLUDERS: [&str; 8] = [
 const TONE_MAP_PARAM: &str = "cToneMapParam";
 const ADAPT_LUM_PARAM: &str = "cAdaptLumParam";
 const SKY_PARAM: &str = "cSkyParam";
+const SUN_PARAM: &str = "cSunParam";
 const FOG_PARAM: &str = "cFogParam";
 const HEIGHT_FOG_PARAM: &str = "cExpHeightFogParam";
 const DIRECTIONAL_SHADOW_PARAM: &str = "g_DirectionalShadowParameter";
@@ -777,6 +798,9 @@ pub struct Sky {
     /// How far the sun's circle leans, in degrees, which is the zone's own.
     pub tilt: f32,
     pub size: (f32, f32),
+    /// Slices the volume holds, which is one an hour however deep it is: the tail of a deeper one
+    /// repeats its start so that reading between them wraps past midnight.
+    pub depth: f32,
 }
 
 /// Which way the sun comes from at an hour of the day, in world space. It rises due `+x` at six and
@@ -901,6 +925,7 @@ impl Default for Sky {
             time: 0.0,
             tilt: TILT,
             size: (8.0, 32.0),
+            depth: 24.0,
         }
     }
 }
@@ -1848,10 +1873,25 @@ impl Buffer {
             write(&mut out, 2, &[0.5, 1.0 - 0.5 / tall, 0.0, 0.0]);
             write(&mut out, 3, &[(1.0 - 1.0 / wide) * 0.5, -(1.0 - 1.0 / tall), 0.0, 0.0]);
             // The hour's own slice, and the exposure the sky is read under with everything else.
-            write(&mut out, 4, &[(hours + 0.5) / 24.0, 0.0, 1.0 / adapted, 0.0]);
+            write(&mut out, 4, &[(hours + 0.5) / held.depth, 0.0, 1.0 / adapted, 0.0]);
             // The color the sky is mixed toward, at the weight a real frame carried: nought, so it
             // never reaches the frame. Nothing found states either.
             write(&mut out, 5, &[0.0; 4]);
+            return out;
+        }
+        if self.name == SUN_PARAM {
+            let held = scene.sky;
+            let (wide, tall) = scene.size;
+            // Where the sun stands as this pass reads a pixel's own coordinate, which is a texture
+            // one rather than the clip xy the sky takes. The game's runs down the frame and this
+            // one up it, so the vertical is the one place the two conventions part.
+            let at = projection * view * sun(held.time, held.tilt).extend(0.0);
+            let over = at.truncate() / at.w;
+            write(&mut out, 0, &[wide / tall, 1.0, over.x * 0.5 + 0.5, over.y * 0.5 + 0.5]);
+            write(&mut out, 1, &SUN_RAYS);
+            write(&mut out, 2, &SUN_FALLOFF);
+            write(&mut out, 3, &SUN_CORE);
+            write(&mut out, 4, &SUN_HALO);
             return out;
         }
         if matches!(pass, Pass::CloudBand | Pass::CloudSheet)
@@ -2640,8 +2680,8 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        Ambient, Buffer, Exposure, FOG_PARAM, Fog, JOINT, ROW, SHADER_TYPE, Pass, Scene, Volume,
-        ambient, joints, selector, shader_types,
+        Ambient, Buffer, Exposure, FOG_PARAM, Fog, JOINT, ROW, SHADER_TYPE, SUN_PARAM, Pass, Scene,
+        Sky, Volume, ambient, joints, selector, shader_types, sun,
     };
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -2745,6 +2785,46 @@ mod test {
         let coordinate = |z: f32| filled[19] * z + filled[15];
         assert!((coordinate(100.0) - 0.5 / 256.0).abs() < 1e-6);
         assert!((coordinate(1900.0) - 255.5 / 256.0).abs() < 1e-6);
+    }
+
+    /// A camera turned to face the sun should find it dead centre. The pass measures every pixel
+    /// against the place this states, so an error here moves the whole glow rather than distorting
+    /// it, which on screen reads as a sun in the wrong part of the sky.
+    #[test]
+    fn the_sun_lands_where_the_camera_looks() {
+        let time = 51_000.0;
+        let tilt = 5.0;
+        let toward = sun(time, tilt);
+        let eye = Vec3::new(-6.535, 18.583, 36.727);
+        let projection = Mat4::perspective_rh(55.0f32.to_radians(), 1251.0 / 913.0, 0.1, 8000.0);
+        let scene = Scene {
+            view: Mat4::look_at_rh(eye, eye + toward, Vec3::Y),
+            projection,
+            size: (1251.0, 913.0),
+            sky: Sky {
+                time,
+                tilt,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: SUN_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 5,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::Composite, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        assert!(
+            (filled[2] - 0.5).abs() < 1e-4 && (filled[3] - 0.5).abs() < 1e-4,
+            "the sun stands at {}, {} rather than the middle",
+            filled[2],
+            filled[3]
+        );
     }
 
     /// The composite reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, and its header

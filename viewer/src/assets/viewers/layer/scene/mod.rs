@@ -454,6 +454,7 @@ pub struct Scene {
     /// The pass that fills whatever the frame did not cover, and the size and resource id of the
     /// volume it reads: a sky is addressed by its own texel centers, so the pass needs its shape.
     skybox: Option<Arc<program::Program>>,
+    sunlight: Option<Arc<program::Program>>,
     /// The pass that fades a distant pixel toward the weather's own fog and then toward that sky.
     haze: Option<Arc<program::Program>>,
     /// The two cloud draws, the band first, and the texture each reads: the weather names one per
@@ -461,7 +462,7 @@ pub struct Scene {
     clouds: [Option<Arc<program::Program>>; 2],
     cloud_files: [Aside; 2],
     cloud_wanted: [Option<u16>; 2],
-    sky_volume: Option<(u32, (f32, f32))>,
+    sky_volume: Option<(u32, (f32, f32), f32)>,
     /// The sky the volume was fetched for, so moving the picker fetches the next one.
     sky_wanted: Option<u16>,
     sky_file: Aside,
@@ -611,6 +612,7 @@ impl Scene {
             lighting: None,
             exposure: None,
             skybox: None,
+            sunlight: None,
             haze: None,
             clouds: [None, None],
             cloud_files: [Aside::Done, Aside::Done],
@@ -1370,8 +1372,11 @@ impl Scene {
             // whole sky, and the hour falls between two of its slices.
             match mdl::layered(&bytes, &path, glow::LINEAR) {
                 Ok(decoded) => {
-                    self.sky_volume =
-                        Some((held, (decoded.size.0 as f32, decoded.size.1 as f32)));
+                    self.sky_volume = Some((
+                        held,
+                        (decoded.size.0 as f32, decoded.size.1 as f32),
+                        decoded.layers as f32,
+                    ));
                     self.renderer.lock().unwrap().queue_supplied(held, decoded);
                 }
                 Err(why) => log::error!("assets/layer: {path}: {why}"),
@@ -1715,6 +1720,7 @@ impl Scene {
             program::FXAA_LUMA.to_owned(),
             program::FXAA.to_owned(),
             program::SKY.to_owned(),
+            program::SUN.to_owned(),
             program::SHADOW.to_owned(),
         ]);
         // Only where the weather states a fog of its own, the same way the exposure chain is only
@@ -1987,6 +1993,9 @@ impl Scene {
         }
         if self.exposure.is_none() {
             self.exposure = self.measure();
+        }
+        if self.sunlight.is_none() {
+            self.sunlight = self.effect(program::SUN, program::POST_VERTEX);
         }
         if self.skybox.is_none() {
             self.skybox = self.effect(program::SKY, program::SKY_VERTEX);
@@ -2355,13 +2364,17 @@ impl Scene {
                     tilt: self.ambient.tilt,
                     size: self
                         .sky_volume
-                        .map_or_else(|| program::Sky::default().size, |(_, size)| size),
+                        .map_or_else(|| program::Sky::default().size, |(_, size, _)| size),
+                    depth: self
+                        .sky_volume
+                        .map_or_else(|| program::Sky::default().depth, |(_, _, depth)| depth),
                 },
                 ..Default::default()
             },
             lighting: self.lighting.clone(),
             exposure: self.exposure.clone(),
             skybox: self.skybox.clone(),
+            sunlight: self.sunlight.clone(),
             haze: self.haze.clone(),
             clouds: self.clouds.clone(),
             smoothing: self.smoothing.clone(),
@@ -2707,6 +2720,7 @@ impl Scene {
                         let ran: Vec<&str> = [
                             (held.shadow, "shadow"),
                             (held.sky, "sky"),
+                            (held.sun, "sun"),
                             (held.clouds[0], "band"),
                             (held.clouds[1], "sheet"),
                             (held.fog, "fog"),

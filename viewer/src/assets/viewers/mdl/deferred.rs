@@ -136,6 +136,7 @@ const FOG: usize = 19;
 const CLOUD: usize = 20;
 const SHADE: usize = 21;
 const SCATTER: usize = 22;
+const SUN: usize = 23;
 
 /// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
 /// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
@@ -342,6 +343,7 @@ struct Clouded {
 #[derive(Clone, Copy, Default)]
 pub struct Drawn {
     pub sky: bool,
+    pub sun: bool,
     pub fog: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
     pub shadow: bool,
@@ -1265,6 +1267,34 @@ impl Buffers {
         }
         self.covered = true;
         self.drawn.sky = held.is_ok();
+        held
+    }
+
+    /// The sun's glow, over the sky and nowhere the frame already covered. The game keeps its own
+    /// occlusion in a buffer this graph does not build, so the depth test stands in for it: what the
+    /// pass answers is added where nothing drew, and hidden behind anything that did.
+    pub fn sun(
+        &mut self,
+        gl: &glow::Context,
+        held: &program::Program,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.enable(glow::BLEND);
+            gl.blend_func(glow::SRC_ALPHA, glow::ONE);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_mask(false);
+        }
+        let held = self.pass(gl, SUN, held, lit, scene, Over::Screen);
+        unsafe {
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+        }
+        self.drawn.sun = held.is_ok();
         held
     }
 

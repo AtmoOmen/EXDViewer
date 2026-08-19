@@ -110,6 +110,11 @@ pub const GLARE_SCALE: i32 = 4;
 /// at the pair's own center of mass rather than on either texel.
 const TAPS: [f32; 3] = [1.40737, 3.29421, 5.20181];
 
+/// What the blur multiplies the light it gathers by. Its kernel is three times a unit-area Gaussian
+/// on each axis and the file leaves it that way, so a halo comes back nine times the light that went
+/// into it and the merge weight is what takes it back.
+const GLARE_GAIN: f32 = 9.0;
+
 /// The sky, drawn over whatever the frame did not cover.
 pub const SKY: &str = "shader/sm5/posteffect/Sky.shcd";
 
@@ -849,7 +854,7 @@ impl Default for Look {
             power: 1.0,
             bloom: true,
             threshold: 0.4,
-            glare: 1.0,
+            glare: 1.0 / GLARE_GAIN,
             veil: 0.0,
         }
     }

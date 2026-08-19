@@ -2256,6 +2256,16 @@ impl Buffer {
             "m_EmissiveColor",
             vec![1.0; 3],
         );
+        // The projection a cloud's shadow falls through. Nothing here casts one and the sampler it
+        // pairs with stands in opaque white, so the term resolves to one; the identity is what keeps
+        // the lighting from dividing by a zero row and carrying a NaN through every lit pixel.
+        put(
+            "g_CloudShadowMatrix",
+            "g_CloudShadowMatrix",
+            rows(Mat4::IDENTITY, 4),
+        );
+        // The lane the character resolve multiplies its environment term by, which nought erases.
+        put(INSTANCE, "m_EnvParameter", vec![0.0, 0.0, 0.0, 1.0]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.

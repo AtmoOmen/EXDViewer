@@ -2349,12 +2349,21 @@ impl Buffers {
                 )?;
             }
         }
+        // One level past the last the blur wrote, which is what caps the level the resolve picks
+        // per pixel: at nought it would read the marched level and none of the blurred ones.
+        let resolving = program::Scene {
+            reflect: program::Reflect {
+                level: levels as i32,
+                ..scene.reflect
+            },
+            ..scene.clone()
+        };
         self.pass(
             gl,
             REFLECT + 5,
             &held.distort,
             chain[1].1[0],
-            scene,
+            &resolving,
             Over::Reflecting(size, Member::Distort, reads),
         )?;
         // The reflection is added to the frame by the square of itself, which is the blend the game

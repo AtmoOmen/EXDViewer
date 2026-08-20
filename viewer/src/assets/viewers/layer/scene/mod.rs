@@ -3375,6 +3375,7 @@ impl Scene {
                             (held.clouds[0], "band"),
                             (held.clouds[1], "sheet"),
                             (held.fog, "fog"),
+                            (held.reflection, "reflection"),
                             (held.vignette, "vignette"),
                         ]
                         .into_iter()

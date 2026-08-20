@@ -258,6 +258,8 @@ struct Model {
     drawn: [bool; 3],
     /// Per detail level, the scene material each of its meshes uses.
     meshes: Vec<Vec<usize>>,
+    /// Whether the wind may reach it, which its own header states.
+    waving: bool,
     /// Placements drawing this model.
     instances: usize,
     /// How far the nearest of them was at the last rebuild, which is the order models are asked for
@@ -522,8 +524,6 @@ pub struct Scene {
     models: Vec<Model>,
     model_at: HashMap<String, usize>,
     materials: Vec<(String, Slot)>,
-    /// Materials a model the wind may reach is drawn with, which is what its own header states.
-    waving: HashSet<usize>,
     material_at: HashMap<String, usize>,
     packages: HashMap<String, Package>,
     /// The bytecode still owed on the packages a store served in part.
@@ -533,7 +533,7 @@ pub struct Scene {
     picked: HashSet<usize>,
     /// Parameter files folded into the table the card holds, so a later one uploads it again.
     typed: usize,
-    translated: HashMap<usize, Translated>,
+    translated: HashMap<(usize, bool), Translated>,
     tables: HashMap<usize, Arc<(Vec<u16>, usize, usize)>>,
     lighting: Option<Arc<mdl::gpu::Lighting>>,
     /// The chain that works the frame's brightness out and reads it back through a curve, once its
@@ -740,7 +740,6 @@ impl Scene {
             models: Vec::new(),
             model_at: HashMap::new(),
             materials: Vec::new(),
-            waving: HashSet::new(),
             material_at: HashMap::new(),
             packages: HashMap::new(),
             blobs: HashMap::new(),
@@ -1067,6 +1066,7 @@ impl Scene {
             state: State::Wanted,
             drawn: [false; 3],
             meshes: Vec::new(),
+            waving: false,
             instances: 0,
             nearest: f32::INFINITY,
             finest: 2,
@@ -1884,9 +1884,6 @@ impl Scene {
             used.push(self.material(&resolved));
             built.push(geometry);
         }
-        if model.waving() {
-            self.waving.extend(&used);
-        }
 
         let level = usize::from(level);
         // A model may carry no standard mesh at the level it was read at, which plenty of terrain
@@ -1900,6 +1897,7 @@ impl Scene {
         meshes[level] = used;
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
+        self.models[at].waving = model.waving();
         self.renderer
             .lock()
             .unwrap()
@@ -2471,13 +2469,29 @@ impl Scene {
             self.vignette = self.effect(program::VIGNETTE, program::SKY_VERTEX);
         }
 
-        for (at, (_, slot)) in self.materials.iter().enumerate() {
-            let Slot::Ready(material) = slot else {
+        // Which reading of a material to take is the model's to say, and most of the materials on a
+        // model the wind reaches are also on one that stands still. So a material shared that way
+        // is translated twice, and one that is not is translated once.
+        let mut readings: Vec<(usize, bool)> = self
+            .models
+            .iter()
+            .flat_map(|model| {
+                model
+                    .meshes
+                    .iter()
+                    .flatten()
+                    .map(move |at| (*at, model.waving))
+            })
+            .collect();
+        readings.sort_unstable();
+        readings.dedup();
+        for (at, waving) in readings {
+            let Some((_, Slot::Ready(material))) = self.materials.get(at) else {
                 continue;
             };
             if self
                 .translated
-                .get(&at)
+                .get(&(at, waving))
                 .is_some_and(|held| held.attachments == attachments)
             {
                 continue;
@@ -2495,7 +2509,7 @@ impl Scene {
                 continue;
             }
             let mut keys = KEYS.to_vec();
-            if self.waving.contains(&at) {
+            if waving {
                 keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
             }
             let page = |pass, page| {
@@ -2588,7 +2602,7 @@ impl Scene {
                 }
             }
             self.translated.insert(
-                at,
+                (at, waving),
                 Translated {
                     attachments,
                     buffer,
@@ -2613,7 +2627,7 @@ impl Scene {
     fn sliced(&self) -> BTreeSet<String> {
         self.translated
             .iter()
-            .filter_map(|(at, held)| match self.materials.get(*at) {
+            .filter_map(|((at, _), held)| match self.materials.get(*at) {
                 Some((_, Slot::Ready(material))) => Some((held, material)),
                 _ => None,
             })
@@ -2699,7 +2713,7 @@ impl Scene {
             .materials
             .iter()
             .enumerate()
-            .filter(|(at, _)| self.translated.contains_key(at))
+            .filter(|(at, _)| self.translated.contains_key(&(*at, false)))
             .filter_map(|(_, (_, slot))| match slot {
                 Slot::Ready(material) => Some(material),
                 _ => None,
@@ -2875,7 +2889,10 @@ impl Scene {
                     model: at,
                     level,
                     instances,
-                    surfaces: meshes.iter().map(|slot| self.surface(*slot)).collect(),
+                    surfaces: meshes
+                        .iter()
+                        .map(|slot| self.surface(*slot, model.waving))
+                        .collect(),
                 });
             }
         }
@@ -2981,7 +2998,7 @@ impl Scene {
             .collect()
     }
 
-    fn surface(&self, slot: usize) -> gpu::Surface {
+    fn surface(&self, slot: usize, waving: bool) -> gpu::Surface {
         let held = self.materials.get(slot).and_then(|(_, held)| match held {
             Slot::Ready(material) => Some(material),
             _ => None,
@@ -2998,7 +3015,7 @@ impl Scene {
         // Bare geometry until the material and its package arrive, rather than a hole where they
         // will be.
         let shaded = held
-            .zip(self.translated.get(&slot))
+            .zip(self.translated.get(&(slot, waving)))
             .map(|(material, held)| mdl::gpu::Shaded {
                 buffer: held.buffer.clone(),
                 depth: held.depth.clone(),
@@ -3216,27 +3233,31 @@ impl Scene {
                     ("Groups to read", self.waiting.len().to_string()),
                     (
                         "Materials",
-                        format!("{} of {}", self.translated.len(), self.materials.len()),
+                        format!(
+                            "{} of {}",
+                            self.translated.keys().filter(|(_, waving)| !waving).count(),
+                            self.materials.len()
+                        ),
                     ),
                     (
                         "Lights",
                         format!("{} of {}", self.lamps().len(), self.lights.len()),
                     ),
                     ("Wind", {
-                        let count = self.waving.len();
+                        let count = self.models.iter().filter(|model| model.waving).count();
                         let plural = match count {
                             1 => "",
                             _ => "s",
                         };
                         match self.ambient.wind() {
                             Some(held) => format!(
-                                "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} material{plural}",
+                                "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} model{plural}",
                                 self.clock / TICKS,
                                 held.reach,
                                 held.heading.x.atan2(held.heading.z).to_degrees(),
                                 held.rate,
                             ),
-                            None => format!("no wind set stated, {count} material{plural}"),
+                            None => format!("no wind set stated, {count} model{plural}"),
                         }
                     }),
                     (
@@ -3301,7 +3322,7 @@ impl Scene {
                             }
                             let held = tally.entry(name).or_default();
                             held.0 += 1;
-                            match self.translated.get(&at) {
+                            match self.translated.get(&(at, false)) {
                                 Some(one) if one.resolve.is_some() => held.1 += 1,
                                 Some(_) => held.2 += 1,
                                 None => {}

@@ -858,7 +858,7 @@ impl Ambient {
                             }
                         }
                         None => {
-                            ui.label(RichText::new(state).monospace());
+                            ui.add(egui::Label::new(RichText::new(state).monospace()).wrap());
                         }
                     }
                     ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
@@ -866,7 +866,7 @@ impl Ambient {
                 }
                 for (label, value) in &rows {
                     ui.label(RichText::new(*label).weak());
-                    ui.label(RichText::new(value).monospace());
+                    ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                     ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
                     ui.end_row();
                 }

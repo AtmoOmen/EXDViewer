@@ -109,7 +109,9 @@ fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
         .show(ui, |ui| {
             for (label, value) in rows {
                 ui.label(RichText::new(*label).weak());
-                ui.label(RichText::new(value).monospace());
+                // Wrapped rather than run on: a grid's cell is as wide as it likes, and one long
+                // row would take the panel and the view beside it with it.
+                ui.add(Label::new(RichText::new(value).monospace()).wrap());
                 ui.allocate_space(vec2(ui.available_width(), 0.0));
                 ui.end_row();
             }
@@ -277,6 +279,7 @@ fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
                     .monospace()
                     .color(ui.visuals().hyperlink_color),
             )
+            .wrap()
             .sense(Sense::click()),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);

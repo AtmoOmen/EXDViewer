@@ -69,7 +69,8 @@ const GRASS_SIZE: u16 = 1024;
 /// Tiles a grass color map is laid out in, which a placement's own profile picks between.
 const TILES: u8 = 8;
 
-/// Blades a scene will stand up, each a quad of its own. Past it a grid's own are left out whole.
+/// Blades one frame draws, each a quad of its own. The grids nearest the eye fill it, and the rest
+/// stand undrawn until it comes closer.
 const BLADES: usize = 200_000;
 
 /// Lights the frame draws at once. Every one is a pass of its own over the volume it reaches, so a
@@ -589,9 +590,9 @@ pub struct Scene {
     /// The two readings the grass is drawn with, once its package has arrived.
     sward: Option<Arc<gpu::Grass>>,
     turf: Vec<Turf>,
-    /// The quads those stand as, and the ones a grid that arrived past the cap would have added.
+    /// The quads those stand as, and how many of them the last frame drew.
     blades: usize,
-    unsown: usize,
+    standing: usize,
     /// Placements the view was last framed over, so a scene that arrived empty frames itself once
     /// its first file lands rather than leaving the camera at the origin.
     fitted: usize,
@@ -793,7 +794,7 @@ impl Scene {
             sward: None,
             turf: Vec::new(),
             blades: 0,
-            unsown: 0,
+            standing: 0,
             fitted: 0,
             renderer: gpu::Renderer::new(),
             placed: Vec::new(),
@@ -1286,8 +1287,7 @@ impl Scene {
         self.dirty = true;
     }
 
-    /// One grid's blades handed to the card, a buffer per auto layer. Past the cap a whole grid is
-    /// left out rather than half of one, and how many that came to is what the panel reports.
+    /// One grid's blades handed to the card, a buffer per auto layer.
     fn sow(&mut self, origin: Vec3, radius: f32, sown: [Vec<gpu::Corner>; ggd::Chunk::AUTO_LAYERS]) {
         let Grass::Placing(placing) = &self.grass else {
             return;
@@ -1298,10 +1298,6 @@ impl Scene {
             let blades = corners.len() / 4;
             // A layer the zone names no map for is cut out of nothing, so it stands nothing up.
             if blades == 0 || !cut[layer] {
-                continue;
-            }
-            if self.blades + blades > BLADES {
-                self.unsown += blades;
                 continue;
             }
             let indices = (0..blades as u32)
@@ -2951,6 +2947,8 @@ impl Scene {
         }
 
         let (light, color) = self.ambient.light();
+        let blades = self.sown();
+        self.standing = blades.iter().map(|held| self.turf[held.turf].blades).sum();
         let frame = gpu::Frame {
             scene: program::Scene {
                 view,
@@ -3012,7 +3010,7 @@ impl Scene {
             lamps: self.lamps(),
             batches,
             grass: self.sward.clone(),
-            blades: self.sown(),
+            blades,
         };
 
         // A click picks whatever the pointer runs through, and a click on nothing lets go of what
@@ -3172,32 +3170,48 @@ impl Scene {
         );
     }
 
-    /// Every grid's blades that stand within the distance the rest of the zone is drawn over, and
-    /// the color map each is cut out of.
+    /// The grids nearest the eye, up to the blades one frame draws, and the color map each is cut
+    /// out of. Whatever stands within the distance the rest of the zone is drawn over is a
+    /// candidate; the cap takes them in the order the eye reaches them.
     fn sown(&self) -> Vec<gpu::Blades> {
         let Grass::Placing(placing) = &self.grass else {
             return Vec::new();
         };
         let eye = self.camera.position;
-        self.turf
+        let mut near: Vec<(f32, usize, &Turf)> = self
+            .turf
             .iter()
             .enumerate()
-            .filter(|(_, turf)| eye.distance(turf.origin) < self.load + turf.radius)
-            .filter_map(|(at, turf)| {
-                // Nothing until the map itself is in hand. A blade is cut out of its alpha, and the
-                // flat stand-in an unfilled sampler answers with is opaque: the whole quad would
-                // stand there as a grey sheet.
-                let color_map = match self.textures.get(placing.maps.get(turf.layer)?)? {
-                    Texture::Ready(handle) => handle.id(),
-                    _ => return None,
-                };
-                Some(gpu::Blades {
-                    turf: at,
-                    origin: turf.origin,
-                    color_map,
-                })
-            })
-            .collect()
+            .map(|(at, turf)| (eye.distance(turf.origin) - turf.radius, at, turf))
+            .filter(|(span, _, _)| *span < self.load)
+            .collect();
+        near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let mut standing = 0;
+        let mut drawn = Vec::new();
+        for (_, at, turf) in near {
+            // Nothing until the map itself is in hand. A blade is cut out of its alpha, and the
+            // flat stand-in an unfilled sampler answers with is opaque: the whole quad would stand
+            // there as a grey sheet. A grid waiting on one costs nothing against the cap.
+            let held = placing
+                .maps
+                .get(turf.layer)
+                .and_then(|path| self.textures.get(path));
+            let Some(Texture::Ready(color_map)) = held else {
+                continue;
+            };
+            // Stopped rather than skipped past: what the frame draws is then a run of the nearest
+            // grids, which a step of the camera moves the end of rather than shuffling.
+            if standing + turf.blades > BLADES {
+                break;
+            }
+            standing += turf.blades;
+            drawn.push(gpu::Blades {
+                turf: at,
+                origin: turf.origin,
+                color_map: color_map.id(),
+            });
+        }
+        drawn
     }
 
     fn surface(&self, slot: usize, waving: bool) -> gpu::Surface {
@@ -3490,15 +3504,12 @@ impl Scene {
                         Grass::Done => "none".to_owned(),
                         Grass::Placing(held) => {
                             let read = held.grids.iter().filter(|grid| grid.taken).count();
-                            let over = match self.unsown {
-                                0 => String::new(),
-                                held => format!(", {held} over the cap"),
-                            };
                             format!(
-                                "{read} of {} grids, {} models, {} placed, {} blades{over}",
+                                "{read} of {} grids, {} models, {} placed, {} of {} blades drawn",
                                 held.grids.len(),
                                 held.models.len(),
                                 self.layers.get(held.layer).map_or(0, |held| held.placements),
+                                self.standing,
                                 self.blades,
                             )
                         }
@@ -3538,7 +3549,7 @@ impl Scene {
                                     format!("{name} {all}: {wet} blended, {dry} opaque")
                                 })
                                 .collect::<Vec<_>>()
-                                .join(", "),
+                                .join("\n"),
                         }
                     }),
                     (

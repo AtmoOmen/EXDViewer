@@ -322,7 +322,7 @@ pub fn details_ui(ui: &mut egui::Ui, material: &Rendered, follow: &mut Option<St
                 ui.end_row();
                 for (label, value, raw) in &material.identity {
                     ui.label(RichText::new(*label).weak());
-                    let shown = ui.label(RichText::new(value).monospace());
+                    let shown = ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                     if let Some(raw) = raw {
                         shown.on_hover_text(raw);
                     }

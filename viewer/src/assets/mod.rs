@@ -45,6 +45,8 @@ const MAX_RESULTS: usize = 500;
 const EXISTS_DELAY: Duration = Duration::from_millis(250);
 /// Width the extension menu is held to.
 const EXTENSION_MENU_WIDTH: f32 = 50.0;
+/// Widest the details panel beside a preview may stand.
+const DETAILS_WIDTH: f32 = 400.0;
 const SEARCH_ID: &str = "asset_search";
 
 /// One entry in the flattened view of the tree that is currently on screen.
@@ -1695,34 +1697,37 @@ impl AssetBrowser {
             // Only textures and images have anything to put in the sidebar.
             if self.preview.as_ref().is_some_and(Preview::has_details) {
                 let mut change = None;
-                CollapsibleSidePanel::new("asset_info", Side::Right).show(ui, |ui, is_open| {
-                    if !is_open {
-                        return;
-                    }
-                    Panel::top("asset_info_header").show(ui, |ui| {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            // Mirror of the tree panel: the arrow goes against this panel's outer
-                            // edge, which is the left one, and the heading centers in the rest.
-                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                CollapsibleSidePanel::draw_arrow(ui, "asset_info", Side::Right);
-                                ui.vertical_centered_justified(|ui| ui.heading("Details"));
-                            });
-                        });
-                        ui.add_space(4.0);
-                    });
-                    CentralPanel::default().show(ui, |ui| {
-                        if let Some(preview) = &self.preview {
-                            change = preview.info_ui(
-                                ui,
-                                (self.mip, self.slice, self.channels),
-                                &mut follow,
-                                &mut self.deps,
-                                backend,
-                            );
+                CollapsibleSidePanel::new("asset_info", Side::Right)
+                    .max_width(DETAILS_WIDTH)
+                    .show(ui, |ui, is_open| {
+                        if !is_open {
+                            return;
                         }
+                        Panel::top("asset_info_header").show(ui, |ui| {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                // Mirror of the tree panel: the arrow goes against this
+                                // panel's outer edge, which is the left one, and the heading
+                                // centers in the rest.
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    CollapsibleSidePanel::draw_arrow(ui, "asset_info", Side::Right);
+                                    ui.vertical_centered_justified(|ui| ui.heading("Details"));
+                                });
+                            });
+                            ui.add_space(4.0);
+                        });
+                        CentralPanel::default().show(ui, |ui| {
+                            if let Some(preview) = &self.preview {
+                                change = preview.info_ui(
+                                    ui,
+                                    (self.mip, self.slice, self.channels),
+                                    &mut follow,
+                                    &mut self.deps,
+                                    backend,
+                                );
+                            }
+                        });
                     });
-                });
                 if let Some((mip, slice, channels)) = change {
                     // The slice is chosen at draw time, so only the settings that change the pixels
                     // are worth throwing the decoded preview away for.

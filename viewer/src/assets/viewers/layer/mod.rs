@@ -1098,7 +1098,7 @@ impl Rendered {
                             ui.label(RichText::new(label).weak());
                             match fact {
                                 Fact::Text(value) => {
-                                    ui.label(RichText::new(value).monospace());
+                                    ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                                 }
                                 Fact::Row(sheet, id) => {
                                     let named = deps.text(ui.ctx(), backend, sheet, id);

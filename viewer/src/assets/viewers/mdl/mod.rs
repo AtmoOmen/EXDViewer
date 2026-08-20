@@ -1245,34 +1245,15 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
     });
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut look.bloom, "Bloom").on_hover_text(
-            "Spread the bright end of the frame with the game's own glare chain. Where its taps \
-             stand comes out of the blur's own weights, but the three below are choices: no file \
-             states them",
+            "Spread the bright end of the frame with the game's own glare chain. Nothing in it is \
+             the viewer's to choose: the taps come out of the passes' own weights and the two \
+             beside this off the frames the game drew",
         );
         ui.add_enabled_ui(look.bloom, |ui| {
-            for (value, range, name, what) in [
-                (
-                    &mut look.threshold,
-                    0.0..=2.0,
-                    "Threshold",
-                    "What a pixel's glare has to average before any of it spreads",
-                ),
-                (
-                    &mut look.glare,
-                    0.0..=2.0,
-                    "Glare",
-                    "What the spread halo is weighted by where it goes back over the frame",
-                ),
-                (
-                    &mut look.veil,
-                    0.0..=0.5,
-                    "Veil",
-                    "How dim a pixel has to be for the merge to pull it toward a grey",
-                ),
-            ] {
-                ui.add(egui::Slider::new(value, range).text(name))
-                    .on_hover_text(what);
-            }
+            ui.label(format!("Threshold {:.5}", program::GLARE_THRESHOLD))
+                .on_hover_text("What a pixel's glare has to average before any of it spreads");
+            ui.label(format!("Veil {}", program::GLARE_VEIL))
+                .on_hover_text("How dim a pixel has to be for the merge to pull it toward a grey");
         });
     });
     ui.horizontal_wrapped(|ui| {
@@ -2251,16 +2232,18 @@ impl Rendered {
                 .ok()
                 .map(Arc::new)
         };
-        let sampled = |path: &str| {
-            program::Program::sampling(path, ready(path)?, ready(program::SAMPLING_7)?)
+        let sampled = |path: &str, vertex: &str| {
+            program::Program::sampling(path, ready(path)?, ready(vertex)?)
                 .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
                 .ok()
                 .map(Arc::new)
         };
         let built = gpu::Glare {
             bright: held(program::BRIGHT_PASS)?,
-            blur: sampled(program::BLOOM_BLUR)?,
+            gauss: sampled(program::GAUSS_BLUR, program::SAMPLING_9)?,
+            blur: sampled(program::BLOOM_BLUR, program::SAMPLING_7)?,
             merge: held(program::GLARE_MERGE)?,
+            composite: held(program::GLARE_COMPOSITE)?,
         };
         drop(packages);
         let built = Arc::new(built);

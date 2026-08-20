@@ -1051,6 +1051,14 @@ impl Renderer {
             // measures as a far darker scene than it is.
             if let Some(skybox) = frame.skybox.as_ref() {
                 self.buffers.sky(gl, skybox, &scene)?;
+            }
+            // What the glare chain spreads, kept over the sky and under everything below: each of
+            // those writes an alpha of its own over the share of a pixel the composite marked as
+            // glare, and the game keeps its own copy at this point for the same reason.
+            if frame.glare.is_some() {
+                self.buffers.source(gl)?;
+            }
+            if frame.skybox.is_some() {
                 // Over the sky and under the clouds, which is where a real frame draws it.
                 if let Some(held) = frame.sunlight.as_ref() {
                     self.buffers.sun(gl, held, &scene)?;

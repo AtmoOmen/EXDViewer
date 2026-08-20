@@ -96,32 +96,58 @@ pub const MEASURE: [&str; 6] = [
 pub const CURVE: i32 = 1024;
 
 /// What spreads the bright end of the frame into a halo, in the order it runs. The first keeps the
-/// share of a pixel the composite left in its alpha, the second smooths that along one axis at a
-/// time, and the last lays it back over the frame.
+/// share of a pixel the composite left in its alpha, wherever that is bright enough to count; the
+/// second smooths each level the halo is carried down through; the third spreads it along one axis
+/// at a time; the fourth shapes what came back; and the last adds that to the frame.
+///
+/// The game binds `posteffect/ed8a98cf` for the first, which is this file one generation on with a
+/// `sqrt` around the color it reads. That undoes the square the source pass ahead of it takes, and
+/// the viewer runs no source pass: what it reads is already square-rooted, so the file without the
+/// `sqrt` is what puts the same numbers into the blur.
 pub const BRIGHT_PASS: &str = "shader/sm5/posteffect/BrightPassFilter.shcd";
+pub const GAUSS_BLUR: &str = "shader/sm5/posteffect/GaussBlur5x5_Linear.shcd";
 pub const BLOOM_BLUR: &str = "shader/sm5/posteffect/BloomBlur_Linear.shcd";
 pub const GLARE_MERGE: &str = "shader/sm5/posteffect/GlareMerge.shcd";
+pub const GLARE_COMPOSITE: &str = "shader/sm5/posteffect/90631568";
 
-/// The vertex shader the game pairs the blur with, which hands it seven coordinates rather than the
-/// one every other pass here reads.
+/// The vertex shaders the game pairs the two smoothing passes with, which hand them nine and seven
+/// coordinates rather than the one every other pass here reads.
+pub const SAMPLING_9: &str = "shader/sm5/posteffect/VSSampling9.shcd";
 pub const SAMPLING_7: &str = "shader/sm5/posteffect/VSSampling7.shcd";
 
-/// The four of them, for asking after at once.
-pub const GLARE: [&str; 4] = [BRIGHT_PASS, BLOOM_BLUR, GLARE_MERGE, SAMPLING_7];
+/// The seven of them, for asking after at once.
+pub const GLARE: [&str; 7] = [
+    BRIGHT_PASS,
+    GAUSS_BLUR,
+    BLOOM_BLUR,
+    GLARE_MERGE,
+    GLARE_COMPOSITE,
+    SAMPLING_9,
+    SAMPLING_7,
+];
 
-/// What the glare chain runs at, against the frame. The blur reaches six texels of whatever it
-/// reads, so this is what settles how far a halo spreads on screen.
+/// What the chain runs at, against the frame. The frame is kept at half, the bright pass and the
+/// first smoothing stand at a quarter, and the blur that spreads the halo runs at an eighth, which
+/// is what settles how far one reaches: the blur takes six texels of whatever it reads.
+pub const GLARE_SOURCE: i32 = 2;
 pub const GLARE_SCALE: i32 = 4;
+pub const GLARE_SPREAD: i32 = 8;
 
 /// Where the blur's six outer taps stand, in texels of what it reads. Its weights are a Gaussian of
 /// two texels read at nought through six and paired off, and a pair taken as one bilinear tap sits
 /// at the pair's own center of mass rather than on either texel.
 const TAPS: [f32; 3] = [1.40737, 3.29421, 5.20181];
 
-/// What the blur multiplies the light it gathers by. Its kernel is three times a unit-area Gaussian
-/// on each axis and the file leaves it that way, so a halo comes back nine times the light that went
-/// into it and the merge weight is what takes it back.
-const GLARE_GAIN: f32 = 9.0;
+/// The same for the smoothing pass, whose weights are a Gaussian of one texel read at nought through
+/// two, paired off on each axis and taken as a square of nine bilinear taps.
+const GAUSS_TAP: f32 = 1.182_425;
+
+/// What a pixel's glare has to average before any of it spreads, and how dim one has to be for the
+/// merge to pull it toward a grey of one and a half times its own mean. Both come off the frames the
+/// game drew. The halo goes back over the frame at its own strength, so the blur's threefold gain
+/// along each axis stands and nothing takes it back.
+pub const GLARE_THRESHOLD: f32 = 2.5 / 255.0;
+pub const GLARE_VEIL: f32 = 10.0;
 
 /// What takes the frame's four corners down toward black, which the game draws last of all and over
 /// the graded frame. It measures a pixel against the middle of the frame rather than reading the
@@ -277,11 +303,13 @@ const HEIGHT_FOG_PARAM: &str = "cExpHeightFogParam";
 const DIRECTIONAL_SHADOW_PARAM: &str = "g_DirectionalShadowParameter";
 const SHADOW_BIAS_PARAM: &str = "g_ShadowBiasParameter";
 
-/// The buffers the glare chain reads. The first two carry a threshold and a pair of weights no file
-/// states; the last two are the sampling vertex shader's own, one holding the scale and bias it
-/// builds a coordinate with and the other where each of its taps stands.
+/// The buffers the glare chain reads. The first two carry the threshold and the merge's weights; the
+/// third is what the pass that adds the halo back writes into the frame's alpha. The last two are
+/// the sampling vertex shader's own, one holding the scale and bias it builds a coordinate with and
+/// the other where each of its taps stands.
 const BRIGHT_PASS_PARAM: &str = "cBrightPassParam";
 const MERGE_WEIGHT: &str = "cMergeWeight";
+const SOFT_FOCUS_PARAM: &str = "cSoftFocusParam";
 const SAMPLING_PARAM: &str = "cParam";
 const SAMPLING_OFFSET: &str = "cSamplingOffset";
 const VIGNETTING_PARAM: &str = "cVignettingParam";
@@ -866,14 +894,6 @@ pub struct Look {
     /// is the file's own arithmetic and not a reading of it.
     pub power: f32,
     pub bloom: bool,
-    /// What a pixel's emissive share has to average before any of it is spread. Nothing states it.
-    pub threshold: f32,
-    /// What the spread glare is weighted by where the merge lays it back over the frame. The blur
-    /// carries a gain of three along each axis, so a weight here is against nine.
-    pub glare: f32,
-    /// How dim a pixel has to be for the merge to pull it toward a grey of one and a half times its
-    /// own mean, which is the other thing that pass does. Nought leaves every pixel its own color.
-    pub veil: f32,
     pub vignette: bool,
     /// Where the corners start darkening, as the squared distance from the middle of the frame with
     /// a corner at one, and how steeply the darkening deepens past that. No file states either: in
@@ -882,8 +902,8 @@ pub struct Look {
     pub darkening: f32,
 }
 
-/// The occlusion and glare values are a guess. Nothing states them: the buffers behind them report
-/// no member names, no defaults, and no units.
+/// The occlusion values are a guess. Nothing states them: the buffer behind them reports no member
+/// names, no defaults, and no units.
 impl Default for Look {
     fn default() -> Self {
         Self {
@@ -902,9 +922,6 @@ impl Default for Look {
             intensity: 3.0,
             power: 1.0,
             bloom: true,
-            threshold: 0.4,
-            glare: 1.0 / GLARE_GAIN,
-            veil: 0.0,
             vignette: true,
             onset: 0.35,
             darkening: 0.5,
@@ -1282,8 +1299,39 @@ pub struct Scene {
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
     pub clock: f32,
     pub wind: Wind,
-    /// How far one tap of the glare blur steps and which way, in the coordinate that pass reads.
-    pub blur: Vec2,
+    /// How far one tap of a smoothing pass steps, in the coordinate that pass reads.
+    pub blur: Blur,
+    /// What share of a surface the composite counts as glare.
+    pub bloom: Bloom,
+}
+
+/// Which kernel a smoothing pass of the glare chain lays its taps out for. One walks a square of
+/// nine around its own texel; the other spreads the halo along a single axis.
+#[derive(Clone, Copy)]
+pub enum Blur {
+    Square(Vec2),
+    Along(Vec2),
+}
+
+/// What share of a surface's own specular and of what it emits the composite counts as glare, which
+/// is what it leaves in the frame's alpha for the bright pass to weigh a pixel by. The weather's
+/// own: `g_CommonParameter.m_Misc` takes both out of the wetness set, and three frames measured
+/// reproduce from it to six figures.
+#[derive(Clone, Copy)]
+pub struct Bloom {
+    pub specular: f32,
+    pub emissive: f32,
+}
+
+/// What a model outside a zone is drawn under, since nothing there names an environment. The pair
+/// every weather measured holds through the middle of the day.
+impl Default for Bloom {
+    fn default() -> Self {
+        Self {
+            specular: 0.04,
+            emissive: 0.1,
+        }
+    }
 }
 
 /// What a leaf is swayed by, which is all three registers `g_WavingParam` holds. The heading and the
@@ -1373,7 +1421,8 @@ impl Default for Scene {
             customize: Customize::default(),
             clock: 0.0,
             wind: Wind::default(),
-            blur: Vec2::ZERO,
+            blur: Blur::Along(Vec2::ZERO),
+            bloom: Bloom::default(),
         }
     }
 }
@@ -2460,14 +2509,24 @@ impl Buffer {
             return out;
         }
         if self.name == BRIGHT_PASS_PARAM {
-            write(&mut out, 0, &[scene.look.threshold, 0.0, 0.0, 0.0]);
+            write(&mut out, 0, &[GLARE_THRESHOLD, 0.0, 0.0, 0.0]);
             return out;
         }
         if self.name == MERGE_WEIGHT {
-            // The frame passes through at its own strength: anything else here would scale a whole
-            // exposed frame a second time.
-            let veil = 1.0 / scene.look.veil.max(f32::EPSILON);
-            write(&mut out, 0, &[1.0, scene.look.glare, veil, 0.0]);
+            // The merge reads the halo alone: the second lane weighs a level of the pyramid the
+            // engine keeps beside it, and every frame measured leaves that at nothing.
+            write(&mut out, 0, &[1.0, 0.0, GLARE_VEIL, 0.0]);
+            return out;
+        }
+        if self.name == SOFT_FOCUS_PARAM {
+            // The last lane is the alpha the pass writes, and the blend reads it back: nought is
+            // what makes the halo add to the frame rather than cover it.
+            write(&mut out, 0, &[
+                1.0 - 0.5 / size.0,
+                1.0 - 0.5 / size.1,
+                0.0,
+                0.0,
+            ]);
             return out;
         }
         if self.name == SAMPLING_PARAM {
@@ -2479,13 +2538,25 @@ impl Buffer {
             return out;
         }
         if self.name == SAMPLING_OFFSET {
-            // Which tap lands in which lane is settled by the weight the blur pairs with it, and the
+            // Which tap lands in which lane is settled by the weight the pass pairs with it, and the
             // middle of the kernel is the first lane here rather than the lone coordinate.
-            let [near, mid, far] = TAPS.map(|held| scene.blur * held);
-            write(&mut out, 0, &[0.0, 0.0, near.x, near.y]);
-            write(&mut out, 1, &[mid.x, mid.y, far.x, far.y]);
-            write(&mut out, 2, &[-near.x, -near.y, -mid.x, -mid.y]);
-            write(&mut out, 3, &[-far.x, -far.y, 0.0, 0.0]);
+            match scene.blur {
+                Blur::Square(texel) => {
+                    let held = texel * GAUSS_TAP;
+                    write(&mut out, 0, &[0.0, 0.0, -held.x, 0.0]);
+                    write(&mut out, 1, &[held.x, 0.0, 0.0, -held.y]);
+                    write(&mut out, 2, &[0.0, held.y, -held.x, -held.y]);
+                    write(&mut out, 3, &[-held.x, held.y, held.x, -held.y]);
+                    write(&mut out, 4, &[held.x, held.y, 0.0, 0.0]);
+                }
+                Blur::Along(step) => {
+                    let [near, mid, far] = TAPS.map(|held| step * held);
+                    write(&mut out, 0, &[0.0, 0.0, near.x, near.y]);
+                    write(&mut out, 1, &[mid.x, mid.y, far.x, far.y]);
+                    write(&mut out, 2, &[-near.x, -near.y, -mid.x, -mid.y]);
+                    write(&mut out, 3, &[-far.x, -far.y, 0.0, 0.0]);
+                }
+            }
             return out;
         }
         if self.name == VIGNETTING_PARAM {
@@ -2692,7 +2763,10 @@ impl Buffer {
             "m_Viewport",
             vec![2.0 / width, -2.0 / height, -1.0, 1.0],
         );
-        put(common, "m_Misc", vec![1.0, 1.0, 0.0, 0.0]);
+        // The two lanes the composite weighs its glare by before it divides that through by the
+        // colour and leaves the share in the frame's alpha. The weather states both.
+        let held = scene.bloom;
+        put(common, "m_Misc", vec![held.specular, held.emissive, 0.0, 0.0]);
         put(common, "m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
         let screen = "g_ScreenParameter";
         put(screen, "m_BackBufferSize", vec![width, height]);

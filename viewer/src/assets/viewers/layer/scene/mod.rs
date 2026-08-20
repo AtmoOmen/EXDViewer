@@ -691,6 +691,26 @@ fn bulk(points: &[Vec3]) -> (Vec3, f32) {
     (center, reach)
 }
 
+/// The nearest of the spheres the ray runs through. Everything the eye stands inside is met at
+/// nought, so the tighter of those wins rather than whichever the file placed first.
+fn nearest(
+    from: Vec3,
+    along: Vec3,
+    spheres: impl Iterator<Item = (usize, Vec3, f32)>,
+) -> Option<usize> {
+    let mut found: Option<((f32, f32), usize)> = None;
+    for (at, center, radius) in spheres {
+        let Some(hit) = pierced(from, along, center, radius) else {
+            continue;
+        };
+        let key = (hit, (center - from).length());
+        if found.is_none_or(|(held, _)| key < held) {
+            found = Some((key, at));
+        }
+    }
+    found.map(|(_, at)| at)
+}
+
 /// How far along the ray a sphere is first met, or nought where the ray starts inside it.
 fn pierced(from: Vec3, along: Vec3, center: Vec3, radius: f32) -> Option<f32> {
     let toward = center - from;
@@ -1426,27 +1446,21 @@ impl Scene {
     /// The nearest placement the ray runs through, out of the ones the frame is drawing.
     fn under(&self, from: Vec3, along: Vec3) -> Option<usize> {
         let eye = self.camera.position;
-        let mut found: Option<((f32, f32), usize)> = None;
-        for (at, placement) in self.placements.iter().enumerate() {
-            if !self.layers[placement.layer].shown {
-                continue;
-            }
-            let span = (placement.center - eye).length() - placement.radius;
-            if span > self.load || (placement.fade > 0.0 && span > placement.fade) {
-                continue;
-            }
-            let center = self.posed(placement).transform_point3(Vec3::ZERO);
-            let Some(hit) = pierced(from, along, center, placement.radius.max(0.01)) else {
-                continue;
-            };
-            // Everything the eye stands inside is met at nought, so the tighter of them wins
-            // rather than whichever the file placed first.
-            let key = (hit, (center - from).length());
-            if found.is_none_or(|(held, _)| key < held) {
-                found = Some((key, at));
-            }
-        }
-        found.map(|(_, at)| at)
+        nearest(
+            from,
+            along,
+            self.placements.iter().enumerate().filter_map(|(at, placement)| {
+                if !self.layers[placement.layer].shown {
+                    return None;
+                }
+                let span = (placement.center - eye).length() - placement.radius;
+                if span > self.load || (placement.fade > 0.0 && span > placement.fade) {
+                    return None;
+                }
+                let center = self.posed(placement).transform_point3(Vec3::ZERO);
+                Some((at, center, placement.radius.max(0.01)))
+            }),
+        )
     }
 
     fn rebuild(&mut self) {
@@ -3748,5 +3762,22 @@ mod tests {
         assert_eq!(pierced(Vec3::ZERO, along, Vec3::new(0.0, 0.0, 10.0), 1.0), None);
         assert_eq!(pierced(Vec3::ZERO, along, Vec3::new(5.0, 0.0, -10.0), 1.0), None);
         assert_eq!(pierced(Vec3::ZERO, along, Vec3::new(0.0, 0.0, -1.0), 5.0), Some(0.0));
+    }
+
+    #[test]
+    fn the_tighter_bound_wins_where_the_eye_stands_inside_both() {
+        let wide = (0, Vec3::new(0.0, 0.0, -40.0), 100.0);
+        let close = (1, Vec3::new(0.0, 0.0, -2.0), 5.0);
+        assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [wide, close].into_iter()), Some(1));
+        assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [close, wide].into_iter()), Some(1));
+    }
+
+    #[test]
+    fn the_nearer_of_two_spheres_ahead_wins_either_way_round() {
+        let far = (0, Vec3::new(0.0, 0.0, -30.0), 2.0);
+        let near = (1, Vec3::new(0.0, 0.0, -10.0), 2.0);
+        assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [far, near].into_iter()), Some(1));
+        assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [near, far].into_iter()), Some(1));
+        assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [].into_iter()), None);
     }
 }

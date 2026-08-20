@@ -38,7 +38,7 @@ use ironworks::file::{
 };
 
 use super::super::mdl;
-use super::super::{facts, section};
+use super::super::{facts, link, section};
 use super::Source;
 use crate::assets::deps::Deps;
 use crate::backend::Backend;
@@ -519,6 +519,8 @@ pub struct Scene {
     fov: f32,
     layers: Vec<Layer>,
     placements: Vec<Placement>,
+    /// The placement the pointer last landed on, which the overlay outlines and the panel reads.
+    selected: Option<usize>,
     models: Vec<Model>,
     model_at: HashMap<String, usize>,
     materials: Vec<(String, Slot)>,
@@ -737,6 +739,7 @@ impl Scene {
             fov: FOV.to_degrees(),
             layers: Vec::new(),
             placements: Vec::new(),
+            selected: None,
             models: Vec::new(),
             model_at: HashMap::new(),
             materials: Vec::new(),
@@ -1412,6 +1415,52 @@ impl Scene {
 
     /// Where every model stands for where the eye now is. The transforms go to the card each frame
     /// rather than here, since a record carries the object into view space and the camera turns.
+    /// Where a placement stands now, which is where the file put it unless a timeline drives it.
+    fn posed(&self, placement: &Placement) -> Mat4 {
+        match &placement.driven {
+            Some(held) => {
+                held.chain.iter().fold(Mat4::IDENTITY, |into, (at, fixed)| {
+                    into * *fixed * self.motions[*at].at(self.clock)
+                }) * held.tail
+            }
+            None => placement.transform,
+        }
+    }
+
+    /// The nearest placement the ray runs through, out of the ones the frame is drawing.
+    fn under(&self, from: Vec3, along: Vec3) -> Option<usize> {
+        let eye = self.camera.position;
+        let mut found: Option<(f32, usize)> = None;
+        for (at, placement) in self.placements.iter().enumerate() {
+            if !self.layers[placement.layer].shown {
+                continue;
+            }
+            let span = (placement.center - eye).length() - placement.radius;
+            if span > self.load || (placement.fade > 0.0 && span > placement.fade) {
+                continue;
+            }
+            let center = self.posed(placement).transform_point3(Vec3::ZERO);
+            let toward = center - from;
+            let ahead = toward.dot(along);
+            let off = toward.length_squared() - ahead * ahead;
+            let radius = placement.radius.max(0.01);
+            if off > radius * radius {
+                continue;
+            }
+            // The near root, or the eye's own depth where the ray starts inside the sphere.
+            let reach = (radius * radius - off).sqrt();
+            let hit = match ahead - reach {
+                held if held >= 0.0 => held,
+                _ if ahead + reach >= 0.0 => 0.0,
+                _ => continue,
+            };
+            if found.is_none_or(|(held, _)| hit < held) {
+                found = Some((hit, at));
+            }
+        }
+        found.map(|(_, at)| at)
+    }
+
     fn rebuild(&mut self) {
         let eye = self.camera.position;
         let mut placed: Vec<[Vec<program::Instance>; 3]> = (0..self.models.len())
@@ -1443,12 +1492,7 @@ impl Scene {
                 continue;
             };
             placed[placement.model][level].push(program::Instance {
-                transform: match &placement.driven {
-                    Some(held) => held.chain.iter().fold(Mat4::IDENTITY, |into, (at, fixed)| {
-                        into * *fixed * self.motions[*at].at(self.clock)
-                    }) * held.tail,
-                    None => placement.transform,
-                },
+                transform: self.posed(&placement),
                 sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
             });
         }
@@ -2939,6 +2983,21 @@ impl Scene {
             blades: self.sown(),
         };
 
+        // A click picks whatever the pointer runs through, and a click on nothing lets go of what
+        // was held. Dragging turns the camera, so only a click that did not drag counts.
+        if response.clicked()
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            let ndc = egui::vec2(
+                2.0 * (pointer.x - rect.left()) / rect.width() - 1.0,
+                1.0 - 2.0 * (pointer.y - rect.top()) / rect.height(),
+            );
+            let inverse = (projection * view).inverse();
+            let near = inverse.project_point3(Vec3::new(ndc.x, ndc.y, 0.0));
+            let far = inverse.project_point3(Vec3::new(ndc.x, ndc.y, 1.0));
+            self.selected = self.under(near, (far - near).normalize_or_zero());
+        }
+
         // The context is taken from the painter rather than captured: `glow::Context` is neither
         // `Send` nor `Sync` on wasm, and a callback has to be both.
         let renderer = self.renderer.clone();
@@ -2951,6 +3010,134 @@ impl Scene {
                     .draw(painter.gl(), painter, &frame, &info);
             })),
         });
+        self.outline(ui, rect, projection * view);
+    }
+
+    /// Everything the zone states about the placement the pointer picked.
+    fn chosen_ui(&self, ui: &mut egui::Ui, follow: &mut Option<String>) {
+        let Some(placement) = self.selected.and_then(|at| self.placements.get(at)) else {
+            return;
+        };
+        ui.add_space(8.0);
+        ui.separator();
+        section(ui, "Selected");
+        ui.add_space(4.0);
+
+        let path = &self.models[placement.model].path;
+        if link(ui, crate::utils::file_name(path), path) {
+            *follow = Some(path.clone());
+        }
+        ui.add_space(4.0);
+
+        let held = self.posed(placement);
+        let basis = Mat3::from_cols(
+            held.x_axis.truncate(),
+            held.y_axis.truncate(),
+            held.z_axis.truncate(),
+        );
+        let scale = Vec3::new(
+            basis.x_axis.length(),
+            basis.y_axis.length(),
+            basis.z_axis.length(),
+        );
+        // A placement is free to state a scale of nought, and taking a rotation out of a basis that
+        // flat gives nothing back.
+        let angles = (scale.min_element() > 1e-6).then(|| {
+            let upright = Mat3::from_cols(
+                basis.x_axis / scale.x,
+                basis.y_axis / scale.y,
+                basis.z_axis / scale.z,
+            );
+            let (y, x, z) = Quat::from_mat3(&upright).to_euler(glam::EulerRot::YXZ);
+            Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees())
+        });
+        let place = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
+        let (group, id) = placement.key;
+        facts(ui, "scene_selected", &[
+            ("Layer", self.layers[placement.layer].name.clone()),
+            ("Position", place(held.w_axis.truncate())),
+            ("Rotation", match angles {
+                Some(held) => place(held),
+                None => "flat".to_owned(),
+            }),
+            ("Scale", place(scale)),
+            ("Size", format!("{:.3}", placement.radius)),
+            ("Fade", match placement.fade {
+                held if held > 0.0 => format!("{held:.1}"),
+                _ => "never".to_owned(),
+            }),
+            ("Motion", match &placement.driven {
+                Some(held) => format!("{} driven", held.chain.len()),
+                None => "still".to_owned(),
+            }),
+            (
+                "Sky",
+                format!(
+                    "{:.3}",
+                    self.visibility.get(&placement.key).copied().unwrap_or(1.0)
+                ),
+            ),
+            (
+                "Key",
+                format!("{group:08x} {:02x}{:02x}{:02x}{:02x}", id[0], id[1], id[2], id[3]),
+            ),
+        ]);
+    }
+
+    /// A box around what the pointer picked, drawn over the frame rather than into it, and the name
+    /// of what it holds.
+    fn outline(&self, ui: &egui::Ui, rect: egui::Rect, clip: Mat4) {
+        let Some(placement) = self.selected.and_then(|at| self.placements.get(at)) else {
+            return;
+        };
+        let held = self.posed(placement);
+        let reach = placement.radius.max(0.01);
+        let center = held.transform_point3(Vec3::ZERO);
+        let corner = |at: usize| {
+            let step = |bit: usize| match at >> bit & 1 {
+                0 => -reach,
+                _ => reach,
+            };
+            let point = center + Vec3::new(step(0), step(1), step(2));
+            let clipped = clip * point.extend(1.0);
+            (clipped.w > 0.0).then(|| {
+                egui::pos2(
+                    rect.left() + (clipped.x / clipped.w * 0.5 + 0.5) * rect.width(),
+                    rect.top() + (0.5 - clipped.y / clipped.w * 0.5) * rect.height(),
+                )
+            })
+        };
+        let points: Vec<Option<egui::Pos2>> = (0..8).map(corner).collect();
+        let painter = ui.painter_at(rect);
+        let stroke = egui::Stroke::new(1.5, Color32::from_rgb(255, 190, 60));
+        let mut seen = egui::Rect::NOTHING;
+        for from in 0..8 {
+            for bit in 0..3 {
+                let to = from ^ 1usize << bit;
+                if to < from {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (points[from], points[to]) else {
+                    continue;
+                };
+                painter.line_segment([a, b], stroke);
+                seen = seen.union(egui::Rect::from_two_pos(a, b));
+            }
+        }
+        if seen.is_negative() {
+            return;
+        }
+        painter.text(
+            egui::pos2(seen.center().x, seen.top() - 4.0),
+            egui::Align2::CENTER_BOTTOM,
+            self.models[placement.model]
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or_default(),
+            egui::FontId::monospace(11.0),
+            stroke.color,
+        );
     }
 
     /// Every grid's blades that stand within the distance the rest of the zone is drawn over, and
@@ -3383,6 +3570,8 @@ impl Scene {
                     ),
                 ],
             );
+
+            self.chosen_ui(ui, follow);
 
             ui.add_space(8.0);
             ui.separator();

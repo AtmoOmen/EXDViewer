@@ -604,6 +604,10 @@ pub struct Buffers {
     /// address between texels and the last of them is read back over the whole frame.
     glared: Option<[(glow::Framebuffer, glow::Texture); 2]>,
     reached: Option<[(glow::Framebuffer, glow::Texture); 2]>,
+    /// What that chain spreads: the frame as the sky left it, at half its size. The game keeps its
+    /// own copy there rather than at the end, and the passes between write an alpha of their own
+    /// over the share of a pixel the composite marked as glare.
+    sourced: Option<(glow::Framebuffer, glow::Texture)>,
     /// Whether that chain ran this frame. Every pass reads the flat stand-in until it has, and again
     /// from the frame the viewer stops asking for it.
     occluding: bool,
@@ -921,6 +925,7 @@ impl Buffers {
                 .chain(self.adapted.take().into_iter().flatten())
                 .chain(self.glared.take().into_iter().flatten())
                 .chain(self.reached.take().into_iter().flatten())
+                .chain(self.sourced.take())
                 .map(|(frame, held)| (frame, vec![held])),
         )
         {
@@ -1086,6 +1091,10 @@ impl Buffers {
             };
             self.glared = Some(level(self.spread())?);
             self.reached = Some(level(self.reach())?);
+            let held = self.halved();
+            let sourced = plane(gl, held, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+            smooth(gl, sourced);
+            self.sourced = Some((frame_of(gl, &[sourced], None)?, sourced));
 
             // One channel at whole-float width: what the halving accumulates is the reciprocal of a
             // luminance, which runs far past what a byte or a half holds once a pixel is dark.
@@ -1144,8 +1153,13 @@ impl Buffers {
         ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
     }
 
-    /// The two levels the glare chain draws into: where the frame's bright end is kept and smoothed,
-    /// and where the blur that spreads it runs.
+    /// What the glare chain reads, and the two levels it draws into: where the frame's bright end is
+    /// kept and smoothed, and where the blur that spreads it runs.
+    fn halved(&self) -> (i32, i32) {
+        let held = program::GLARE_SOURCE;
+        ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
+    }
+
     fn spread(&self) -> (i32, i32) {
         let held = program::GLARE_SCALE;
         ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
@@ -1178,6 +1192,15 @@ impl Buffers {
             gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, self.size.0, self.size.1);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
         }
+        Ok(())
+    }
+
+    /// Keeps what the glare chain spreads, which the game does the moment the sky has drawn and
+    /// nothing else has. Halved on the way, the way the game's own copy is.
+    pub fn source(&self, gl: &glow::Context) -> Result<(), String> {
+        let (frame, _) = self.lit.ok_or("no lit frame")?;
+        let (into, _) = self.sourced.ok_or("no glare source")?;
+        blit(gl, frame, into, self.size, self.halved());
         Ok(())
     }
 
@@ -1948,7 +1971,7 @@ impl Buffers {
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
-        let source = self.resolved.ok_or("no resolved frame")?;
+        let (_, source) = self.sourced.ok_or("no glare source")?;
         let [(bright, kept), (merged, halo)] = self.glared.ok_or("no glare buffers")?;
         let [(first, swept), (second, spread)] = self.reached.ok_or("no glare buffers")?;
         unsafe {
@@ -1958,8 +1981,6 @@ impl Buffers {
             gl.disable(glow::BLEND);
             gl.depth_mask(false);
         }
-        // The last pass reads the frame while it writes it, so it reads the copy instead.
-        self.keep(gl)?;
         let near = self.spread();
         let far = self.reach();
         let texel = |(wide, tall): (i32, i32)| glam::Vec2::new(1.0 / wide as f32, 1.0 / tall as f32);
@@ -2892,6 +2913,7 @@ impl Drop for Buffers {
                 .into_iter()
                 .flatten()
                 .chain(self.reached.take().into_iter().flatten())
+                .chain(self.sourced.take())
                 .map(|(frame, held)| (frame, vec![held])),
         )
         {

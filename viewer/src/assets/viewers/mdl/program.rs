@@ -126,9 +126,10 @@ pub const GLARE: [&str; 7] = [
     SAMPLING_7,
 ];
 
-/// What the chain runs at, against the frame. The bright pass and the first smoothing stand at a
-/// quarter of it and the blur that spreads the halo at an eighth, which is what settles how far one
-/// reaches: the blur takes six texels of whatever it reads.
+/// What the chain runs at, against the frame. The frame is kept at half, the bright pass and the
+/// first smoothing stand at a quarter, and the blur that spreads the halo runs at an eighth, which
+/// is what settles how far one reaches: the blur takes six texels of whatever it reads.
+pub const GLARE_SOURCE: i32 = 2;
 pub const GLARE_SCALE: i32 = 4;
 pub const GLARE_SPREAD: i32 = 8;
 

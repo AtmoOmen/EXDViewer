@@ -746,6 +746,7 @@ impl Game {
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
             self.resolve(gl, painter, frame, meshes, &scene)?;
             if let Some(glare) = frame.glare.as_ref() {
+                self.buffers.source(gl)?;
                 self.buffers.glare(gl, glare, &scene)?;
             }
             if let Some(post) = frame.post.as_ref() {

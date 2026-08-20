@@ -2878,10 +2878,7 @@ impl Scene {
 
         let (light, color) = self.ambient.light();
         let blades = self.sown();
-        self.standing = blades
-            .iter()
-            .map(|held| self.turf[held.turf].blades)
-            .sum();
+        self.standing = blades.iter().map(|held| self.turf[held.turf].blades).sum();
         let frame = gpu::Frame {
             scene: program::Scene {
                 view,

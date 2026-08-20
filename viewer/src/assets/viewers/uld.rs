@@ -1394,7 +1394,7 @@ pub fn details_ui(ui: &mut egui::Ui, layout: &Rendered, deps: &mut Deps, backend
                 .show(ui, |ui| {
                     for (label, value) in &node.props {
                         ui.label(RichText::new(*label).weak());
-                        ui.label(RichText::new(value).monospace());
+                        ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                         ui.allocate_space(vec2(ui.available_width(), 0.0));
                         ui.end_row();
                     }
@@ -1409,7 +1409,7 @@ pub fn details_ui(ui: &mut egui::Ui, layout: &Rendered, deps: &mut Deps, backend
             .show(ui, |ui| {
                 for (label, value) in &layout.identity {
                     ui.label(RichText::new(*label).weak());
-                    ui.label(RichText::new(value).monospace());
+                    ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                     ui.allocate_space(vec2(ui.available_width(), 0.0));
                     ui.end_row();
                 }

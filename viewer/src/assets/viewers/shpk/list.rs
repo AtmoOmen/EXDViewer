@@ -376,7 +376,7 @@ fn tooltip(ui: &mut egui::Ui, package: &Rendered, index: usize) {
             .show(ui, |ui| {
                 for (key, value) in set {
                     ui.label(RichText::new(key).monospace().weak());
-                    ui.label(RichText::new(value).monospace());
+                    ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                     ui.end_row();
                 }
             });

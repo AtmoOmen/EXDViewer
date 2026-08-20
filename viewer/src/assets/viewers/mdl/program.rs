@@ -2609,8 +2609,17 @@ impl Buffer {
             "g_CloudShadowMatrix",
             rows(Mat4::IDENTITY, 4),
         );
-        // The lane the character resolve multiplies its environment term by, which nought erases.
+        // The weight the character resolve carries a material's own emissive into the frame's alpha
+        // at, which the glare pass reads that frame back through. It reaches no color of its own,
+        // and nought would leave a lit surface keying no halo at all.
         put(INSTANCE, "m_EnvParameter", vec![0.0, 0.0, 0.0, 1.0]);
+        // A fill light standing where the camera does, added over whatever the frame's own lighting
+        // left. The first register weighs it: a diffuse and a specular for the character path, then
+        // the pair skin takes instead. The second is the rim it draws around a silhouette, how far
+        // that rim is leant into the view, and the weight an eye reads its own reflection at.
+        put(INSTANCE, "m_CameraLight", vec![
+            0.15, 0.15, 0.15, 0.17, 0.01584, 0.9, 0.01584, 0.8,
+        ]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
@@ -3180,8 +3189,8 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        Ambient, Buffer, Exposure, FOG_PARAM, Fog, JOINT, ROW, SHADER_TYPE, SUN_PARAM, Pass, Scene,
-        Sky, Volume, ambient, joints, selector, shader_types, sun,
+        Ambient, Buffer, Exposure, FOG_PARAM, Fog, INSTANCE, JOINT, ROW, SHADER_TYPE, SUN_PARAM,
+        Pass, Scene, Sky, Volume, ambient, instance_fields, joints, selector, shader_types, sun,
     };
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -3243,6 +3252,27 @@ mod test {
                 0.000698741,
             ]
         ));
+    }
+
+    /// The instance record a character is drawn with, against the bytes a capture of the running
+    /// game held in it. Two registers of the eleven are filled here and neither reads as one field:
+    /// the camera light spans a pair, and a write cut to four floats would leave the rim at nought.
+    #[test]
+    fn the_camera_light_comes_out_as_the_game_held_it() {
+        let held = Buffer {
+            name: INSTANCE.to_owned(),
+            members: instance_fields(),
+            registers: 11,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&Scene::default(), Pass::Composite, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        assert_eq!(filled[4..8], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(filled[8..12], [0.15, 0.15, 0.15, 0.17]);
+        assert_eq!(filled[12..16], [0.01584, 0.9, 0.01584, 0.8]);
     }
 
     /// The fog reads a distance out of the depth buffer as `1 / (y * d + x)`, and everything it then

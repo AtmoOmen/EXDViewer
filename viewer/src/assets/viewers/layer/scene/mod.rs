@@ -2266,23 +2266,28 @@ impl Scene {
         }))
     }
 
-    /// The chain that spreads the bright end of the frame, translated once its four shaders have
-    /// arrived. The blur reads seven coordinates rather than one, so it is drawn with the vertex
-    /// shader the game pairs it with rather than the one every other pass here takes.
+    /// The chain that spreads the bright end of the frame, translated once its shaders have arrived.
+    /// The two smoothing passes read nine and seven coordinates rather than one, so each is drawn
+    /// with the vertex shader the game pairs it with rather than the one every other pass here takes.
     fn halo(&self) -> Option<Arc<mdl::gpu::Glare>> {
-        let Some(Package::Ready(vertex)) = self.packages.get(program::SAMPLING_7) else {
-            return None;
+        let sampled = |path: &str, vertex: &str| {
+            let Some(Package::Ready(held)) = self.packages.get(vertex) else {
+                return None;
+            };
+            let Some(Package::Ready(bytes)) = self.packages.get(path) else {
+                return None;
+            };
+            program::Program::sampling(path, bytes, held)
+                .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
         };
-        let Some(Package::Ready(bytes)) = self.packages.get(program::BLOOM_BLUR) else {
-            return None;
-        };
-        let blur = program::Program::sampling(program::BLOOM_BLUR, bytes, vertex)
-            .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::BLOOM_BLUR))
-            .ok()?;
         Some(Arc::new(mdl::gpu::Glare {
             bright: self.effect(program::BRIGHT_PASS, program::POST_VERTEX)?,
-            blur: Arc::new(blur),
+            gauss: sampled(program::GAUSS_BLUR, program::SAMPLING_9)?,
+            blur: sampled(program::BLOOM_BLUR, program::SAMPLING_7)?,
             merge: self.effect(program::GLARE_MERGE, program::POST_VERTEX)?,
+            composite: self.effect(program::GLARE_COMPOSITE, program::POST_VERTEX)?,
         }))
     }
 
@@ -2902,6 +2907,7 @@ impl Scene {
                     .clouds()
                     .map_or_else(program::Cloud::default, |held| held.scene),
                 shaft: self.ambient.shafts().unwrap_or_default(),
+                bloom: self.ambient.bloom().unwrap_or_default(),
                 look: self.look,
                 clock: self.clock / TICKS,
                 wind: self.ambient.wind().unwrap_or(program::Wind {

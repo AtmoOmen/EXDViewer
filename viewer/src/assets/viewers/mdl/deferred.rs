@@ -170,10 +170,11 @@ const SHADE: usize = 21;
 const SCATTER: usize = 22;
 const SUN: usize = 23;
 const MOON: usize = 24;
-/// The glare chain: the bright pass, the blur, and the merge. Both halves of the blur share a slot,
-/// since they are one program run twice.
+/// The glare chain: the bright pass, a smoothing at each of its two levels, the blur, the merge and
+/// the pass that adds the halo back. Both halves of the blur share a slot, since they are one
+/// program run twice, and so do the two smoothings.
 const GLARE: usize = 25;
-const VIGNETTE: usize = 28;
+const VIGNETTE: usize = 30;
 
 /// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
 /// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
@@ -523,8 +524,10 @@ pub struct Exposure {
 /// The chain that spreads the bright end of the frame into a halo, in the order it runs.
 pub struct Glare {
     pub bright: std::sync::Arc<program::Program>,
+    pub gauss: std::sync::Arc<program::Program>,
     pub blur: std::sync::Arc<program::Program>,
     pub merge: std::sync::Arc<program::Program>,
+    pub composite: std::sync::Arc<program::Program>,
 }
 
 /// The chain that works out how much of the sky reaches each pixel, in the order it runs.
@@ -596,10 +599,11 @@ pub struct Buffers {
     scaled: Option<(glow::Framebuffer, glow::Texture)>,
     gathered: Option<(glow::Framebuffer, [glow::Texture; 2])>,
     occluded: Option<(glow::Framebuffer, glow::Texture)>,
-    /// The glare chain's own pair, at a fraction of the frame. Two rather than one because each half
-    /// of the blur reads what the other wrote, and filtered because the blur addresses between texels
-    /// and the merge reads the pair back over the whole frame.
+    /// The glare chain's own levels, a quarter of the frame and an eighth. A pair at each because
+    /// every pass of the chain reads what the one before it wrote, and filtered because the taps
+    /// address between texels and the last of them is read back over the whole frame.
     glared: Option<[(glow::Framebuffer, glow::Texture); 2]>,
+    reached: Option<[(glow::Framebuffer, glow::Texture); 2]>,
     /// Whether that chain ran this frame. Every pass reads the flat stand-in until it has, and again
     /// from the frame the viewer stops asking for it.
     occluding: bool,
@@ -916,6 +920,7 @@ impl Buffers {
                 .map(|(_, frame, held)| (frame, held))
                 .chain(self.adapted.take().into_iter().flatten())
                 .chain(self.glared.take().into_iter().flatten())
+                .chain(self.reached.take().into_iter().flatten())
                 .map(|(frame, held)| (frame, vec![held])),
         )
         {
@@ -1066,18 +1071,21 @@ impl Buffers {
             smooth(gl, occluded);
             self.occluded = Some((frame_of(gl, &[occluded], None)?, occluded));
 
-            let held = self.spread();
-            let glared = [
-                plane(gl, held, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
-                plane(gl, held, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
-            ];
-            for held in glared {
-                smooth(gl, held);
-            }
-            self.glared = Some([
-                (frame_of(gl, &glared[..1], None)?, glared[0]),
-                (frame_of(gl, &glared[1..], None)?, glared[1]),
-            ]);
+            let level = |size| {
+                let pair = [
+                    plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
+                    plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?,
+                ];
+                for held in pair {
+                    smooth(gl, held);
+                }
+                Ok::<_, String>([
+                    (frame_of(gl, &pair[..1], None)?, pair[0]),
+                    (frame_of(gl, &pair[1..], None)?, pair[1]),
+                ])
+            };
+            self.glared = Some(level(self.spread())?);
+            self.reached = Some(level(self.reach())?);
 
             // One channel at whole-float width: what the halving accumulates is the reciprocal of a
             // luminance, which runs far past what a byte or a half holds once a pixel is dark.
@@ -1136,10 +1144,15 @@ impl Buffers {
         ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
     }
 
-    /// What the glare chain draws into, which is the frame taken down by the factor the blur's own
-    /// reach is stated in texels of.
+    /// The two levels the glare chain draws into: where the frame's bright end is kept and smoothed,
+    /// and where the blur that spreads it runs.
     fn spread(&self) -> (i32, i32) {
         let held = program::GLARE_SCALE;
+        ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
+    }
+
+    fn reach(&self) -> (i32, i32) {
+        let held = program::GLARE_SPREAD;
         ((self.size.0 / held).max(1), (self.size.1 / held).max(1))
     }
 
@@ -1918,12 +1931,13 @@ impl Buffers {
         Ok(())
     }
 
-    /// The bright end of the frame spread into a halo and laid back over it.
+    /// The bright end of the frame spread into a halo and added back to it.
     ///
-    /// Four passes: the share of each pixel the composite marked as glare, kept where it is bright
-    /// enough to count, then that smoothed along each axis in turn, then the two put together. The
-    /// middle three run at a fraction of the frame, which is what settles how far a halo reaches:
-    /// the blur's own taps are six texels of whatever it reads.
+    /// Seven passes: the share of each pixel the composite marked as glare, kept where it is bright
+    /// enough to count and taken down to a quarter of the frame; that smoothed; halved again; that
+    /// smoothed; spread along each axis in turn; shaped; and added to the frame. How far a halo
+    /// reaches follows the level the spreading runs at, since its taps are six texels of what it
+    /// reads.
     ///
     /// Ahead of the exposure and the grading, since a halo belongs to the frame the lighting left
     /// rather than to what a curve made of it.
@@ -1935,7 +1949,8 @@ impl Buffers {
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
         let source = self.resolved.ok_or("no resolved frame")?;
-        let [(into, halo), (sideways, swept)] = self.glared.ok_or("no glare buffers")?;
+        let [(bright, kept), (merged, halo)] = self.glared.ok_or("no glare buffers")?;
+        let [(first, swept), (second, spread)] = self.reached.ok_or("no glare buffers")?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
@@ -1943,58 +1958,91 @@ impl Buffers {
             gl.disable(glow::BLEND);
             gl.depth_mask(false);
         }
-        // Both the first pass and the last read the frame while the last writes it, so the copy is
-        // taken once here and both read that.
+        // The last pass reads the frame while it writes it, so it reads the copy instead.
         self.keep(gl)?;
-        let size = self.spread();
+        let near = self.spread();
+        let far = self.reach();
+        let texel = |(wide, tall): (i32, i32)| glam::Vec2::new(1.0 / wide as f32, 1.0 / tall as f32);
         self.pass(
             gl,
             GLARE,
             &held.bright,
-            into,
+            bright,
             scene,
             Over::Glaring(
-                size,
+                near,
                 Glared {
                     input: source,
                     merge: None,
                 },
             ),
         )?;
+        let smoothing = program::Scene {
+            blur: program::Blur::Square(texel(near)),
+            ..scene.clone()
+        };
+        self.pass(
+            gl,
+            GLARE + 1,
+            &held.gauss,
+            merged,
+            &smoothing,
+            Over::Blurring(near, kept),
+        )?;
+        // The level below, which the game copies down with a pass of its own.
+        blit(gl, merged, second, near, far);
+        let smoothing = program::Scene {
+            blur: program::Blur::Square(texel(far)),
+            ..scene.clone()
+        };
+        self.pass(
+            gl,
+            GLARE + 1,
+            &held.gauss,
+            first,
+            &smoothing,
+            Over::Blurring(far, spread),
+        )?;
         // A tap of the blur is stated in texels of what it reads, and each half reads the target the
         // other wrote, so the step is the same for both and only its direction differs.
-        let texel = glam::Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32);
-        for (frame, read, step) in [
-            (sideways, halo, glam::Vec2::new(texel.x, 0.0)),
-            (into, swept, glam::Vec2::new(0.0, texel.y)),
+        let step = texel(far);
+        for (frame, read, along) in [
+            (second, swept, glam::Vec2::new(step.x, 0.0)),
+            (first, spread, glam::Vec2::new(0.0, step.y)),
         ] {
             let scene = program::Scene {
-                blur: step,
+                blur: program::Blur::Along(along),
                 ..scene.clone()
             };
-            self.pass(
-                gl,
-                GLARE + 1,
-                &held.blur,
-                frame,
-                &scene,
-                Over::Blurring(size, read),
-            )?;
+            self.pass(gl, GLARE + 2, &held.blur, frame, &scene, Over::Blurring(far, read))?;
         }
         self.pass(
             gl,
-            GLARE + 2,
+            GLARE + 3,
             &held.merge,
-            lit,
+            merged,
             scene,
             Over::Glaring(
-                self.size,
+                near,
                 Glared {
-                    input: source,
-                    merge: Some(halo),
+                    input: swept,
+                    merge: Some(kept),
                 },
             ),
-        )
+        )?;
+        // The halo's own alpha is nought, which is what makes this add rather than cover.
+        unsafe {
+            gl.enable(glow::BLEND);
+            gl.blend_func_separate(
+                glow::ONE,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ZERO,
+                glow::ZERO,
+            );
+        }
+        let drawn = self.pass(gl, GLARE + 4, &held.composite, lit, scene, Over::Reading(halo));
+        unsafe { gl.disable(glow::BLEND) };
+        drawn
     }
 
     /// The frame with its edges smoothed, which is the last thing the graph does to it.
@@ -2843,6 +2891,7 @@ impl Drop for Buffers {
                 .take()
                 .into_iter()
                 .flatten()
+                .chain(self.reached.take().into_iter().flatten())
                 .map(|(frame, held)| (frame, vec![held])),
         )
         {
@@ -2957,6 +3006,35 @@ fn smooth(gl: &glow::Context, texture: glow::Texture) {
         for name in [glow::TEXTURE_MIN_FILTER, glow::TEXTURE_MAG_FILTER] {
             gl.tex_parameter_i32(glow::TEXTURE_2D, name, glow::LINEAR as i32);
         }
+    }
+}
+
+/// The whole of one buffer onto the whole of another, filtered where the two differ in size.
+fn blit(
+    gl: &glow::Context,
+    from: glow::Framebuffer,
+    into: glow::Framebuffer,
+    (wide, tall): (i32, i32),
+    (across, down): (i32, i32),
+) {
+    unsafe {
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
+        gl.read_buffer(glow::COLOR_ATTACHMENT0);
+        gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(into));
+        gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+        gl.blit_framebuffer(
+            0,
+            0,
+            wide,
+            tall,
+            0,
+            0,
+            across,
+            down,
+            glow::COLOR_BUFFER_BIT,
+            glow::LINEAR,
+        );
+        gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
     }
 }
 

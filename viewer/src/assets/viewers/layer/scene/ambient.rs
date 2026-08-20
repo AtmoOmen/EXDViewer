@@ -41,6 +41,7 @@ const CLOUDS: u32 = 2;
 const STARFIELD: u32 = 12;
 const WIND: u32 = 6;
 const LIGHT_SHAFT: u32 = 7;
+const WETNESS: u32 = 8;
 const TONE_MAPPING: u32 = 9;
 const VERTICAL_FOG: u32 = 13;
 
@@ -400,6 +401,17 @@ impl Ambient {
             shoulder: scalar(held, "tone_map_parameter_y", 0.0),
             step,
             ..Default::default()
+        })
+    }
+
+    /// What share of a surface the composite counts as glare, which is what the bright pass weighs a
+    /// pixel by. The engine takes both out of the wetness set, whose first two lanes reach
+    /// `g_CommonParameter.m_Misc` unchanged: three frames measured reproduce from them exactly.
+    pub fn bloom(&self) -> Option<program::Bloom> {
+        let held = self.keyframes(WETNESS)?;
+        Some(program::Bloom {
+            specular: scalar(held, "world_wetness_parameter_0", 0.0),
+            emissive: scalar(held, "world_wetness_parameter_1", 0.0),
         })
     }
 

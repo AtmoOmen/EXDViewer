@@ -3343,8 +3343,11 @@ impl Scene {
                         "Blended surfaces",
                         format!(
                             "{} of {} translated",
-                            self.translated.values().filter(|held| held.resolve.is_some()).count(),
-                            self.translated.len()
+                            self.translated
+                                .iter()
+                                .filter(|((_, waving), held)| !waving && held.resolve.is_some())
+                                .count(),
+                            self.translated.keys().filter(|(_, waving)| !waving).count()
                         ),
                     ),
                     (

@@ -2169,6 +2169,9 @@ impl Rendered {
             .unwrap_or_default();
         if !held.is_empty() && self.lighting.borrow().is_some() {
             held.push((gpu::LIT, "Lit".to_owned()));
+            if self.look.get().reflect {
+                held.push((deferred::REFLECTED, "Reflection".to_owned()));
+            }
         }
         held
     }
@@ -2309,22 +2312,23 @@ impl Rendered {
             Some(Package::Ready(bytes)) => Some(bytes),
             _ => None,
         };
-        let held = |path: &str| {
-            program::Program::sampling(path, ready(path)?, ready(program::REFLECTION_VERTEX)?)
+        let held = |path: &str, vertex: &str| {
+            program::Program::sampling(path, ready(path)?, ready(vertex)?)
                 .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
                 .ok()
                 .map(Arc::new)
         };
+        let read = |path: &str| held(path, program::REFLECTION_VERTEX);
         let built = gpu::Reflection {
-            normal: held(program::REFLECTION_NORMAL)?,
-            mask: held(program::REFLECTION_MASK)?,
-            march: held(program::REFLECTION_MARCH)?,
+            normal: read(program::REFLECTION_NORMAL)?,
+            mask: read(program::REFLECTION_MASK)?,
+            march: read(program::REFLECTION_MARCH)?,
             blur: [
-                held(program::REFLECTION_BLUR_X)?,
-                held(program::REFLECTION_BLUR_Y)?,
+                read(program::REFLECTION_BLUR_X)?,
+                read(program::REFLECTION_BLUR_Y)?,
             ],
-            distort: held(program::REFLECTION_DISTORT)?,
-            copy: held(program::REFLECTION_COPY)?,
+            distort: read(program::REFLECTION_DISTORT)?,
+            copy: held(program::REFLECTION_COPY, program::REFLECTION_MERGE_VERTEX)?,
         };
         drop(packages);
         let built = Arc::new(built);

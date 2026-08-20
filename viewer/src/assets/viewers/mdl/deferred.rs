@@ -221,6 +221,10 @@ const OVERHEAD_SCALE: i32 = 4;
 pub const TARGETS: usize = 5;
 pub const LIT: usize = TARGETS;
 
+/// The channel past that: what the reflection chain resolved, before the copy laid it back over the
+/// frame. Read as data rather than looked at, the way a raw channel is.
+pub const REFLECTED: usize = LIT + 1;
+
 /// The channel the fur pass softens. It squares what it reads and takes the root of what it writes,
 /// and the surface color is the one channel a drawing package gamma-encodes; the package asks for it
 /// by a name every package that shades a surface gives the channel after it.
@@ -792,9 +796,10 @@ impl Buffers {
     /// What a viewer puts on screen: one channel of the G-buffer, or the frame the composite
     /// resolved past the last of them.
     fn channel(&self, at: usize) -> Option<glow::Texture> {
-        match at >= TARGETS {
-            true => self.lit.map(|(_, texture)| texture),
-            false => self.color.get(at).copied(),
+        match at {
+            REFLECTED => self.mirrored.as_ref().map(|held| held.chain[1].0),
+            LIT => self.lit.map(|(_, texture)| texture),
+            _ => self.color.get(at).copied(),
         }
     }
 
@@ -852,10 +857,10 @@ impl Buffers {
             sampler(gl, program, "u_frame", 0, texture);
             sampler(gl, program, "u_depth", 1, depth);
             if let Some(location) = gl.get_uniform_location(program, "u_tone") {
-                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && !self.toned));
+                gl.uniform_1_i32(Some(&location), i32::from(at == LIT && !self.toned));
             }
             if let Some(location) = gl.get_uniform_location(program, "u_cover") {
-                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && self.covered));
+                gl.uniform_1_i32(Some(&location), i32::from(at == LIT && self.covered));
             }
             gl.bind_vertex_array(Some(layout));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -2169,55 +2174,62 @@ impl Buffers {
         let depth = self.depth.ok_or("no depth buffer")?;
         let layout = self.screen(gl)?;
         let (near, far) = scene.planes();
+        let frame = self.size;
         let held = self.mirrors(gl)?;
         let (texture, frames) = held.depth.clone();
         let size = held.size;
         unsafe {
             gl.use_program(Some(program));
             gl.bind_vertex_array(Some(layout));
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.active_texture(glow::TEXTURE0);
         }
-        for (level, frame) in frames.iter().enumerate() {
-            let (width, height) = match level {
-                0 => self.size,
+        let uniform = |name: &str| unsafe { gl.get_uniform_location(program, name) };
+        for (level, into) in frames.iter().enumerate() {
+            let source = match level {
+                0 => frame,
                 _ => (
                     (size.0 >> (level - 1)).max(1),
                     (size.1 >> (level - 1)).max(1),
                 ),
             };
             unsafe {
-                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*frame));
-                gl.viewport(0, 0, (size.0 >> level).max(1), (size.1 >> level).max(1));
-                if let Some(at) = gl.get_uniform_location(program, "u_texel") {
-                    gl.uniform_2_f32(Some(&at), 1.0 / width as f32, 1.0 / height as f32);
+                // The level read is cut down to before the level written is attached: a texture
+                // whose sampled levels include the one under the pen is a draw the card rejects.
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                for name in [glow::TEXTURE_BASE_LEVEL, glow::TEXTURE_MAX_LEVEL] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, name, level.saturating_sub(1) as i32);
                 }
-                if let Some(at) = gl.get_uniform_location(program, "u_level") {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*into));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.viewport(0, 0, (size.0 >> level).max(1), (size.1 >> level).max(1));
+                if let Some(at) = uniform("u_texel") {
+                    gl.uniform_2_f32(Some(&at), 1.0 / source.0 as f32, 1.0 / source.1 as f32);
+                }
+                if let Some(at) = uniform("u_level") {
                     gl.uniform_1_f32(Some(&at), level.saturating_sub(1) as f32);
                 }
-                if let Some(at) = gl.get_uniform_location(program, "u_range") {
+                if let Some(at) = uniform("u_range") {
                     gl.uniform_1_f32(Some(&at), (far - near) / far.max(f32::EPSILON));
                 }
-                if let Some(at) = gl.get_uniform_location(program, "u_first") {
+                if let Some(at) = uniform("u_first") {
                     gl.uniform_1_i32(Some(&at), i32::from(level == 0));
                 }
-                sampler(gl, program, "u_source", 0, if level == 0 { depth } else { texture });
-                // The level being written is not the level being read, and a sampler answering with
-                // the one under the pen is what the card rejects the draw for.
-                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
-                gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_BASE_LEVEL,
-                    level.saturating_sub(1) as i32,
-                );
-                gl.tex_parameter_i32(
-                    glow::TEXTURE_2D,
-                    glow::TEXTURE_MAX_LEVEL,
-                    level.saturating_sub(1) as i32,
+                sampler(
+                    gl,
+                    program,
+                    "u_source",
+                    0,
+                    match level {
+                        0 => depth,
+                        _ => texture,
+                    },
                 );
                 gl.draw_arrays(glow::TRIANGLES, 0, 3);
             }
         }
         unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
             gl.bind_vertex_array(None);
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
@@ -2350,7 +2362,7 @@ impl Buffers {
         unsafe {
             gl.enable(glow::BLEND);
             gl.blend_equation(glow::FUNC_ADD);
-            gl.blend_func(glow::SRC_COLOR, glow::ONE);
+            gl.blend_func_separate(glow::SRC_COLOR, glow::ONE, glow::ZERO, glow::ONE);
         }
         let drawn = self.pass(
             gl,

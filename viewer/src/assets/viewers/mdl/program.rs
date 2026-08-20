@@ -269,6 +269,9 @@ pub fn unnamed(path: &str) -> Option<u64> {
 /// `ReflectionBlurYPS.shcd` is three of those hashes, so those three have their names back.
 pub const REFLECTION_DIRECTORY: &str = "shader/sm5/shcd";
 pub const REFLECTION_VERTEX: &str = "shader/sm5/shcd/ReflectionVS.shcd";
+/// The same without the half-texel the rest of the chain reads at, which is what the copy back over
+/// the frame is drawn with.
+pub const REFLECTION_MERGE_VERTEX: &str = "shader/sm5/shcd/ReflectionMergeVS.shcd";
 pub const REFLECTION_NORMAL: &str = "shader/sm5/shcd/38611e75";
 pub const REFLECTION_MASK: &str = "shader/sm5/shcd/ReflectionMaskPS.shcd";
 pub const REFLECTION_MARCH: &str = "shader/sm5/shcd/621a822b";
@@ -278,8 +281,9 @@ pub const REFLECTION_DISTORT: &str = "shader/sm5/shcd/c137698f";
 pub const REFLECTION_COPY: &str = "shader/sm5/shcd/ReflectionCopyPS.shcd";
 
 /// Every file the chain takes, for one fetch list.
-pub const REFLECTION: [&str; 8] = [
+pub const REFLECTION: [&str; 9] = [
     REFLECTION_VERTEX,
+    REFLECTION_MERGE_VERTEX,
     REFLECTION_NORMAL,
     REFLECTION_MASK,
     REFLECTION_MARCH,
@@ -1835,6 +1839,18 @@ impl Program {
     /// grades one saturates what it reads before it reads its table. The path is taken because two
     /// members read the same buffer as different things.
     pub fn posteffect(path: &str, bytes: &[u8], vertex: &str) -> Result<Self, String> {
+        Self::effect(path, bytes, vertex, &HashMap::new())
+    }
+
+    /// The same, where the stage it is drawn with declares blocks of its own: GLSL links a block by
+    /// name and rejects a pair whose two spellings of one differ, so each stage is written at the
+    /// extent both of them reach.
+    fn effect(
+        path: &str,
+        bytes: &[u8],
+        vertex: &str,
+        shared: &HashMap<String, u32>,
+    ) -> Result<Self, String> {
         let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
         let blob = bytes
             .get(code.blob_offset()..code.blob_offset() + code.blob_size())
@@ -1869,7 +1885,11 @@ impl Program {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let extents = hlsl::glsl::extents(&fragment, &names);
+        let mut extents = hlsl::glsl::extents(&fragment, &names);
+        for (name, registers) in shared {
+            let held = extents.entry(name.clone()).or_default();
+            *held = (*held).max(*registers);
+        }
         let options = hlsl::glsl::Options {
             targets: outputs.clone(),
             extents: extents.clone(),
@@ -1945,15 +1965,7 @@ impl Program {
         }
         signatures(blob, &mut names);
         let extents = hlsl::glsl::extents(&program, &names);
-        let options = hlsl::glsl::Options {
-            targets: Vec::new(),
-            extents: extents.clone(),
-        };
-        let source = hlsl::glsl(&program, &names, hlsl::Reading::Plain, &options)
-            .lines
-            .join("\n");
-
-        let mut held = Self::posteffect(path, bytes, &source)?;
+        let mut held = Self::effect(path, bytes, "", &extents)?;
         for (name, registers) in extents {
             match held.buffers.iter_mut().find(|buffer| buffer.name == name) {
                 Some(buffer) => buffer.registers = buffer.registers.max(registers),
@@ -1965,6 +1977,23 @@ impl Program {
                 }),
             }
         }
+        // Written again now the fragment's own blocks are known: the two stages have to spell a
+        // block at the same extent for the program to link.
+        held.vertex = hlsl::glsl(
+            &program,
+            &names,
+            hlsl::Reading::Plain,
+            &hlsl::glsl::Options {
+                targets: Vec::new(),
+                extents: held
+                    .buffers
+                    .iter()
+                    .map(|buffer| (buffer.name.clone(), buffer.registers))
+                    .collect(),
+            },
+        )
+        .lines
+        .join("\n");
         Ok(held)
     }
 

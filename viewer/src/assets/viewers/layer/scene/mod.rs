@@ -544,6 +544,7 @@ pub struct Scene {
     occlusion: Option<Arc<mdl::gpu::Occlusion>>,
     /// The one that darkens its corners, and what the passes past the composite are run with.
     vignette: Option<Arc<program::Program>>,
+    reflection: Option<Arc<mdl::deferred::Reflection>>,
     look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
@@ -746,6 +747,7 @@ impl Scene {
             smoothing: None,
             occlusion: None,
             vignette: None,
+            reflection: None,
             look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
@@ -1955,6 +1957,7 @@ impl Scene {
             wanted.extend(program::MEASURE.map(str::to_owned));
         }
         wanted.extend(program::GLARE.map(str::to_owned));
+        wanted.extend(program::REFLECTION.map(str::to_owned));
         wanted.extend([
             program::FXAA_LUMA.to_owned(),
             program::FXAA.to_owned(),
@@ -2239,6 +2242,33 @@ impl Scene {
             .map(Arc::new)
     }
 
+    /// The chain that reflects the frame off itself, translated once its nine shaders have arrived.
+    /// Every member is drawn with the vertex shader the game pairs it with.
+    fn mirror(&self) -> Option<Arc<mdl::deferred::Reflection>> {
+        let ready = |path: &str| match self.packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let held = |path: &str, vertex: &str| {
+            program::Program::sampling(path, ready(path)?, ready(vertex)?)
+                .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let read = |path: &str| held(path, program::REFLECTION_VERTEX);
+        Some(Arc::new(mdl::deferred::Reflection {
+            normal: read(program::REFLECTION_NORMAL)?,
+            mask: read(program::REFLECTION_MASK)?,
+            march: read(program::REFLECTION_MARCH)?,
+            blur: [
+                read(program::REFLECTION_BLUR_X)?,
+                read(program::REFLECTION_BLUR_Y)?,
+            ],
+            distort: read(program::REFLECTION_DISTORT)?,
+            copy: held(program::REFLECTION_COPY, program::REFLECTION_MERGE_VERTEX)?,
+        }))
+    }
+
     /// The pair that smooths the frame's edges, and the three that work out how much sky reaches
     /// each pixel, each translated once all of its own shaders have arrived.
     fn edges(&self) -> Option<Arc<mdl::gpu::Smoothing>> {
@@ -2440,6 +2470,9 @@ impl Scene {
         }
         if self.glare.is_none() {
             self.glare = self.halo();
+        }
+        if self.reflection.is_none() {
+            self.reflection = self.mirror();
         }
         if self.smoothing.is_none() {
             self.smoothing = self.edges();
@@ -2915,6 +2948,7 @@ impl Scene {
             smoothing: self.smoothing.clone(),
             occlusion: self.occlusion.clone(),
             vignette: self.look.vignette.then(|| self.vignette.clone()).flatten(),
+            reflection: self.look.reflect.then(|| self.reflection.clone()).flatten(),
             lamps: self.lamps(),
             batches,
             grass: self.sward.clone(),

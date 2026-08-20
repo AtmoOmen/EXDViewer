@@ -691,6 +691,22 @@ fn bulk(points: &[Vec3]) -> (Vec3, f32) {
     (center, reach)
 }
 
+/// How far along the ray a sphere is first met, or nought where the ray starts inside it.
+fn pierced(from: Vec3, along: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let toward = center - from;
+    let ahead = toward.dot(along);
+    let off = toward.length_squared() - ahead * ahead;
+    if off > radius * radius {
+        return None;
+    }
+    let reach = (radius * radius - off).sqrt();
+    match ahead - reach {
+        held if held >= 0.0 => Some(held),
+        _ if ahead + reach >= 0.0 => Some(0.0),
+        _ => None,
+    }
+}
+
 fn looking_at(center: Vec3, reach: f32) -> Camera {
     let back = reach * MARGIN;
     let position = center + Vec3::new(0.0, back * 0.45, -back);
@@ -1410,7 +1426,7 @@ impl Scene {
     /// The nearest placement the ray runs through, out of the ones the frame is drawing.
     fn under(&self, from: Vec3, along: Vec3) -> Option<usize> {
         let eye = self.camera.position;
-        let mut found: Option<(f32, usize)> = None;
+        let mut found: Option<((f32, f32), usize)> = None;
         for (at, placement) in self.placements.iter().enumerate() {
             if !self.layers[placement.layer].shown {
                 continue;
@@ -1420,22 +1436,14 @@ impl Scene {
                 continue;
             }
             let center = self.posed(placement).transform_point3(Vec3::ZERO);
-            let toward = center - from;
-            let ahead = toward.dot(along);
-            let off = toward.length_squared() - ahead * ahead;
-            let radius = placement.radius.max(0.01);
-            if off > radius * radius {
+            let Some(hit) = pierced(from, along, center, placement.radius.max(0.01)) else {
                 continue;
-            }
-            // The near root, or the eye's own depth where the ray starts inside the sphere.
-            let reach = (radius * radius - off).sqrt();
-            let hit = match ahead - reach {
-                held if held >= 0.0 => held,
-                _ if ahead + reach >= 0.0 => 0.0,
-                _ => continue,
             };
-            if found.is_none_or(|(held, _)| hit < held) {
-                found = Some((hit, at));
+            // Everything the eye stands inside is met at nought, so the tighter of them wins
+            // rather than whichever the file placed first.
+            let key = (hit, (center - from).length());
+            if found.is_none_or(|(held, _)| key < held) {
+                found = Some((key, at));
             }
         }
         found.map(|(_, at)| at)
@@ -3729,5 +3737,16 @@ mod tests {
         assert_eq!(level([true, true, true], 0.5), Some(0));
         assert_eq!(level([true, true, true], 0.0001), Some(2));
         assert_eq!(level([false, false, false], 0.5), None);
+    }
+
+    #[test]
+    fn a_ray_meets_the_near_side_of_a_sphere() {
+        let along = Vec3::NEG_Z;
+        let ahead = Vec3::new(0.0, 0.0, -10.0);
+        assert_eq!(pierced(Vec3::ZERO, along, ahead, 1.0), Some(9.0));
+        assert_eq!(pierced(Vec3::ZERO, along, ahead, 2.0), Some(8.0));
+        assert_eq!(pierced(Vec3::ZERO, along, Vec3::new(0.0, 0.0, 10.0), 1.0), None);
+        assert_eq!(pierced(Vec3::ZERO, along, Vec3::new(5.0, 0.0, -10.0), 1.0), None);
+        assert_eq!(pierced(Vec3::ZERO, along, Vec3::new(0.0, 0.0, -1.0), 5.0), Some(0.0));
     }
 }

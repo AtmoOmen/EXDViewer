@@ -277,7 +277,7 @@ pub const REFLECTION_MASK: &str = "shader/sm5/shcd/ReflectionMaskPS.shcd";
 pub const REFLECTION_MARCH: &str = "shader/sm5/shcd/621a822b";
 pub const REFLECTION_BLUR_X: &str = "shader/sm5/shcd/65887e77";
 pub const REFLECTION_BLUR_Y: &str = "shader/sm5/shcd/a9227ee9";
-pub const REFLECTION_DISTORT: &str = "shader/sm5/shcd/c137698f";
+pub const REFLECTION_DISTORT: &str = "shader/sm5/shcd/ReflectionDistortionPS.shcd";
 pub const REFLECTION_COPY: &str = "shader/sm5/shcd/ReflectionCopyPS.shcd";
 
 /// Every file the chain takes, for one fetch list.

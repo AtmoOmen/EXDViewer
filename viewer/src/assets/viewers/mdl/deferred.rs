@@ -3149,12 +3149,12 @@ impl Buffers {
             return;
         };
         for (at, buffer) in held.buffers.iter().enumerate() {
-            let Some(&(block, size)) = self.blocks.get(at) else {
-                continue;
-            };
-            if buffer.name != program::LIGHT || size == 0 {
+            if buffer.name != program::LIGHT {
                 continue;
             }
+            let Some(&(block, size)) = self.blocks.get(at).filter(|held| held.1 != 0) else {
+                continue;
+            };
             let mut data = buffer.fill(scene, held.pass, &[]);
             data.resize(size, 0);
             unsafe {

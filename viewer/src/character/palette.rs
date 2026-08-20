@@ -20,7 +20,7 @@ pub const COLUMNS: usize = 8;
 /// A palette the creator picks from: what the shader is given, and what the player is shown.
 #[derive(Default)]
 pub struct Swatches {
-    shaded: Vec<[f32; 4]>,
+    held: Vec<[f32; 4]>,
     shown: Vec<Color32>,
 }
 
@@ -30,8 +30,17 @@ impl Swatches {
         self.shown.get(index).copied()
     }
 
+    /// The colour a shader is given, which every buffer but the decal's takes squared. The fourth
+    /// lane is not a colour and passes through either way: a lip's own opacity goes in as the file
+    /// states it, byte for byte.
     pub fn shaded(&self, index: usize) -> [f32; 4] {
-        self.shaded.get(index).copied().unwrap_or([1.0; 4])
+        let [red, green, blue, weight] = self.plain(index);
+        [red * red, green * green, blue * blue, weight]
+    }
+
+    /// The swatch as the file holds it, which is what the decal buffer takes.
+    pub fn plain(&self, index: usize) -> [f32; 4] {
+        self.held.get(index).copied().unwrap_or([1.0; 4])
     }
 }
 
@@ -88,9 +97,9 @@ impl Made {
     }
 }
 
-fn pair(shaded: &[cmp::Color], shown: &[cmp::Color]) -> Swatches {
+fn pair(held: &[cmp::Color], shown: &[cmp::Color]) -> Swatches {
     Swatches {
-        shaded: shaded.iter().map(lanes).collect(),
+        held: held.iter().map(lanes).collect(),
         shown: shown.iter().map(color).collect(),
     }
 }
@@ -102,7 +111,7 @@ fn halves(
     pick: fn(&cmp::ColorParameters, usize) -> Option<cmp::Color>,
 ) -> Swatches {
     Swatches {
-        shaded: (0..256)
+        held: (0..256)
             .filter_map(|at| pick(shaded, at))
             .map(|held| lanes(&held))
             .collect(),
@@ -113,15 +122,14 @@ fn halves(
     }
 }
 
-/// The shaders take a colour squared, which is what the game itself writes into their buffer. The
-/// fourth lane is not a colour and is passed as it is: it is a lip's own opacity.
+/// A swatch as the file holds it, each channel over the range it is stated in.
 fn lanes(held: &cmp::Color) -> [f32; 4] {
-    let squared = |channel: u8| (f32::from(channel) / 255.0).powi(2);
+    let over = |channel: u8| f32::from(channel) / 255.0;
     [
-        squared(held.red()),
-        squared(held.green()),
-        squared(held.blue()),
-        f32::from(held.alpha()) / 255.0,
+        over(held.red()),
+        over(held.green()),
+        over(held.blue()),
+        over(held.alpha()),
     ]
 }
 

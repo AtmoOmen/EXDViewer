@@ -58,6 +58,7 @@ const HAIR_COLOR: u32 = 10;
 const FEATURES: u32 = 12;
 const TATTOO_COLOR: u32 = 13;
 const LIP_COLOR: u32 = 20;
+const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
 const MUSCLE_TONE: u32 = 21;
@@ -622,9 +623,26 @@ impl CharacterBuilder {
                     let [red, green, blue, _] = palettes.features.shaded(at);
                     customize.option = [red, green, blue];
                 }
+                // The decal buffer takes its colour as the file holds it rather than squared, and
+                // the swatch's own last lane is the weight the paint is worn at.
+                if menu.customize == FACE_PAINT_COLOR {
+                    customize.decal = palettes.face_paint.plain(at);
+                }
             }
             // Only the lane, since the muscle tone menu comes before the skin colour that would
             // otherwise write over what it left.
+            // An icon menu holds what it was left at as the number the file tree files the set
+            // under, and nought is the empty box a face wearing no paint is offered under.
+            if menu.customize == FACE_PAINT {
+                let held = match self.choices.get(&FACE_PAINT) {
+                    Some(id) => *id as u16,
+                    None => {
+                        self.choice_of(menu, menu.init.min(menu.count.saturating_sub(1)))
+                            .id
+                    }
+                };
+                customize.paint = (held > 0).then_some(held);
+            }
             if menu.customize == MUSCLE_TONE {
                 let last = menu.count.saturating_sub(1).max(1) as usize;
                 tone = at.min(last) as f32 / last as f32;
@@ -660,6 +678,9 @@ impl CharacterBuilder {
             }
         }
         customize.skin[3] = tone;
+        if customize.paint.is_none() {
+            customize.decal[3] = 0.0;
+        }
         // Lip colour carries its own opacity, and the creator's own box is what it is worn at all.
         if !self.ticked(LIPSTICK) {
             customize.lip[3] = 0.0;

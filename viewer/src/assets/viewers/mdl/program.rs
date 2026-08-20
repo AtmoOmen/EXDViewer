@@ -480,6 +480,10 @@ const INSTANCING: &str = "g_InstancingData";
 /// The buffer holding what the engine decides per object rather than per material.
 const INSTANCE: &str = "g_InstanceParameter";
 
+/// What the decal a face paint is drawn through is tinted with. One register named after itself,
+/// which a reflection describes as a bare array and hands no fields for a write to land in.
+const DECAL: &str = "g_DecalColor";
+
 /// Its fields, as every package that reads one by name declares them. `iris.shpk` picks its record
 /// out by which eye a vertex belongs to, and a reflection describes a buffer indexed that way as one
 /// bare array, so the names have to come from somewhere for a fill to reach it at all.
@@ -494,6 +498,15 @@ const INSTANCE_FIELDS: [(&str, u32); 9] = [
     ("m_Param", 16),
     ("m_HeadUpVector", 16),
 ];
+
+fn decal_field() -> Vec<hlsl::layout::Member> {
+    vec![hlsl::layout::Member {
+        name: DECAL.to_owned(),
+        offset: 0,
+        size: 16,
+        kind: "float4".to_owned(),
+    }]
+}
 
 fn instance_fields() -> Vec<hlsl::layout::Member> {
     INSTANCE_FIELDS
@@ -1308,12 +1321,18 @@ pub struct Customize {
     /// A lip tint, whose alpha is the weight it is mixed at rather than an opacity.
     pub lip: [f32; 4],
     pub hair: [f32; 4],
-    /// A hair highlight, drawn only where its alpha says to.
+    /// A hair highlight, which a strand is mixed toward by its own mask.
     pub highlight: [f32; 4],
     pub left_eye: [f32; 4],
     pub right_eye: [f32; 4],
-    /// What a face paint or a limbal ring is tinted with.
+    /// What a race feature is tinted with: a limbal ring, an ear tuft, the tattoo the creator names
+    /// it after. Not the face paint, which the engine hands its own buffer.
     pub option: [f32; 3],
+    /// What the face paint decal is tinted with and the weight it is laid on at, which is the one
+    /// colour going in as the file holds it rather than squared.
+    pub decal: [f32; 4],
+    /// The face paint itself, which names the texture the engine binds for it.
+    pub paint: Option<u16>,
 }
 
 impl Default for Customize {
@@ -1326,6 +1345,8 @@ impl Default for Customize {
             left_eye: [1.0; 4],
             right_eye: [1.0; 4],
             option: [1.0; 3],
+            decal: [1.0, 1.0, 1.0, 0.0],
+            paint: None,
         }
     }
 }
@@ -1992,10 +2013,13 @@ impl Program {
                 let fixed = (name == "g_MaterialParameter")
                     .then(|| parameters.clone())
                     .flatten();
+                // A buffer holding one bare array named after itself is described with no fields
+                // at all, and a fill by field name against that lands nowhere and says nothing.
                 let members = match described.get(&name) {
-                    Some(held) => held.clone(),
-                    None if name == INSTANCE => instance_fields(),
-                    None => Vec::new(),
+                    Some(held) if !held.is_empty() => held.clone(),
+                    _ if name == INSTANCE => instance_fields(),
+                    _ if name == DECAL => decal_field(),
+                    _ => Vec::new(),
                 };
                 buffers.push(Buffer {
                     members,
@@ -2609,21 +2633,46 @@ impl Buffer {
             "g_CloudShadowMatrix",
             rows(Mat4::IDENTITY, 4),
         );
-        // The lane the character resolve multiplies its environment term by, which nought erases.
+        // The weight the character resolve carries a material's own emissive into the frame's alpha
+        // at, which the glare pass reads that frame back through. It reaches no color of its own,
+        // and nought would leave a lit surface keying no halo at all.
         put(INSTANCE, "m_EnvParameter", vec![0.0, 0.0, 0.0, 1.0]);
+        // A fill light standing where the camera does, added over whatever the frame's own lighting
+        // left. The first register weighs it: a diffuse and a specular for the character path, then
+        // the pair skin takes instead. The second is the rim it draws around a silhouette, how far
+        // that rim is leant into the view, and the weight an eye reads its own reflection at.
+        put(INSTANCE, "m_CameraLight", vec![
+            0.15, 0.15, 0.15, 0.17, 0.01584, 0.9, 0.01584, 0.8,
+        ]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);
 
-        // The colors a character was made with. The last lane of the two hair colors is where a
-        // decal is read from.
+        // The colors a character was made with. The last lane of each hair color is not a hair's
+        // own alpha: the pair places the decal a face paint is read through across the face, and
+        // every package reading either reads it for that and nothing else.
         let held = scene.customize;
         let customize = "g_CustomizeParameter";
         put(customize, "m_SkinColor", held.skin.to_vec());
         put(customize, "m_LipColor", held.lip.to_vec());
-        put(customize, "m_MainColor", held.hair.to_vec());
-        put(customize, "m_MeshColor", held.highlight.to_vec());
+        put(customize, "m_MainColor", vec![
+            held.hair[0],
+            held.hair[1],
+            held.hair[2],
+            1.0,
+        ]);
+        put(customize, "m_MeshColor", vec![
+            held.highlight[0],
+            held.highlight[1],
+            held.highlight[2],
+            0.0,
+        ]);
+        // A face with no paint picked leaves the weight at nought, which is what keeps the flat
+        // stand-in an unbound decal sampler answers with off the whole face. What that weight is
+        // when one is picked is the swatch's own last lane, which is what the game writes for a lip
+        // and what nothing else in the file could be.
+        put(DECAL, DECAL, held.decal.to_vec());
         put(customize, "m_LeftColor", held.left_eye.to_vec());
         put(customize, "m_RightColor", held.right_eye.to_vec());
         put(customize, "m_OptionColor0", held.option.to_vec());
@@ -3180,8 +3229,9 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        Ambient, Buffer, Exposure, FOG_PARAM, Fog, JOINT, ROW, SHADER_TYPE, SUN_PARAM, Pass, Scene,
-        Sky, Volume, ambient, joints, selector, shader_types, sun,
+        Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE, JOINT, ROW,
+        SHADER_TYPE, SUN_PARAM, Pass, Scene, Sky, Volume, ambient, decal_field, instance_fields,
+        joints, selector, shader_types, sun,
     };
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -3243,6 +3293,71 @@ mod test {
                 0.000698741,
             ]
         ));
+    }
+
+    /// The instance record a character is drawn with, against the bytes a capture of the running
+    /// game held in it. Two registers of the eleven are filled here and neither reads as one field:
+    /// the camera light spans a pair, and a write cut to four floats would leave the rim at nought.
+    #[test]
+    fn the_camera_light_comes_out_as_the_game_held_it() {
+        let held = Buffer {
+            name: INSTANCE.to_owned(),
+            members: instance_fields(),
+            registers: 11,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&Scene::default(), Pass::Composite, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        assert_eq!(filled[4..8], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(filled[8..12], [0.15, 0.15, 0.15, 0.17]);
+        assert_eq!(filled[12..16], [0.01584, 0.9, 0.01584, 0.8]);
+    }
+
+    /// The two buffers a face paint reaches, filled the way a character package declares them. The
+    /// decal's own buffer holds one bare array named after itself, which a reflection describes with
+    /// no fields at all: a write by name against that lands nowhere and reports nothing.
+    #[test]
+    fn a_face_paint_reaches_both_buffers_it_is_read_through() {
+        let member = |name: &str, offset, size| hlsl::layout::Member {
+            name: name.to_owned(),
+            offset,
+            size,
+            kind: "float4".to_owned(),
+        };
+        let scene = Scene {
+            customize: Customize {
+                hair: [0.1, 0.2, 0.3, 0.4],
+                highlight: [0.5, 0.6, 0.7, 0.8],
+                decal: [0.9, 0.8, 0.7, 0.6],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filled = |name: &str, members: Vec<hlsl::layout::Member>, registers| {
+            let held = Buffer {
+                name: name.to_owned(),
+                members,
+                registers,
+                fixed: None,
+            };
+            held.fill(&scene, Pass::Buffer, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect::<Vec<f32>>()
+        };
+        assert_eq!(filled(DECAL, decal_field(), 1), [0.9, 0.8, 0.7, 0.6]);
+        // The last lane of each hair colour places the decal across the face rather than weighing
+        // the hair, so the palette's own alpha has no business in either.
+        let held = filled(
+            "g_CustomizeParameter",
+            vec![member("m_MainColor", 32, 16), member("m_MeshColor", 48, 16)],
+            4,
+        );
+        assert_eq!(held[8..12], [0.1, 0.2, 0.3, 1.0]);
+        assert_eq!(held[12..16], [0.5, 0.6, 0.7, 0.0]);
     }
 
     /// The fog reads a distance out of the depth buffer as `1 / (y * d + x)`, and everything it then

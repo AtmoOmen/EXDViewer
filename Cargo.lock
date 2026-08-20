@@ -7346,6 +7346,7 @@ dependencies = [
  "smallvec",
  "symphonia",
  "syntect",
+ "ureq",
  "url",
  "uuid",
  "wasm-bindgen",

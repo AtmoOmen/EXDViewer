@@ -611,6 +611,7 @@ g_SamplerGBuffer
 g_SamplerGBuffer1
 g_SamplerGBuffer2
 g_SamplerGBuffer3
+g_SamplerGBuffer4
 g_SamplerIndex
 g_SamplerLight
 g_SamplerLightDiffuse
@@ -633,6 +634,7 @@ g_SamplerReflectionArray
 g_SamplerReflectionMap
 g_SamplerRefractionMap
 g_SamplerShadow
+g_SamplerShadowMask
 g_SamplerSpecular
 g_SamplerSpecularMap
 g_SamplerSpecularMap0

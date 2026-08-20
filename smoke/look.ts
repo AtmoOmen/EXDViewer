@@ -4,7 +4,7 @@
 //
 //   CHROMIUM=$(...) bun smoke/look.ts --origin=http://127.0.0.1:9080 --out=look <path> ...
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -172,6 +172,7 @@ async function main() {
     } finally {
         cdp.close();
         child.kill();
+        rmSync(profile, { recursive: true, force: true });
     }
 }
 

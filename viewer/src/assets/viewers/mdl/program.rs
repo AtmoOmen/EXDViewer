@@ -480,6 +480,9 @@ const INSTANCING: &str = "g_InstancingData";
 /// The buffer holding what the engine decides per object rather than per material.
 const INSTANCE: &str = "g_InstanceParameter";
 
+/// The buffer one placed light is read out of, and the only one that differs from lamp to lamp.
+pub const LIGHT: &str = "g_LightParam";
+
 /// Its fields, as every package that reads one by name declares them. `iris.shpk` picks its record
 /// out by which eye a vertex belongs to, and a reflection describes a buffer indexed that way as one
 /// bare array, so the names have to come from somewhere for a fill to reach it at all.
@@ -2726,7 +2729,7 @@ impl Buffer {
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.
         let axes = glam::Mat3::from_mat4(view);
-        let light = "g_LightParam";
+        let light = LIGHT;
         let lamp = scene.lamp;
         put(
             light,

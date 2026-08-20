@@ -2822,7 +2822,11 @@ impl Scene {
 
     /// The viewport, and the navigation over it.
     fn viewport(&mut self, ui: &mut egui::Ui) {
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+        // Interacted with under an id of its own: the details panel beside it is content sized, so
+        // the rect this takes moves as the counts in there change, and an id taken from the rect
+        // changes with it, which loses a press and the release that answers it.
+        let response = ui.interact(rect, ui.id().with("scene"), Sense::click_and_drag());
         if rect.width() < 1.0 || rect.height() < 1.0 {
             return;
         }

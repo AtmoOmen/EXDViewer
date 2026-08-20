@@ -10,7 +10,7 @@ use ironworks::{
 };
 use viewer::utils::fetch_range;
 
-const API: &str = "https://exd.camora.dev/api/global/2026.08.11.0000.0000/file";
+const API: &str = "https://xiviewer.app/api/global/2026.08.11.0000.0000/file";
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
 const HEAD: u64 = 4096;
 

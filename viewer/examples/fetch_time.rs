@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use viewer::utils::fetch;
 
-const API: &str = "https://exd.camora.dev/api/global/2026.08.11.0000.0000/file";
+const API: &str = "https://xiviewer.app/api/global/2026.08.11.0000.0000/file";
 const PATHS: &str = "/home/asriel/Code/ironworks-formats/paths.txt";
 const ZONE: &str = "bg/ex5/02_ykt_y6/twn/y6t1/";
 

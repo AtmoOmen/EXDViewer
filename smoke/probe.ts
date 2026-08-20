@@ -128,7 +128,7 @@ function text(argument: any): string {
 async function main() {
     const server = serve();
     const origin = `http://127.0.0.1:${server.port}`;
-    const profile = mkdtempSync(join(tmpdir(), "exdviewer-probe-"));
+    const profile = mkdtempSync(join(tmpdir(), "xiviewer-probe-"));
     const { child, port } = await launch(profile);
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     const cdp = await Cdp.connect(

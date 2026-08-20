@@ -75,7 +75,7 @@ impl Default for PathList {
         Self {
             url: "https://rl2.perchbird.dev/download/export/PathList.gz".to_string(),
             extra_urls: vec![
-                "https://raw.githubusercontent.com/WorkingRobot/EXDViewer/main/paths/extra.txt"
+                "https://raw.githubusercontent.com/WorkingRobot/XIViewer/main/paths/extra.txt"
                     .to_string(),
             ],
             ttl_minutes: 12 * 60,
@@ -90,7 +90,7 @@ impl Default for Config {
             server_addr: "0.0.0.0:80".to_string(),
             metrics_server_addr: None,
             log_filter: Some(
-                "debug,exdviewer_web=debug,tracing::span=warn,foyer_memory::raw=warn".to_string(),
+                "debug,web=debug,tracing::span=warn,foyer_memory::raw=warn".to_string(),
             ),
             log_access_format: None,
             cache: ServerBuilder::default(),

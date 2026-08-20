@@ -1,11 +1,11 @@
 # XIViewer
-<img align="right" src="https://github.com/WorkingRobot/EXDViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
+<img align="right" src="https://github.com/WorkingRobot/XIViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
 
-[![Native Build](https://img.shields.io/github/actions/workflow/status/WorkingRobot/EXDViewer/build-native.yml?style=for-the-badge&label=Native%20Build
-)](https://github.com/WorkingRobot/EXDViewer/releases)
-[![Web Build](https://img.shields.io/github/actions/workflow/status/WorkingRobot/EXDViewer/build-web.yml?style=for-the-badge&label=Web%20Build
-)](https://github.com/WorkingRobot/EXDViewer/pkgs/container/exdviewer-web)
-[![License](https://img.shields.io/github/license/WorkingRobot/EXDViewer?style=for-the-badge&)](/LICENSE)
+[![Native Build](https://img.shields.io/github/actions/workflow/status/WorkingRobot/XIViewer/build-native.yml?style=for-the-badge&label=Native%20Build
+)](https://github.com/WorkingRobot/XIViewer/releases)
+[![Web Build](https://img.shields.io/github/actions/workflow/status/WorkingRobot/XIViewer/build-web.yml?style=for-the-badge&label=Web%20Build
+)](https://github.com/WorkingRobot/XIViewer/pkgs/container/xiviewer)
+[![License](https://img.shields.io/github/license/WorkingRobot/XIViewer?style=for-the-badge&)](/LICENSE)
 [![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fxiviewer.app%2Fapi%2Fglobal%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
 )](https://thaliak.xiv.dev/repository/4e9a232b)
 
@@ -14,7 +14,7 @@ XIViewer is a modern, fast, and user-friendly tool for exploring [Excel files](h
 
 ## Features
 
-- **Web and Native:** Instantly use the web version at [xiviewer.app](https://xiviewer.app) or download [a native build](https://github.com/WorkingRobot/EXDViewer/releases).
+- **Web and Native:** Instantly use the web version at [xiviewer.app](https://xiviewer.app) or download [a native build](https://github.com/WorkingRobot/XIViewer/releases).
 - **Easy Deployment:** Host your own web instance via Docker.
 - **Performance:** Efficiently handles all sheets, even huge ones like `Item`, `Action`, or `Quest`.
 - **EXDSchema Support:** Provides tight integration with [EXDSchema](https://github.com/xivdev/EXDSchema) for enhanced data exploration and dynamic in-viewer schema editing.
@@ -28,15 +28,15 @@ Visit [xiviewer.app](https://xiviewer.app) to use the latest version, directly i
 
 ### Locally
 
-Find pre-built binaries for your platform on the [Releases page](https://github.com/WorkingRobot/EXDViewer/releases).
+Find pre-built binaries for your platform on the [Releases page](https://github.com/WorkingRobot/XIViewer/releases).
 
 ### Self-Host with Docker
 
 Deploy the website yourself with Docker:
 
 ```bash
-docker pull ghcr.io/workingrobot/exdviewer-web:main
-docker run -p 8080:80 ghcr.io/workingrobot/exdviewer-web:main
+docker pull ghcr.io/workingrobot/xiviewer:main
+docker run -p 8080:80 ghcr.io/workingrobot/xiviewer:main
 ```
 Then open [http://localhost:8080](http://localhost:8080) in your browser. Give it a few seconds to load the latest game version, and set the API url to `http://localhost:8080/api` in the settings.
 
@@ -56,8 +56,8 @@ More info is available [here](https://github.com/xivdev/EXDSchema?tab=readme-ov-
 
 1. Clone the repository:
     ```bash
-    git clone https://github.com/WorkingRobot/EXDViewer.git
-    cd EXDViewer
+    git clone https://github.com/WorkingRobot/XIViewer.git
+    cd XIViewer
     ```
 
 ### Native
@@ -95,4 +95,4 @@ the model and scene viewers, and fails on any GL error, panic or `ERROR`-level l
 
 ## Contributing
 
-Contributions, bug reports, and feature requests are welcome! Please open an [issue](https://github.com/WorkingRobot/EXDViewer/issues) or a [pull request](https://github.com/WorkingRobot/EXDViewer/pulls).
+Contributions, bug reports, and feature requests are welcome! Please open an [issue](https://github.com/WorkingRobot/XIViewer/issues) or a [pull request](https://github.com/WorkingRobot/XIViewer/pulls).

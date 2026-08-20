@@ -58,7 +58,7 @@ function text(argument: any): string {
 }
 
 async function main() {
-    const profile = mkdtempSync(join(tmpdir(), "exdviewer-look-"));
+    const profile = mkdtempSync(join(tmpdir(), "xiviewer-look-"));
     const { child, port } = await launch(profile);
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
     const cdp = await Cdp.connect(

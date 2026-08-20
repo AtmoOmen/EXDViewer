@@ -53,7 +53,7 @@ use shadow_rs::shadow;
 
 pub const IS_WEB: bool = cfg!(target_arch = "wasm32");
 pub const SCHEMA_REPO_URL: &str = "https://github.com/xivdev/EXDSchema";
-pub const REPO_URL: &str = "https://github.com/WorkingRobot/EXDViewer";
+pub const REPO_URL: &str = "https://github.com/WorkingRobot/XIViewer";
 pub const AUTHOR_URL: &str = "https://github.com/WorkingRobot";
 pub const KOFI_URL: &str = "https://ko-fi.com/camora";
 
@@ -66,7 +66,7 @@ pub const CREATE_PAT_URL: &str =
 
 /// Still the old host: the new one has no router yet, and a build that names it first cannot load
 /// anything at all.
-pub const DEFAULT_API_URL: &str = "https://exd.camora.dev/api";
+pub const DEFAULT_API_URL: &str = "https://xiviewer.app/api";
 pub const DEFAULT_SCHEMA_URL: &str =
     "https://raw.githubusercontent.com/xivdev/EXDSchema/refs/heads/latest";
 pub const DEFAULT_GITHUB_REPO: (&str, &str) = ("xivdev", "EXDSchema");

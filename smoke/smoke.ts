@@ -326,7 +326,7 @@ async function main() {
 
     const server = serve();
     const origin = `http://127.0.0.1:${server.port}`;
-    const profile = mkdtempSync(join(tmpdir(), "exdviewer-smoke-"));
+    const profile = mkdtempSync(join(tmpdir(), "xiviewer-smoke-"));
     const { child, port } = await launch(profile);
     const cdp = await page(port);
 

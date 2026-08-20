@@ -277,7 +277,7 @@ fn generate_branch_name(base_sha: &str, files: &[(String, String)]) -> String {
     let digest = hasher.finalize();
     let suffix: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
 
-    format!("exdviewer/{label}-{suffix}")
+    format!("xiviewer/{label}-{suffix}")
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

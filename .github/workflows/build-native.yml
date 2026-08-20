@@ -62,23 +62,23 @@ jobs:
       - name: Rename Binary
         shell: bash
         run: |
-          mv -f target/${{ matrix.platform.target }}/release/viewer${{ matrix.platform.binary-ext }} exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+          mv -f target/${{ matrix.platform.target }}/release/viewer${{ matrix.platform.binary-ext }} xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
       - name: Attest
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: |
-            exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+            xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: exdviewer-${{ matrix.platform.os-name }}
+          name: xiviewer-${{ matrix.platform.os-name }}
           path: |
-            exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+            xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
       - uses: softprops/action-gh-release@v2
         if: github.ref_type == 'tag'
         with:
           files: |
-            exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+            xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}

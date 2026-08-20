@@ -480,6 +480,10 @@ const INSTANCING: &str = "g_InstancingData";
 /// The buffer holding what the engine decides per object rather than per material.
 const INSTANCE: &str = "g_InstanceParameter";
 
+/// What the decal a face paint is drawn through is tinted with. One register named after itself,
+/// which a reflection describes as a bare array and hands no fields for a write to land in.
+const DECAL: &str = "g_DecalColor";
+
 /// Its fields, as every package that reads one by name declares them. `iris.shpk` picks its record
 /// out by which eye a vertex belongs to, and a reflection describes a buffer indexed that way as one
 /// bare array, so the names have to come from somewhere for a fill to reach it at all.
@@ -1308,12 +1312,18 @@ pub struct Customize {
     /// A lip tint, whose alpha is the weight it is mixed at rather than an opacity.
     pub lip: [f32; 4],
     pub hair: [f32; 4],
-    /// A hair highlight, drawn only where its alpha says to.
+    /// A hair highlight, which a strand is mixed toward by its own mask.
     pub highlight: [f32; 4],
     pub left_eye: [f32; 4],
     pub right_eye: [f32; 4],
-    /// What a face paint or a limbal ring is tinted with.
+    /// What a race feature is tinted with: a limbal ring, an ear tuft, the tattoo the creator names
+    /// it after. Not the face paint, which the engine hands its own buffer.
     pub option: [f32; 3],
+    /// What the face paint decal is tinted with and the weight it is laid on at, which is the one
+    /// colour going in as the file holds it rather than squared.
+    pub decal: [f32; 4],
+    /// The face paint itself, which names the texture the engine binds for it.
+    pub paint: Option<u16>,
 }
 
 impl Default for Customize {
@@ -1326,6 +1336,8 @@ impl Default for Customize {
             left_eye: [1.0; 4],
             right_eye: [1.0; 4],
             option: [1.0; 3],
+            decal: [1.0, 1.0, 1.0, 0.0],
+            paint: None,
         }
     }
 }
@@ -1992,10 +2004,18 @@ impl Program {
                 let fixed = (name == "g_MaterialParameter")
                     .then(|| parameters.clone())
                     .flatten();
+                // A buffer holding one bare array named after itself is described with no fields
+                // at all, and a fill by field name against that lands nowhere and says nothing.
                 let members = match described.get(&name) {
-                    Some(held) => held.clone(),
-                    None if name == INSTANCE => instance_fields(),
-                    None => Vec::new(),
+                    Some(held) if !held.is_empty() => held.clone(),
+                    _ if name == INSTANCE => instance_fields(),
+                    _ if name == DECAL => vec![hlsl::layout::Member {
+                        name: DECAL.to_owned(),
+                        offset: 0,
+                        size: 16,
+                        kind: "float4".to_owned(),
+                    }],
+                    _ => Vec::new(),
                 };
                 buffers.push(Buffer {
                     members,
@@ -2625,14 +2645,28 @@ impl Buffer {
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);
 
-        // The colors a character was made with. The last lane of the two hair colors is where a
-        // decal is read from.
+        // The colors a character was made with. The last lane of each hair color is not a hair's
+        // own alpha: the pair places the decal a face paint is read through across the face, and
+        // every package reading either reads it for that and nothing else.
         let held = scene.customize;
         let customize = "g_CustomizeParameter";
         put(customize, "m_SkinColor", held.skin.to_vec());
         put(customize, "m_LipColor", held.lip.to_vec());
-        put(customize, "m_MainColor", held.hair.to_vec());
-        put(customize, "m_MeshColor", held.highlight.to_vec());
+        put(customize, "m_MainColor", vec![
+            held.hair[0],
+            held.hair[1],
+            held.hair[2],
+            1.0,
+        ]);
+        put(customize, "m_MeshColor", vec![
+            held.highlight[0],
+            held.highlight[1],
+            held.highlight[2],
+            0.0,
+        ]);
+        // A face with no paint picked leaves the weight at nought, which is what keeps the flat
+        // stand-in an unbound decal sampler answers with off the whole face.
+        put(DECAL, DECAL, held.decal.to_vec());
         put(customize, "m_LeftColor", held.left_eye.to_vec());
         put(customize, "m_RightColor", held.right_eye.to_vec());
         put(customize, "m_OptionColor0", held.option.to_vec());

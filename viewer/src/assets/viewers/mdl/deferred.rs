@@ -146,6 +146,11 @@ pub const ENGINE: [(u32, &str, u32); 13] = [
     ),
 ];
 
+/// The decal a face paint is drawn through, and where the set the creator picks is filed. Kept out
+/// of [`ENGINE`] because which one binds is what a character was made with rather than a fixed path.
+pub const FACE_PAINT: u32 = 0x0237_cb94;
+pub const PAINTS: &str = "chara/common/texture/decal_face/_decal_";
+
 /// The table the frame is graded through, which the grading pass addresses by the color it found.
 /// Three of these ship and nothing states which one binds; this is the one that answers a grey with
 /// the grey it was given and departs from the identity least of the three.

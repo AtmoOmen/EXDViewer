@@ -408,6 +408,8 @@ pub struct Rendered {
     /// declares one part per facial feature and no `.imc` to choose between them, so left to the
     /// variant alone it draws all seven at once over each other.
     customize: Cell<program::Customize>,
+    /// The face paint the decal binding was last fetched for.
+    painted: Cell<Option<u16>>,
     hidden: RefCell<BTreeSet<String>>,
     /// How tall the character was built, as a scale on everything it is drawn from.
     stature: Cell<f32>,
@@ -478,6 +480,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
         customize: Cell::new(program::Customize::default()),
+        painted: Cell::new(None),
         hidden: Default::default(),
         stature: Cell::new(1.0),
         skeleton: Cell::new(false),
@@ -1590,11 +1593,29 @@ impl Rendered {
             }
 
             let mut arrays = self.arrays.borrow_mut();
-            for (id, path, filter) in deferred::ENGINE.into_iter().chain([deferred::GRADING]) {
+            // Picking another face paint drops what was fetched for the last one, since the two are
+            // the one binding and the fetch below is what fills it.
+            let paint = self.customize.get().paint;
+            if self.painted.replace(paint) != paint {
+                arrays.remove(&deferred::FACE_PAINT);
+            }
+            let held = deferred::ENGINE
+                .into_iter()
+                .chain([deferred::GRADING])
+                .map(|(id, path, filter)| (id, path.to_owned(), filter))
+                .chain(paint.map(|set| {
+                    (
+                        deferred::FACE_PAINT,
+                        format!("{}{set}.tex", deferred::PAINTS),
+                        glow::LINEAR,
+                    )
+                }));
+            for (id, path, filter) in held {
                 let held = arrays.entry(id).or_insert_with(|| {
                     let files = backend.files().clone();
+                    let path = path.clone();
                     Array::Fetching(TrackedPromise::spawn_local(async move {
-                        files.read(path).await
+                        files.read(&path).await
                     }))
                 });
                 let Array::Fetching(promise) = held else {
@@ -1606,7 +1627,7 @@ impl Rendered {
                 *held = match result
                     .as_ref()
                     .map_err(ToString::to_string)
-                    .and_then(|bytes| layered(bytes, path, filter).map_err(|why| why.to_string()))
+                    .and_then(|bytes| layered(bytes, &path, filter).map_err(|why| why.to_string()))
                 {
                     Ok(decoded) => {
                         level.gpu.lock().unwrap().queue_array(id, decoded.clone());
@@ -2024,7 +2045,7 @@ impl Rendered {
                     ..Default::default()
                 },
                 look: self.look.get(),
-                customize: self.customize.get(),
+                customize: self.made_up(),
                 clock: self.clock.get(),
                 ..Default::default()
             },
@@ -2556,6 +2577,19 @@ impl Rendered {
 
     /// How the character was made: the colours its shaders tint with, the attributes its face draws
     /// and the shape keys that deform it. Taken together so a pick costs one pass over the parts.
+    /// What the creator left, less a face paint whose own texture has not arrived: the flat
+    /// stand-in an unbound sampler answers with would lay the paint's colour over the whole face.
+    fn made_up(&self) -> program::Customize {
+        let mut held = self.customize.get();
+        if !matches!(
+            self.arrays.borrow().get(&deferred::FACE_PAINT),
+            Some(Array::Ready(_))
+        ) {
+            held.decal[3] = 0.0;
+        }
+        held
+    }
+
     pub fn made(
         &self,
         customize: program::Customize,

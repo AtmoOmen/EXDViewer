@@ -32,7 +32,6 @@ use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
 use ironworks::file::shpk::ShaderPackage;
 use ironworks::file::spm::ShaderParameters;
-use ironworks::sqpack::IndexHash;
 use ironworks::file::{
     File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera,
 };
@@ -343,23 +342,6 @@ fn wet_name(held: &str) -> bool {
     .any(|one| held.ends_with(one))
 }
 
-/// Which repository and category the shader files sit in.
-const SHADER: (u8, u8) = (0, 5);
-
-/// The index hash a shader path names where its last segment is the hash itself rather than a file
-/// name. The install ships one shader that way and the path list has no name for it, so it is asked
-/// for the way the asset browser asks for any file it can only see as a hash.
-fn unnamed(path: &str) -> Option<u64> {
-    let (directory, name) = path.rsplit_once('/')?;
-    if name.len() != 8 || !name.bytes().all(|held| held.is_ascii_hexdigit()) {
-        return None;
-    }
-    let (Some(IndexHash::Split(held)), _) = IndexHash::of(&format!("{directory}/x")) else {
-        return None;
-    };
-    Some(held & !0xffff_ffff | u64::from(u32::from_str_radix(name, 16).ok()?))
-}
-
 /// One material's shaders, and how much of the G-buffer they were translated for.
 struct Translated {
     attachments: usize,
@@ -565,6 +547,7 @@ pub struct Scene {
     occlusion: Option<Arc<mdl::gpu::Occlusion>>,
     /// The one that darkens its corners, and what the passes past the composite are run with.
     vignette: Option<Arc<program::Program>>,
+    reflection: Option<Arc<mdl::deferred::Reflection>>,
     look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
@@ -767,6 +750,7 @@ impl Scene {
             smoothing: None,
             occlusion: None,
             vignette: None,
+            reflection: None,
             look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
@@ -2011,6 +1995,7 @@ impl Scene {
             wanted.extend(program::MEASURE.map(str::to_owned));
         }
         wanted.extend(program::GLARE.map(str::to_owned));
+        wanted.extend(program::REFLECTION.map(str::to_owned));
         wanted.extend([
             program::FXAA_LUMA.to_owned(),
             program::FXAA.to_owned(),
@@ -2084,9 +2069,9 @@ impl Scene {
             let wanted = path.clone();
             let holed = named.contains(path);
             *held = Package::Fetching(TrackedPromise::spawn_local(async move {
-                match unnamed(&wanted) {
+                match program::unnamed(&wanted) {
                     Some(hash) => Ok((
-                        files.read_by_hash(SHADER.0, SHADER.1, hash, true).await?,
+                        files.read_by_hash(program::SHADER.0, program::SHADER.1, hash, true).await?,
                         false,
                     )),
                     None if holed => files.read_package(&wanted).await,
@@ -2295,6 +2280,33 @@ impl Scene {
             .map(Arc::new)
     }
 
+    /// The chain that reflects the frame off itself, translated once its nine shaders have arrived.
+    /// Every member is drawn with the vertex shader the game pairs it with.
+    fn mirror(&self) -> Option<Arc<mdl::deferred::Reflection>> {
+        let ready = |path: &str| match self.packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let held = |path: &str, vertex: &str| {
+            program::Program::sampling(path, ready(path)?, ready(vertex)?)
+                .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let read = |path: &str| held(path, program::REFLECTION_VERTEX);
+        Some(Arc::new(mdl::deferred::Reflection {
+            normal: read(program::REFLECTION_NORMAL)?,
+            mask: read(program::REFLECTION_MASK)?,
+            march: read(program::REFLECTION_MARCH)?,
+            blur: [
+                read(program::REFLECTION_BLUR_X)?,
+                read(program::REFLECTION_BLUR_Y)?,
+            ],
+            distort: read(program::REFLECTION_DISTORT)?,
+            copy: held(program::REFLECTION_COPY, program::REFLECTION_MERGE_VERTEX)?,
+        }))
+    }
+
     /// The pair that smooths the frame's edges, and the three that work out how much sky reaches
     /// each pixel, each translated once all of its own shaders have arrived.
     fn edges(&self) -> Option<Arc<mdl::gpu::Smoothing>> {
@@ -2501,6 +2513,9 @@ impl Scene {
         }
         if self.glare.is_none() {
             self.glare = self.halo();
+        }
+        if self.reflection.is_none() {
+            self.reflection = self.mirror();
         }
         if self.smoothing.is_none() {
             self.smoothing = self.edges();
@@ -3007,6 +3022,7 @@ impl Scene {
             smoothing: self.smoothing.clone(),
             occlusion: self.occlusion.clone(),
             vignette: self.look.vignette.then(|| self.vignette.clone()).flatten(),
+            reflection: self.look.reflect.then(|| self.reflection.clone()).flatten(),
             lamps: self.lamps(),
             batches,
             grass: self.sward.clone(),
@@ -3596,6 +3612,7 @@ impl Scene {
                             (held.clouds[0], "band"),
                             (held.clouds[1], "sheet"),
                             (held.fog, "fog"),
+                            (held.reflection, "reflection"),
                             (held.vignette, "vignette"),
                         ]
                         .into_iter()

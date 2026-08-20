@@ -180,6 +180,42 @@ const MOON: usize = 24;
 /// program run twice, and so do the two smoothings.
 const GLARE: usize = 25;
 const VIGNETTE: usize = 30;
+/// The reflection chain: the pyramid it walks, the normal and reflectance it reads a pixel off, the
+/// march, the two halves of the blur, the resolve and the copy back.
+const REFLECT: usize = 31;
+
+/// One level of the pyramid the march walks, reduced off the level above it. A square of four texels
+/// becomes one, the nearest of them in the first channel and the furthest in the second, which is
+/// what the game's own compute shader leaves and the only reading the chain reads back.
+const HIERARCHY: &str = "\
+#version 300 es
+precision highp float;
+precision highp sampler2D;
+
+in vec2 TEXCOORD;
+
+uniform sampler2D u_source;
+uniform vec2 u_texel;
+uniform float u_level;
+/// What the frame's own depth is brought into the game's ordering by, where the first level reads
+/// that rather than a level of this.
+uniform float u_range;
+uniform bool u_first;
+
+out vec2 fragColor;
+
+void main() {
+\tvec2 held = vec2(0.0, 1.0);
+\tfor (int at = 0; at < 4; ++at) {
+\t\tvec2 corner = vec2(float(at & 1), float(at >> 1)) - 0.5;
+\t\tvec2 read = u_first
+\t\t\t? vec2(1.0 - texture(u_source, TEXCOORD + corner * u_texel).x * u_range)
+\t\t\t: textureLod(u_source, TEXCOORD + corner * u_texel, u_level).xy;
+\t\theld = vec2(max(held.x, read.x), min(held.y, read.y));
+\t}
+\tfragColor = held;
+}
+";
 
 /// How far down the sky is drawn on its own plane, which the fog reads what a distant pixel fades
 /// toward out of. Nothing there is finer than the sky itself, and the game takes it down by the same
@@ -190,6 +226,10 @@ const OVERHEAD_SCALE: i32 = 4;
 /// once, and the channel past the last of them: the frame the composite resolved.
 pub const TARGETS: usize = 5;
 pub const LIT: usize = TARGETS;
+
+/// The channel past that: what the reflection chain resolved, before the copy laid it back over the
+/// frame. Read as data rather than looked at, the way a raw channel is.
+pub const REFLECTED: usize = LIT + 1;
 
 /// The channel the fur pass softens. It squares what it reads and takes the root of what it writes,
 /// and the surface color is the one channel a drawing package gamma-encodes; the package asks for it
@@ -387,6 +427,32 @@ enum Over {
     /// The blur among them, drawn over the triangle that carries a coordinate of its own: the game's
     /// own vertex shader builds its seven taps off that lane rather than off the position.
     Blurring((i32, i32), glow::Texture),
+    /// A member of the reflection chain, over a target of its own and against what the members
+    /// before it left. Which member is drawing is carried with them: two of the names its files use
+    /// mean different things to different members.
+    Reflecting((i32, i32), Member, Reflecting),
+}
+
+/// Which member of the reflection chain is drawing.
+#[derive(Clone, Copy, PartialEq)]
+enum Member {
+    Normal,
+    Mask,
+    March,
+    Blur,
+    Distort,
+    Copy,
+}
+
+/// What the reflection chain reads: the frame's depth as a pyramid, the frame itself, the normal and
+/// reflectance the members before the march left, and the level of the blurred reflection at hand.
+#[derive(Clone, Copy)]
+struct Reflecting {
+    depth: glow::Texture,
+    frame: glow::Texture,
+    normal: glow::Texture,
+    mask: glow::Texture,
+    blurred: glow::Texture,
 }
 
 /// What a pass of the glare chain reads, by the names its files give them: the frame or whatever the
@@ -411,6 +477,8 @@ struct Clouded {
 #[derive(Clone, Copy, Default)]
 pub struct Drawn {
     pub sky: bool,
+    /// Whether the frame was reflected off itself this frame.
+    pub reflection: bool,
     pub sun: bool,
     pub moon: bool,
     pub fog: bool,
@@ -535,6 +603,18 @@ pub struct Glare {
     pub composite: std::sync::Arc<program::Program>,
 }
 
+/// The chain that reflects the frame off itself, in the order it runs. Four of its files carry names
+/// the path list knows and five ship under none.
+pub struct Reflection {
+    pub normal: std::sync::Arc<program::Program>,
+    pub mask: std::sync::Arc<program::Program>,
+    pub march: std::sync::Arc<program::Program>,
+    /// The two halves of the blur, across and then down.
+    pub blur: [std::sync::Arc<program::Program>; 2],
+    pub distort: std::sync::Arc<program::Program>,
+    pub copy: std::sync::Arc<program::Program>,
+}
+
 /// The chain that works out how much of the sky reaches each pixel, in the order it runs.
 pub struct Occlusion {
     pub scale: std::sync::Arc<program::Program>,
@@ -552,6 +632,18 @@ pub struct Layered {
     /// What a sampler has to be declared as to read it, which the file states for itself. A draw
     /// only validates where the texture bound to a unit is of the declaration's own kind.
     pub kind: program::Kind,
+}
+
+/// What the reflection chain draws into: the frame's depth as a pyramid of maxima, the normal and
+/// reflectance a pixel's surface is read off, and the pair the blur carries the marched reflection
+/// down. Two of that pair rather than one because each level of the blur reads a level of the other,
+/// and a texture cannot be read and drawn into at once.
+struct Mirrored {
+    depth: (glow::Texture, Vec<glow::Framebuffer>),
+    normal: (glow::Framebuffer, glow::Texture),
+    mask: (glow::Framebuffer, glow::Texture),
+    chain: [(glow::Texture, Vec<glow::Framebuffer>); 2],
+    size: (i32, i32),
 }
 
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
@@ -613,6 +705,11 @@ pub struct Buffers {
     /// own copy there rather than at the end, and the passes between write an alpha of their own
     /// over the share of a pixel the composite marked as glare.
     sourced: Option<(glow::Framebuffer, glow::Texture)>,
+    /// The reflection chain's own buffers, at a fraction of the frame.
+    mirrored: Option<Mirrored>,
+    /// The program that builds the pyramid the march walks. The game builds it in a compute shader,
+    /// which a context this draws through has none of.
+    hierarchy: Option<glow::Program>,
     /// Whether that chain ran this frame. Every pass reads the flat stand-in until it has, and again
     /// from the frame the viewer stops asking for it.
     occluding: bool,
@@ -718,9 +815,10 @@ impl Buffers {
     /// What a viewer puts on screen: one channel of the G-buffer, or the frame the composite
     /// resolved past the last of them.
     fn channel(&self, at: usize) -> Option<glow::Texture> {
-        match at >= TARGETS {
-            true => self.lit.map(|(_, texture)| texture),
-            false => self.color.get(at).copied(),
+        match at {
+            REFLECTED => self.mirrored.as_ref().map(|held| held.chain[1].0),
+            LIT => self.lit.map(|(_, texture)| texture),
+            _ => self.color.get(at).copied(),
         }
     }
 
@@ -778,10 +876,10 @@ impl Buffers {
             sampler(gl, program, "u_frame", 0, texture);
             sampler(gl, program, "u_depth", 1, depth);
             if let Some(location) = gl.get_uniform_location(program, "u_tone") {
-                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && !self.toned));
+                gl.uniform_1_i32(Some(&location), i32::from(at == LIT && !self.toned));
             }
             if let Some(location) = gl.get_uniform_location(program, "u_cover") {
-                gl.uniform_1_i32(Some(&location), i32::from(at >= TARGETS && self.covered));
+                gl.uniform_1_i32(Some(&location), i32::from(at == LIT && self.covered));
             }
             gl.bind_vertex_array(Some(layout));
             gl.draw_arrays(glow::TRIANGLES, 0, 3);
@@ -942,6 +1040,19 @@ impl Buffers {
         {
             dead.push(Dead::Frame(frame));
             dead.extend(textures.into_iter().map(Dead::Texture));
+        }
+        if let Some(held) = self.mirrored.take() {
+            let (texture, frames) = held.depth;
+            dead.push(Dead::Texture(texture));
+            dead.extend(frames.into_iter().map(Dead::Frame));
+            for (frame, texture) in [held.normal, held.mask] {
+                dead.push(Dead::Frame(frame));
+                dead.push(Dead::Texture(texture));
+            }
+            for (texture, frames) in held.chain {
+                dead.push(Dead::Texture(texture));
+                dead.extend(frames.into_iter().map(Dead::Frame));
+            }
         }
         drop(dead);
         self.size = size;
@@ -2077,6 +2188,291 @@ impl Buffers {
         drawn
     }
 
+    /// What the reflection chain draws into, built where the frame has moved under it.
+    fn mirrors(&mut self, gl: &glow::Context) -> Result<&Mirrored, String> {
+        let size = (
+            (self.size.0 / program::REFLECTION_SCALE).max(1),
+            (self.size.1 / program::REFLECTION_SCALE).max(1),
+        );
+        if self.mirrored.as_ref().is_some_and(|held| held.size == size) {
+            return Ok(self.mirrored.as_ref().expect("just measured"));
+        }
+        // One level fewer than asked for wherever the frame is too small to halve that many times,
+        // since a chain deeper than its own largest edge is not a texture the card will allocate.
+        let deepest = 32 - (size.0.max(size.1) as u32).leading_zeros() as i32;
+        let normal = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+        smooth(gl, normal);
+        let mask = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+        smooth(gl, mask);
+        let held = Mirrored {
+            depth: pyramid(
+                gl,
+                size,
+                program::REFLECTION_DEPTHS.min(deepest),
+                glow::RG16F,
+                glow::NEAREST,
+            )?,
+            normal: (frame_of(gl, &[normal], None)?, normal),
+            mask: (frame_of(gl, &[mask], None)?, mask),
+            chain: [
+                pyramid(
+                    gl,
+                    size,
+                    (program::REFLECTION_LEVELS + 1).min(deepest),
+                    glow::RGBA16F,
+                    glow::LINEAR,
+                )?,
+                pyramid(
+                    gl,
+                    size,
+                    (program::REFLECTION_LEVELS + 1).min(deepest),
+                    glow::RGBA16F,
+                    glow::LINEAR,
+                )?,
+            ],
+            size,
+        };
+        self.mirrored = Some(held);
+        Ok(self.mirrored.as_ref().expect("just built"))
+    }
+
+    /// The frame's own depth as the pyramid of maxima the march walks, one level a draw.
+    ///
+    /// The game builds all four levels in one compute shader, which a context this draws through has
+    /// none of, so this is the same reduction written as a draw. The reading it leaves is the game's
+    /// rather than the viewer's: the game stands its near plane at one and its far plane at nought,
+    /// which is the ordering the march's hit test is written against.
+    fn hierarchy(&mut self, gl: &glow::Context, scene: &program::Scene) -> Result<(), String> {
+        let program = match self.hierarchy {
+            Some(held) => held,
+            None => {
+                let held = build_pair(gl, program::POST_VERTEX, HIERARCHY)?;
+                self.hierarchy = Some(held);
+                held
+            }
+        };
+        let depth = self.depth.ok_or("no depth buffer")?;
+        let layout = self.screen(gl)?;
+        let (near, far) = scene.planes();
+        let frame = self.size;
+        let held = self.mirrors(gl)?;
+        let (texture, frames) = held.depth.clone();
+        let size = held.size;
+        unsafe {
+            gl.use_program(Some(program));
+            gl.bind_vertex_array(Some(layout));
+            gl.active_texture(glow::TEXTURE0);
+        }
+        let uniform = |name: &str| unsafe { gl.get_uniform_location(program, name) };
+        for (level, into) in frames.iter().enumerate() {
+            let source = match level {
+                0 => frame,
+                _ => (
+                    (size.0 >> (level - 1)).max(1),
+                    (size.1 >> (level - 1)).max(1),
+                ),
+            };
+            unsafe {
+                // The level read is cut down to before the level written is attached: a texture
+                // whose sampled levels include the one under the pen is a draw the card rejects.
+                gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+                gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+                for name in [glow::TEXTURE_BASE_LEVEL, glow::TEXTURE_MAX_LEVEL] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, name, level.saturating_sub(1) as i32);
+                }
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(*into));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.viewport(0, 0, (size.0 >> level).max(1), (size.1 >> level).max(1));
+                if let Some(at) = uniform("u_texel") {
+                    gl.uniform_2_f32(Some(&at), 1.0 / source.0 as f32, 1.0 / source.1 as f32);
+                }
+                if let Some(at) = uniform("u_level") {
+                    gl.uniform_1_f32(Some(&at), level.saturating_sub(1) as f32);
+                }
+                if let Some(at) = uniform("u_range") {
+                    gl.uniform_1_f32(Some(&at), (far - near) / far.max(f32::EPSILON));
+                }
+                if let Some(at) = uniform("u_first") {
+                    gl.uniform_1_i32(Some(&at), i32::from(level == 0));
+                }
+                sampler(
+                    gl,
+                    program,
+                    "u_source",
+                    0,
+                    match level {
+                        0 => depth,
+                        _ => texture,
+                    },
+                );
+                gl.draw_arrays(glow::TRIANGLES, 0, 3);
+            }
+        }
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.bind_vertex_array(None);
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_BASE_LEVEL, 0);
+            gl.tex_parameter_i32(
+                glow::TEXTURE_2D,
+                glow::TEXTURE_MAX_LEVEL,
+                frames.len() as i32 - 1,
+            );
+        }
+        Ok(())
+    }
+
+    /// The frame reflected off itself, which is what a metal surface answers with where nothing
+    /// captured an environment for it.
+    ///
+    /// The march reads the frame while the copy at the end writes it, so the copy taken once here is
+    /// what it reads. Every member runs at half the frame, which is what the game runs them at and
+    /// what the buffers are sized to.
+    pub fn mirror(
+        &mut self,
+        gl: &glow::Context,
+        held: &Reflection,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        self.keep(gl)?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+        }
+        self.hierarchy(gl, scene)?;
+        let frame = self.resolved.ok_or("no resolved frame")?;
+        let mirrors = self.mirrors(gl)?;
+        let size = mirrors.size;
+        let levels = mirrors.chain[0].1.len();
+        let reads = Reflecting {
+            depth: mirrors.depth.0,
+            frame,
+            normal: mirrors.normal.1,
+            mask: mirrors.mask.1,
+            blurred: mirrors.chain[0].0,
+        };
+        let (into, masked) = (mirrors.normal.0, mirrors.mask.0);
+        let marched = mirrors.chain[0].1[0];
+        let chain: [(glow::Texture, Vec<glow::Framebuffer>); 2] = mirrors.chain.clone();
+        let scene = &program::Scene {
+            reflect: program::Reflect {
+                level: 0,
+                texel: glam::Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32),
+            },
+            ..scene.clone()
+        };
+        self.pass(
+            gl,
+            REFLECT,
+            &held.normal,
+            into,
+            scene,
+            Over::Reflecting(size, Member::Normal, reads),
+        )?;
+        // The mask drops the pixels no reflection reaches rather than writing a nought to them, so
+        // what it leaves behind on those is whatever it wrote last frame unless this clears it.
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(masked));
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        self.pass(
+            gl,
+            REFLECT + 1,
+            &held.mask,
+            masked,
+            scene,
+            Over::Reflecting(size, Member::Mask, reads),
+        )?;
+        self.pass(
+            gl,
+            REFLECT + 2,
+            &held.march,
+            marched,
+            scene,
+            Over::Reflecting(size, Member::March, reads),
+        )?;
+        // Each level reads the level above it out of the other half of the pair, so the step a tap
+        // is stated in is the texel of that level rather than of the one being written.
+        for level in 1..levels {
+            let source = (
+                (size.0 >> (level - 1)).max(1) as f32,
+                (size.1 >> (level - 1)).max(1) as f32,
+            );
+            let scene = program::Scene {
+                reflect: program::Reflect {
+                    level: level as i32,
+                    texel: glam::Vec2::new(1.0 / source.0, 1.0 / source.1),
+                },
+                ..scene.clone()
+            };
+            let over = ((size.0 >> level).max(1), (size.1 >> level).max(1));
+            for (at, from) in [(1, 0), (0, 1)] {
+                self.pass(
+                    gl,
+                    REFLECT + 3 + from,
+                    &held.blur[from],
+                    chain[at].1[level],
+                    &scene,
+                    Over::Reflecting(
+                        over,
+                        Member::Blur,
+                        Reflecting {
+                            blurred: chain[from].0,
+                            ..reads
+                        },
+                    ),
+                )?;
+            }
+        }
+        // One level past the last the blur wrote, which is what caps the level the resolve picks
+        // per pixel: at nought it would read the marched level and none of the blurred ones.
+        let resolving = program::Scene {
+            reflect: program::Reflect {
+                level: levels as i32,
+                ..scene.reflect
+            },
+            ..scene.clone()
+        };
+        self.pass(
+            gl,
+            REFLECT + 5,
+            &held.distort,
+            chain[1].1[0],
+            &resolving,
+            Over::Reflecting(size, Member::Distort, reads),
+        )?;
+        // The reflection is added to the frame by the square of itself, which is the blend the game
+        // lays it back with.
+        unsafe {
+            gl.enable(glow::BLEND);
+            gl.blend_equation(glow::FUNC_ADD);
+            gl.blend_func_separate(glow::SRC_COLOR, glow::ONE, glow::ZERO, glow::ONE);
+        }
+        let drawn = self.pass(
+            gl,
+            REFLECT + 6,
+            &held.copy,
+            lit,
+            scene,
+            Over::Reflecting(
+                self.size,
+                Member::Copy,
+                Reflecting {
+                    blurred: chain[1].0,
+                    ..reads
+                },
+            ),
+        );
+        unsafe { gl.disable(glow::BLEND) };
+        self.drawn.reflection = drawn.is_ok();
+        drawn
+    }
+
     /// The frame with its edges smoothed, which is the last thing the graph does to it.
     ///
     /// Two passes rather than one: the game works each pixel's brightness out in a pass of its own
@@ -2591,7 +2987,8 @@ impl Buffers {
             Over::Exposing(size, _)
             | Over::Sized(size)
             | Over::Glaring(size, _)
-            | Over::Blurring(size, _) => size,
+            | Over::Blurring(size, _)
+            | Over::Reflecting(size, _, _) => size,
             _ => self.size,
         };
         let source = format!("{}\n{}", held.vertex, held.fragment);
@@ -2616,7 +3013,7 @@ impl Buffers {
         };
         let layout = match over {
             Over::Clouding(held) => held.layout,
-            Over::Blurring(..) => self.sampled(gl)?,
+            Over::Blurring(..) | Over::Reflecting(..) => self.sampled(gl)?,
             Over::Volume => {
                 let held = match self.volume {
                     Some(held) => held,
@@ -2669,6 +3066,22 @@ impl Buffers {
                         program::FOG_DEPTH => reads.depth,
                         program::SKY_SAMPLER => reads.sky,
                         program::FOG_LUT => reads.table,
+                        _ => self.engine(gl, texture.id)?,
+                    },
+                    // Two of the names the chain's files use mean different things to different
+                    // members: what the mask calls the blurred reflection is the normal the member
+                    // before it wrote, and what the march calls the first two channels of the
+                    // G-buffer are that normal and the mask itself.
+                    Over::Reflecting(_, member, reads) => match (member, texture.name.as_str()) {
+                        (_, program::REFLECTION_DEPTH) => reads.depth,
+                        (_, program::REFLECTION_FRAME) => reads.frame,
+                        (Member::Mask, program::REFLECTION_BLURRED) => reads.normal,
+                        (_, program::REFLECTION_BLURRED) => reads.blurred,
+                        (Member::March | Member::Distort, program::REFLECTION_PLANE) => {
+                            reads.normal
+                        }
+                        (Member::March, program::REFLECTION_MASKED) => reads.mask,
+                        (_, program::REFLECTION_PLANE) => self.engine(gl, GBUFFER[0])?,
                         _ => self.engine(gl, texture.id)?,
                     },
                     // Both meshes read one sampler under the same name, so which sheet is bound is
@@ -3134,6 +3547,55 @@ fn plane(
         );
         point(gl);
         Ok(texture)
+    }
+}
+
+/// A buffer of the graph with a chain of levels under it and a framebuffer over each, since a pass
+/// of the reflection chain draws into one level while it reads another.
+fn pyramid(
+    gl: &glow::Context,
+    size: (i32, i32),
+    levels: i32,
+    internal: u32,
+    filter: u32,
+) -> Result<(glow::Texture, Vec<glow::Framebuffer>), String> {
+    let levels = levels.max(1);
+    unsafe {
+        let texture = gl.create_texture()?;
+        gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+        gl.tex_storage_2d(glow::TEXTURE_2D, levels, internal, size.0, size.1);
+        for (name, value) in [
+            (glow::TEXTURE_MAG_FILTER, filter),
+            (
+                glow::TEXTURE_MIN_FILTER,
+                match filter {
+                    glow::LINEAR => glow::LINEAR_MIPMAP_LINEAR,
+                    _ => glow::NEAREST_MIPMAP_NEAREST,
+                },
+            ),
+            (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+            (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+        ] {
+            gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+        }
+        let mut frames = Vec::new();
+        for level in 0..levels {
+            let held = gl.create_framebuffer()?;
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(held));
+            gl.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(texture),
+                level,
+            );
+            let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+            if status != glow::FRAMEBUFFER_COMPLETE {
+                return Err(format!("a level of the graph would not complete: {status:#x}"));
+            }
+            frames.push(held);
+        }
+        Ok((texture, frames))
     }
 }
 

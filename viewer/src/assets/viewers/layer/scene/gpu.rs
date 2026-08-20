@@ -182,6 +182,8 @@ pub struct Frame {
     /// reaches the pixel.
     pub smoothing: Option<Arc<Smoothing>>,
     pub occlusion: Option<Arc<Occlusion>>,
+    /// The chain that reflects the frame off itself.
+    pub reflection: Option<Arc<deferred::Reflection>>,
     /// The one that darkens its corners, which runs after all of them.
     pub vignette: Option<Arc<program::Program>>,
     /// Every light the zone places that reaches the frame.
@@ -1082,6 +1084,11 @@ impl Renderer {
                         ..scene.clone()
                     };
                     self.buffers.cloud(gl, at, held, &scene)?;
+                }
+                // Over the frame the sky and the clouds left and before the water reads it, which
+                // is where the game runs it.
+                if let Some(reflection) = frame.reflection.as_ref() {
+                    self.buffers.mirror(gl, reflection, &scene)?;
                 }
                 // After both, which is what it fades the far distance toward, and before the
                 // exposure, which measures the frame the fog leaves rather than the one under it.

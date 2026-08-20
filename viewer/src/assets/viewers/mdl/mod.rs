@@ -396,6 +396,7 @@ pub struct Rendered {
     glare: RefCell<Option<Arc<gpu::Glare>>>,
     /// The pass that darkens its corners.
     vignette: RefCell<Option<Arc<program::Program>>>,
+    reflection: RefCell<Option<Arc<gpu::Reflection>>>,
     /// What those passes are run with, and whether the settings row is open.
     look: Cell<program::Look>,
     settings: Cell<bool>,
@@ -474,6 +475,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         occlusion: Default::default(),
         glare: Default::default(),
         vignette: Default::default(),
+        reflection: Default::default(),
         look: Cell::new(program::Look::default()),
         settings: Cell::new(false),
         tables: Default::default(),
@@ -1271,6 +1273,31 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
         });
     });
     ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut look.reflect, "Reflection").on_hover_text(
+            "Reflect the frame off itself with the game's own chain, which is what a metal \
+             surface answers with where nothing captured an environment for it",
+        );
+        ui.add_enabled_ui(look.reflect, |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{}-{} units  x{}  rough<{}  {} levels",
+                    program::REFLECTION_FADE[0],
+                    program::REFLECTION_FADE[1],
+                    program::REFLECTION_POWER,
+                    program::REFLECTION_ROUGHNESS,
+                    program::REFLECTION_LEVELS,
+                ))
+                .weak(),
+            )
+            .on_hover_text(
+                "What the chain runs with, read whole off a frame the game drew: how far a \
+                 reflection reaches and where it starts fading, what a pixel's reflectance is \
+                 scaled by, how rough a surface may be and still be marched, and how many levels \
+                 the blur takes the answer down",
+            );
+        });
+    });
+    ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut look.occlude, "Occlusion")
             .on_hover_text("Shade the creases with the game's own HDAO");
         ui.add_enabled_ui(look.occlude, |ui| {
@@ -1529,6 +1556,15 @@ impl Rendered {
                         .then_some(program::VIGNETTE)
                         .map(str::to_owned),
                 )
+                .chain(
+                    self.look
+                        .get()
+                        .reflect
+                        .then_some(program::REFLECTION)
+                        .into_iter()
+                        .flatten()
+                        .map(str::to_owned),
+                )
                 // Of the eight readings the quality ladder offers, only the one it is set to.
                 .chain(
                     self.look
@@ -1553,7 +1589,14 @@ impl Rendered {
                 packages.insert(
                     path,
                     Package::Fetching(TrackedPromise::spawn_local(async move {
-                        files.read(&wanted).await
+                        match program::unnamed(&wanted) {
+                            Some(hash) => {
+                                files
+                                    .read_by_hash(program::SHADER.0, program::SHADER.1, hash, true)
+                                    .await
+                            }
+                            None => files.read(&wanted).await,
+                        }
                     })),
                 );
             }
@@ -2047,6 +2090,10 @@ impl Rendered {
                 true => self.occlusion(),
                 false => None,
             },
+            reflection: match self.shaded.get() {
+                true => self.mirror(),
+                false => None,
+            },
             vignette: match self.shaded.get() {
                 true => self.corners(),
                 false => None,
@@ -2124,6 +2171,9 @@ impl Rendered {
             .unwrap_or_default();
         if !held.is_empty() && self.lighting.borrow().is_some() {
             held.push((gpu::LIT, "Lit".to_owned()));
+            if self.look.get().reflect {
+                held.push((deferred::REFLECTED, "Reflection".to_owned()));
+            }
         }
         held
     }
@@ -2248,6 +2298,45 @@ impl Rendered {
         drop(packages);
         let built = Arc::new(built);
         *self.glare.borrow_mut() = Some(built.clone());
+        Some(built)
+    }
+
+    /// The chain that reflects the frame off itself, translated once its eight shaders have
+    /// arrived. Every member is drawn with the vertex shader the game pairs it with, which hands a
+    /// fragment both where it stands and what to read.
+    fn mirror(&self) -> Option<Arc<gpu::Reflection>> {
+        if !self.look.get().reflect {
+            return None;
+        }
+        if let Some(held) = self.reflection.borrow().as_ref() {
+            return Some(held.clone());
+        }
+        let packages = self.packages.borrow();
+        let ready = |path: &str| match packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let held = |path: &str, vertex: &str| {
+            program::Program::sampling(path, ready(path)?, ready(vertex)?)
+                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .ok()
+                .map(Arc::new)
+        };
+        let read = |path: &str| held(path, program::REFLECTION_VERTEX);
+        let built = gpu::Reflection {
+            normal: read(program::REFLECTION_NORMAL)?,
+            mask: read(program::REFLECTION_MASK)?,
+            march: read(program::REFLECTION_MARCH)?,
+            blur: [
+                read(program::REFLECTION_BLUR_X)?,
+                read(program::REFLECTION_BLUR_Y)?,
+            ],
+            distort: read(program::REFLECTION_DISTORT)?,
+            copy: held(program::REFLECTION_COPY, program::REFLECTION_MERGE_VERTEX)?,
+        };
+        drop(packages);
+        let built = Arc::new(built);
+        *self.reflection.borrow_mut() = Some(built.clone());
         Some(built)
     }
 

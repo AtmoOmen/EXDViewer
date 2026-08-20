@@ -265,6 +265,94 @@ pub const FOG_DEPTH: &str = "sDepth";
 pub const SKY_SAMPLER: &str = "sSky";
 pub const FOG_LUT: &str = "sLut";
 
+/// Which repository and category the shader files sit in.
+pub const SHADER: (u8, u8) = (0, 5);
+
+/// The index hash a shader path names where its last segment is the hash itself rather than a file
+/// name. Several shaders the install ships have no name in the path list, so each is asked for the
+/// way the asset browser asks for any file it can only see as a hash.
+pub fn unnamed(path: &str) -> Option<u64> {
+    let (directory, name) = path.rsplit_once('/')?;
+    if name.len() != 8 || !name.bytes().all(|held| held.is_ascii_hexdigit()) {
+        return None;
+    }
+    let (Some(ironworks::sqpack::IndexHash::Split(held)), _) =
+        ironworks::sqpack::IndexHash::of(&format!("{directory}/x"))
+    else {
+        return None;
+    };
+    Some(held & !0xffff_ffff | u64::from(u32::from_str_radix(name, 16).ok()?))
+}
+
+/// The chain the game reflects a frame off itself with, which its own files call a reflection and
+/// its shader keys call RLR. The frame's depth becomes a pyramid of its own, a march walks that
+/// pyramid for whatever a pixel's surface points at, a blur pair takes the answer down five levels,
+/// and a resolve picks a level per pixel and adds it back.
+///
+/// Four of the files carry names the path list knows. The other five ship under none, so they are
+/// named here by the hash their directory records them under and read the same way the asset browser
+/// reads any unnamed file; the crc32 of `ReflectionNormalPS.shcd`, `ReflectionBlurXPS.shcd` and
+/// `ReflectionBlurYPS.shcd` is three of those hashes, so those three have their names back.
+pub const REFLECTION_DIRECTORY: &str = "shader/sm5/shcd";
+pub const REFLECTION_VERTEX: &str = "shader/sm5/shcd/ReflectionVS.shcd";
+/// The same without the half-texel the rest of the chain reads at, which is what the copy back over
+/// the frame is drawn with.
+pub const REFLECTION_MERGE_VERTEX: &str = "shader/sm5/shcd/ReflectionMergeVS.shcd";
+pub const REFLECTION_NORMAL: &str = "shader/sm5/shcd/38611e75";
+pub const REFLECTION_MASK: &str = "shader/sm5/shcd/ReflectionMaskPS.shcd";
+pub const REFLECTION_MARCH: &str = "shader/sm5/shcd/621a822b";
+pub const REFLECTION_BLUR_X: &str = "shader/sm5/shcd/65887e77";
+pub const REFLECTION_BLUR_Y: &str = "shader/sm5/shcd/a9227ee9";
+pub const REFLECTION_DISTORT: &str = "shader/sm5/shcd/ReflectionDistortionPS.shcd";
+pub const REFLECTION_COPY: &str = "shader/sm5/shcd/ReflectionCopyPS.shcd";
+
+/// Every file the chain takes, for one fetch list.
+pub const REFLECTION: [&str; 9] = [
+    REFLECTION_VERTEX,
+    REFLECTION_MERGE_VERTEX,
+    REFLECTION_NORMAL,
+    REFLECTION_MASK,
+    REFLECTION_MARCH,
+    REFLECTION_BLUR_X,
+    REFLECTION_BLUR_Y,
+    REFLECTION_DISTORT,
+    REFLECTION_COPY,
+];
+
+/// What the chain reads, by the names its files give them. Two of these mean different things to
+/// different members, so what each pass is handed is the pass's own to say.
+pub const REFLECTION_DEPTH: &str = "g_SamplerHierarchicalZ";
+pub const REFLECTION_FRAME: &str = "g_SamplerReflection";
+pub const REFLECTION_BLURRED: &str = "g_SamplerReflectionBlur";
+pub const REFLECTION_PLANE: &str = "g_SamplerGBuffer0";
+pub const REFLECTION_MASKED: &str = "g_SamplerGBuffer1";
+
+/// How far down the chain runs against the frame, which every buffer of it is sized by.
+pub const REFLECTION_SCALE: i32 = 2;
+
+/// How many levels the blur pair takes the marched reflection down, past the one the march wrote.
+pub const REFLECTION_LEVELS: i32 = 5;
+
+/// How many levels the pyramid the march walks holds. The pass that builds it writes four and the
+/// march caps its own mip at the last of them.
+pub const REFLECTION_DEPTHS: i32 = 4;
+
+/// What the environment states the reflection reaches, read whole off a frame the game drew: the
+/// view depth it starts fading at, the one past which a pixel is dropped outright, and one over the
+/// distance between them.
+pub const REFLECTION_FADE: [f32; 4] = [16.0, 32.0, 0.0625, 0.0];
+
+/// What a pixel's own reflectance is scaled by before anything is marched for it, and how rough a
+/// surface may be and still be marched at all. Both are the same on every frame measured.
+pub const REFLECTION_POWER: f32 = 2.5;
+pub const REFLECTION_ROUGHNESS: f32 = 0.8;
+
+/// The buffers the chain reads itself out of, and the one every stage of the engine takes the camera
+/// from.
+const REFLECTION_PARAM: &str = "g_ReflectionParameter";
+const SCREEN_PARAM: &str = "g_ScreenParameter";
+const CAMERA: &str = "g_CameraParameter";
+
 /// The two passes that stand between the G-buffer and the occlusion read off it: one linearizes the
 /// depth and brings the normal into view space, the other packs a square of four of those into the
 /// channels of one texel, which is the shape the occlusion pass addresses.
@@ -830,7 +918,7 @@ impl Default for Ambient {
 impl Scene {
     /// The planes the projection was built with, which is the only scale the frame states: the
     /// viewer cuts them to the model's own bounding sphere.
-    fn planes(&self) -> (f32, f32) {
+    pub fn planes(&self) -> (f32, f32) {
         let (z, w) = (self.projection.z_axis.z, self.projection.w_axis.z);
         (w / z, w / (z + 1.0))
     }
@@ -898,6 +986,9 @@ pub struct Look {
     pub power: f32,
     pub bloom: bool,
     pub vignette: bool,
+    /// Whether the frame is reflected off itself, which is what a metal surface answers with where
+    /// nothing captured an environment for it.
+    pub reflect: bool,
     /// Where the corners start darkening, as the squared distance from the middle of the frame with
     /// a corner at one, and how steeply the darkening deepens past that. No file states either: in
     /// the game they follow a graphics setting.
@@ -926,6 +1017,7 @@ impl Default for Look {
             power: 1.0,
             bloom: true,
             vignette: true,
+            reflect: true,
             onset: 0.35,
             darkening: 0.5,
         }
@@ -1306,6 +1398,8 @@ pub struct Scene {
     pub blur: Blur,
     /// What share of a surface the composite counts as glare.
     pub bloom: Bloom,
+    /// What the member of the reflection chain at hand runs at.
+    pub reflect: Reflect,
 }
 
 /// Which kernel a smoothing pass of the glare chain lays its taps out for. One walks a square of
@@ -1335,6 +1429,14 @@ impl Default for Bloom {
             emissive: 0.1,
         }
     }
+}
+
+/// Which level of the blurred reflection a pass addresses, and the texels its own taps are stated
+/// in, which is the level above the one it writes.
+#[derive(Clone, Copy, Default)]
+pub struct Reflect {
+    pub level: i32,
+    pub texel: Vec2,
 }
 
 /// What a leaf is swayed by, which is all three registers `g_WavingParam` holds. The heading and the
@@ -1426,6 +1528,7 @@ impl Default for Scene {
             wind: Wind::default(),
             blur: Blur::Along(Vec2::ZERO),
             bloom: Bloom::default(),
+            reflect: Reflect::default(),
         }
     }
 }
@@ -1809,6 +1912,18 @@ impl Program {
     /// grades one saturates what it reads before it reads its table. The path is taken because two
     /// members read the same buffer as different things.
     pub fn posteffect(path: &str, bytes: &[u8], vertex: &str) -> Result<Self, String> {
+        Self::effect(path, bytes, vertex, &HashMap::new())
+    }
+
+    /// The same, where the stage it is drawn with declares blocks of its own: GLSL links a block by
+    /// name and rejects a pair whose two spellings of one differ, so each stage is written at the
+    /// extent both of them reach.
+    fn effect(
+        path: &str,
+        bytes: &[u8],
+        vertex: &str,
+        shared: &HashMap<String, u32>,
+    ) -> Result<Self, String> {
         let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
         let blob = bytes
             .get(code.blob_offset()..code.blob_offset() + code.blob_size())
@@ -1843,7 +1958,11 @@ impl Program {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
-        let extents = hlsl::glsl::extents(&fragment, &names);
+        let mut extents = hlsl::glsl::extents(&fragment, &names);
+        for (name, registers) in shared {
+            let held = extents.entry(name.clone()).or_default();
+            *held = (*held).max(*registers);
+        }
         let options = hlsl::glsl::Options {
             targets: outputs.clone(),
             extents: extents.clone(),
@@ -1884,7 +2003,13 @@ impl Program {
             attributes: Vec::new(),
             textures,
             buffers,
-            structured: Vec::new(),
+            structured: hlsl::glsl::buffers(&fragment, &names)
+                .into_iter()
+                .map(|(name, stride)| Structured {
+                    name,
+                    stride: stride as usize,
+                })
+                .collect(),
             names: outputs.iter().map(|at| format!("SV_Target{at}")).collect(),
             targets: outputs.clone(),
             outputs,
@@ -1913,15 +2038,7 @@ impl Program {
         }
         signatures(blob, &mut names);
         let extents = hlsl::glsl::extents(&program, &names);
-        let options = hlsl::glsl::Options {
-            targets: Vec::new(),
-            extents: extents.clone(),
-        };
-        let source = hlsl::glsl(&program, &names, hlsl::Reading::Plain, &options)
-            .lines
-            .join("\n");
-
-        let mut held = Self::posteffect(path, bytes, &source)?;
+        let mut held = Self::effect(path, bytes, "", &extents)?;
         for (name, registers) in extents {
             match held.buffers.iter_mut().find(|buffer| buffer.name == name) {
                 Some(buffer) => buffer.registers = buffer.registers.max(registers),
@@ -1933,6 +2050,23 @@ impl Program {
                 }),
             }
         }
+        // Written again now the fragment's own blocks are known: the two stages have to spell a
+        // block at the same extent for the program to link.
+        held.vertex = hlsl::glsl(
+            &program,
+            &names,
+            hlsl::Reading::Plain,
+            &hlsl::glsl::Options {
+                targets: Vec::new(),
+                extents: held
+                    .buffers
+                    .iter()
+                    .map(|buffer| (buffer.name.clone(), buffer.registers))
+                    .collect(),
+            },
+        )
+        .lines
+        .join("\n");
         Ok(held)
     }
 
@@ -2281,6 +2415,56 @@ impl Buffer {
                 0,
                 &[exposure.min, exposure.max, step, exposure.key * exposure.key],
             );
+            return out;
+        }
+        // The three registers of the camera buffer the reflection chain reads, for a pass the
+        // reflection gives no members. Its own projection rather than the viewer's: the game stands
+        // the near plane at one and has no far plane at all, and the march's hit test is written
+        // against that ordering. The second row is negated with it, since these shaders turn a
+        // texture coordinate into a clip one the way D3D counts rows and the buffers they read count
+        // them the other way.
+        if self.name == CAMERA && self.members.is_empty() {
+            let (near, _) = scene.planes();
+            let reversed = Mat4::from_cols(
+                projection.row(0),
+                -projection.row(1),
+                Vec4::new(0.0, 0.0, 0.0, near),
+                Vec4::new(0.0, 0.0, -1.0, 0.0),
+            )
+            .transpose();
+            for (base, matrix) in [
+                (0, rows(view, 3)),
+                (14, rows(reversed.inverse(), 4)),
+                (18, rows(reversed, 4)),
+            ] {
+                for (at, row) in matrix.chunks(4).enumerate() {
+                    write(&mut out, base + at, row);
+                }
+            }
+            return out;
+        }
+        if self.name == SCREEN_PARAM {
+            let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+            for at in 0..2 {
+                write(&mut out, at, &[width, height, 1.0 / width, 1.0 / height]);
+            }
+            write(&mut out, 2, &[1.0, 1.0, 1.0, 1.0]);
+            return out;
+        }
+        if self.name == REFLECTION_PARAM {
+            let held = scene.reflect;
+            let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+            write(
+                &mut out,
+                0,
+                &[held.texel.x, held.texel.y, 1.0 / width, 1.0 / height],
+            );
+            write(&mut out, 1, &REFLECTION_FADE);
+            write(&mut out, 2, &[0.0, REFLECTION_POWER, 0.0, REFLECTION_ROUGHNESS]);
+            // A whole number rather than the float that reads the same: the shaders take this lane
+            // through its bit pattern.
+            out[40..44].copy_from_slice(&held.level.to_le_bytes());
+            write(&mut out, 3, &[1.0, 1.0, 0.0, 0.0]);
             return out;
         }
         if self.name == PROJECTION_INVERSE {
@@ -2632,7 +2816,7 @@ impl Buffer {
         let view_projection = projection * view;
         // Nothing here moves between frames, so every previous-frame matrix is the current one and
         // the motion vectors come out as nought.
-        let camera = "g_CameraParameter";
+        let camera = CAMERA;
         for name in ["m_ViewMatrix", "m_ViewMatrixPrev"] {
             put(camera, name, rows(view, 3));
         }

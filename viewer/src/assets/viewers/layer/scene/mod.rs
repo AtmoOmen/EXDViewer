@@ -2962,10 +2962,15 @@ impl Scene {
                 ambient: self.ambient.scene(),
                 // How far the adaptation moves is stated per second, so it needs to know how long a
                 // frame took. A frame after an idle spell is capped by the pass itself.
-                exposure: self
-                    .ambient
-                    .exposure(ui.input(|input| input.stable_dt))
-                    .unwrap_or_default(),
+                // The adaptation the last frame settled on, which every pass writing into the lit
+                // frame divides by so the tone pass can multiply it back.
+                exposure: program::Exposure {
+                    adapted: self.renderer.lock().unwrap().exposed(),
+                    ..self
+                        .ambient
+                        .exposure(ui.input(|input| input.stable_dt))
+                        .unwrap_or_default()
+                },
                 fog: self.ambient.fog().unwrap_or_default(),
                 cloud: self
                     .ambient

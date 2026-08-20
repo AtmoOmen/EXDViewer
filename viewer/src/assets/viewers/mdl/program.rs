@@ -2767,7 +2767,14 @@ impl Buffer {
         // colour and leaves the share in the frame's alpha. The weather states both.
         let held = scene.bloom;
         put(common, "m_Misc", vec![held.specular, held.emissive, 0.0, 0.0]);
-        put(common, "m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
+        // The composite hands the tone pass a frame already divided by the adaptation, which that
+        // pass multiplies back before it squares. Left at one the frame reaches the curve at the
+        // square of the adaptation.
+        put(
+            common,
+            "m_Misc2",
+            vec![1.0 / scene.exposure.adapted.max(f32::EPSILON), 0.0, 0.0, 0.0],
+        );
         let screen = "g_ScreenParameter";
         put(screen, "m_BackBufferSize", vec![width, height]);
         put(screen, "m_ViewportSize", vec![width, height]);

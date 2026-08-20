@@ -31,7 +31,8 @@ impl Swatches {
     }
 
     /// The colour a shader is given, which every buffer but the decal's takes squared. The fourth
-    /// lane is not a colour and passes through either way: it is the weight the swatch is worn at.
+    /// lane is not a colour and passes through either way: a lip's own opacity goes in as the file
+    /// states it, byte for byte.
     pub fn shaded(&self, index: usize) -> [f32; 4] {
         let [red, green, blue, weight] = self.plain(index);
         [red * red, green * green, blue * blue, weight]

@@ -24,6 +24,7 @@ pub struct CollapsibleSidePanel {
     id: Id,
     side: Side,
     collapsed_width: Option<f32>,
+    max_width: Option<f32>,
 }
 
 impl CollapsibleSidePanel {
@@ -32,11 +33,19 @@ impl CollapsibleSidePanel {
             id: id.into(),
             side,
             collapsed_width: None,
+            max_width: None,
         }
     }
 
     pub fn collapsed_width(mut self, width: f32) -> Self {
         self.collapsed_width = Some(width);
+        self
+    }
+
+    /// How wide the panel may grow. A panel takes the width its contents ask for and keeps it, so
+    /// one long row would otherwise take the space beside it for good.
+    pub fn max_width(mut self, width: f32) -> Self {
+        self.max_width = Some(width);
         self
     }
 
@@ -54,13 +63,18 @@ impl CollapsibleSidePanel {
             .resizable(false)
             .exact_size(self.collapsed_width.unwrap_or_default());
 
+        let expanded_panel = match self.max_width {
+            Some(width) => self.side.panel(self.id).max_size(width),
+            None => self.side.panel(self.id),
+        };
+
         if openness != 0.0 || self.collapsed_width.is_some() {
             let mut is_expanded = is_expanded;
             Some(Panel::show_switched(
                 ui,
                 &mut is_expanded,
                 collapsed_panel,
-                self.side.panel(self.id),
+                expanded_panel,
                 |ui, expanded| add_contents(ui, expanded),
             ))
         } else {

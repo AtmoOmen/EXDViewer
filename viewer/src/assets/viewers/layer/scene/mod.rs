@@ -3329,7 +3329,7 @@ impl Scene {
                                     format!("{name} {all}: {wet} blended, {dry} opaque")
                                 })
                                 .collect::<Vec<_>>()
-                                .join(", "),
+                                .join("\n"),
                         }
                     }),
                     (

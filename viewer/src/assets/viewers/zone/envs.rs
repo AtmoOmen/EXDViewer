@@ -458,7 +458,7 @@ impl Rendered {
                     .show(ui, |ui| {
                         for (label, value) in self.fields(at) {
                             ui.label(RichText::new(&label).weak());
-                            ui.label(RichText::new(value).monospace());
+                            ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                             ui.allocate_space(vec2(ui.available_width(), 0.0));
                             ui.end_row();
                         }

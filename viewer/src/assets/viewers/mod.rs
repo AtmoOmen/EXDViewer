@@ -279,6 +279,7 @@ fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
                     .monospace()
                     .color(ui.visuals().hyperlink_color),
             )
+            .wrap()
             .sense(Sense::click()),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);

@@ -692,8 +692,13 @@ impl Buffers {
         self.measured
     }
 
+    /// One until a chain has run and answered, which is the exposure a frame is drawn under when
+    /// nothing is adapting it, and what every pass that divides by this has to see.
     pub fn exposed(&self) -> f32 {
-        self.exposed
+        match self.exposed {
+            held if held > 0.0 => held,
+            _ => 1.0,
+        }
     }
 
     /// How much of the G-buffer one pass can write. Four until a frame has asked the context, since

@@ -32,7 +32,6 @@ use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
 use ironworks::file::shpk::ShaderPackage;
 use ironworks::file::spm::ShaderParameters;
-use ironworks::sqpack::IndexHash;
 use ironworks::file::{
     File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera,
 };
@@ -338,23 +337,6 @@ fn wet_name(held: &str) -> bool {
     ]
     .iter()
     .any(|one| held.ends_with(one))
-}
-
-/// Which repository and category the shader files sit in.
-const SHADER: (u8, u8) = (0, 5);
-
-/// The index hash a shader path names where its last segment is the hash itself rather than a file
-/// name. The install ships one shader that way and the path list has no name for it, so it is asked
-/// for the way the asset browser asks for any file it can only see as a hash.
-fn unnamed(path: &str) -> Option<u64> {
-    let (directory, name) = path.rsplit_once('/')?;
-    if name.len() != 8 || !name.bytes().all(|held| held.is_ascii_hexdigit()) {
-        return None;
-    }
-    let (Some(IndexHash::Split(held)), _) = IndexHash::of(&format!("{directory}/x")) else {
-        return None;
-    };
-    Some(held & !0xffff_ffff | u64::from(u32::from_str_radix(name, 16).ok()?))
 }
 
 /// One material's shaders, and how much of the G-buffer they were translated for.
@@ -2046,9 +2028,9 @@ impl Scene {
             let wanted = path.clone();
             let holed = named.contains(path);
             *held = Package::Fetching(TrackedPromise::spawn_local(async move {
-                match unnamed(&wanted) {
+                match program::unnamed(&wanted) {
                     Some(hash) => Ok((
-                        files.read_by_hash(SHADER.0, SHADER.1, hash, true).await?,
+                        files.read_by_hash(program::SHADER.0, program::SHADER.1, hash, true).await?,
                         false,
                     )),
                     None if holed => files.read_package(&wanted).await,

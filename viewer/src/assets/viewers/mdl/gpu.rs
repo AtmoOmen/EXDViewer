@@ -19,7 +19,7 @@ use super::material::Family;
 use super::{Vertex, program};
 
 pub use super::deferred::{
-    Dead, Exposure, Glare, LIT, Lighting, Occlusion, Smoothing, bury, graveyard,
+    Dead, Exposure, Glare, LIT, Lighting, Occlusion, Reflection, Smoothing, bury, graveyard,
 };
 
 /// Attribute locations, in the order [`Vertex`] stores them.
@@ -203,6 +203,8 @@ pub struct Frame {
     pub smoothing: Option<Arc<Smoothing>>,
     /// The chain that works out how much sky reaches each pixel, on the same terms.
     pub occlusion: Option<Arc<Occlusion>>,
+    /// The chain that reflects the frame off itself, where the viewer is drawing with it.
+    pub reflection: Option<Arc<Reflection>>,
     /// The one that darkens its corners, which runs after all of them.
     pub vignette: Option<Arc<program::Program>>,
     pub eye: [f32; 3],
@@ -745,6 +747,11 @@ impl Game {
             self.buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
             self.resolve(gl, painter, frame, meshes, &scene)?;
+            // Over the frame the composite left and before anything spreads or grades it, which is
+            // where the game runs it.
+            if let Some(reflection) = frame.reflection.as_ref() {
+                self.buffers.mirror(gl, reflection, &scene)?;
+            }
             if let Some(glare) = frame.glare.as_ref() {
                 self.buffers.glare(gl, glare, &scene)?;
             }

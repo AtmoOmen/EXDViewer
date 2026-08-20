@@ -652,7 +652,8 @@ pub struct Buffers {
     sheets: [Option<(String, glow::Texture)>; 2],
     resolvers: BTreeMap<usize, Linked>,
     present: Option<glow::Program>,
-    blocks: Vec<glow::Buffer>,
+    /// One uniform buffer per binding slot, and how many bytes the last fill of it came to.
+    blocks: Vec<(glow::Buffer, usize)>,
     /// Whether the graph has already brought the frame into the range a screen holds, which is what
     /// keeps the pass that puts it up from bending it a second time.
     toned: bool,
@@ -2482,13 +2483,14 @@ impl Buffers {
                 let mut data = buffer.fill(scene, held.pass, instances);
                 data.resize(size.max(16), 0);
                 while self.blocks.len() <= at {
-                    self.blocks.push(gl.create_buffer()?);
+                    self.blocks.push((gl.create_buffer()?, 0));
                 }
-                let held = self.blocks[at];
+                let held = self.blocks[at].0;
                 gl.bind_buffer(glow::UNIFORM_BUFFER, Some(held));
                 gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &data, glow::DYNAMIC_DRAW);
                 gl.bind_buffer_base(glow::UNIFORM_BUFFER, at as u32, Some(held));
                 gl.uniform_block_binding(program, block, at as u32);
+                self.blocks[at].1 = data.len();
             }
         }
         Ok(())
@@ -2647,6 +2649,39 @@ impl Buffers {
         Ok(())
     }
 
+    /// One more draw of the pass just run, with only the light it carries written again. Every lamp
+    /// of a kind reads the same program over the same volume, so what that pass bound - its
+    /// framebuffer, its textures, the rest of its buffers - stands as it left it.
+    fn again(&self, gl: &glow::Context, held: &program::Program, scene: &program::Scene) {
+        let Some((layout, _, _)) = self.volume else {
+            return;
+        };
+        for (at, buffer) in held.buffers.iter().enumerate() {
+            if buffer.name != program::LIGHT {
+                continue;
+            }
+            let Some(&(block, size)) = self.blocks.get(at).filter(|held| held.1 != 0) else {
+                continue;
+            };
+            let mut data = buffer.fill(scene, held.pass, &[]);
+            data.resize(size, 0);
+            unsafe {
+                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(block));
+                gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
+            }
+        }
+        unsafe {
+            gl.bind_vertex_array(Some(layout));
+            gl.draw_elements(
+                glow::TRIANGLES,
+                VOLUME_FACES.len() as i32,
+                glow::UNSIGNED_SHORT,
+                0,
+            );
+            gl.bind_vertex_array(None);
+        }
+    }
+
     /// The graph past the G-buffer: the view position off the depth, the light off both, and the
     /// frame off the light. Every lamp adds to the same two buffers, so they start at nothing and
     /// each pass adds to what the one before it left.
@@ -2714,18 +2749,17 @@ impl Buffers {
             gl.cull_face(glow::FRONT);
             gl.front_face(glow::CCW);
         }
-        // Every lamp of a kind is the same pass over a volume of its own, so each kind's program is
-        // linked once, at a slot of its own, and only the buffer it reads is written again. A spot
-        // whose package has not arrived draws through the point one, which reads neither its
-        // direction nor its cone: a lit box rather than nothing.
-        for lamp in lamps {
-            let held = program::Scene {
-                lamp: *lamp,
-                ..scene.clone()
-            };
-            // Each kind is one pass over a volume of its own, linked once at a slot of its own. A
-            // kind whose package has not arrived draws through the point one, which reads neither
-            // its length nor its area: a lit box rather than nothing.
+        // Each kind is one pass over a volume of its own, linked once at a slot of its own. A kind
+        // whose package has not arrived draws through the point one, which reads neither its length
+        // nor its area: a lit box rather than nothing. Gathered by kind so a run of lamps goes
+        // through one program: the first sets the pass up whole and the rest write the one buffer
+        // that differs and draw. Every lamp adds to the same buffer, so the order costs nothing.
+        let mut sorted = lamps.to_vec();
+        sorted.sort_by_key(|lamp| lamp.kind as u8);
+        let mut held = scene.clone();
+        let mut standing = None;
+        for lamp in &sorted {
+            held.lamp = *lamp;
             let (slot, program) = match lamp.kind {
                 program::LampKind::Spot if lighting.spot.is_some() => (3, lighting.spot.as_ref()),
                 program::LampKind::Line if lighting.line.is_some() => (6, lighting.line.as_ref()),
@@ -2735,7 +2769,13 @@ impl Buffers {
                 _ => (2, None),
             };
             let program = program.unwrap_or(&lighting.point);
-            self.pass(gl, slot, program, light, &held, Over::Volume)?;
+            match standing == Some(slot) {
+                true => self.again(gl, program, &held),
+                false => {
+                    self.pass(gl, slot, program, light, &held, Over::Volume)?;
+                    standing = Some(slot);
+                }
+            }
         }
         unsafe {
             gl.disable(glow::CULL_FACE);
@@ -2869,7 +2909,7 @@ impl Drop for Buffers {
                 .filter_map(Option::take)
                 .map(|(_, held)| Dead::Texture(held)),
         );
-        dead.extend(self.blocks.drain(..).map(Dead::Buffer));
+        dead.extend(self.blocks.drain(..).map(|(held, _)| Dead::Buffer(held)));
         dead.extend(self.present.take().map(Dead::Program));
         dead.extend(
             std::mem::take(&mut self.resolvers)

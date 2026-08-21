@@ -241,8 +241,13 @@ fn run() -> Result<String, String> {
             let _ = writeln!(
                 out,
                 "           step {:.3} units  turn {:.3} deg  roll {:.3} deg  fov {:+.3} deg  \
-                 parallax {:.3} deg at a hundred units",
-                residual.step, residual.turn, residual.roll, residual.fov, residual.parallax,
+                 parallax {:.3} deg at a hundred units, the turn worth {:.1} px here",
+                residual.step,
+                residual.turn,
+                residual.roll,
+                residual.fov,
+                residual.parallax,
+                residual.pixels,
             );
             let _ = writeln!(
                 out,
@@ -353,10 +358,10 @@ fn coverage(held: &Aligned, seen: &View, mine: &View) -> String {
     format!(
         "           the viewer's frame covers {:.1}% of the game's, {:.1} deg wide against {:.1}\n",
         100.0 * reached as f64 / whole as f64,
-        2.0 * (mine.aspect() * (mine.fov.to_radians() * 0.5).tan())
+        2.0 * (mine.aspect * (mine.fov.to_radians() * 0.5).tan())
             .atan()
             .to_degrees(),
-        2.0 * (seen.aspect() * (seen.fov.to_radians() * 0.5).tan())
+        2.0 * (seen.aspect * (seen.fov.to_radians() * 0.5).tan())
             .atan()
             .to_degrees(),
     )

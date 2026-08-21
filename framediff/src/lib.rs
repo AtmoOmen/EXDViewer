@@ -234,6 +234,8 @@ pub struct View {
     pub rotation: Mat3,
     /// Vertical, in degrees.
     pub fov: f32,
+    /// What the frame was drawn at, which a resampled thumbnail no longer states by its own shape.
+    pub aspect: f32,
     pub width: u32,
     pub height: u32,
 }
@@ -247,6 +249,7 @@ impl View {
             eye,
             rotation: Mat3::from_cols(right, up, -forward).transpose(),
             fov,
+            aspect: width as f32 / height as f32,
             width,
             height,
         }
@@ -254,10 +257,6 @@ impl View {
 
     pub fn forward(&self) -> Vec3 {
         -self.rotation.transpose().z_axis
-    }
-
-    pub fn aspect(&self) -> f32 {
-        self.width as f32 / self.height as f32
     }
 
     /// Half the frame's height at unit depth.
@@ -269,7 +268,7 @@ impl View {
     fn ray(&self, x: f32, y: f32) -> Vec3 {
         let nx = 2.0 * (x + 0.5) / self.width as f32 - 1.0;
         let ny = 1.0 - 2.0 * (y + 0.5) / self.height as f32;
-        Vec3::new(nx * self.reach() * self.aspect(), ny * self.reach(), -1.0)
+        Vec3::new(nx * self.reach() * self.aspect, ny * self.reach(), -1.0)
     }
 
     /// Where a direction in this view's space lands, as a pixel place.
@@ -277,7 +276,7 @@ impl View {
         if ray.z >= 0.0 {
             return None;
         }
-        let nx = ray.x / (-ray.z * self.reach() * self.aspect());
+        let nx = ray.x / (-ray.z * self.reach() * self.aspect);
         let ny = ray.y / (-ray.z * self.reach());
         Some((
             (nx + 1.0) * 0.5 * self.width as f32 - 0.5,
@@ -298,6 +297,8 @@ pub struct Residual {
     pub fov: f32,
     /// The step as an angle at a hundred units, which is what it costs a frame of that reach.
     pub parallax: f32,
+    /// What the turn is worth on the game's own pixel grid.
+    pub pixels: f32,
 }
 
 impl Residual {
@@ -317,6 +318,7 @@ impl Residual {
             roll,
             fov: view.fov - game.fov,
             parallax: (step / 100.0).atan().to_degrees(),
+            pixels: turn / game.fov * game.height as f32,
         }
     }
 }

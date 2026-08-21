@@ -45,8 +45,12 @@ pub struct Camera {
 }
 
 impl Camera {
+    /// The frame as its own pixels, stretched to the shape it was drawn at rather than the shape a
+    /// resampled thumbnail happens to be.
     pub fn view(&self, width: u32, height: u32) -> View {
-        View::of(self.eye, self.forward, self.fov, width, height)
+        let mut held = View::of(self.eye, self.forward, self.fov, width, height);
+        held.aspect = self.aspect;
+        held
     }
 
     /// The angles a TitleEdit preset states, in radians.

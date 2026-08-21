@@ -3,13 +3,14 @@
 //
 //   CHROMIUM=$(...) bun smoke/frame.ts --capture=~/rdcaps/tuli.zip.xml \
 //       --level=bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb --time=14:10 --weather=1 \
-//       --origin=http://127.0.0.1:9083 --out=smoke/y6t1
+//       --out=smoke/y6t1
 //
 // The camera and the lens come out of the capture, so the two views are the same view rather than
 // two hand-flown ones. The build that drew the frame states its own commit, and a run against a
 // tree that did not draw it fails rather than reporting the difference.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -30,12 +31,30 @@ const untilde = (path: string) => (path.startsWith("~/") ? join(home, path.slice
 const capture = untilde(flag("capture", ""));
 const level = flag("level", "");
 const outDir = resolve(root, flag("out", "smoke/frame"));
-const origin = flag("origin", "http://127.0.0.1:9083");
+const dist = resolve(root, "viewer/dist");
 const wait = Number(flag("wait", "150000"));
-const [WIDTH, HEIGHT] = flag("size", "2200x1200").split("x").map(Number);
+const [WIDTH, HEIGHT] = flag("size", "2400x1200").split("x").map(Number);
 const build = flag("build", "");
 
 const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+
+// Serves what was just built, so nothing between the build and the browser can hand over an older
+// one. The build the frame came from states its own commit either way, and a mismatch is fatal.
+function serve() {
+    return Bun.serve({
+        port: 0,
+        fetch(request) {
+            const url = new URL(request.url);
+            const asked = join(dist, decodeURIComponent(url.pathname));
+            if (asked.startsWith(dist) && !asked.endsWith("/") && existsSync(asked)) {
+                return new Response(Bun.file(asked));
+            }
+            return new Response(Bun.file(join(dist, "index.html")), {
+                headers: { "content-type": "text/html" },
+            });
+        },
+    });
+}
 
 function run(command: string[], where = root) {
     const held = Bun.spawnSync(command, { cwd: where, stdout: "pipe", stderr: "pipe" });
@@ -112,6 +131,14 @@ async function main() {
 
     const head = run(["git", "rev-parse", "HEAD"]).trim();
     console.log(`tree ${head}`);
+    if (!argv.includes("--no-build")) {
+        console.log("building viewer/dist");
+        run(["trunk", "build", "index.html", "--release"], join(root, "viewer"));
+    }
+    if (!existsSync(join(dist, "index.html"))) {
+        throw new Error(`no build at ${dist}`);
+    }
+    console.log(`dist built ${statSync(join(dist, "index.html")).mtime.toISOString()}`);
     run(["cargo", "build", "-q", "--release", "-p", "framediff"]);
     const rdframe = join(root, "target/release/rdframe");
     console.log(
@@ -123,6 +150,8 @@ async function main() {
     );
     const preset = readFileSync(join(outDir, "preset.te3"), "utf8").trim();
 
+    const server = serve();
+    const origin = `http://127.0.0.1:${server.port}`;
     const profile = mkdtempSync(join(tmpdir(), "xiviewer-frame-"));
     const { child, port } = await launch(profile);
     const targets = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
@@ -176,6 +205,7 @@ async function main() {
     } finally {
         cdp.close();
         child.kill();
+        await server.stop(true);
         rmSync(profile, { recursive: true, force: true });
     }
 

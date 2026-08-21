@@ -1,6 +1,7 @@
 //! Takes the presented frame and the camera out of a converted RenderDoc capture.
 //!
-//!   rdframe <capture.zip.xml> --level=<lvb path> [--time=HH:MM] [--weather=N] --out=<dir>
+//!   rdframe <capture.zip.xml> --level=<lvb path> [--time=HH:MM] [--weather=N]
+//!           [--camera=<n>] --out=<dir>
 //!
 //! Writes the frame as a PNG, what the capture states as JSON, and a TitleEdit preset that stands
 //! this viewer where the game stood. The zone, the hour and the weather are not in the capture in
@@ -25,6 +26,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let (mut path, mut out, mut level, mut time, mut weather) = (None, None, None, None, 1u32);
+    let mut pick: Option<usize> = None;
     for one in std::env::args().skip(1) {
         match one.strip_prefix("--").and_then(|one| one.split_once('=')) {
             Some(("out", value)) => out = Some(PathBuf::from(value)),
@@ -32,6 +34,9 @@ fn run() -> Result<(), String> {
             Some(("time", value)) => time = Some(clock(value)?),
             Some(("weather", value)) => {
                 weather = value.parse().map_err(|_| "--weather wants a number")?;
+            }
+            Some(("camera", value)) => {
+                pick = Some(value.parse().map_err(|_| "--camera wants a number")?);
             }
             Some((name, _)) => return Err(format!("--{name}: no such option")),
             None => path = Some(PathBuf::from(one)),
@@ -55,9 +60,9 @@ fn run() -> Result<(), String> {
     );
 
     let cameras = held.cameras()?;
-    for camera in &cameras {
+    for (at, camera) in cameras.iter().enumerate() {
         println!(
-            "camera     eye ({:.3}, {:.3}, {:.3})  looking ({:.3}, {:.3}, {:.3})  \
+            "camera {at}   eye ({:.3}, {:.3}, {:.3})  looking ({:.3}, {:.3}, {:.3})  \
              fov {:.2} vertical  near {}  x{}",
             camera.eye.x,
             camera.eye.y,
@@ -89,8 +94,18 @@ fn run() -> Result<(), String> {
     )
     .map_err(|why| why.to_string())?;
 
-    let Some(camera) = cameras.first() else {
-        return Err("no camera in the frame's own writes: nothing to stand the viewer by".to_owned());
+    // A frame states more than one camera - the lobby's own stands beside the zone's - and which
+    // drew the picture is not something the buffers say. Picking the busiest silently would put the
+    // viewer somewhere else entirely and leave the difference looking like a shading fault.
+    let camera = match (cameras.len(), pick) {
+        (0, _) => return Err("no camera in the frame's own writes".to_owned()),
+        (_, Some(at)) => cameras
+            .get(at)
+            .ok_or_else(|| format!("--camera={at}: the capture states {}", cameras.len()))?,
+        (1, None) => &cameras[0],
+        (held, None) => {
+            return Err(format!("{held} cameras stated: pass --camera=<n> to pick one"));
+        }
     };
     let Some(level) = level else {
         println!("no --level, so no preset was written");

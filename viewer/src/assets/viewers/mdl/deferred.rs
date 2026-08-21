@@ -4,7 +4,7 @@
 //! the composite that turns those into a frame. One model and a whole zone want the same thing here,
 //! so this is what they share; what differs is only the draw list that fills the G-buffer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glow::HasContext;
 
@@ -535,10 +535,154 @@ pub fn graveyard() -> &'static std::sync::Mutex<Vec<Dead>> {
     GRAVEYARD.get_or_init(Default::default)
 }
 
+/// What a linked program has already answered about its own names, and which vertex arrays are
+/// already pointed at what it reads. Each of these is a question put to the driver, and a zone puts
+/// the same ones to the same programs thousands of times a frame.
+#[derive(Default)]
+struct Learned {
+    uniforms: HashMap<String, Option<glow::UniformLocation>>,
+    samplers: HashMap<String, Sampled>,
+    blocks: HashMap<String, Option<(u32, usize)>>,
+    bindings: HashMap<u32, u32>,
+    layouts: HashSet<glow::VertexArray>,
+}
+
+/// Where a program takes the unit a sampler reads from, where it takes how many levels the texture
+/// on that unit has, and which unit it was last told to read.
+struct Sampled {
+    unit: Option<glow::UniformLocation>,
+    levels: Option<glow::UniformLocation>,
+    at: Option<u32>,
+}
+
+type Lessons = std::sync::Mutex<HashMap<glow::Program, Learned>>;
+static LEARNED: std::sync::OnceLock<Lessons> = std::sync::OnceLock::new();
+
+fn learned() -> &'static Lessons {
+    LEARNED.get_or_init(Default::default)
+}
+
+/// Where a program holds the uniform of this name.
+pub fn uniform(
+    gl: &glow::Context,
+    program: glow::Program,
+    name: &str,
+) -> Option<glow::UniformLocation> {
+    let mut learned = learned().lock().unwrap();
+    let held = learned.entry(program).or_default();
+    if let Some(found) = held.uniforms.get(name) {
+        return found.as_ref().cloned();
+    }
+    let found = unsafe { gl.get_uniform_location(program, name) };
+    held.uniforms.insert(name.to_owned(), found);
+    held.uniforms[name].as_ref().cloned()
+}
+
+/// Points a program's sampler at a unit, where it is not pointed there already. The value is the
+/// program's own state, so it stands until something points it elsewhere.
+fn point_sampler(gl: &glow::Context, program: glow::Program, name: &str, unit: u32) {
+    let mut learned = learned().lock().unwrap();
+    let held = learned
+        .entry(program)
+        .or_default()
+        .samplers
+        .entry(name.to_owned())
+        .or_insert_with(|| unsafe {
+            Sampled {
+                unit: gl.get_uniform_location(program, name),
+                levels: gl.get_uniform_location(program, &format!("{name}_levels")),
+                at: None,
+            }
+        });
+    if held.at == Some(unit) {
+        return;
+    }
+    held.at = Some(unit);
+    unsafe {
+        if let Some(location) = &held.unit {
+            gl.uniform_1_i32(Some(location), unit as i32);
+        }
+        // Nothing in GLSL says how many levels a texture has, so a shader that asks is told.
+        if let Some(location) = &held.levels {
+            gl.uniform_1_i32(Some(location), 1);
+        }
+    }
+}
+
+/// Whether a program's block already reads the binding point it is about to be pointed at.
+pub fn pointed(program: glow::Program, block: u32, at: u32) -> bool {
+    learned()
+        .lock()
+        .unwrap()
+        .entry(program)
+        .or_default()
+        .bindings
+        .insert(block, at)
+        == Some(at)
+}
+
+/// Which block a program holds for the buffer of this name, and how large it declares it. The
+/// translator names a block after the buffer it carries, with a suffix that keeps the two apart.
+pub fn block(gl: &glow::Context, program: glow::Program, name: &str) -> Option<(u32, usize)> {
+    let mut learned = learned().lock().unwrap();
+    let held = learned.entry(program).or_default();
+    if let Some(found) = held.blocks.get(name) {
+        return *found;
+    }
+    let found = unsafe {
+        gl.get_uniform_block_index(program, &format!("{name}_b")).map(|index| {
+            let size = gl.get_active_uniform_block_parameter_i32(
+                program,
+                index,
+                glow::UNIFORM_BLOCK_DATA_SIZE,
+            );
+            (index, size as usize)
+        })
+    };
+    held.blocks.insert(name.to_owned(), found);
+    found
+}
+
+/// Whether a vertex array is already pointed at what a program reads, marking it as pointed there
+/// where it is not. The pointers are the array's own state, so a mesh drawn again through the same
+/// program keeps what it was given.
+pub fn laid_out(program: glow::Program, layout: glow::VertexArray) -> bool {
+    !learned()
+        .lock()
+        .unwrap()
+        .entry(program)
+        .or_default()
+        .layouts
+        .insert(layout)
+}
+
 /// Deletes what an earlier viewer left behind. Called at the top of a draw, because that is the
 /// only moment a context exists.
 pub fn bury(gl: &glow::Context) {
-    for dead in graveyard().lock().unwrap().drain(..) {
+    let dead: Vec<Dead> = graveyard().lock().unwrap().drain(..).collect();
+    if !dead.is_empty() {
+        // A handle is the driver's to hand out again, so what was learned about one being deleted
+        // cannot be left standing for whatever takes its number next.
+        let mut learned = learned().lock().unwrap();
+        let layouts: HashSet<glow::VertexArray> = dead
+            .iter()
+            .filter_map(|dead| match dead {
+                Dead::Layout(layout) => Some(*layout),
+                _ => None,
+            })
+            .collect();
+        for dead in &dead {
+            if let Dead::Program(program) = dead {
+                learned.remove(program);
+            }
+        }
+        if !layouts.is_empty() {
+            for held in learned.values_mut() {
+                held.layouts.retain(|layout| !layouts.contains(layout));
+            }
+        }
+    }
+    for dead in dead {
         unsafe {
             match dead {
                 Dead::Layout(layout) => gl.delete_vertex_array(layout),
@@ -649,7 +793,7 @@ struct Mirrored {
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
 /// it rather than a stale program drawing on.
 pub struct Linked {
-    source: String,
+    source: std::sync::Arc<program::Program>,
     pub program: glow::Program,
 }
 
@@ -763,7 +907,7 @@ pub struct Buffers {
     resolvers: BTreeMap<usize, Linked>,
     present: Option<glow::Program>,
     /// One uniform buffer per binding slot, and how many bytes the last fill of it came to.
-    blocks: Vec<(glow::Buffer, usize)>,
+    blocks: Vec<(glow::Buffer, Vec<u8>)>,
     /// Whether the graph has already brought the frame into the range a screen holds, which is what
     /// keeps the pass that puts it up from bending it a second time.
     toned: bool,
@@ -1335,7 +1479,7 @@ impl Buffers {
     pub fn post(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1471,7 +1615,7 @@ impl Buffers {
     pub fn shade(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (into, _) = self.mask.ok_or("no shadow mask")?;
@@ -1546,7 +1690,7 @@ impl Buffers {
     pub fn sky(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1582,7 +1726,7 @@ impl Buffers {
     pub fn sun(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1612,7 +1756,7 @@ impl Buffers {
     pub fn moon(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1658,7 +1802,7 @@ impl Buffers {
         &mut self,
         gl: &glow::Context,
         at: usize,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1775,7 +1919,7 @@ impl Buffers {
     pub fn fog(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let into = self.bare.ok_or("no lit frame")?;
@@ -2508,7 +2652,7 @@ impl Buffers {
     pub fn vignette(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -2944,28 +3088,25 @@ impl Buffers {
         instances: &[program::Instance],
     ) -> Result<(), String> {
         for (at, buffer) in held.buffers.iter().enumerate() {
-            let Some(block) =
-                (unsafe { gl.get_uniform_block_index(program, &format!("{}_b", buffer.name)) })
-            else {
+            let Some((block, size)) = block(gl, program, &buffer.name) else {
                 continue;
             };
             unsafe {
-                let size = gl.get_active_uniform_block_parameter_i32(
-                    program,
-                    block,
-                    glow::UNIFORM_BLOCK_DATA_SIZE,
-                ) as usize;
                 let mut data = buffer.fill(scene, held.pass, instances);
                 data.resize(size.max(16), 0);
                 while self.blocks.len() <= at {
-                    self.blocks.push((gl.create_buffer()?, 0));
+                    self.blocks.push((gl.create_buffer()?, Vec::new()));
                 }
                 let held = self.blocks[at].0;
                 gl.bind_buffer(glow::UNIFORM_BUFFER, Some(held));
-                gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &data, glow::DYNAMIC_DRAW);
+                if self.blocks[at].1 != data {
+                    gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &data, glow::DYNAMIC_DRAW);
+                    self.blocks[at].1 = data;
+                }
                 gl.bind_buffer_base(glow::UNIFORM_BUFFER, at as u32, Some(held));
-                gl.uniform_block_binding(program, block, at as u32);
-                self.blocks[at].1 = data.len();
+                if !pointed(program, block, at as u32) {
+                    gl.uniform_block_binding(program, block, at as u32);
+                }
             }
         }
         Ok(())
@@ -2977,7 +3118,7 @@ impl Buffers {
         &mut self,
         gl: &glow::Context,
         at: usize,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         into: glow::Framebuffer,
         scene: &program::Scene,
         over: Over,
@@ -2991,15 +3132,14 @@ impl Buffers {
             | Over::Reflecting(size, _, _) => size,
             _ => self.size,
         };
-        let source = format!("{}\n{}", held.vertex, held.fragment);
         let program = match self.resolvers.get(&at) {
-            Some(linked) if linked.source == source => linked.program,
+            Some(linked) if std::sync::Arc::ptr_eq(&linked.source, held) => linked.program,
             _ => {
                 let built = build_pair(gl, &held.vertex, &held.fragment)?;
                 if let Some(stale) = self.resolvers.insert(
                     at,
                     Linked {
-                        source,
+                        source: held.clone(),
                         program: built,
                     },
                 ) {
@@ -3144,7 +3284,7 @@ impl Buffers {
     /// One more draw of the pass just run, with only the light it carries written again. Every lamp
     /// of a kind reads the same program over the same volume, so what that pass bound - its
     /// framebuffer, its textures, the rest of its buffers - stands as it left it.
-    fn again(&self, gl: &glow::Context, held: &program::Program, scene: &program::Scene) {
+    fn again(&mut self, gl: &glow::Context, held: &program::Program, scene: &program::Scene) {
         let Some((layout, _, _)) = self.volume else {
             return;
         };
@@ -3152,15 +3292,20 @@ impl Buffers {
             if buffer.name != program::LIGHT {
                 continue;
             }
-            let Some(&(block, size)) = self.blocks.get(at).filter(|held| held.1 != 0) else {
+            let Some((block, standing)) = self.blocks.get_mut(at).filter(|held| !held.1.is_empty())
+            else {
                 continue;
             };
             let mut data = buffer.fill(scene, held.pass, &[]);
-            data.resize(size, 0);
+            data.resize(standing.len(), 0);
+            if *standing == data {
+                continue;
+            }
             unsafe {
-                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(block));
+                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(*block));
                 gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
             }
+            *standing = data;
         }
         unsafe {
             gl.bind_vertex_array(Some(layout));
@@ -3413,17 +3558,17 @@ impl Drop for Buffers {
     }
 }
 
-/// One linked pair, kept against the source it was built from so a change rebuilds it rather than a
-/// stale program drawing on.
+/// One linked pair, kept against the reading it was built from so a change rebuilds it rather than a
+/// stale program drawing on. Held by identity rather than by source: a zone links thousands of times
+/// a frame, and the two shaders behind one of them run to tens of kilobytes.
 pub fn link<K: Ord>(
     gl: &glow::Context,
     into: &mut BTreeMap<K, Linked>,
     key: K,
-    held: &program::Program,
+    held: &std::sync::Arc<program::Program>,
 ) -> Result<glow::Program, String> {
-    let source = format!("{}\n{}", held.vertex, held.fragment);
     if let Some(linked) = into.get(&key)
-        && linked.source == source
+        && std::sync::Arc::ptr_eq(&linked.source, held)
     {
         return Ok(linked.program);
     }
@@ -3431,7 +3576,7 @@ pub fn link<K: Ord>(
     if let Some(stale) = into.insert(
         key,
         Linked {
-            source,
+            source: held.clone(),
             program: built,
         },
     ) {
@@ -3679,14 +3824,8 @@ pub fn bind(
     unsafe {
         gl.active_texture(glow::TEXTURE0 + unit);
         gl.bind_texture(target, Some(texture));
-        if let Some(location) = gl.get_uniform_location(program, name) {
-            gl.uniform_1_i32(Some(&location), unit as i32);
-        }
-        // Nothing in GLSL says how many levels a texture has, so a shader that asks is told.
-        if let Some(location) = gl.get_uniform_location(program, &format!("{name}_levels")) {
-            gl.uniform_1_i32(Some(&location), 1);
-        }
     }
+    point_sampler(gl, program, name, unit);
 }
 
 /// The geometry the screen-wide passes and a light's volume are drawn from, in one array each so a

@@ -145,6 +145,9 @@ pub struct Pending {
 /// What one mesh needs beyond its geometry.
 pub struct Surface {
     pub material: usize,
+    /// Whether the model this belongs to is drawn through the wind's own reading of the material,
+    /// which is a second pair of shaders off the same package.
+    pub waving: bool,
     /// The material's own shaders, once its package has arrived.
     pub shaded: Option<Shaded>,
     pub cull: bool,
@@ -210,7 +213,7 @@ pub struct Renderer {
     /// The table the shading passes index, waiting for a context.
     types: Option<Vec<u32>>,
     /// One linked pair per material, pass and page of the G-buffer.
-    programs: BTreeMap<(usize, bool, usize), Linked>,
+    programs: BTreeMap<(usize, bool, bool, usize), Linked>,
     tables: BTreeMap<usize, glow::Texture>,
     /// Every object of the frame, in the layout the packages read them, and how far apart its
     /// windows sit.
@@ -500,12 +503,17 @@ impl Renderer {
                     let Some(held) = surface
                         .shaded
                         .as_ref()
-                        .and_then(|shaded| shaded.shadow.as_deref())
+                        .and_then(|shaded| shaded.shadow.as_ref())
                     else {
                         continue;
                     };
                     let program =
-                        deferred::link(gl, &mut self.programs, (surface.material, true, SUN), held)?;
+                        deferred::link(
+                            gl,
+                            &mut self.programs,
+                            (surface.material, surface.waving, true, SUN),
+                            held,
+                        )?;
                     unsafe { gl.use_program(Some(program)) };
                     if held.batch() > 1 {
                         self.buffers.bind(gl, program, held, &sun, &[])?;
@@ -517,12 +525,14 @@ impl Renderer {
                         .unwrap_or(0) as u32;
                     unsafe {
                         gl.bind_vertex_array(Some(mesh.0));
-                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                        for location in 0..16 {
-                            gl.disable_vertex_attrib_array(location);
-                        }
-                        for held in &held.attributes {
-                            attribute(gl, held);
+                        if !deferred::laid_out(program, mesh.0) {
+                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                            for location in 0..16 {
+                                gl.disable_vertex_attrib_array(location);
+                            }
+                            for held in &held.attributes {
+                                attribute(gl, held);
+                            }
                         }
                         let count = held.batch() as i32;
                         for at in 0..*windows {
@@ -608,11 +618,16 @@ impl Renderer {
                 let Some(shaded) = &surface.shaded else {
                     continue;
                 };
-                let Some(held) = shaded.resolve.as_deref() else {
+                let Some(held) = shaded.resolve.as_ref() else {
                     continue;
                 };
                 let program =
-                    deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
+                    deferred::link(
+                    gl,
+                    &mut self.programs,
+                    (surface.material, surface.waving, false, LIT),
+                    held,
+                )?;
                 // A surface that filled the G-buffer is tested against exactly what its own buffer
                 // pass settled, so one layered over itself keeps the fragment that pass kept. An
                 // overlay filled none of it and is tested against the scene in front of it: a shaft
@@ -701,12 +716,14 @@ impl Renderer {
                     .unwrap_or(0) as u32;
                 unsafe {
                     gl.bind_vertex_array(Some(mesh.0));
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                    for location in 0..16 {
-                        gl.disable_vertex_attrib_array(location);
-                    }
-                    for held in &held.attributes {
-                        attribute(gl, held);
+                    if !deferred::laid_out(program, mesh.0) {
+                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                        for location in 0..16 {
+                            gl.disable_vertex_attrib_array(location);
+                        }
+                        for held in &held.attributes {
+                            attribute(gl, held);
+                        }
                     }
                     let count = held.batch() as i32;
                     for at in 0..*windows {
@@ -776,7 +793,7 @@ impl Renderer {
             let Some(held) = held.filter(|held| !held.targets.is_empty()) else {
                 continue;
             };
-            let program = deferred::link(gl, &mut self.programs, (TURF, normal, page), held)?;
+            let program = deferred::link(gl, &mut self.programs, (TURF, false, normal, page), held)?;
             let supplied = held
                 .textures
                 .iter()
@@ -820,12 +837,14 @@ impl Renderer {
                 }
                 unsafe {
                     gl.bind_vertex_array(Some(layout));
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
-                    for location in 0..16 {
-                        gl.disable_vertex_attrib_array(location);
-                    }
-                    for held in &held.attributes {
-                        corner(gl, held);
+                    if !deferred::laid_out(program, layout) {
+                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
+                        for location in 0..16 {
+                            gl.disable_vertex_attrib_array(location);
+                        }
+                        for held in &held.attributes {
+                            corner(gl, held);
+                        }
                     }
                     gl.draw_elements(glow::TRIANGLES, count, glow::UNSIGNED_INT, 0);
                     gl.bind_vertex_array(None);
@@ -861,6 +880,11 @@ impl Renderer {
 
         for page in 0..self.buffers.pages() {
             self.buffers.open(gl, page);
+            // What the last draw left the context set to. Thousands of surfaces run through the
+            // same handful of readings, and a draw only has to set what the one before it left
+            // wrong. Kept per page, since the draw buffers belong to the framebuffer that page
+            // opened.
+            let mut standing: Option<(glow::Program, bool, Vec<u32>, bool)> = None;
             for depth in [true, false] {
                 for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
                     // Taken by value first: the draw wants the frame's own buffers mutably, and
@@ -886,8 +910,8 @@ impl Renderer {
                             continue;
                         };
                         let held = match depth {
-                            true => shaded.depth.as_deref(),
-                            false => shaded.buffer.get(page).map(Arc::as_ref),
+                            true => shaded.depth.as_ref(),
+                            false => shaded.buffer.get(page),
                         };
                         let Some(held) = held.filter(|held| depth || !held.targets.is_empty())
                         else {
@@ -896,24 +920,34 @@ impl Renderer {
                         let program = deferred::link(
                             gl,
                             &mut self.programs,
-                            (surface.material, depth, page),
+                            (surface.material, surface.waving, depth, page),
                             held,
                         )?;
-                        unsafe {
-                            gl.use_program(Some(program));
-                            // A material with no depth pass writes its own, since the depth buffer
-                            // is what says which pixels the frame covered.
-                            gl.depth_mask(depth || shaded.depth.is_none());
-                            gl.color_mask(!depth, !depth, !depth, !depth);
-                            gl.draw_buffers(&deferred::written(held));
-                            match surface.cull {
-                                true => {
-                                    gl.enable(glow::CULL_FACE);
-                                    gl.cull_face(glow::BACK);
-                                    gl.front_face(glow::CCW);
+                        // A material with no depth pass writes its own, since the depth buffer is
+                        // what says which pixels the frame covered.
+                        let wanted = (
+                            program,
+                            depth || shaded.depth.is_none(),
+                            deferred::written(held),
+                            surface.cull,
+                        );
+                        if standing.as_ref() != Some(&wanted) {
+                            let (program, writes, targets, cull) = &wanted;
+                            unsafe {
+                                gl.use_program(Some(*program));
+                                gl.depth_mask(*writes);
+                                gl.color_mask(!depth, !depth, !depth, !depth);
+                                gl.draw_buffers(targets);
+                                match cull {
+                                    true => {
+                                        gl.enable(glow::CULL_FACE);
+                                        gl.cull_face(glow::BACK);
+                                        gl.front_face(glow::CCW);
+                                    }
+                                    false => gl.disable(glow::CULL_FACE),
                                 }
-                                false => gl.disable(glow::CULL_FACE),
                             }
+                            standing = Some(wanted);
                         }
                         if held.batch() > 1 {
                             self.buffers.bind(gl, program, held, &scene, &[])?;
@@ -975,18 +1009,20 @@ impl Renderer {
                             .iter()
                             .position(|buffer| buffer.instances() > 1)
                             .unwrap_or(0) as u32;
+                        let viewport = deferred::uniform(gl, program, "dx_Viewport");
                         unsafe {
-                            if let Some(location) = gl.get_uniform_location(program, "dx_Viewport")
-                            {
+                            if let Some(location) = viewport {
                                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                             }
                             gl.bind_vertex_array(Some(mesh.0));
-                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                            for location in 0..16 {
-                                gl.disable_vertex_attrib_array(location);
-                            }
-                            for held in &held.attributes {
-                                attribute(gl, held);
+                            if !deferred::laid_out(program, mesh.0) {
+                                gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                                for location in 0..16 {
+                                    gl.disable_vertex_attrib_array(location);
+                                }
+                                for held in &held.attributes {
+                                    attribute(gl, held);
+                                }
                             }
                             let count = held.batch() as i32;
                             for at in 0..*windows {
@@ -1044,7 +1080,7 @@ impl Renderer {
             }
             // Before the lighting too: the shadowed variant reads the mask as a weight on what it
             // works out, so it has to be standing before the first light is resolved.
-            match lighting.shadow.as_deref() {
+            match lighting.shadow.as_ref() {
                 Some(held) => self.buffers.shade(gl, held, &scene)?,
                 None => self.buffers.unshade(),
             }

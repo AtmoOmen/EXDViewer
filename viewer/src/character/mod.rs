@@ -554,6 +554,22 @@ impl CharacterBuilder {
             }
             self.face = pick(&self.faces, self.face);
             self.hair = pick(&self.hairs, self.hair);
+            // The two feature menus are halves of the one byte the game holds them in, so where
+            // each opens has to be laid into its own half of it before either menu reads it. Left
+            // until the creator has landed: a body it cannot answer for yet would seed nothing,
+            // and nothing is what the menus would then be held at.
+            let features = self.creator.body(self.tribe, self.female).map(|body| {
+                body.menus
+                    .iter()
+                    .filter(|menu| menu.customize == FEATURES)
+                    .fold((0, 0), |(mask, first), menu| {
+                        (mask | menu.init << first, first + menu.count)
+                    })
+                    .0
+            });
+            if let Some(features) = features {
+                self.choices.entry(FEATURES).or_insert(features);
+            }
         }
 
         let wanted = self.wearing(&listing, &deformers);
@@ -702,8 +718,8 @@ impl CharacterBuilder {
                     .filter(|held| held.customize == FEATURES)
                     .map(|held| held.count as usize)
                     .sum::<usize>();
-                for bit in 0..menu.count as usize {
-                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(first + bit) {
+                for bit in first..first + menu.count as usize {
+                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(bit) {
                         hidden.remove(&format!("{FEATURE}{letter}"));
                     }
                 }
@@ -1124,7 +1140,7 @@ impl CharacterBuilder {
                     let shown = body.features.get(face);
                     let bits: Vec<Choice> = (0..menu.count)
                         .map(|bit| Choice {
-                            at: bit,
+                            at: first as u32 + bit,
                             id: bit as u16 + 1,
                             icon: shown
                                 .and_then(|icons| icons.get(first + bit as usize))

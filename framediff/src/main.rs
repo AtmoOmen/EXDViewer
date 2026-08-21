@@ -137,8 +137,12 @@ fn run() -> Result<String, String> {
     if let Some(state) = &state {
         let _ = writeln!(
             out,
-            "Viewer  {} built {}  {}{}",
+            "Viewer  {}{} built {}  {}{}",
             state.commit,
+            match state.clean {
+                true => "",
+                false => " (dirty)",
+            },
             state.built,
             state.level,
             state

@@ -9,6 +9,8 @@ use crate::View;
 pub struct State {
     /// The commit the wasm was built from, which is what stops a measurement against a stale build.
     pub commit: String,
+    /// False where the tree had uncommitted work, so the commit alone does not name the build.
+    pub clean: bool,
     pub built: String,
     pub level: String,
     pub preset: Option<String>,

@@ -38,6 +38,19 @@ impl Placement {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
 
+    /// This placement carried by another, which is how a rider hangs off the seat its mount names.
+    pub fn carried(&self, by: &Self) -> Self {
+        Self {
+            translation: by.translation + by.rotation * (by.scale * self.translation),
+            rotation: by.rotation * self.rotation,
+            scale: by.scale * self.scale,
+        }
+    }
+
+    pub fn translation(&self) -> Vec3 {
+        self.translation
+    }
+
     /// Scaled about its own origin, along its own axes, which is what a proportion slider does to
     /// the one pair of bones it names.
     pub fn scaled(&self, by: Vec3) -> Self {

@@ -286,7 +286,7 @@ pub struct CharacterBuilder {
     emote: Option<usize>,
     emote_search: String,
     emotes_matched: RefCell<(Option<String>, Vec<usize>)>,
-    /// The mounts the game names, and which of them is being stood on instead of the character.
+    /// The mounts the game names, and which of them the character is seated on.
     mounts: Vec<mounts::Mount>,
     reading_mounts: Option<TrackedPromise<Result<Vec<mounts::Mount>>>>,
     mount: Option<usize>,
@@ -937,15 +937,6 @@ impl CharacterBuilder {
     /// The face leads, since the first file is what names the skeleton the rest are posed on and a
     /// piece of equipment worn by a race that has no model of its own is filed under another's code.
     fn wearing(&self, listing: &Listing, deformers: &mdl::Deformers) -> Vec<(String, u16)> {
-        if let Some(mount) = self.mount.and_then(|at| self.mounts.get(at)) {
-            let mut found = listing.under(&mount.under);
-            found.retain(|path| path.ends_with(".mdl"));
-            found.sort();
-            return found
-                .into_iter()
-                .map(|path| (path, mount.variant))
-                .collect();
-        }
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -981,7 +972,24 @@ impl CharacterBuilder {
                 None => found.extend(part(&self.body, slot).map(|path| (path, 0))),
             }
         }
+        found.extend(self.ridden(listing));
         found
+    }
+
+    /// The mount the character is seated on. A mount is a whole body rather than anything worn, so
+    /// every model under it is drawn, and it comes after the character: the first file is what
+    /// names the skeleton the rest are posed on.
+    fn ridden(&self, listing: &Listing) -> Vec<(String, u16)> {
+        let Some(mount) = self.mount.and_then(|at| self.mounts.get(at)) else {
+            return Vec::new();
+        };
+        let mut found = listing.under(&mount.under);
+        found.retain(|path| path.ends_with(".mdl"));
+        found.sort();
+        found
+            .into_iter()
+            .map(|path| (path, mount.variant))
+            .collect()
     }
 
     /// Whether the body's own model for a slot still draws, which is what a piece worn over it
@@ -1449,8 +1457,9 @@ impl CharacterBuilder {
         .map(Pick::Emote)
     }
 
-    /// The mounts the game names, one of which stands in place of the character. A mount is a body
-    /// of its own rather than something the character is put on, so picking one draws it alone.
+    /// The mounts the game names, one of which the character rides. A mount is a body of its own
+    /// and names the same bones a rider does, so the two are posed apart and the rider is carried
+    /// to the seat the mount's own skeleton names.
     fn mounts_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1754,7 +1763,7 @@ enum Pick {
     /// The same, where what a menu holds is the number the file tree files the choice under.
     Choice(u32, u16),
     Emote(usize),
-    /// A mount to stand in place of the character, or none to stand it again.
+    /// A mount to seat the character on, or none to stand it on the ground again.
     Mount(Option<usize>),
     Npc(usize),
 }

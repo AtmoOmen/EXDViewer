@@ -4,6 +4,9 @@
 //! the numbered set under it and the variant it is worn at. A monster is one whole model and a
 //! demihuman is several pieces of equipment, so what is kept here is the directory they sit in
 //! rather than a list of suffixes.
+//!
+//! Where the rider sits is the mount's own skeleton's to say: every body a mount is drawn from
+//! carries an `n_mount` bone, and nothing else does.
 
 use anyhow::Result;
 use ironworks::excel::Language;
@@ -81,6 +84,6 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Mount>> {
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));
-    log::info!("character: {} mounts to stand on", found.len());
+    log::info!("character: {} mounts to ride", found.len());
     Ok(found)
 }

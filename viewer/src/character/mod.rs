@@ -64,7 +64,7 @@ const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
 /// Muscle tone, on a body the creator offers no tail or ears; every other race spends the same
-/// customisation on how far the pair its [`TAIL`] menu shapes reaches.
+/// customisation on the length of whatever its [`TAIL`] menu shapes.
 const MUSCLE_TONE: u32 = 21;
 const BUST: u32 = 23;
 /// A tail, or a Viera's ears: the game files both under the one customisation, and under one

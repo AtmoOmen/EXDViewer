@@ -560,13 +560,6 @@ fn learned() -> &'static Lessons {
     LEARNED.get_or_init(Default::default)
 }
 
-type Pointing = std::sync::Mutex<HashMap<glow::VertexArray, Vec<program::Attribute>>>;
-static POINTING: std::sync::OnceLock<Pointing> = std::sync::OnceLock::new();
-
-fn pointing() -> &'static Pointing {
-    POINTING.get_or_init(Default::default)
-}
-
 /// Where a program holds the uniform of this name.
 pub fn uniform(
     gl: &glow::Context,
@@ -648,21 +641,6 @@ pub fn block(gl: &glow::Context, program: glow::Program, name: &str) -> Option<(
     found
 }
 
-/// Whether a vertex array is already pointed at what a draw reads, marking it as pointed there where
-/// it is not. The pointers are the array's own, and one mesh has one array that every pass drawing it
-/// shares, so what stands is the last set of attributes pointed rather than which program pointed
-/// them: the shadow and depth passes ask for the same ones and need not undo each other.
-pub fn laid_out(attributes: &[program::Attribute], layout: glow::VertexArray) -> bool {
-    let mut pointing = pointing().lock().unwrap();
-    match pointing.get(&layout) {
-        Some(held) if held.as_slice() == attributes => true,
-        _ => {
-            pointing.insert(layout, attributes.to_vec());
-            false
-        }
-    }
-}
-
 /// Deletes what an earlier viewer left behind. Called at the top of a draw, because that is the
 /// only moment a context exists.
 pub fn bury(gl: &glow::Context) {
@@ -671,16 +649,9 @@ pub fn bury(gl: &glow::Context) {
         // A handle is the driver's to hand out again, so what was learned about one being deleted
         // cannot be left standing for whatever takes its number next.
         let mut learned = learned().lock().unwrap();
-        let mut pointing = pointing().lock().unwrap();
         for dead in &dead {
-            match dead {
-                Dead::Program(program) => {
-                    learned.remove(program);
-                }
-                Dead::Layout(layout) => {
-                    pointing.remove(layout);
-                }
-                _ => (),
+            if let Dead::Program(program) = dead {
+                learned.remove(program);
             }
         }
     }

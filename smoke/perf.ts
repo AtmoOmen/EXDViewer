@@ -221,7 +221,7 @@ async function main() {
                 `   cost: ${drawn ? ((gaps.median * 1000) / drawn).toFixed(1) : "-"} us per draw, ${drawn.toFixed(0)} draws and ${calls.toFixed(0)} watched gl calls a frame`,
             );
             console.log(
-                `   per frame: ${per("drawElementsInstanced").toFixed(0)} instanced draws, ${per("drawElements").toFixed(0)} draws, ${per("getUniformLocation").toFixed(0)} uniform lookups, ${per("disableVertexAttribArray").toFixed(0)} attrib disables, ${per("useProgram").toFixed(0)} programs, ${per("bindTexture").toFixed(0)} texture binds, ${per("bufferData").toFixed(0)} buffer uploads`,
+                `   per frame: ${per("drawElementsInstanced").toFixed(0)} instanced draws, ${per("drawElements").toFixed(0)} draws, ${per("getUniformLocation").toFixed(0)} uniform lookups, ${per("disableVertexAttribArray").toFixed(0)} attrib disables, ${per("vertexAttribPointer").toFixed(0)} attrib pointers, ${per("bindVertexArray").toFixed(0)} array binds, ${per("useProgram").toFixed(0)} programs, ${per("bindTexture").toFixed(0)} texture binds, ${per("bufferData").toFixed(0)} buffer uploads`,
             );
             for (const line of timings.slice(-14)) console.log(`   ${line}`);
             if (failures.length) {

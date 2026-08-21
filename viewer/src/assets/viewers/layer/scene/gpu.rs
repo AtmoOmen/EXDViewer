@@ -43,12 +43,36 @@ const TURF: usize = usize::MAX;
 /// The color map a blade is cut out of, which the zone's own grass file names per auto layer.
 const COLOR_MAP: u32 = 0x6e1d_f4a2;
 
-/// One mesh's geometry.
+/// One mesh's geometry, and one vertex array per set of attributes read off it. The pointers are
+/// the array's own state and the passes drawing a mesh do not read the same set, so each set has an
+/// array of its own rather than one array being pointed again per pass.
 struct Mesh {
-    layout: glow::VertexArray,
     vertices: glow::Buffer,
     indices: glow::Buffer,
     count: i32,
+    arrays: Vec<(Vec<program::Attribute>, glow::VertexArray)>,
+}
+
+impl Mesh {
+    fn array(
+        &mut self,
+        gl: &glow::Context,
+        attributes: &[program::Attribute],
+    ) -> Result<glow::VertexArray, String> {
+        pointed(
+            gl,
+            &mut self.arrays,
+            (self.vertices, self.indices),
+            attributes,
+            attribute,
+        )
+    }
+
+    fn dead(self) -> impl Iterator<Item = Dead> {
+        [Dead::Buffer(self.vertices), Dead::Buffer(self.indices)]
+            .into_iter()
+            .chain(self.arrays.into_iter().map(|(_, layout)| Dead::Layout(layout)))
+    }
 }
 
 /// One corner of one blade, in the layout the grass package's own vertex shader reads. The last lane
@@ -72,21 +96,34 @@ const CORNERS: [(program::Field, i32, i32, u32); 4] = [
     (program::Field::Color, 4, 24, glow::UNSIGNED_BYTE),
 ];
 
-/// One grid's blades at one auto layer, as the card holds them.
+/// One grid's blades at one auto layer, as the card holds them, with an array per set of attributes
+/// for the same reason a mesh has one.
 struct Turf {
-    layout: glow::VertexArray,
     vertices: glow::Buffer,
     indices: glow::Buffer,
     count: i32,
+    arrays: Vec<(Vec<program::Attribute>, glow::VertexArray)>,
 }
 
 impl Turf {
-    fn dead(self) -> [Dead; 3] {
-        [
-            Dead::Layout(self.layout),
-            Dead::Buffer(self.vertices),
-            Dead::Buffer(self.indices),
-        ]
+    fn array(
+        &mut self,
+        gl: &glow::Context,
+        attributes: &[program::Attribute],
+    ) -> Result<glow::VertexArray, String> {
+        pointed(
+            gl,
+            &mut self.arrays,
+            (self.vertices, self.indices),
+            attributes,
+            corner,
+        )
+    }
+
+    fn dead(self) -> impl Iterator<Item = Dead> {
+        [Dead::Buffer(self.vertices), Dead::Buffer(self.indices)]
+            .into_iter()
+            .chain(self.arrays.into_iter().map(|(_, layout)| Dead::Layout(layout)))
     }
 }
 
@@ -123,15 +160,9 @@ struct Model {
 
 impl Model {
     fn dead(self) -> impl Iterator<Item = Dead> {
-        self.levels.into_iter().flat_map(|level| {
-            level.meshes.into_iter().flat_map(|mesh| {
-                [
-                    Dead::Layout(mesh.layout),
-                    Dead::Buffer(mesh.vertices),
-                    Dead::Buffer(mesh.indices),
-                ]
-            })
-        })
+        self.levels
+            .into_iter()
+            .flat_map(|level| level.meshes.into_iter().flat_map(Mesh::dead))
     }
 }
 
@@ -382,6 +413,23 @@ impl Renderer {
         self.failure = drawn.and(shown).err();
     }
 
+    /// The array one mesh of a batch is drawn from for the attributes a pass reads off it.
+    fn array(
+        &mut self,
+        gl: &glow::Context,
+        batch: &Batch,
+        mesh: usize,
+        attributes: &[program::Attribute],
+    ) -> Result<Option<glow::VertexArray>, String> {
+        self.models
+            .get_mut(batch.model)
+            .and_then(Option::as_mut)
+            .and_then(|model| model.levels.get_mut(batch.level))
+            .and_then(|level| level.meshes.get_mut(mesh))
+            .map(|mesh| mesh.array(gl, attributes))
+            .transpose()
+    }
+
     /// Every object of every batch, laid out so that one draw can be pointed at its own window.
     /// Answers where each batch's windows begin and how large one is.
     fn windows(
@@ -483,20 +531,16 @@ impl Renderer {
             let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
             unsafe { gl.viewport(0, split as i32 * size, size, size) };
             for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
-                let meshes: Vec<(glow::VertexArray, glow::Buffer, i32)> = match self
+                let meshes: Vec<i32> = match self
                     .models
                     .get(batch.model)
                     .and_then(Option::as_ref)
                     .and_then(|model| model.levels.get(batch.level))
                 {
-                    Some(level) => level
-                        .meshes
-                        .iter()
-                        .map(|mesh| (mesh.layout, mesh.vertices, mesh.count))
-                        .collect(),
+                    Some(level) => level.meshes.iter().map(|mesh| mesh.count).collect(),
                     None => continue,
                 };
-                for (mesh, surface) in meshes.iter().zip(&batch.surfaces) {
+                for (mesh, (indices, surface)) in meshes.iter().zip(&batch.surfaces).enumerate() {
                     if surface.hidden {
                         continue;
                     }
@@ -523,17 +567,11 @@ impl Renderer {
                         .iter()
                         .position(|buffer| buffer.instances() > 1)
                         .unwrap_or(0) as u32;
+                    let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
+                        continue;
+                    };
                     unsafe {
-                        gl.bind_vertex_array(Some(mesh.0));
-                        if !deferred::laid_out(&held.attributes, mesh.0) {
-                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                            for location in 0..16 {
-                                gl.disable_vertex_attrib_array(location);
-                            }
-                            for held in &held.attributes {
-                                attribute(gl, held);
-                            }
-                        }
+                        gl.bind_vertex_array(Some(array));
                         let count = held.batch() as i32;
                         for at in 0..*windows {
                             gl.bind_buffer_range(
@@ -546,7 +584,7 @@ impl Renderer {
                             let drawn = (batch.instances.len() as i32 - at * count).min(count);
                             gl.draw_elements_instanced(
                                 glow::TRIANGLES,
-                                mesh.2,
+                                *indices,
                                 glow::UNSIGNED_SHORT,
                                 0,
                                 drawn,
@@ -598,20 +636,16 @@ impl Renderer {
             gl.depth_mask(false);
         }
         for (batch, (offset, windows)) in frame.batches.iter().zip(offsets) {
-            let meshes: Vec<(glow::VertexArray, glow::Buffer, i32)> = match self
+            let meshes: Vec<i32> = match self
                 .models
                 .get(batch.model)
                 .and_then(Option::as_ref)
                 .and_then(|model| model.levels.get(batch.level))
             {
-                Some(level) => level
-                    .meshes
-                    .iter()
-                    .map(|mesh| (mesh.layout, mesh.vertices, mesh.count))
-                    .collect(),
+                Some(level) => level.meshes.iter().map(|mesh| mesh.count).collect(),
                 None => continue,
             };
-            for (mesh, surface) in meshes.iter().zip(&batch.surfaces) {
+            for (mesh, (indices, surface)) in meshes.iter().zip(&batch.surfaces).enumerate() {
                 if surface.hidden {
                     continue;
                 }
@@ -714,17 +748,11 @@ impl Renderer {
                     .iter()
                     .position(|buffer| buffer.instances() > 1)
                     .unwrap_or(0) as u32;
+                let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
+                    continue;
+                };
                 unsafe {
-                    gl.bind_vertex_array(Some(mesh.0));
-                    if !deferred::laid_out(&held.attributes, mesh.0) {
-                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                        for location in 0..16 {
-                            gl.disable_vertex_attrib_array(location);
-                        }
-                        for held in &held.attributes {
-                            attribute(gl, held);
-                        }
-                    }
+                    gl.bind_vertex_array(Some(array));
                     let count = held.batch() as i32;
                     for at in 0..*windows {
                         gl.bind_buffer_range(
@@ -737,7 +765,7 @@ impl Renderer {
                         let drawn = (batch.instances.len() as i32 - at * count).min(count);
                         gl.draw_elements_instanced(
                             glow::TRIANGLES,
-                            mesh.2,
+                            *indices,
                             glow::UNSIGNED_SHORT,
                             0,
                             drawn,
@@ -756,8 +784,8 @@ impl Renderer {
                         };
                         self.buffers.bind(gl, program, held, &held_scene, &[])?;
                         unsafe {
-                            gl.bind_vertex_array(Some(mesh.0));
-                            gl.draw_elements(glow::TRIANGLES, mesh.2, glow::UNSIGNED_SHORT, 0);
+                            gl.bind_vertex_array(Some(array));
+                            gl.draw_elements(glow::TRIANGLES, *indices, glow::UNSIGNED_SHORT, 0);
                             gl.bind_vertex_array(None);
                         }
                     }
@@ -812,10 +840,11 @@ impl Renderer {
                 gl.draw_buffers(&deferred::written(held));
             }
             for blades in &frame.blades {
-                let Some(turf) = self.turf.get(&blades.turf) else {
+                let Some(turf) = self.turf.get_mut(&blades.turf) else {
                     continue;
                 };
-                let (layout, vertices, count) = (turf.layout, turf.vertices, turf.count);
+                let count = turf.count;
+                let array = turf.array(gl, &held.attributes)?;
                 let held_scene = program::Scene {
                     model: glam::Mat4::from_translation(blades.origin),
                     ..scene.clone()
@@ -836,16 +865,7 @@ impl Renderer {
                     );
                 }
                 unsafe {
-                    gl.bind_vertex_array(Some(layout));
-                    if !deferred::laid_out(&held.attributes, layout) {
-                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
-                        for location in 0..16 {
-                            gl.disable_vertex_attrib_array(location);
-                        }
-                        for held in &held.attributes {
-                            corner(gl, held);
-                        }
-                    }
+                    gl.bind_vertex_array(Some(array));
                     gl.draw_elements(glow::TRIANGLES, count, glow::UNSIGNED_INT, 0);
                     gl.bind_vertex_array(None);
                 }
@@ -889,20 +909,18 @@ impl Renderer {
                 for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
                     // Taken by value first: the draw wants the frame's own buffers mutably, and
                     // the models would still be borrowed.
-                    let held: Vec<(glow::VertexArray, glow::Buffer, i32)> = match self
+                    let meshes: Vec<i32> = match self
                         .models
                         .get(batch.model)
                         .and_then(Option::as_ref)
                         .and_then(|model| model.levels.get(batch.level))
                     {
-                        Some(level) => level
-                            .meshes
-                            .iter()
-                            .map(|mesh| (mesh.layout, mesh.vertices, mesh.count))
-                            .collect(),
+                        Some(level) => level.meshes.iter().map(|mesh| mesh.count).collect(),
                         None => continue,
                     };
-                    for (mesh, surface) in held.iter().zip(&batch.surfaces) {
+                    for (mesh, (indices, surface)) in
+                        meshes.iter().zip(&batch.surfaces).enumerate()
+                    {
                         if surface.hidden {
                             continue;
                         }
@@ -1010,20 +1028,14 @@ impl Renderer {
                             .position(|buffer| buffer.instances() > 1)
                             .unwrap_or(0) as u32;
                         let viewport = deferred::uniform(gl, program, "dx_Viewport");
+                        let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
+                            continue;
+                        };
                         unsafe {
                             if let Some(location) = viewport {
                                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                             }
-                            gl.bind_vertex_array(Some(mesh.0));
-                            if !deferred::laid_out(&held.attributes, mesh.0) {
-                                gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                                for location in 0..16 {
-                                    gl.disable_vertex_attrib_array(location);
-                                }
-                                for held in &held.attributes {
-                                    attribute(gl, held);
-                                }
-                            }
+                            gl.bind_vertex_array(Some(array));
                             let count = held.batch() as i32;
                             for at in 0..*windows {
                                 gl.bind_buffer_range(
@@ -1036,7 +1048,7 @@ impl Renderer {
                                 let drawn = (batch.instances.len() as i32 - at * count).min(count);
                                 gl.draw_elements_instanced(
                                     glow::TRIANGLES,
-                                    mesh.2,
+                                    *indices,
                                     glow::UNSIGNED_SHORT,
                                     0,
                                     drawn,
@@ -1054,10 +1066,10 @@ impl Renderer {
                                 };
                                 self.buffers.bind(gl, program, held, &held_scene, &[])?;
                                 unsafe {
-                                    gl.bind_vertex_array(Some(mesh.0));
+                                    gl.bind_vertex_array(Some(array));
                                     gl.draw_elements(
                                         glow::TRIANGLES,
-                                        mesh.2,
+                                        *indices,
                                         glow::UNSIGNED_SHORT,
                                         0,
                                     );
@@ -1209,6 +1221,43 @@ fn aligned(bytes: i32, alignment: i32) -> i32 {
     (bytes + held - 1) / held * held
 }
 
+/// The array a set of attributes is pointed on, pointing one the first time a pass asks for it. The
+/// upload leaves an array behind with nothing pointed on it, since the indices had to be bound under
+/// one, and the first set asked for takes that rather than building another.
+fn pointed(
+    gl: &glow::Context,
+    arrays: &mut Vec<(Vec<program::Attribute>, glow::VertexArray)>,
+    geometry: (glow::Buffer, glow::Buffer),
+    attributes: &[program::Attribute],
+    onto: fn(&glow::Context, &program::Attribute),
+) -> Result<glow::VertexArray, String> {
+    if let Some((_, layout)) = arrays.iter().find(|(held, _)| held.as_slice() == attributes) {
+        return Ok(*layout);
+    }
+    let layout = match arrays.iter().position(|(held, _)| held.is_empty()) {
+        Some(at) => {
+            arrays[at].0 = attributes.to_vec();
+            arrays[at].1
+        }
+        None => {
+            let layout = unsafe { gl.create_vertex_array()? };
+            arrays.push((attributes.to_vec(), layout));
+            layout
+        }
+    };
+    unsafe {
+        gl.bind_vertex_array(Some(layout));
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(geometry.0));
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(geometry.1));
+        for held in attributes {
+            onto(gl, held);
+        }
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+    }
+    Ok(layout)
+}
+
 /// One of the grass semantics pointed at the corner it sits in.
 fn corner(gl: &glow::Context, held: &program::Attribute) {
     let Some((_, lanes, offset, kind)) = CORNERS.iter().find(|(field, ..)| *field == held.field)
@@ -1227,8 +1276,8 @@ fn corner(gl: &glow::Context, held: &program::Attribute) {
     }
 }
 
-/// One grid's blades and the quads over them, with a vertex array of their own for the same reason a
-/// mesh has one.
+/// One grid's blades and the quads over them, under a vertex array of their own for the same reason
+/// a mesh has one.
 fn upload_turf(
     gl: &glow::Context,
     corners: &[Corner],
@@ -1257,10 +1306,10 @@ fn upload_turf(
         gl.bind_vertex_array(None);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
         Ok(Turf {
-            layout,
             vertices,
             indices: drawn,
             count: indices.len() as i32,
+            arrays: vec![(Vec::new(), layout)],
         })
     }
 }
@@ -1278,9 +1327,9 @@ fn upload(gl: &glow::Context, pending: Pending) -> Result<Model, String> {
     Ok(Model { levels })
 }
 
-/// One mesh's buffers, with its own vertex array. The array is not an optimization: egui leaves its
-/// own bound while a callback runs, so setting attribute pointers without one would rewrite egui's
-/// layout to point at scene geometry.
+/// One mesh's buffers, under a vertex array of its own. The array is not an optimization: egui
+/// leaves its own bound while a callback runs, so binding the indices without one would hand egui's
+/// layout this mesh's.
 fn upload_mesh(gl: &glow::Context, vertices: &[Vertex], indices: &[u16]) -> Result<Mesh, String> {
     unsafe {
         let layout = gl.create_vertex_array()?;
@@ -1305,10 +1354,10 @@ fn upload_mesh(gl: &glow::Context, vertices: &[Vertex], indices: &[u16]) -> Resu
         gl.bind_vertex_array(None);
         gl.bind_buffer(glow::ARRAY_BUFFER, None);
         Ok(Mesh {
-            layout,
             vertices: held,
             indices: drawn,
             count: indices.len() as i32,
+            arrays: vec![(Vec::new(), layout)],
         })
     }
 }

@@ -65,6 +65,11 @@ impl Worn {
     /// would poke through, so the file states which to leave undrawn rather than the two being told
     /// apart by depth.
     pub fn covers(&self, worn: Slot, set: u16) -> Vec<&'static str> {
+        // Smallclothes have no entry of their own, entry nought being the file's own control word,
+        // and reach over nothing: taking the next set's leaves a bare leg with its knee cut out.
+        if set == 0 {
+            return Vec::new();
+        }
         let held = self.0.set(set);
         let mut found = Vec::new();
         match worn {

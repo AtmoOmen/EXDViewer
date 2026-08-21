@@ -240,6 +240,37 @@ fn main() {
                 println!("  {name:16} {count}");
             }
         }
+        "imc" => {
+            let path = &arguments[1];
+            let part: u8 = arguments[2].parse().unwrap();
+            let bytes: Vec<u8> = ironworks
+                .file(&format!(
+                    "{}.imc",
+                    path.rsplit_once("/model/").unwrap().0.rsplit_once('/').map(|(under, set)| format!("{under}/{set}/{set}")).unwrap()
+                ))
+                .unwrap();
+            let file =
+                ironworks::file::imc::ImageChange::read(Cursor::new(bytes)).unwrap();
+            let held: Vec<u8> = ironworks.file(path).unwrap();
+            let container = ModelContainer::read(Cursor::new(held)).unwrap();
+            let declared = container
+                .model(ironworks::file::mdl::Lod::High)
+                .attribute_names()
+                .unwrap();
+            for variant in 0..=file.variant_count() {
+                let Some(entry) = file.entry(part, variant) else {
+                    continue;
+                };
+                let mask = u32::from(entry.attribute_mask());
+                let shown: Vec<&str> = declared
+                    .iter()
+                    .enumerate()
+                    .filter(|(bit, _)| mask & 1 << bit != 0)
+                    .map(|(_, name)| name.as_str())
+                    .collect();
+                println!("  variant {variant}: mask {mask:#012b} shows {}", shown.join(" "));
+            }
+        }
         "set" => {
             let bytes: Vec<u8> = ironworks.file(EQP).unwrap();
             let file = eqp::EquipmentParameter::read(Cursor::new(bytes)).unwrap();

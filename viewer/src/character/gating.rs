@@ -15,8 +15,8 @@ pub const PATH: &str = "chara/xls/equipmentparameter/equipmentparameter.eqp";
 /// The seams themselves, each named for the part of the body it sits at. A name belongs to one
 /// slot's models alone, so hiding it by name reaches only the model that owns it.
 const NECK: &str = "atr_nek";
-const ARM: &str = "atr_ude";
-const ELBOW: &str = "atr_hij";
+const UPPER_ARM: &str = "atr_ude";
+const FOREARM: &str = "atr_hij";
 const WAIST: &str = "atr_kod";
 const KNEE: &str = "atr_hiz";
 const CALF: &str = "atr_sne";
@@ -86,12 +86,14 @@ impl Worn {
                 }
             }
             Slot::Hands => {
+                // The two bits are one reach rather than two seams: a glove ends at the wrist, the
+                // forearm, the elbow or the upper arm, and only the last two reach over anything.
                 let hands = held.hands();
-                if hands.enabled() && hands.hide_elbow() {
-                    found.push(ELBOW);
-                }
                 if hands.enabled() && hands.hide_forearm() {
-                    found.push(ARM);
+                    found.push(FOREARM);
+                    if hands.hide_elbow() {
+                        found.push(UPPER_ARM);
+                    }
                 }
             }
             Slot::Legs => {
@@ -101,12 +103,14 @@ impl Worn {
                 }
             }
             Slot::Feet => {
+                // A reach again: a boot ends at the ankle, the calf or the knee, and the shoe that
+                // ends below the calf covers neither.
                 let feet = held.feet();
-                if feet.enabled() && feet.hide_knee() {
-                    found.push(KNEE);
-                }
                 if feet.enabled() && feet.hide_calf() {
                     found.push(CALF);
+                    if feet.hide_knee() {
+                        found.push(KNEE);
+                    }
                 }
             }
         }

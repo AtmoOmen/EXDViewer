@@ -209,7 +209,7 @@ async fn serve_file(
                 None => response.body(bytes.clone()),
             })
         }
-        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),
+        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorNotFound(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
 }
@@ -412,14 +412,8 @@ async fn serve_hash(
             .body(data.bytes.clone())),
         // A whole-path hash can name more than one file, which the caller has to resolve by asking
         // for a path instead.
-        Err(err)
-            if matches!(
-                err,
-                ironworks::Error::NotFound(_) | ironworks::Error::Invalid(..)
-            ) =>
-        {
-            Err(ErrorBadRequest(err))
-        }
+        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorNotFound(err)),
+        Err(err) if matches!(err, ironworks::Error::Invalid(..)) => Err(ErrorBadRequest(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
 }
@@ -458,7 +452,7 @@ async fn serve_exists(
         Ok(exists) => Ok(HttpResponse::Ok()
             .insert_header(CacheControl(directives))
             .json(ExistsResponse { exists })),
-        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),
+        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorNotFound(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
 }

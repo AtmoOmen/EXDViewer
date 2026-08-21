@@ -1983,7 +1983,7 @@ impl Buffers {
         // what the card answered, and only this side of the graph knows it.
         let scene = &program::Scene {
             exposure: program::Exposure {
-                adapted: self.exposed,
+                adapted: self.exposed(),
                 ..scene.exposure
             },
             ..scene.clone()

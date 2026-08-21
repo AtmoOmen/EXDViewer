@@ -691,18 +691,6 @@ impl CharacterBuilder {
             }
             // Only the lane, since the muscle tone menu comes before the skin colour that would
             // otherwise write over what it left.
-            // An icon menu holds what it was left at as the number the file tree files the set
-            // under, and nought is the empty box a face wearing no paint is offered under.
-            if menu.customize == FACE_PAINT {
-                let held = match self.choices.get(&FACE_PAINT) {
-                    Some(id) => *id as u16,
-                    None => {
-                        self.choice_of(menu, menu.init.min(menu.count.saturating_sub(1)))
-                            .id
-                    }
-                };
-                customize.paint = (held > 0).then_some(held);
-            }
             if menu.customize == MUSCLE_TONE {
                 let last = menu.count.saturating_sub(1).max(1) as usize;
                 tone = at.min(last) as f32 / last as f32;
@@ -738,6 +726,7 @@ impl CharacterBuilder {
             }
         }
         customize.skin[3] = tone;
+        customize.paint = self.paint();
         if customize.paint.is_none() {
             customize.decal[3] = 0.0;
         }
@@ -778,6 +767,23 @@ impl CharacterBuilder {
             .get(&menu.customize)
             .copied()
             .unwrap_or(menu.init)
+    }
+
+    /// The face paint the creator has been left at, as the number the file tree files the set
+    /// under. Nought is the empty box a face wearing none is offered under.
+    fn paint(&self) -> Option<u16> {
+        let menu = self
+            .creator
+            .body(self.tribe, self.female)
+            .and_then(|body| body.menus.iter().find(|menu| menu.customize == FACE_PAINT))?;
+        let held = match self.choices.get(&FACE_PAINT) {
+            Some(id) => *id as u16,
+            None => {
+                self.choice_of(menu, menu.init.min(menu.count.saturating_sub(1)))
+                    .id
+            }
+        };
+        (held > 0).then_some(held)
     }
 
     /// The tail or ear set the creator has been left at, which is one past where the choice sits.
@@ -1191,24 +1197,37 @@ impl CharacterBuilder {
                             picked = Some(Pick::Made(LIPSTICK, u32::from(on)));
                         }
                     }
-                    // Lips and face paint are offered as a dark run and a light one, which is one
-                    // palette in the file: the half a colour belongs to is the top bit of its own
-                    // index, so switching halves is that bit and nothing else.
-                    let mut half = 0;
-                    if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
-                        half = current / HALF;
-                        ui.horizontal(|ui| {
-                            for (at, name) in [(0, "Dark"), (1, "Light")] {
-                                if ui.selectable_label(half == at, name).clicked() {
-                                    picked =
-                                        Some(Pick::Made(menu.customize, current % HALF + at * HALF));
+                    // A colour the character is not wearing has nothing to pick: what puts it on
+                    // is the box beside it, or the paint the colour is for.
+                    let worn = match menu.customize {
+                        LIP_COLOR => self.ticked(LIPSTICK),
+                        FACE_PAINT_COLOR => self.paint().is_some(),
+                        _ => true,
+                    };
+                    if worn {
+                        // Lips and face paint are offered as a dark run and a light one, which is
+                        // one palette in the file: the half a colour belongs to is the top bit of
+                        // its own index, so switching halves is that bit and nothing else.
+                        let mut half = 0;
+                        if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
+                            half = current / HALF;
+                            ui.horizontal(|ui| {
+                                for (at, name) in [(0, "Dark"), (1, "Light")] {
+                                    if ui.selectable_label(half == at, name).clicked() {
+                                        picked = Some(Pick::Made(
+                                            menu.customize,
+                                            current % HALF + at * HALF,
+                                        ));
+                                    }
                                 }
-                            }
-                        });
-                    }
-                    let offered = half * HALF..half * HALF + menu.count;
-                    if let Some(index) = colors(ui, ("character_colors", at), swatches, offered, current) {
-                        picked = Some(Pick::Made(menu.customize, index));
+                            });
+                        }
+                        let offered = half * HALF..half * HALF + menu.count;
+                        if let Some(index) =
+                            colors(ui, ("character_colors", at), swatches, offered, current)
+                        {
+                            picked = Some(Pick::Made(menu.customize, index));
+                        }
                     }
                     // A second colour the creator only offers once its own box is ticked: a strand
                     // is mixed between two hair colours, and an eye takes one each.

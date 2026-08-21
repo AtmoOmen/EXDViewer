@@ -1068,6 +1068,13 @@ impl CharacterBuilder {
         }
     }
 
+    /// Whether the game builds a child of the picked clan at all.
+    fn builds_a_child(&self) -> bool {
+        self.deformers
+            .as_ref()
+            .is_some_and(|deformers| deformers.knows(resolve(self.tribe, self.female, true)))
+    }
+
     /// This body and every one it is built on, as the animation directories name them. Few bodies
     /// carry animation of their own: a child's is the one child body's, and a Highlander man's is
     /// the Midlander's.
@@ -1633,7 +1640,11 @@ impl CharacterBuilder {
                                 picked = Some(Pick::Gender(female));
                             }
                         }
-                        if ui.selectable_label(self.child, "Child").clicked() {
+                        // Only some races are built a child, and the rest would draw the adult
+                        // under a lit button.
+                        if self.builds_a_child()
+                            && ui.selectable_label(self.child, "Child").clicked()
+                        {
                             picked = Some(Pick::Child(!self.child));
                         }
                     });

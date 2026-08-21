@@ -335,6 +335,11 @@ impl Animation {
         code(model) == self.code
     }
 
+    /// The mount the body is seated on, where it is on one.
+    pub fn rides(&self) -> Option<&str> {
+        self.mounted.as_ref()?.code.as_deref()
+    }
+
     /// Whether the rigs on hand are the ones a set of models is posed on: the body the first of
     /// them names, and the mount it is ridden on. Neither can be pointed elsewhere once built, so
     /// a change to either is what asks for a rig of its own.

@@ -2761,12 +2761,11 @@ impl Rendered {
         };
         let level = level_of(&pieces, lod)?;
 
-        // A rig it was not posed on before is a different subject rather than a change of clothes,
-        // so the view is framed on it again.
-        let posed = self
+        let rode = self.animation.rides().map(str::to_owned);
+        if !self
             .animation
-            .poses(parts.iter().map(|part| part.path.as_str()));
-        if !posed {
+            .poses(parts.iter().map(|part| part.path.as_str()))
+        {
             self.animation = skin::Animation::new(parts.iter().map(|part| part.path.as_str()));
         }
         self.animation
@@ -2775,7 +2774,9 @@ impl Rendered {
         self.drawn = drawn;
         self.lod.set(lod);
         self.rebuild(level);
-        if !posed {
+        // Getting on or off a mount is a whole second body coming and going rather than a change of
+        // clothes, so the view is framed on what is there now.
+        if rode.as_deref() != self.animation.rides() {
             self.camera.set(self.level.borrow().home);
         }
         Ok(())

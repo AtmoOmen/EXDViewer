@@ -59,6 +59,7 @@ fn main() {
     let mut curves: BTreeMap<String, usize> = BTreeMap::new();
     let mut moved: BTreeMap<(bool, bool), usize> = BTreeMap::new();
     let mut asleep: Vec<String> = Vec::new();
+    let mut reached: BTreeMap<String, usize> = BTreeMap::new();
     let mut wide = 0usize;
     for path in &every {
         let Ok(file) = ironworks.file::<SharedGroupFile>(path.as_str()) else {
@@ -87,6 +88,42 @@ fn main() {
                         timeline.kind(),
                         timeline.animated()
                     ));
+                }
+            }
+            // Only what an autoplaying timeline actually reaches: the actor it names, that actor's
+            // tracks, and the commands hanging off them.
+            if timeline.auto_play() {
+                for (actor, _) in timeline.animated() {
+                    let Some(tracks) = items.iter().find_map(|item| match item {
+                        tmb::Item::Actor(held) if i32::from(held.time()) == *actor => {
+                            Some(held.tracks())
+                        }
+                        _ => None,
+                    }) else {
+                        continue;
+                    };
+                    for track in tracks {
+                        let Some(commands) = items.iter().find_map(|item| match item {
+                            tmb::Item::Track(held) if held.id() == *track => Some(held.commands()),
+                            _ => None,
+                        }) else {
+                            continue;
+                        };
+                        for command in commands {
+                            let Some(tmb::Item::Command(held)) = items.iter().find(|item| {
+                                matches!(item, tmb::Item::Command(held) if held.id() == *command)
+                            }) else {
+                                continue;
+                            };
+                            let name = match held.kind() {
+                                tmb::CommandKind::Unknown { magic, .. } => {
+                                    String::from_utf8_lossy(magic).into_owned()
+                                }
+                                held => format!("{held:?}").split(&['(', ' ']).next().unwrap().to_owned(),
+                            };
+                            *reached.entry(name).or_default() += 1;
+                        }
+                    }
                 }
             }
             let sets: BTreeSet<i32> = items
@@ -152,6 +189,7 @@ fn main() {
     for line in &asleep {
         println!("   asleep {line}");
     }
+    println!("commands an autoplaying timeline reaches: {reached:?}");
     for (field, count) in &curves {
         println!("{field} names a curve set in its own timeline {count} times");
     }

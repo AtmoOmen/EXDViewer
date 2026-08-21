@@ -34,7 +34,9 @@ use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use half::f16;
-use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, SceneTimeline, Transform};
+use ironworks::file::layer::{
+    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneTimeline, Transform,
+};
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
 use ironworks::file::shpk::ShaderPackage;
@@ -187,49 +189,107 @@ struct Driven {
     tail: Mat4,
 }
 
-/// What one node of a shared group's timeline does to it, as nine curves over a span. Nothing states
-/// the unit of that span; the game's own timelines run at thirty to the second.
-struct Motion {
-    curves: Vec<(tmb::Channel, tmb::Curve)>,
-    duration: f32,
+/// What moves a shared group's node, either way it is stated. Nothing names the unit of either
+/// span; the game's own timelines run at thirty to the second.
+enum Motion {
+    /// A timeline's nine curves over its span, which state where the node stands outright.
+    Keyed {
+        curves: Vec<(tmb::Channel, tmb::Curve)>,
+        duration: f32,
+    },
+    /// A swing the scene repeats with no timeline to play it, on top of where the file placed it.
+    Repeat {
+        placement: Transform,
+        translation: Lane,
+        rotation: Lane,
+        scale: Lane,
+    },
+}
+
+/// How far along its swing a repeating lane stands, from nought at rest to one at full reach. A
+/// lane that wraps at nought starts over, which is what a whole turn wants; the rest swing back.
+fn phase(period: u32, delay: u32, wrap: u32, time: f32) -> f32 {
+    let along = (time - delay as f32).max(0.0) / period.max(1) as f32;
+    match wrap {
+        0 => along.fract(),
+        _ => 1.0 - (along.rem_euclid(2.0) - 1.0).abs(),
+    }
 }
 
 impl Motion {
-    /// Where the node stands at a time, which the curves state outright rather than as an offset
-    /// from wherever the file placed it.
+    /// Where the node stands at a time.
     fn at(&self, time: f32) -> Mat4 {
-        let span = self.duration.max(1.0);
-        let along = time.rem_euclid(span);
-        let mut turn = Vec3::ZERO;
-        let mut shift = Vec3::ZERO;
-        let mut size = Vec3::ONE;
-        for (channel, curve) in &self.curves {
-            let Some(held) = curve.at(along) else {
-                continue;
-            };
-            let lane = |into: &mut Vec3, at: usize| into[at] = held;
-            match channel {
-                tmb::Channel::TranslationX => lane(&mut shift, 0),
-                tmb::Channel::TranslationY => lane(&mut shift, 1),
-                tmb::Channel::TranslationZ => lane(&mut shift, 2),
-                tmb::Channel::RotationX => lane(&mut turn, 0),
-                tmb::Channel::RotationY => lane(&mut turn, 1),
-                tmb::Channel::RotationZ => lane(&mut turn, 2),
-                tmb::Channel::ScaleX => lane(&mut size, 0),
-                tmb::Channel::ScaleY => lane(&mut size, 1),
-                tmb::Channel::ScaleZ => lane(&mut size, 2),
+        match self {
+            Self::Keyed { curves, duration } => {
+                let span = duration.max(1.0);
+                let along = time.rem_euclid(span);
+                let mut turn = Vec3::ZERO;
+                let mut shift = Vec3::ZERO;
+                let mut size = Vec3::ONE;
+                for (channel, curve) in curves {
+                    let Some(held) = curve.at(along) else {
+                        continue;
+                    };
+                    let lane = |into: &mut Vec3, at: usize| into[at] = held;
+                    match channel {
+                        tmb::Channel::TranslationX => lane(&mut shift, 0),
+                        tmb::Channel::TranslationY => lane(&mut shift, 1),
+                        tmb::Channel::TranslationZ => lane(&mut shift, 2),
+                        tmb::Channel::RotationX => lane(&mut turn, 0),
+                        tmb::Channel::RotationY => lane(&mut turn, 1),
+                        tmb::Channel::RotationZ => lane(&mut turn, 2),
+                        tmb::Channel::ScaleX => lane(&mut size, 0),
+                        tmb::Channel::ScaleY => lane(&mut size, 1),
+                        tmb::Channel::ScaleZ => lane(&mut size, 2),
+                    }
+                }
+                Mat4::from_scale_rotation_translation(
+                    size,
+                    Quat::from_euler(
+                        glam::EulerRot::XYZ,
+                        turn.x.to_radians(),
+                        turn.y.to_radians(),
+                        turn.z.to_radians(),
+                    ),
+                    shift,
+                )
+            }
+            Self::Repeat {
+                placement,
+                translation,
+                rotation: spin,
+                scale,
+            } => {
+                let reach = |lane: Lane| {
+                    let held = lane.amount();
+                    Vec3::new(held[0], held[1], held[2])
+                        * phase(lane.period(), lane.delay(), lane.wrap(), time)
+                };
+                let shift = match translation.active() {
+                    true => reach(*translation),
+                    false => Vec3::ZERO,
+                };
+                let turn = match spin.active() {
+                    true => reach(*spin),
+                    false => Vec3::ZERO,
+                };
+                // A scale rests at one rather than at nought, so its lane reaches towards what it
+                // states instead of adding to it.
+                let size = match scale.active() {
+                    true => Vec3::ONE.lerp(
+                        Vec3::from_slice(&scale.amount()[..3]),
+                        phase(scale.period(), scale.delay(), scale.wrap(), time),
+                    ),
+                    false => Vec3::ONE,
+                };
+                Mat4::from_scale_rotation_translation(
+                    Vec3::from_array(placement.scale()) * size,
+                    Quat::from_mat3(&rotation(placement.rotation()))
+                        * Quat::from_euler(glam::EulerRot::XYZ, turn.x, turn.y, turn.z),
+                    Vec3::from_array(placement.translation()) + shift,
+                )
             }
         }
-        Mat4::from_scale_rotation_translation(
-            size,
-            Quat::from_euler(
-                glam::EulerRot::XYZ,
-                turn.x.to_radians(),
-                turn.y.to_radians(),
-                turn.z.to_radians(),
-            ),
-            shift,
-        )
     }
 }
 
@@ -850,6 +910,7 @@ impl Scene {
             _ => scene.walk(
                 source.groups(),
                 source.scene().map_or(&[][..], SceneTimeline::of),
+                source.scene().map_or(&[][..], SceneAnimation::of),
                 Mat4::IDENTITY,
                 (0, [0; 4]),
                 1.0,
@@ -866,8 +927,15 @@ impl Scene {
 
     /// Reads placements out of a file's layers, queueing every shared group it names.
     #[allow(clippy::too_many_arguments)]
-    /// The motion a scene's timelines give one of its own instances, where they give it one.
-    fn motion(&mut self, timelines: &[SceneTimeline], instance: u32) -> Option<usize> {
+    /// The motion a scene gives one of its own instances, where it gives it one: a timeline that
+    /// plays curves over it, or a swing it repeats forever without one.
+    fn motion(
+        &mut self,
+        timelines: &[SceneTimeline],
+        animations: &[SceneAnimation],
+        instance: u32,
+        placement: Transform,
+    ) -> Option<usize> {
         for timeline in timelines {
             if !timeline.auto_play() {
                 continue;
@@ -934,7 +1002,21 @@ impl Scene {
                     _ => None,
                 })
                 .unwrap_or(1.0);
-            self.motions.push(Motion { curves, duration });
+            self.motions.push(Motion::Keyed { curves, duration });
+            return Some(self.motions.len() - 1);
+        }
+        // Only where no timeline already plays over it: a few scenes state both, and the curves are
+        // the more particular of the two.
+        for animation in animations {
+            if !animation.instances().contains(&instance) {
+                continue;
+            }
+            self.motions.push(Motion::Repeat {
+                placement,
+                translation: *animation.translation(),
+                rotation: *animation.rotation(),
+                scale: *animation.scale(),
+            });
             return Some(self.motions.len() - 1);
         }
         None
@@ -945,6 +1027,7 @@ impl Scene {
         &mut self,
         groups: &[LayerGroup],
         timelines: &[SceneTimeline],
+        animations: &[SceneAnimation],
         transform: Mat4,
         key: (u32, [u8; 4]),
         scale: f32,
@@ -974,7 +1057,7 @@ impl Scene {
                     let placed = instance.transform();
                     // What a timeline moves stands where the curves put it rather than where the
                     // file did, and everything under it follows.
-                    let moved = self.motion(timelines, instance.id());
+                    let moved = self.motion(timelines, animations, instance.id(), placed);
                     let local = match moved {
                         Some(at) => self.motions[at].at(0.0),
                         None => matrix(placed),
@@ -1838,6 +1921,7 @@ impl Scene {
             self.walk(
                 source.groups(),
                 source.scene().map_or(&[][..], SceneTimeline::of),
+                source.scene().map_or(&[][..], SceneAnimation::of),
                 transform,
                 key,
                 scale,
@@ -3805,6 +3889,19 @@ mod tests {
         let quarter = std::f32::consts::FRAC_PI_2;
         assert!((rotation([0.0, quarter, 0.0]) * Vec3::Z - Vec3::X).length() < 1e-5);
         assert!((rotation([quarter, 0.0, quarter]) * Vec3::Z - Vec3::X).length() < 1e-5);
+    }
+
+    /// A whole turn starts over where it ends, so it never runs backwards; anything else swings
+    /// back to where it began.
+    #[test]
+    fn a_repeating_lane_wraps_or_swings_back() {
+        assert_eq!(phase(360, 0, 0, 0.0), 0.0);
+        assert_eq!(phase(360, 0, 0, 270.0), 0.75);
+        assert_eq!(phase(360, 0, 0, 450.0), 0.25);
+        assert_eq!(phase(180, 0, 1, 180.0), 1.0);
+        assert_eq!(phase(180, 0, 1, 270.0), 0.5);
+        assert_eq!(phase(180, 0, 1, 360.0), 0.0);
+        assert_eq!(phase(60, 30, 1, 20.0), 0.0);
     }
 
     #[test]

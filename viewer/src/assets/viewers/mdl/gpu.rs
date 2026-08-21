@@ -772,10 +772,14 @@ impl Game {
 
     /// Every material resolved into the frame as its own geometry, after the lighting.
     ///
-    /// A material that wrote the G-buffer goes first and reads it; one that did not wrote nothing
-    /// to light and reads the frame instead, so the copy it reads is taken once the rest have
-    /// drawn. Depth tested against what the G-buffer covered and writing none of its own, so the
-    /// surfaces in front of a piece of glass hide it and the pieces behind it do not.
+    /// A material that settled its own depth goes first and resolves against it; one that did not
+    /// reads the frame instead, so the copy it reads is taken once the rest have drawn. Depth
+    /// tested against what the G-buffer covered and writing none of its own, so the surfaces in
+    /// front of a piece of glass hide it and the pieces behind it do not.
+    ///
+    /// A package with no opaque pass fills the buffer through a semitransparent one and settles no
+    /// depth of its own, so it belongs in the second leg however much of the buffer it wrote: the
+    /// alpha its composite states is what makes it sheer, and only that leg applies it.
     ///
     /// The ones reading the frame are drawn back to front and each takes its own copy: a pass of
     /// theirs writes the whole composited color rather than blending, so one drawn over another
@@ -804,7 +808,7 @@ impl Game {
                 frame.surfaces[*at]
                     .shaded
                     .as_ref()
-                    .is_some_and(|shaded| !shaded.buffer.is_empty())
+                    .is_some_and(|shaded| shaded.depth.is_some())
             });
         // The camera looks down negative z, so the farthest is the least.
         let away = |at: &usize| match meshes.get(*at) {

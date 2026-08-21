@@ -513,11 +513,12 @@ impl Renderer {
             gl.draw_buffers(&[glow::NONE]);
             gl.clear_color(1.0, 1.0, 1.0, 1.0);
             gl.clear(glow::DEPTH_BUFFER_BIT);
-            // The sun looks along its own axis, so what faces away from it is what casts: culling
-            // the near side is what keeps a surface from shadowing itself along every edge.
-            gl.enable(glow::CULL_FACE);
-            gl.cull_face(glow::FRONT);
-            gl.front_face(glow::CCW);
+            // Every face casts, whichever way it points, and the depth is pushed back instead to
+            // keep a surface off its own shadow. Culling the side that faces the sun costs a
+            // one-sided shell - a pane of glass, a roof - its shadow entirely, that side being the
+            // whole of it.
+            gl.disable(glow::CULL_FACE);
+            gl.enable(glow::POLYGON_OFFSET_FILL);
         }
         for split in 0..program::SPLITS {
             let (view, projection) = program::shadow_camera(scene.light, scene.view, split);
@@ -529,7 +530,10 @@ impl Renderer {
             };
             let (offsets, window) = self.windows(gl, frame, &sun, false)?;
             let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
-            unsafe { gl.viewport(0, split as i32 * size, size, size) };
+            unsafe {
+                gl.viewport(0, split as i32 * size, size, size);
+                gl.polygon_offset(program::SHADOW_SLOPE, program::shadow_push(split));
+            }
             for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
                 let meshes: Vec<i32> = match self
                     .models
@@ -596,7 +600,7 @@ impl Renderer {
             }
         }
         unsafe {
-            gl.cull_face(glow::BACK);
+            gl.disable(glow::POLYGON_OFFSET_FILL);
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
         }
         Ok(())

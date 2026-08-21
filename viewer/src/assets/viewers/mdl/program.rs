@@ -1140,6 +1140,18 @@ pub fn shadow_reach(at: usize) -> f32 {
     SHADOW_REACH * SPLIT_STEP.powi(at as i32)
 }
 
+/// How far a face is pushed away from the light before its depth is kept: a slope the map's own
+/// step is multiplied by, and a flat push in those same steps. This is what keeps a surface off its
+/// own shadow, since the pass rasterises both of a surface's sides.
+pub const SHADOW_SLOPE: f32 = 2.0;
+const SHADOW_PUSH: f32 = 131.0;
+
+/// That flat push for the split at `at`. A step of the map spans the whole of the split's own box,
+/// so it is scaled down as the box grows and the push comes to the same distance in the world.
+pub fn shadow_push(at: usize) -> f32 {
+    SHADOW_PUSH * SHADOW_REACH / shadow_reach(at)
+}
+
 /// Where the sun stands to draw one split of the scene's depth, as a view and an orthographic
 /// projection about `focus`. The projection matches the one the frame is drawn with in handing back
 /// a nought-to-one depth, which is what the translator's own fixup leaves in the buffer.

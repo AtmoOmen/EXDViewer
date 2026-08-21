@@ -96,11 +96,11 @@ fn main() {
                         println!("      TMAL id {:>3}  {:?}", command.id(), command.kind())
                     }
                     tmb::Item::Actor(actor) => println!(
-                        "      TMAC id {:>3} time {} delay {} unk {}  tracks {:?}",
+                        "      TMAC id {:>3} time {} delay {} participant {}  tracks {:?}",
                         actor.id(),
                         actor.time(),
                         actor.ability_delay(),
-                        actor.unknown_2(),
+                        actor.participant(),
                         actor.tracks()
                     ),
                     tmb::Item::Header(header) => println!(

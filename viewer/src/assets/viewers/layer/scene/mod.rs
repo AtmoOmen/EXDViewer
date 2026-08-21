@@ -22,6 +22,12 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
@@ -121,10 +127,11 @@ const MODELS: usize = 24;
 const MATERIALS: usize = 16;
 const TEXTURES: usize = 24;
 
-/// Files parsed and models decoded in one frame. Both happen on the thread that draws, so they are
-/// spread rather than done as they arrive.
-const PARSES: usize = 2;
-const DECODES: usize = 2;
+/// The share of a frame given to parsing files and decoding models, and the least that share is
+/// worth whatever the frame costs. Both happen on the thread that draws, and a zone holds files
+/// from a few hundred bytes to a few megabytes, so what bounds them is time rather than a count.
+const SHARE: f32 = 0.3;
+const LEAST: Duration = Duration::from_millis(6);
 
 /// How far the eye moves before the instance buffers are written again.
 const STEP: f32 = 8.0;
@@ -1700,15 +1707,17 @@ impl Scene {
 
     /// Asks for whatever the scene still needs and takes in whatever arrived. Runs every frame.
     fn poll(&mut self, ui: &egui::Ui, backend: &Backend) {
+        let step = ui.input(|input| input.stable_dt).min(0.5);
+        let until = Instant::now() + Duration::from_secs_f32(step * SHARE).max(LEAST);
         self.load_terrain(backend);
         self.load_grass(backend);
         self.load_asides(backend);
         self.ambient.poll(backend);
-        self.expand(backend);
+        self.expand(backend, until);
         if self.fitted == 0 && !self.placements.is_empty() {
             self.fit();
         }
-        self.load_models(backend);
+        self.load_models(backend, until);
         self.load_materials(backend);
         self.load_packages(backend);
         self.load_textures(ui, backend);
@@ -1734,7 +1743,7 @@ impl Scene {
     }
 
     /// Drives the files the scene is still reading placements out of.
-    fn expand(&mut self, backend: &Backend) {
+    fn expand(&mut self, backend: &Backend, until: Instant) {
         let mut fetching = self
             .files
             .values()
@@ -1779,7 +1788,6 @@ impl Scene {
             .iter()
             .filter(|(_, held)| matches!(held, Held::Parsing(_)))
             .map(|(path, _)| path.clone())
-            .take(PARSES)
             .collect();
         for path in parsing {
             let Some(Held::Parsing(bytes)) = self.files.remove(&path) else {
@@ -1798,6 +1806,9 @@ impl Scene {
                 }
             };
             self.files.insert(path, held);
+            if Instant::now() >= until {
+                break;
+            }
         }
 
         let mut waiting = std::mem::take(&mut self.waiting);
@@ -1838,7 +1849,7 @@ impl Scene {
         }
     }
 
-    fn load_models(&mut self, backend: &Backend) {
+    fn load_models(&mut self, backend: &Backend, until: Instant) {
         let fetching = self
             .models
             .iter()
@@ -1891,7 +1902,6 @@ impl Scene {
 
         let decoding: Vec<usize> = (0..self.models.len())
             .filter(|at| matches!(self.models[*at].state, State::Decoding(..)))
-            .take(DECODES)
             .collect();
         for at in decoding {
             let State::Decoding(bytes, level) =
@@ -1905,6 +1915,9 @@ impl Scene {
                     self.dirty = true;
                 }
                 Err(why) => log::error!("assets/layer: {}: {why}", self.models[at].path),
+            }
+            if Instant::now() >= until {
+                break;
             }
         }
     }

@@ -66,8 +66,9 @@ const ITEM_ICON: u32 = 136;
 const SLOTS: u32 = 154;
 const RESTRICTION: u32 = 80;
 /// Where `EquipSlotCategory` states each of [`Slot::ALL`]. It runs over every slot the game has, of
-/// which the five a body is dressed in are not adjacent.
-const FILLS: [u32; 5] = [2, 3, 4, 6, 7];
+/// which the five a body is dressed in are not adjacent, and it names the left ring ahead of the
+/// right one where the models are named the other way round.
+const FILLS: [u32; 10] = [2, 3, 4, 6, 7, 8, 9, 10, 11, 12];
 /// `EquipRaceCategory`'s eight races, then the two genders packed into one byte after them.
 const WORN_BY: u32 = 0;
 const GENDERS: u32 = 8;
@@ -155,12 +156,13 @@ pub struct Job {
 }
 
 /// One piece of equipment the game names, and what wearing it does to a character's slots.
+#[derive(Clone)]
 pub struct Piece {
     pub name: String,
     pub gear: Gear,
     pub icon: u32,
     /// The slots it covers itself, so nothing else is drawn in them.
-    pub hides: [bool; 5],
+    pub hides: [bool; 10],
     /// The races and genders it is made for, one bit each. A character outside them still has a
     /// model to wear: the game bars the pairing, the files do not.
     races: u8,
@@ -187,7 +189,7 @@ pub struct Creator {
     pub attire: BTreeMap<(u32, bool), Outfit>,
     pub jobs: Vec<Job>,
     /// Everything there is to wear, by the slot it is worn in.
-    pub pieces: [Vec<Piece>; 5],
+    pub pieces: [Vec<Piece>; 10],
 }
 
 impl Creator {
@@ -281,12 +283,12 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Creator> {
     })
 }
 
-/// Everything the game names that a body can be dressed in, by the slot it goes in. A category
-/// fills at most one of the five, so a piece belongs to a slot rather than carrying a mask of them.
+/// Everything the game names that a body can be dressed in, by the slot it goes in. A ring is the
+/// one thing that goes in either of two, so a category fills a list of slots rather than one.
 ///
 /// Read on its own, since walking every item there is takes long enough that waiting for it would
 /// hold up the character it is going to dress.
-pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>; 5]> {
+pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>; 10]> {
     let excel = backend.excel();
     let items = excel.get_sheet("Item", language).await?;
     let categories = excel.get_sheet("EquipSlotCategory", language).await?;
@@ -297,17 +299,17 @@ pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>
         let Ok(row) = categories.get_row(id) else {
             continue;
         };
-        let mut fills = None;
-        let mut hides = [false; 5];
+        let mut fills = Vec::new();
+        let mut hides = [false; 10];
         for (slot, at) in FILLS.into_iter().enumerate() {
             match row.read::<i8>(at) {
-                Ok(1) => fills = Some(slot),
+                Ok(1) => fills.push(slot),
                 Ok(-1) => hides[slot] = true,
                 _ => {}
             }
         }
-        if let Some(slot) = fills {
-            worn.insert(id, (slot, hides));
+        if !fills.is_empty() {
+            worn.insert(id, (fills, hides));
         }
     }
 
@@ -327,7 +329,7 @@ pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>
         allowed.insert(id, (races, genders));
     }
 
-    let mut found: [Vec<Piece>; 5] = Default::default();
+    let mut found: [Vec<Piece>; 10] = Default::default();
     let mut drawn = Instant::now();
     for id in items.get_row_ids() {
         if drawn.elapsed() >= MAX_FRAME_TIME {
@@ -337,7 +339,7 @@ pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>
         let Ok(row) = items.get_row(id) else {
             continue;
         };
-        let Some((slot, hides)) = row
+        let Some((fills, hides)) = row
             .read::<u8>(SLOTS)
             .ok()
             .and_then(|category| worn.get(&u32::from(category)))
@@ -356,14 +358,17 @@ pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>
             .and_then(|worn| allowed.get(&u32::from(worn)))
             .copied()
             .unwrap_or_default();
-        found[*slot].push(Piece {
+        let piece = Piece {
             name: name.to_string(),
             gear,
             icon: row.read::<u16>(ITEM_ICON).unwrap_or(0).into(),
             hides: *hides,
             races,
             genders,
-        });
+        };
+        for slot in fills {
+            found[*slot].push(piece.clone());
+        }
     }
     for pieces in &mut found {
         pieces.sort_by(|left, right| left.name.cmp(&right.name));
@@ -419,8 +424,8 @@ async fn jobs(backend: &Backend, language: Language) -> Result<Vec<Job>> {
             continue;
         };
         let mut outfit = Outfit::default();
-        for (at, held) in outfit.iter_mut().enumerate() {
-            *held = row.read::<u64>(at as u32 * 8).ok().and_then(Gear::read);
+        for slot in Slot::GEAR {
+            outfit[slot as usize] = row.read::<u64>(slot as u32 * 8).ok().and_then(Gear::read);
         }
         found.push(Job {
             name: classes

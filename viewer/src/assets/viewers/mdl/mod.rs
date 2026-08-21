@@ -2726,19 +2726,25 @@ impl Rendered {
     }
 
     /// Poses the character out of a different pack, which is what picking an emote is.
-    pub fn play(&self, path: &str) {
-        self.animation.play(path);
+    pub fn play(&self, path: &str, then: Option<&str>) {
+        self.animation.play(path, then);
     }
 
-    /// Puts a different set of files on the same character, which is what a change of clothes is.
-    /// The camera, the rig and the motion it is playing all stay where they are; the rig is rebuilt
-    /// only where the body under the clothes changed.
+    /// Puts an expression on the character's face, which is what picking an emote that only makes
+    /// one is.
+    pub fn express(&self, name: &str) {
+        self.animation.express(name);
+    }
+
     /// The bodies to read animation from, nearest first, which the caller reads off the same tree
     /// that says where a body borrows its clothes from.
     pub fn built_on(&self, lineage: Vec<String>) {
         self.animation.built_on(lineage);
     }
 
+    /// Puts a different set of files on the same character, which is what a change of clothes is.
+    /// The camera, the rig and the motion it is playing all stay where they are; the rig is rebuilt
+    /// only where the body under the clothes changed.
     pub fn redress(&mut self, parts: &[Source]) -> Result<()> {
         parts.first().context("a model of no files")?;
         // Whatever is still being worn is kept as it stands, imc and all, so a change of one slot

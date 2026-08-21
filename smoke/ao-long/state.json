@@ -1,0 +1,33 @@
+{
+  "commit": "b371fb3432bbb5db4720ff0fc8a5dae3e7a411f3",
+  "clean": false,
+  "built": "2026-08-21 09:27:55 -07:00",
+  "level": "bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb",
+  "preset": "tuli",
+  "eye": [
+    -6.535227,
+    18.582674,
+    36.727367
+  ],
+  "forward": [
+    -0.5680848,
+    -0.18675022,
+    -0.80150115
+  ],
+  "fov": 55,
+  "viewport": [
+    224,
+    132,
+    1834.375,
+    1044
+  ],
+  "time": 51000,
+  "weather": 1,
+  "exposure": 2.8677647,
+  "measured": 0.077028625,
+  "placed": 11952,
+  "drawn": 10592,
+  "models": "697 of 926",
+  "materials": "257 of 308",
+  "passes": "shadow, sky, sun, band, fog, reflection, vignette"
+}

@@ -63,6 +63,8 @@ const LIP_COLOR: u32 = 20;
 const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
+/// Muscle tone, on a body the creator offers no tail or ears; every other race spends the same
+/// customisation on the length of whatever its [`TAIL`] menu shapes.
 const MUSCLE_TONE: u32 = 21;
 const BUST: u32 = 23;
 /// A tail, or a Viera's ears: the game files both under the one customisation, and under one
@@ -79,8 +81,8 @@ pub const ODD_EYES: u32 = 102;
 pub const LEFT_EYE_COLOR: u32 = 103;
 pub const LIPSTICK: u32 = 104;
 
-/// Where the light half of a palette the file splits in two begins. Lips and face paint are offered
-/// as a dark run and a light one; the file runs them as one, the second half starting here.
+/// Where the light half of a split palette begins. A lip and a face paint are offered twice over,
+/// the same colours at two weights, and light is the half worn the more lightly of the two.
 const HALF: u32 = 128;
 
 /// The parts of a face the creator deforms, and the shape keys each is named with. A choice picks
@@ -700,10 +702,13 @@ impl CharacterBuilder {
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
         let mut bust = Vec3::ONE;
-        let mut tone = 0.5;
+        let mut tone = 1.0;
         let Some(body) = self.creator.body(self.tribe, self.female) else {
             return (customize, hidden, shapes, stature, bust);
         };
+        // A body that is offered a tail or a pair of ears lengthens those with the customisation
+        // the rest spend on muscle, and is left at the tone a race with none to set is given.
+        let muscled = !body.menus.iter().any(|menu| menu.customize == TAIL);
         let palettes = self
             .made
             .as_ref()
@@ -743,15 +748,13 @@ impl CharacterBuilder {
                     let [red, green, blue, _] = palettes.features.shaded(at);
                     customize.option = [red, green, blue];
                 }
-                // The decal buffer takes its colour as the file holds it rather than squared, and
-                // the swatch's own last lane is the weight the paint is worn at.
                 if menu.customize == FACE_PAINT_COLOR {
-                    customize.decal = palettes.face_paint.plain(at);
+                    customize.decal = palettes.face_paint.shaded(at);
                 }
             }
             // Only the lane, since the muscle tone menu comes before the skin colour that would
             // otherwise write over what it left.
-            if menu.customize == MUSCLE_TONE {
+            if menu.customize == MUSCLE_TONE && muscled {
                 tone = slid(menu, at as u32);
             }
             if menu.customize == HEIGHT
@@ -1306,9 +1309,8 @@ impl CharacterBuilder {
                         _ => true,
                     };
                     if worn {
-                        // Lips and face paint are offered as a dark run and a light one, which is
-                        // one palette in the file: the half a colour belongs to is the top bit of
-                        // its own index, so switching halves is that bit and nothing else.
+                        // The half a colour belongs to is the top bit of its own index, so
+                        // switching halves is that bit and nothing else.
                         let mut half = 0;
                         if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
                             half = current / HALF;
@@ -1738,10 +1740,15 @@ impl CharacterBuilder {
             }
             Some(Pick::Emote(emote)) => {
                 self.emote = Some(emote);
-                if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote))
-                    && let Some(path) = emote.pack(self.code, 0)
-                {
-                    model.play(&path);
+                if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
+                    match emote.expression() {
+                        Some(name) => model.express(name),
+                        None => match emote.packs(self.code).as_slice() {
+                            [start, standing] => model.play(start, Some(standing)),
+                            [only] => model.play(only, None),
+                            _ => {}
+                        },
+                    }
                 }
             }
             Some(Pick::Mount(mount)) => self.mount = mount,

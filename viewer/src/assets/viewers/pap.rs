@@ -389,7 +389,14 @@ impl Rendered {
                         }
                     });
                     ui.add_space(4.0);
-                    let world = loaded.rig.posed(binding, self.play.time.get());
+                    let mut locals = loaded.rig.reference().to_vec();
+                    loaded.rig.lay(
+                        &mut locals,
+                        binding,
+                        loaded.rig.names(),
+                        self.play.time.get(),
+                    );
+                    let world = loaded.rig.world(&locals);
                     loaded.view.replace(loaded.rig.batches(&world, None));
                     loaded.view.ui(ui);
                     return;

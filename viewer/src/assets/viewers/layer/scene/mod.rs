@@ -35,7 +35,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use half::f16;
 use ironworks::file::layer::{
-    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneTimeline, Transform,
+    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneSpin, SceneTimeline, Transform,
 };
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
@@ -119,8 +119,8 @@ const KEYS: [(u32, u32); 3] = [
 /// reach: the file's own `range` is one in nearly every light a zone places.
 const REACH: f32 = 6.0;
 
-/// How fast a shared group's timeline runs. No file names the unit its keys are stated in; this is
-/// the rate the game's own timelines are read at.
+/// How fast a shared group's timeline runs. An animation pack states one span both in seconds and
+/// in these, and the two agree on thirty a second.
 const TICKS: f32 = 30.0;
 
 /// Requests of each kind in flight at once.
@@ -189,12 +189,19 @@ struct Driven {
     tail: Mat4,
 }
 
-/// What moves a shared group's node, either way it is stated. Nothing names the unit of either
-/// span; the game's own timelines run at thirty to the second.
+/// What moves a shared group's node, whichever way it is stated. Every span is in the ticks a
+/// timeline is keyed in.
 enum Motion {
     /// A timeline's nine curves over its span, which state where the node stands outright.
     Keyed {
         curves: Vec<(tmb::Channel, tmb::Curve)>,
+        duration: f32,
+    },
+    /// Transforms a timeline states outright with no curve to play them over, each holding from the
+    /// time its command runs. Where the node stands before the first is where the file put it.
+    Placed {
+        placement: Transform,
+        steps: Vec<(f32, Mat4)>,
         duration: f32,
     },
     /// A swing the scene repeats with no timeline to play it, on top of where the file placed it.
@@ -203,6 +210,13 @@ enum Motion {
         translation: Lane,
         rotation: Lane,
         scale: Lane,
+    },
+    /// A turn about one axis the scene never stops, on top of where the file placed it. The period
+    /// is signed, and runs the turn the other way where it is negative.
+    Spin {
+        placement: Transform,
+        axis: Vec3,
+        period: f32,
     },
 }
 
@@ -254,6 +268,18 @@ impl Motion {
                     shift,
                 )
             }
+            Self::Placed {
+                placement,
+                steps,
+                duration,
+            } => {
+                let along = time.rem_euclid(duration.max(1.0));
+                steps
+                    .iter()
+                    .rev()
+                    .find(|(at, _)| *at <= along)
+                    .map_or_else(|| matrix(*placement), |(_, held)| *held)
+            }
             Self::Repeat {
                 placement,
                 translation,
@@ -287,6 +313,21 @@ impl Motion {
                     Quat::from_mat3(&rotation(placement.rotation()))
                         * Quat::from_euler(glam::EulerRot::XYZ, turn.x, turn.y, turn.z),
                     Vec3::from_array(placement.translation()) + shift,
+                )
+            }
+            Self::Spin {
+                placement,
+                axis,
+                period,
+            } => {
+                // Kept as a fraction of a whole turn rather than wrapped in radians, so a negative
+                // period runs backwards instead of mirroring.
+                let along = (time / period).fract();
+                Mat4::from_scale_rotation_translation(
+                    Vec3::from_array(placement.scale()),
+                    Quat::from_mat3(&rotation(placement.rotation()))
+                        * Quat::from_axis_angle(*axis, along * std::f32::consts::TAU),
+                    Vec3::from_array(placement.translation()),
                 )
             }
         }
@@ -650,8 +691,8 @@ pub struct Scene {
     renderer: Arc<Mutex<gpu::Renderer>>,
     /// Where each model stands at each detail level, as the last rebuild left them.
     placed: Vec<[Vec<program::Instance>; 3]>,
-    /// What the zone's shared groups animate, and how far along their timelines it stands. The unit
-    /// is not named by any file; the game's own timelines run at thirty of these to the second.
+    /// What the zone's shared groups animate, and how far along their timelines it stands, in the
+    /// ticks a timeline is keyed in.
     motions: Vec<Motion>,
     clock: f32,
     /// Placements the last rebuild would have drawn had their model arrived.
@@ -911,6 +952,7 @@ impl Scene {
                 source.groups(),
                 source.scene().map_or(&[][..], SceneTimeline::of),
                 source.scene().map_or(&[][..], SceneAnimation::of),
+                source.scene().map_or(&[][..], SceneSpin::of),
                 Mat4::IDENTITY,
                 (0, [0; 4]),
                 1.0,
@@ -928,11 +970,12 @@ impl Scene {
     /// Reads placements out of a file's layers, queueing every shared group it names.
     #[allow(clippy::too_many_arguments)]
     /// The motion a scene gives one of its own instances, where it gives it one: a timeline that
-    /// plays curves over it, or a swing it repeats forever without one.
+    /// plays curves over it, or a swing or a turn it repeats forever without one.
     fn motion(
         &mut self,
         timelines: &[SceneTimeline],
         animations: &[SceneAnimation],
+        spins: &[SceneSpin],
         instance: u32,
         placement: Transform,
     ) -> Option<usize> {
@@ -959,6 +1002,7 @@ impl Scene {
             // across all of them: eight of the game's aetherytes hang four tracks off one actor.
             // The first to name a channel keeps it, so a lone track reads exactly as it did.
             let mut curves: Vec<(tmb::Channel, tmb::Curve)> = Vec::new();
+            let mut steps: Vec<(f32, Mat4)> = Vec::new();
             for track in tracks {
                 let Some(commands) = held.items().iter().find_map(|item| match item {
                     tmb::Item::Track(held) if held.id() == *track => Some(held.commands()),
@@ -967,32 +1011,45 @@ impl Scene {
                     continue;
                 };
                 for command in commands {
-                    let curve_id = held.items().iter().find_map(|item| match item {
-                        tmb::Item::Command(held) if held.id() == *command => match held.kind() {
-                            tmb::CommandKind::C013(held) => Some(held.curve_id()),
-                            _ => None,
-                        },
-                        _ => None,
-                    });
-                    let Some(found) = curve_id.and_then(|curve_id| {
-                        held.items().iter().find_map(|item| match item {
-                            tmb::Item::Curves(held) if i32::from(held.id()) == curve_id => {
-                                Some(held.curves())
-                            }
-                            _ => None,
-                        })
-                    }) else {
+                    let Some(tmb::Item::Command(found)) = held.items().iter().find(
+                        |item| matches!(item, tmb::Item::Command(held) if held.id() == *command),
+                    ) else {
                         continue;
                     };
-                    for curve in found {
-                        if curves.iter().all(|(channel, _)| *channel != curve.channel()) {
-                            curves.push((curve.channel(), curve.clone()));
+                    match found.kind() {
+                        tmb::CommandKind::C013(driven) => {
+                            let Some(set) = held.items().iter().find_map(|item| match item {
+                                tmb::Item::Curves(held)
+                                    if i32::from(held.id()) == driven.curve_id() =>
+                                {
+                                    Some(held.curves())
+                                }
+                                _ => None,
+                            }) else {
+                                continue;
+                            };
+                            for curve in set {
+                                let Some(channel) = curve.channel() else {
+                                    continue;
+                                };
+                                if curves.iter().all(|(held, _)| *held != channel) {
+                                    curves.push((channel, curve.clone()));
+                                }
+                            }
                         }
+                        // The command's own scale is the identity in every file the game ships, so
+                        // taking it would only throw away a scale the scene did state.
+                        tmb::CommandKind::C018(driven) => steps.push((
+                            f32::from(found.time()),
+                            Mat4::from_scale_rotation_translation(
+                                Vec3::from_array(placement.scale()),
+                                Quat::from_mat3(&rotation(driven.rotation())),
+                                Vec3::from_array(driven.translation()),
+                            ),
+                        )),
+                        _ => (),
                     }
                 }
-            }
-            if curves.is_empty() {
-                continue;
             }
             let duration = held
                 .items()
@@ -1002,7 +1059,19 @@ impl Scene {
                     _ => None,
                 })
                 .unwrap_or(1.0);
-            self.motions.push(Motion::Keyed { curves, duration });
+            if !curves.is_empty() {
+                self.motions.push(Motion::Keyed { curves, duration });
+                return Some(self.motions.len() - 1);
+            }
+            if steps.is_empty() {
+                continue;
+            }
+            steps.sort_by(|left, right| left.0.total_cmp(&right.0));
+            self.motions.push(Motion::Placed {
+                placement,
+                steps,
+                duration,
+            });
             return Some(self.motions.len() - 1);
         }
         // Only where no timeline already plays over it: a few scenes state both, and the curves are
@@ -1019,6 +1088,21 @@ impl Scene {
             });
             return Some(self.motions.len() - 1);
         }
+        for spin in spins {
+            if spin.instance() != instance || spin.period() == 0.0 {
+                continue;
+            }
+            self.motions.push(Motion::Spin {
+                placement,
+                axis: match spin.axis() {
+                    0 => Vec3::X,
+                    2 => Vec3::Z,
+                    _ => Vec3::Y,
+                },
+                period: spin.period(),
+            });
+            return Some(self.motions.len() - 1);
+        }
         None
     }
 
@@ -1028,6 +1112,7 @@ impl Scene {
         groups: &[LayerGroup],
         timelines: &[SceneTimeline],
         animations: &[SceneAnimation],
+        spins: &[SceneSpin],
         transform: Mat4,
         key: (u32, [u8; 4]),
         scale: f32,
@@ -1057,7 +1142,7 @@ impl Scene {
                     let placed = instance.transform();
                     // What a timeline moves stands where the curves put it rather than where the
                     // file did, and everything under it follows.
-                    let moved = self.motion(timelines, animations, instance.id(), placed);
+                    let moved = self.motion(timelines, animations, spins, instance.id(), placed);
                     let local = match moved {
                         Some(at) => self.motions[at].at(0.0),
                         None => matrix(placed),
@@ -1922,6 +2007,7 @@ impl Scene {
                 source.groups(),
                 source.scene().map_or(&[][..], SceneTimeline::of),
                 source.scene().map_or(&[][..], SceneAnimation::of),
+                source.scene().map_or(&[][..], SceneSpin::of),
                 transform,
                 key,
                 scale,

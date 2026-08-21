@@ -1494,8 +1494,7 @@ pub struct Customize {
     /// What a race feature is tinted with: a limbal ring, an ear tuft, the tattoo the creator names
     /// it after. Not the face paint, which the engine hands its own buffer.
     pub option: [f32; 3],
-    /// What the face paint decal is tinted with and the weight it is laid on at, which is the one
-    /// colour going in as the file holds it rather than squared.
+    /// What the face paint decal is tinted with, and the weight it is laid on at.
     pub decal: [f32; 4],
     /// The face paint itself, which names the texture the engine binds for it.
     pub paint: Option<u16>,

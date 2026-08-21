@@ -22,6 +22,9 @@ use crate::{
 /// How many `QuestParams` slots a quest has.
 const PARAMS: usize = 50;
 
+/// How many cutscenes one `CompleteJournal` entry can offer.
+const JOURNAL_CUTSCENES: usize = 24;
+
 pub struct Quest {
     pub row_id: u32,
     pub id: String,
@@ -36,14 +39,14 @@ pub struct Quest {
 
 /// A sheet paired with the schema that names its columns.
 pub struct Fields {
-    sheet: BaseSheet,
+    pub sheet: BaseSheet,
     schema: Schema,
     columns: Vec<SheetColumnDefinition>,
     by_name: HashMap<String, u32>,
 }
 
 impl Fields {
-    async fn load(backend: &Backend, name: &str, language: Language) -> Result<Self> {
+    pub async fn load(backend: &Backend, name: &str, language: Language) -> Result<Self> {
         let sheet = backend.excel().get_sheet(name, language).await?;
         let text = backend.schema().get_schema_text(name).await?;
         let schema = Schema::from_str(&text)?
@@ -77,12 +80,12 @@ impl Fields {
             .ok_or_else(|| anyhow!("{} has no column {name}", self.sheet.name()))
     }
 
-    fn at(&self, name: &str) -> Result<&SheetColumnDefinition> {
+    pub fn at(&self, name: &str) -> Result<&SheetColumnDefinition> {
         Ok(&self.columns[self.index(name)? as usize])
     }
 }
 
-fn integer(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> u32 {
+pub fn integer(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> u32 {
     read_integer::<i64>(row, u32::from(column.offset()), column.kind())
         .unwrap_or(0)
         .try_into()
@@ -98,6 +101,7 @@ fn text(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> String {
 
 pub struct Loaded {
     quests: Vec<Quest>,
+    rewatchable: HashMap<u32, Vec<u32>>,
     graph: Graph,
     sections: Vec<Section>,
     uncategorized: Vec<u32>,
@@ -155,15 +159,45 @@ pub async fn load(backend: Backend, language: Language) -> Result<Loaded> {
     let graph = Graph::build(&row_ids, &prev);
 
     let (sections, uncategorized) = journal(&backend, language, &rows).await?;
+    let rewatchable = rewatchable(&backend, language).await.unwrap_or_default();
     let quests = rows.into_iter().map(|(quest, ..)| quest).collect();
 
     Ok(Loaded {
         quests,
+        rewatchable,
         graph,
         sections,
         uncategorized,
         fields,
     })
+}
+
+/// The cutscenes the Unending Journey offers, by quest row. `CompleteJournal` numbers a quest the
+/// way the quest's own id does, so the two only meet through `FIRST_ROW`.
+async fn rewatchable(backend: &Backend, language: Language) -> Result<HashMap<u32, Vec<u32>>> {
+    let fields = Fields::load(backend, "CompleteJournal", language).await?;
+    let quest = fields.at("Unknown0")?;
+    let slots = (0..JOURNAL_CUTSCENES)
+        .map(|slot| fields.at(&format!("Cutscene[{slot}]")))
+        .collect::<Result<Vec<_>>>()?;
+    let mut found: HashMap<u32, Vec<u32>> = HashMap::new();
+    for row_id in fields.sheet.get_row_ids() {
+        let Ok(row) = fields.sheet.get_row(row_id) else {
+            continue;
+        };
+        let held: Vec<u32> = slots
+            .iter()
+            .map(|slot| integer(row, slot))
+            .filter(|held| *held != 0)
+            .collect();
+        if !held.is_empty() {
+            found
+                .entry(derive::FIRST_ROW + integer(row, quest))
+                .or_default()
+                .extend(held);
+        }
+    }
+    Ok(found)
 }
 
 /// `JournalGenre -> JournalCategory -> JournalSection` is a single link at every level, so a quest
@@ -258,6 +292,7 @@ async fn journal(
 
 pub struct Index {
     pub quests: Vec<Quest>,
+    pub rewatchable: HashMap<u32, Vec<u32>>,
     pub graph: Graph,
     pub sections: Vec<Section>,
     pub uncategorized: Vec<u32>,
@@ -274,6 +309,7 @@ impl Index {
         );
         Self {
             quests: loaded.quests,
+            rewatchable: loaded.rewatchable,
             graph: loaded.graph,
             sections: loaded.sections,
             uncategorized: loaded.uncategorized,
@@ -324,6 +360,58 @@ impl Index {
                 );
                 Some((param, arg))
             })
+            .chain(
+                self.rewatchable
+                    .get(&self.quest(node).row_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|row| (derive::Param::Cutscene, *row)),
+            )
             .collect()
+    }
+
+    /// Every `Cutscene` row any quest names, paired with the quest. The columns are resolved once
+    /// because this reads the whole sheet, unlike `assets`.
+    pub fn cutscenes(&self) -> Vec<(u32, u32)> {
+        let Ok(slots) = (0..PARAMS)
+            .map(|slot| {
+                Ok((
+                    self.fields
+                        .at(&format!("QuestParams[{slot}].ScriptInstruction"))?
+                        .clone(),
+                    self.fields
+                        .at(&format!("QuestParams[{slot}].ScriptArg"))?
+                        .clone(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()
+        else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        for quest in &self.quests {
+            if let Ok(row) = self.fields.sheet.get_row(quest.row_id) {
+                for (instruction, arg) in &slots {
+                    let named = row
+                        .read_string(u32::from(instruction.offset()))
+                        .ok()
+                        .and_then(|held| str::from_utf8(held.as_bytes()).ok())
+                        .is_some_and(|held| {
+                            derive::param_of(held) == Some(derive::Param::Cutscene)
+                        });
+                    if named {
+                        found.push((quest.row_id, integer(row, arg)));
+                    }
+                }
+            }
+            found.extend(
+                self.rewatchable
+                    .get(&quest.row_id)
+                    .into_iter()
+                    .flatten()
+                    .map(|row| (quest.row_id, *row)),
+            );
+        }
+        found
     }
 }

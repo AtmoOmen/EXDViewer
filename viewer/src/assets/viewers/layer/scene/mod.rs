@@ -985,8 +985,11 @@ impl Scene {
                         continue;
                     };
                     for curve in found {
-                        if curves.iter().all(|(channel, _)| *channel != curve.channel()) {
-                            curves.push((curve.channel(), curve.clone()));
+                        let Some(channel) = curve.channel() else {
+                            continue;
+                        };
+                        if curves.iter().all(|(held, _)| *held != channel) {
+                            curves.push((channel, curve.clone()));
                         }
                     }
                 }

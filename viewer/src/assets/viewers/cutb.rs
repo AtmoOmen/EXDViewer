@@ -10,6 +10,7 @@ use anyhow::Result;
 use egui::{RichText, ScrollArea};
 use ironworks::file::File;
 use ironworks::file::cutb::{Cutscene, Node};
+use ironworks::file::tmb::{CommandKind, Item};
 
 use super::{Preview, facts, line, link, section, table, tmb as timeline};
 
@@ -43,7 +44,7 @@ fn magic(node: &Node) -> String {
         Node::Resources(_) => "CTRL".to_owned(),
         Node::Sheet(_) => "CTIS".to_owned(),
         Node::Scene(_) => "CTDS".to_owned(),
-        Node::Records(_) => "CTAL".to_owned(),
+        Node::Participants(_) => "CTAL".to_owned(),
         Node::Groups(_) => "CTPA".to_owned(),
         Node::Timeline(_) => "CTTL".to_owned(),
         Node::Unknown(unknown) => String::from_utf8_lossy(&unknown.magic()).into_owned(),
@@ -55,10 +56,13 @@ fn holds(node: &Node) -> String {
         Node::Resources(list) => format!("{} files", list.len()),
         Node::Sheet(sheet) => format!("sheet {sheet}"),
         Node::Scene(scene) => format!("{}, {} entries", scene.level(), scene.entries().len()),
-        Node::Records(records) => format!(
-            "{} records, {} bytes",
-            records.len(),
-            records.iter().map(Vec::len).sum::<usize>()
+        Node::Participants(participants) => format!(
+            "{} participants, {} bytes unread",
+            participants.len(),
+            participants
+                .iter()
+                .map(|participant| participant.body().len())
+                .sum::<usize>()
         ),
         Node::Groups(groups) => format!(
             "{} groups, {} records",
@@ -80,7 +84,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let mut resources = Vec::new();
     let mut timelines = Vec::new();
     let mut level = String::new();
+    let mut origin = String::new();
     let mut sheet = String::new();
+    let mut shots = 0;
     for (index, node) in file.nodes().iter().enumerate() {
         match node {
             Node::Resources(list) => resources.extend(
@@ -88,8 +94,22 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
                     .map(|resource| (resource.path().to_owned(), resource.unknown_1())),
             ),
             Node::Sheet(named) => sheet = named.clone(),
-            Node::Scene(scene) => level = scene.level().to_owned(),
-            Node::Timeline(found) => timelines.push((index, timeline::Items::new(found))),
+            Node::Scene(scene) => {
+                level = scene.level().to_owned();
+                let [x, y, z] = scene.origin();
+                origin = format!("{x:.2}, {y:.2}, {z:.2}");
+            }
+            Node::Timeline(found) => {
+                shots += found
+                    .items()
+                    .iter()
+                    .filter(|item| {
+                        matches!(item, Item::Command(command)
+                            if matches!(command.kind(), CommandKind::C004(_)))
+                    })
+                    .count();
+                timelines.push((index, timeline::Items::new(found)));
+            }
             _ => {}
         }
         nodes.push((magic(node), holds(node)));
@@ -107,7 +127,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let identity = vec![
         ("Nodes", nodes.len().to_string()),
         ("Level", level),
+        ("Origin", origin),
         ("Sheet", sheet),
+        ("Shots", shots.to_string()),
         ("Files", resources.len().to_string()),
         ("Timelines", timelines.len().to_string()),
         ("Items", items.to_string()),

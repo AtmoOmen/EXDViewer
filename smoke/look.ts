@@ -98,7 +98,7 @@ async function main() {
     try {
         for (const [at, path] of paths.entries()) {
             console.log(`\n== ${path}`);
-            await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
+            await cdp.send("Page.navigate", { url: path.startsWith("/") ? `${origin}${path}` : `${origin}/assets/${path}` });
             await cdp.eval("localStorage.clear()").catch(() => {});
             // A level opens on its file listing; the scene is a tab over. Clicked more than once
             // and over a spread of waits: the tab only exists once the file has been read, and a

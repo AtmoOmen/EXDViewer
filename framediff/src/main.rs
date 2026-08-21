@@ -325,7 +325,7 @@ fn run() -> Result<String, String> {
             let _ = writeln!(
                 out,
                 "  y {:4}-{:4}  gain {:5.2}  sat {:+.3}  lum {:6.2} against {:6.2}  \
-                 clip {:5.2}% against {:5.2}%",
+                 clip {:5.2}% against {:5.2}%  black {:5.2}% against {:5.2}%",
                 cell.rect.y0,
                 cell.rect.y1,
                 cell.gain(),
@@ -334,6 +334,8 @@ fn run() -> Result<String, String> {
                 cell.view.luminance,
                 cell.game.clipped,
                 cell.view.clipped,
+                cell.game.black,
+                cell.view.black,
             );
         }
     }

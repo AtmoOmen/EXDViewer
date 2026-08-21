@@ -157,6 +157,8 @@ pub struct Stats {
     pub clipped: f64,
     /// Share of pixels with every channel at 255.
     pub white: f64,
+    /// Share of pixels with every channel at nought.
+    pub black: f64,
 }
 
 impl Stats {
@@ -177,6 +179,7 @@ impl Stats {
                 held.saturation += saturation(pixel);
                 held.clipped += f64::from(u8::from(pixel.0.iter().any(|held| *held >= CLIPPED)));
                 held.white += f64::from(u8::from(pixel.0.iter().all(|held| *held == u8::MAX)));
+                held.black += f64::from(u8::from(pixel.0.iter().all(|held| *held == 0)));
                 lums.push(lum);
                 held.pixels += 1;
             }
@@ -192,6 +195,7 @@ impl Stats {
         held.saturation /= count;
         held.clipped *= 100.0 / count;
         held.white *= 100.0 / count;
+        held.black *= 100.0 / count;
         lums.sort_by(f64::total_cmp);
         held.median = quantile(&lums, 0.5);
         held.p99 = quantile(&lums, 0.99);
@@ -201,7 +205,7 @@ impl Stats {
     pub fn row(&self) -> String {
         format!(
             "lum {:6.2}  sat {:6.4}  rgb ({:5.1}, {:5.1}, {:5.1})  med {:6.2}  p99 {:6.2}  \
-             clip {:5.2}%  white {:5.2}%",
+             clip {:5.2}%  white {:5.2}%  black {:5.2}%",
             self.luminance,
             self.saturation,
             self.rgb[0],
@@ -211,6 +215,7 @@ impl Stats {
             self.p99,
             self.clipped,
             self.white,
+            self.black,
         )
     }
 }
@@ -528,6 +533,7 @@ mod test {
         let whole = Stats::of(&image, &Region::new(Rect::of(&image), Vec::new()));
         assert_eq!(whole.pixels, 8);
         assert_eq!(whole.white, 50.0);
+        assert_eq!(whole.black, 50.0);
         let masked = Region::new(
             Rect::of(&image),
             vec![Rect {
@@ -539,6 +545,7 @@ mod test {
         );
         assert_eq!(Stats::of(&image, &masked).pixels, 4);
         assert_eq!(Stats::of(&image, &masked).white, 0.0);
+        assert_eq!(Stats::of(&image, &masked).black, 100.0);
     }
 
     #[test]

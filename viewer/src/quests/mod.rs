@@ -1,3 +1,4 @@
+mod cutscenes;
 mod dag;
 mod derive;
 mod detail;
@@ -9,19 +10,21 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 use egui::{
-    Align, Button, CentralPanel, Color32, Layout, RichText, ScrollArea, TextEdit, Vec2, Widget,
-    containers::panel::Panel,
+    Align, Button, CentralPanel, Color32, Label, Layout, RichText, ScrollArea, TextEdit, Vec2,
+    Widget, containers::panel::Panel,
 };
 use ironworks::excel::Language;
 
 use crate::{
     backend::Backend,
+    data::listing::Listed,
     goto::{ListNav, Palette, SUGGESTIONS},
     quests::{
+        cutscenes::Cutscenes,
         index::{Index, Loaded},
         tree::{Outline, Row},
     },
-    settings::LANGUAGE,
+    settings::{LANGUAGE, api_base},
     sheet::GlobalContext,
     utils::{CollapsibleSidePanel, FuzzyMatcher, IconManager, PromiseKind, Side, TrackedPromise},
 };
@@ -39,6 +42,7 @@ pub enum Action {
 enum View {
     Journal,
     Chains,
+    Cutscenes,
 }
 
 #[derive(Default)]
@@ -89,6 +93,12 @@ pub struct QuestBrowser {
     rows: Vec<(Row, u32)>,
     rows_stale: bool,
 
+    cutscenes: Load<Cutscenes>,
+    /// Which cutscenes the query and the owner toggle left, and what it was last built for.
+    shelf: Vec<u32>,
+    shelf_for: Option<(String, bool)>,
+    unowned_only: bool,
+
     selected: Option<u32>,
     pending: Option<u32>,
     /// A quest the view has yet to bring on screen.
@@ -116,6 +126,10 @@ impl Default for QuestBrowser {
             expanded: HashSet::new(),
             rows: Vec::new(),
             rows_stale: true,
+            cutscenes: Load::Idle,
+            shelf: Vec::new(),
+            shelf_for: None,
+            unowned_only: false,
             selected: None,
             pending: None,
             reveal: None,
@@ -155,6 +169,8 @@ impl QuestBrowser {
         self.expanded.clear();
         self.matched_for = None;
         self.rows_stale = true;
+        self.cutscenes = Load::Idle;
+        self.shelf_for = None;
         self.pending = self.pending.take().or(self.selected.take());
     }
 
@@ -212,6 +228,28 @@ impl QuestBrowser {
                 index::load(backend, language).await
             }));
         }
+        if self.view == View::Cutscenes
+            && matches!(self.cutscenes, Load::Idle)
+            && let Some(index) = &self.index
+        {
+            match backend.listing(&api_base(ui.ctx())) {
+                Listed::Loading => ui.ctx().request_repaint(),
+                Listed::Ready(listing) => {
+                    let shipping = listing
+                        .under("cut")
+                        .into_iter()
+                        .filter(|path| path.ends_with(".cutb"))
+                        .collect();
+                    let quests = index.cutscenes();
+                    let backend = backend.clone();
+                    self.cutscenes = Load::spawn(async move {
+                        cutscenes::load(backend, language, shipping, quests).await
+                    });
+                }
+                Listed::Failed(why) => self.cutscenes = Load::Failed(why.to_string()),
+            }
+        }
+        self.cutscenes.poll();
         if self.loading.as_ref().is_some_and(|p| p.try_get().is_some()) {
             match self.loading.take().unwrap().block_and_take() {
                 Ok(loaded) => {
@@ -337,6 +375,7 @@ impl QuestBrowser {
                 action = match self.view {
                     View::Journal => self.draw_tree(ui),
                     View::Chains => self.draw_chains(ui),
+                    View::Cutscenes => self.draw_cutscenes(ui),
                 };
             });
         });
@@ -349,6 +388,7 @@ impl QuestBrowser {
             for (view, glyph, hover) in [
                 (View::Journal, "📖", "Journal"),
                 (View::Chains, "🕸", "Prerequisite chains"),
+                (View::Cutscenes, "▶", "Every cutscene that ships"),
             ] {
                 if ui
                     .add(Button::selectable(self.view == view, glyph))
@@ -366,6 +406,14 @@ impl QuestBrowser {
                     .changed()
             {
                 self.rows_stale = true;
+            }
+            if self.view == View::Cutscenes
+                && ui
+                    .toggle_value(&mut self.unowned_only, "🚫")
+                    .on_hover_text("Only cutscenes nothing claims")
+                    .changed()
+            {
+                self.shelf_for = None;
             }
             if ui
                 .add_enabled(!self.query.is_empty(), Button::new("↩"))
@@ -400,6 +448,15 @@ impl QuestBrowser {
                 self.matched.iter().filter(|hit| **hit).count(),
                 index.quests.len()
             ),
+            View::Cutscenes => match &self.cutscenes {
+                Load::Ready(held) => format!(
+                    "{} of {} cutscenes · {} unclaimed",
+                    self.shelf.len(),
+                    held.entries.len(),
+                    held.entries.len() - held.owned
+                ),
+                _ => String::new(),
+            },
             View::Chains => {
                 let component = self
                     .selected
@@ -414,6 +471,92 @@ impl QuestBrowser {
                 )
             }
         }
+    }
+
+    fn draw_cutscenes(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let Self {
+            cutscenes,
+            shelf,
+            shelf_for,
+            query,
+            unowned_only,
+            matcher,
+            index,
+            ..
+        } = self;
+        let held = match cutscenes {
+            Load::Idle | Load::Loading(_) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Reading every cutscene…");
+                });
+                return None;
+            }
+            Load::Failed(error) => {
+                ui.colored_label(Color32::RED, error.clone());
+                return None;
+            }
+            Load::Ready(held) => held,
+        };
+        let index = index.as_ref()?;
+
+        let want = (query.clone(), *unowned_only);
+        if shelf_for.as_ref() != Some(&want) {
+            *shelf_for = Some(want);
+            let pattern = FuzzyMatcher::parse_pattern(query);
+            shelf.clear();
+            shelf.extend(
+                held.entries
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, entry)| {
+                        (!*unowned_only || entry.owners.is_empty())
+                            && (query.is_empty()
+                                || matcher.score_one(&pattern, &entry.path).is_some())
+                    })
+                    .map(|(at, _)| at as u32),
+            );
+        }
+
+        let mut action = None;
+        let height = ui.text_style_height(&egui::TextStyle::Button);
+        ScrollArea::vertical().auto_shrink(false).show_rows(
+            ui,
+            height,
+            shelf.len(),
+            |ui, range| {
+                for at in &shelf[range] {
+                    let entry = &held.entries[*at as usize];
+                    ui.horizontal(|ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        if ui
+                            .add(
+                                Label::new(
+                                    RichText::new(&entry.path).color(ui.visuals().hyperlink_color),
+                                )
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::PointingHand)
+                            .clicked()
+                        {
+                            action = Some(Action::Navigate(format!("/assets/{}", entry.path)));
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if entry.owners.is_empty() {
+                                ui.label(RichText::new("no known owner").weak().small());
+                                return;
+                            }
+                            for owner in entry.owners.iter().rev() {
+                                if let Some(picked) = owner_label(ui, index, *owner) {
+                                    action = Some(picked);
+                                }
+                            }
+                        });
+                    });
+                }
+            },
+        );
+        action
     }
 
     fn draw_chains(&mut self, ui: &mut egui::Ui) -> Option<Action> {
@@ -588,4 +731,32 @@ fn indented(ui: &mut egui::Ui, depth: f32, button: Button<'_>) -> egui::Response
             .inner
     })
     .inner
+}
+
+/// What claims a cutscene, named. A quest is shown by title and picks itself when clicked; the rest
+/// only have a row to show.
+fn owner_label(ui: &mut egui::Ui, index: &Index, owner: cutscenes::Owner) -> Option<Action> {
+    if let cutscenes::Owner::Quest(row_id) = owner
+        && let Some(node) = index.node_of(row_id)
+    {
+        let quest = index.quest(node);
+        let response = ui
+            .add(
+                Label::new(
+                    RichText::new(&quest.name)
+                        .color(ui.visuals().hyperlink_color)
+                        .small(),
+                )
+                .sense(egui::Sense::click()),
+            )
+            .on_hover_text(&quest.id)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        return response.clicked().then_some(Action::Select(row_id));
+    }
+    ui.label(
+        RichText::new(format!("{} {}", owner.sheet(), owner.row()))
+            .weak()
+            .small(),
+    );
+    None
 }

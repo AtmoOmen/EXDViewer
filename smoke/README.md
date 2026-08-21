@@ -150,11 +150,54 @@ model against the gate's twenty. It exists for reading a render back, not for pa
 `--mark` is how a temporary `console.log` in the renderer gets read back, which is what turned the
 sampler bindings into a table during the task #55 investigation.
 
+## Measuring a frame against the game's own
+
+`frame.ts` stands this viewer where a captured game frame was taken from and reports the difference
+as numbers. The camera, the lens and the frame's shape are read out of the capture's own constant
+buffers, so the two views are the same view rather than two hand-flown ones, and the report states
+the residual step, turn and lens difference rather than leaving it to the eye.
+
+```
+CHROMIUM=$(...) bun smoke/frame.ts --capture=~/rdcaps/tuli.zip.xml \
+    --level=bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb --time=14:10 --weather=1 \
+    --crop=150,170,1450,1040 --out=smoke/y6t1
+```
+
+| flag | |
+|---|---|
+| `--capture=` | a capture `renderdoccmd convert -c zip.xml` has been run over |
+| `--level=` | the `.lvb` the capture stood in, which no capture states |
+| `--time=HH:MM` `--weather=N` | the clock and the weather, which no capture states either |
+| `--camera=N` | which of the cameras the frame holds drew it, where it holds more than one |
+| `--crop=` `--mask=` | the region to measure, in the game frame's own pixels |
+| `--size=WxH` | the browser window, default `2400x1200` |
+| `--wait=ms` | how long to let the zone stream before the shot |
+| `--no-build` | serve `viewer/dist` as it stands |
+| `--build=<sha>` | measure a wasm older than the sources on purpose |
+
+It writes `frame.png` (what the game presented), `window.png`, `view-aligned.png` (this viewer
+resampled onto the game's pixel grid), `difference.png`, `overlay.png` (the game in red and this
+viewer in green, so geometry that only one of them drew is obvious), `report.txt`, and the preset
+and camera the capture states.
+
+**Saturation is the number to read across runs, not luminance.** The frame's gain is an
+auto-exposure that follows how much of the zone has arrived, and `(max - min)/max` is invariant
+under a gain. The report carries both, per whole region, per band and per grid cell.
+
+**A run against a build older than the last change to what the wasm is made of fails.** The app
+publishes its own commit, its viewport rect and its camera on `window.__frame`; nothing here guesses
+where the scene sits in the window or which build drew it.
+
+The two halves are usable alone: `rdframe` takes the frame and the camera out of a capture, and
+`framediff` measures one image, or two, with no browser in the loop.
+
 ## What it does not cover
 
+
 Only the three 3D viewers, and one asset each for the model, the scene and the level (the `.lgb`
-and the `.lvb` share a viewer). It does not check that anything is drawn *correctly*: no reference
-images, no pixel comparison. Channel coverage is a positional sweep
+and the `.lvb` share a viewer). The gate itself does not check that anything is drawn *correctly*;
+`frame.ts` above is what does, and only for a zone a capture exists of. Channel coverage is a
+positional sweep
 over the row rather than a lookup of each label, so it counts distinct selections rather than
 naming them. The click coordinates are calibrated against a 1600x1000 viewport and need
 `--explore` and a fresh look if the layout moves.

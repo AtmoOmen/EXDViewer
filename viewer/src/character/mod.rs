@@ -578,6 +578,7 @@ impl CharacterBuilder {
             .iter()
             .map(|letter| format!("{FEATURE}{letter}"))
             .collect();
+        hidden.extend(self.covered());
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
         let mut tone = 0.5;
@@ -686,6 +687,27 @@ impl CharacterBuilder {
             customize.lip[3] = 0.0;
         }
         (customize, hidden, shapes, stature)
+    }
+
+    /// The seams the outfit covers, which draw nothing rather than through what is over them.
+    /// Only a piece with a model of its own covers anything: where a slot falls back to the body,
+    /// what would be hidden is the very skin standing in for the piece.
+    fn covered(&self) -> BTreeSet<String> {
+        let Some(worn) = &self.worn_over else {
+            return BTreeSet::new();
+        };
+        let (outfit, _) = self.dressed();
+        let sets = self.sets.borrow();
+        Slot::ALL
+            .into_iter()
+            .filter_map(|slot| Some((slot, outfit[slot as usize]?)))
+            .filter(|(slot, gear)| {
+                sets.get(&gear.set)
+                    .is_some_and(|held| held[*slot as usize].is_some())
+            })
+            .flat_map(|(slot, gear)| worn.covers(slot, gear.set))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Where a menu has been left, which is where the creator opens it until it is picked from.

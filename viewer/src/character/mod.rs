@@ -235,6 +235,10 @@ pub struct CharacterBuilder {
     sets: RefCell<BTreeMap<u16, [Option<String>; 5]>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<(String, u16)>,
+    /// What each borrowed body is shaped onto this one by, kept rather than rebuilt. The model
+    /// keeps a piece across a change of clothes by the deform it was built with, and one built
+    /// afresh is a different one however equal it is.
+    shaped: RefCell<BTreeMap<u16, Option<Arc<mdl::Deform>>>>,
     /// Every file read so far, so a change of clothes only asks for what it newly needs.
     held: Files,
     /// Batches of files still on their way. A batch is never abandoned: dropping one cancels the
@@ -288,6 +292,7 @@ impl Default for CharacterBuilder {
             emotes_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
+            shaped: RefCell::new(BTreeMap::new()),
             held: Files::new(),
             fetching: Vec::new(),
             model: None,
@@ -324,6 +329,7 @@ impl CharacterBuilder {
         self.chosen = [None; 5];
         self.matched.take();
         self.sets.borrow_mut().clear();
+        self.shaped.borrow_mut().clear();
         self.worn.clear();
         self.held.clear();
         self.fetching.clear();
@@ -482,6 +488,7 @@ impl CharacterBuilder {
             // one say nothing about this one.
             if code != self.code {
                 self.sets.borrow_mut().clear();
+                self.shaped.borrow_mut().clear();
             }
             self.code = code;
             self.skin = skin(&listing, &deformers, self.code);
@@ -578,6 +585,7 @@ impl CharacterBuilder {
             .iter()
             .map(|letter| format!("{FEATURE}{letter}"))
             .collect();
+        hidden.extend(self.covered());
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
         let mut tone = 0.5;
@@ -686,6 +694,29 @@ impl CharacterBuilder {
             customize.lip[3] = 0.0;
         }
         (customize, hidden, shapes, stature)
+    }
+
+    /// The seams the outfit covers, which draw nothing rather than through what is over them.
+    /// Only a piece whose own model is on hand covers anything: where a slot falls back to the
+    /// body what would be hidden is the very skin standing in for the piece, and a seam hidden
+    /// for a piece still on its way is a hole in the character already on screen.
+    fn covered(&self) -> BTreeSet<String> {
+        let Some(worn) = &self.worn_over else {
+            return BTreeSet::new();
+        };
+        let (outfit, _) = self.dressed();
+        let sets = self.sets.borrow();
+        Slot::ALL
+            .into_iter()
+            .filter_map(|slot| Some((slot, outfit[slot as usize]?)))
+            .filter(|(slot, gear)| {
+                sets.get(&gear.set)
+                    .and_then(|held| held[*slot as usize].as_ref())
+                    .is_some_and(|path| self.held.contains_key(path))
+            })
+            .flat_map(|(slot, gear)| worn.covers(slot, gear.set))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Where a menu has been left, which is where the creator opens it until it is picked from.
@@ -838,13 +869,13 @@ impl CharacterBuilder {
     /// Puts what has arrived on screen, keeping the character that is already there where there is
     /// one so a change of clothes neither moves the view nor asks for anything twice.
     fn dress(&mut self) {
-        let mut shaped: BTreeMap<u16, Option<Arc<mdl::Deform>>> = BTreeMap::new();
         let parts: Vec<_> = self
             .worn
             .iter()
             .filter_map(|(path, variant)| {
                 let deform = made_for(path).and_then(|made_for| {
-                    shaped
+                    self.shaped
+                        .borrow_mut()
                         .entry(made_for)
                         .or_insert_with(|| {
                             let deformers = self.deformers.as_ref()?;

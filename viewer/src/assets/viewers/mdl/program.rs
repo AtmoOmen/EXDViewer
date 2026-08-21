@@ -3052,10 +3052,15 @@ impl Buffer {
         // The wind carries the whole reach: a mesh weights it down to a tenth at most, which is what
         // leaves the stated strength in world units. The pair below is read by every one of the
         // twenty-eight shaders holding the buffer, and the two past it by none of them.
+        //
+        // Both are added to a position the instancing record has already brought into view space, so
+        // they are handed over in that space too. The sun draws the same sway under its own view,
+        // and a leaf whose shadow leans one way while it leans another is what leaving them in the
+        // world looks like.
         let waving = "g_WavingParam";
-        let wind = scene.wind.heading * scene.wind.reach;
+        let wind = view.transform_vector3(scene.wind.heading * scene.wind.reach);
         put(waving, "m_WindVector", wind.to_array().to_vec());
-        put(waving, "m_UpVector", vec![0.0, 1.0, 0.0]);
+        put(waving, "m_UpVector", view.transform_vector3(Vec3::Y).to_array().to_vec());
         put(waving, "m_WavingParam", vec![1.0, 1.0, 0.0, 0.0]);
 
         // A light is read in view space: the shader dots its direction against a normal it has just

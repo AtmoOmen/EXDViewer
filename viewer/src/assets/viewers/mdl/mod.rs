@@ -2684,9 +2684,11 @@ impl Rendered {
         hidden: BTreeSet<String>,
         shapes: BTreeSet<String>,
         stature: f32,
+        bust: Vec3,
     ) {
         self.customize.set(customize);
         self.stature.set(stature);
+        self.animation.shaped(bust);
         *self.hidden.borrow_mut() = hidden;
         let changed = *self.shapes.borrow() != shapes;
         *self.shapes.borrow_mut() = shapes;

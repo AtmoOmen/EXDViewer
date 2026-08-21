@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use egui::{CentralPanel, Color32, RichText, ScrollArea, TextEdit, containers::panel::Panel};
+use glam::Vec3;
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -63,6 +64,7 @@ const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
 const MUSCLE_TONE: u32 = 21;
+const BUST: u32 = 23;
 /// A tail, or a Viera's ears: the game files both under the one customisation, and under one
 /// numbered set beneath the body that grows it.
 const TAIL: u32 = 22;
@@ -623,14 +625,14 @@ impl CharacterBuilder {
         // Cheap enough to hand over on every frame: it walks the parts of one character and the
         // model keeps what it was already at, so nothing is rebuilt where nothing was picked.
         if let Some(Ok(model)) = &self.model {
-            let (customize, hidden, shapes, stature) = self.made();
-            model.made(customize, hidden, shapes, stature);
+            let (customize, hidden, shapes, stature, bust) = self.made();
+            model.made(customize, hidden, shapes, stature, bust);
         }
     }
 
     /// What the creator's menus have been left at, and what the shaders and the model make of it:
     /// the colours to tint with, the parts to leave undrawn and the shape keys to deform by.
-    fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32) {
+    fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32, Vec3) {
         let mut customize = mdl::Customize::default();
         // Every feature the face declares, less the ones the creator has been left on.
         let mut hidden: BTreeSet<String> = FEATURE_LETTERS
@@ -640,9 +642,10 @@ impl CharacterBuilder {
         hidden.extend(self.covered());
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
+        let mut bust = Vec3::ONE;
         let mut tone = 0.5;
         let Some(body) = self.creator.body(self.tribe, self.female) else {
-            return (customize, hidden, shapes, stature);
+            return (customize, hidden, shapes, stature, bust);
         };
         let palettes = self
             .made
@@ -692,15 +695,19 @@ impl CharacterBuilder {
             // Only the lane, since the muscle tone menu comes before the skin colour that would
             // otherwise write over what it left.
             if menu.customize == MUSCLE_TONE {
-                let last = menu.count.saturating_sub(1).max(1) as usize;
-                tone = at.min(last) as f32 / last as f32;
+                tone = slid(menu, at as u32);
             }
             if menu.customize == HEIGHT
                 && let Some(palettes) = &palettes
             {
                 let [short, tall] = palettes.height;
-                let last = menu.count.saturating_sub(1).max(1) as usize;
-                stature = short + (tall - short) * (at.min(last) as f32 / last as f32);
+                stature = short + (tall - short) * slid(menu, at as u32);
+            }
+            if menu.customize == BUST
+                && let Some(palettes) = &palettes
+            {
+                let [small, full] = palettes.bust;
+                bust = Vec3::from(small).lerp(Vec3::from(full), slid(menu, at as u32));
             }
             if menu.customize == FEATURES {
                 // The two menus that share this one number are halves of the same run of parts,
@@ -734,7 +741,7 @@ impl CharacterBuilder {
         if !self.ticked(LIPSTICK) {
             customize.lip[3] = 0.0;
         }
-        (customize, hidden, shapes, stature)
+        (customize, hidden, shapes, stature, bust)
     }
 
     /// The seams the outfit covers, which draw nothing rather than through what is over them.
@@ -1135,9 +1142,9 @@ impl CharacterBuilder {
             let current = self.choice(menu);
             match menu.kind {
                 menus::Kind::Slider => {
-                    let last = menu.count.saturating_sub(1);
-                    let mut held = current.min(last);
-                    if ui.add(egui::Slider::new(&mut held, 0..=last)).changed() {
+                    let [low, high] = menu.range;
+                    let mut held = current.clamp(low, high);
+                    if ui.add(egui::Slider::new(&mut held, low..=high)).changed() {
                         picked = Some(Pick::Made(menu.customize, held));
                     }
                 }
@@ -1657,6 +1664,17 @@ enum Pick {
     /// A mount to stand in place of the character, or none to stand it again.
     Mount(Option<usize>),
     Npc(usize),
+}
+
+/// How far along a bar a menu has been left, over the range the row states for it rather than over
+/// its count: every slider counts a hundred and runs nought to a hundred, so its middle is exactly
+/// the middle.
+fn slid(menu: &menus::Menu, at: u32) -> f32 {
+    let [low, high] = menu.range;
+    match high > low {
+        true => (at.clamp(low, high) - low) as f32 / (high - low) as f32,
+        false => 0.0,
+    }
 }
 
 /// One choice a menu offers: where it sits in the menu, the number the file tree files it under,

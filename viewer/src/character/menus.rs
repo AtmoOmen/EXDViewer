@@ -117,6 +117,9 @@ pub struct Menu {
     pub customize: u32,
     pub kind: Kind,
     pub count: u32,
+    /// What a bar runs between, which the row states beside the two labels bounding it and which
+    /// is not the count: every slider counts a hundred and runs nought to a hundred.
+    pub range: [u32; 2],
     /// Where the creator opens the menu, which is not its first choice: a Midlander man starts at
     /// the middle of the height bar and at the fifty-fifth hair colour, which is a brown.
     pub init: u32,
@@ -491,6 +494,13 @@ fn menus(row: &ExcelRow<'_>, lobby: &impl ExcelSheet) -> Vec<Menu> {
             customize: customize.max(0) as u32,
             kind,
             count: u32::from(count),
+            range: match kind {
+                Kind::Slider => [
+                    params.get(2).copied().unwrap_or(0).max(0) as u32,
+                    params.get(3).copied().unwrap_or(0).max(0) as u32,
+                ],
+                _ => [0, u32::from(count).saturating_sub(1)],
+            },
             init: u32::from(init),
             labels: match kind {
                 Kind::List => params

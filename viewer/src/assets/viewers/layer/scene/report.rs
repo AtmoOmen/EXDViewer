@@ -24,6 +24,8 @@ pub struct Frame<'a> {
     pub weather: u32,
     pub exposure: f32,
     pub measured: f32,
+    /// How long the frame took, which is what the adaptation's per-second rate is scaled by.
+    pub step: f32,
     pub placed: usize,
     pub drawn: usize,
     pub models: String,

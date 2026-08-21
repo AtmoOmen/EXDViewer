@@ -3373,11 +3373,11 @@ impl Scene {
             })),
         });
         self.outline(ui, rect, projection * view);
-        self.state(rect, ui.ctx().pixels_per_point());
+        self.state(rect, ui.ctx().pixels_per_point(), ui.input(|input| input.stable_dt));
     }
 
     /// Publishes what this frame was drawn from, for a harness measuring it against a capture.
-    fn state(&self, rect: egui::Rect, scale: f32) {
+    fn state(&self, rect: egui::Rect, scale: f32, step: f32) {
         let (exposure, measured) = match self.exposure.is_some() {
             true => {
                 let held = self.renderer.lock().unwrap();
@@ -3404,6 +3404,7 @@ impl Scene {
             weather: self.ambient.weather_id().unwrap_or_default(),
             exposure,
             measured,
+            step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
             models: format!(

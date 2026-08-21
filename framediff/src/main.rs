@@ -170,11 +170,12 @@ fn run() -> Result<String, String> {
         );
         let _ = writeln!(
             out,
-            "        {} weather {}  exposure {:.3} from a frame measuring {:.3}",
+            "        {} weather {}  exposure {:.3} from a frame measuring {:.3}, step {:.3} s",
             state.clock(),
             state.weather,
             state.exposure,
             state.measured,
+            state.step,
         );
         let _ = writeln!(
             out,

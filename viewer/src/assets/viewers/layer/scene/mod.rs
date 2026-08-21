@@ -35,8 +35,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use half::f16;
 use ironworks::file::layer::{
-    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneSpin, SceneTimeline,
-    Transform,
+    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneSpin, SceneTimeline, Transform,
 };
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;

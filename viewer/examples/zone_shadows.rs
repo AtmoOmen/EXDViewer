@@ -1,18 +1,23 @@
-//! Which of a zone's materials answer a shadow subview, and which cast nothing.
+//! Which of the materials a zone places answer a shadow subview, and which cast nothing.
 //!
-//! `zone_shadows bg/ex3/01_nvt_n4/twn/n4t1/`
+//! `zone_shadows bg/ex3/01_nvt_n4/twn/n4t1/level/n4t1.lvb`
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use ironworks::file::layer::InstanceData;
+use ironworks::file::mdl::{Lod, ModelContainer};
 use ironworks::file::mtrl::{self, Material};
 use ironworks::file::shpk::{self, ShaderPackage, Stage};
+use ironworks::file::{lgb::LayerGroupFile, lvb::LevelFile, sgb::SharedGroupFile};
 use ironworks::{
     Ironworks,
     sqpack::{Install, SqPack},
 };
 
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
-const PATHS: &str = "/home/asriel/Code/ironworks-formats/paths.txt";
+const DEPTH: usize = 6;
+
+type Pack = Ironworks<SqPack<Install>>;
 
 const PASS_G_OPAQUE: u32 = 0x03ac_862e;
 const PASS_G_SEMITRANSPARENCY: u32 = 0x6006_067f;
@@ -98,18 +103,71 @@ fn pair(
     ))
 }
 
+fn walk(
+    ironworks: &Pack,
+    instances: &[ironworks::file::layer::Instance],
+    models: &mut BTreeSet<String>,
+    seen: &mut BTreeSet<String>,
+    depth: usize,
+) {
+    for instance in instances {
+        match instance.data() {
+            InstanceData::BgPart(held) if !held.asset_path().is_empty() => {
+                models.insert(held.asset_path().clone());
+            }
+            InstanceData::SharedGroup(held)
+                if depth < DEPTH
+                    && !held.asset_path().is_empty()
+                    && seen.insert(held.asset_path().clone()) =>
+            {
+                let Ok(file) = ironworks.file::<SharedGroupFile>(held.asset_path()) else {
+                    continue;
+                };
+                for group in file.scene().layer_groups() {
+                    for layer in group.layers() {
+                        walk(ironworks, layer.instances(), models, seen, depth + 1);
+                    }
+                }
+            }
+            _ => (),
+        }
+    }
+}
+
 fn main() {
     let ironworks = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(SQPACK)));
-    let list = std::fs::read_to_string(PATHS).expect("the path list");
     let mut packages: BTreeMap<String, Option<ShaderPackage>> = BTreeMap::new();
 
     for zone in std::env::args().skip(1) {
-        let mut tally: BTreeMap<(String, bool, bool, bool), usize> = BTreeMap::new();
-        for path in list.lines() {
-            if !path.starts_with(&zone) || !path.ends_with(".mtrl") {
+        let level: LevelFile = ironworks.file(&zone).expect("a level");
+        let mut models = BTreeSet::new();
+        let mut seen = BTreeSet::new();
+        for path in level.scene().layer_group_paths() {
+            let Ok(file) = ironworks.file::<LayerGroupFile>(path) else {
                 continue;
+            };
+            for layer in file.group().layers() {
+                walk(&ironworks, layer.instances(), &mut models, &mut seen, 0);
             }
+        }
+
+        let mut materials: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for path in &models {
+            let Ok(container) = ironworks.file::<ModelContainer>(path) else {
+                continue;
+            };
+            for mesh in container.model(Lod::High).meshes() {
+                if let Ok(name) = mesh.material() {
+                    materials.entry(name).or_default().insert(path.clone());
+                }
+            }
+        }
+
+        let mut tally: BTreeMap<(String, bool, bool, bool), usize> = BTreeMap::new();
+        let mut unread = 0;
+        for (path, named) in &materials {
             let Ok(material) = ironworks.file::<Material>(path) else {
+                unread += 1;
                 continue;
             };
             let name = format!("shader/sm5/shpk/{}", material.shader());
@@ -128,12 +186,19 @@ fn main() {
             let shadow = pair(package, keys, PASS_Z_OPAQUE, SUB_VIEW_SHADOW_0).is_some();
             if !shadow {
                 println!("   no shadow  {path}  {}", material.shader());
+                for held in named {
+                    println!("              on {held}");
+                }
             }
             *tally
                 .entry((material.shader().to_owned(), buffer, depth, shadow))
                 .or_default() += 1;
         }
-        println!("== {zone}");
+        println!(
+            "== {zone}: {} models, {} materials, {unread} unread",
+            models.len(),
+            materials.len()
+        );
         for ((name, buffer, depth, shadow), count) in &tally {
             println!("   {count:>4}  {name:<28} g {buffer:<5} z {depth:<5} shadow {shadow}");
         }

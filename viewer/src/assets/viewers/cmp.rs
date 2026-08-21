@@ -87,10 +87,10 @@ fn named(ui: &egui::Ui, deps: &mut Deps, backend: &Backend, clan: usize) -> Stri
         .to_owned()
 }
 
-/// A swatch as the file holds it. Lips and face paint carry the same colours twice over and the
-/// alpha is all that tells the lightly worn half from the other.
+/// A swatch as the file holds it. The alpha a lip or a face paint carries is the weight it is worn
+/// at rather than anything about the colour, and drawing at it would leave the lightly worn half unreadable.
 fn color(color: cmp::Color) -> Color32 {
-    Color32::from_rgba_unmultiplied(color.red(), color.green(), color.blue(), color.alpha())
+    Color32::from_rgb(color.red(), color.green(), color.blue())
 }
 
 fn palettes(colors: &cmp::ColorParameters) -> Vec<Palette> {

@@ -2005,10 +2005,8 @@ fn sheet_name(entries: &HashMap<String, i32>, path: &str) -> Option<String> {
         {
             return Some(name.clone());
         }
-        match candidate[split..].rfind('_') {
-            Some(i) => candidate = &candidate[..split + i],
-            None => return None,
-        }
+        let at = candidate[split..].rfind('_')?;
+        candidate = &candidate[..split + at];
     }
 }
 

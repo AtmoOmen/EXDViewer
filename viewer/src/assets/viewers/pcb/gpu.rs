@@ -113,7 +113,7 @@ impl Renderer {
 
             for (meshes, mode) in [
                 (Some(&self.solid), glow::TRIANGLES),
-                (Some(&self.wire).filter(|_| show_wire), glow::LINES),
+                (show_wire.then_some(&self.wire), glow::LINES),
             ] {
                 for mesh in meshes.into_iter().flatten() {
                     gl.bind_vertex_array(Some(mesh.layout));

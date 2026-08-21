@@ -243,11 +243,16 @@ async fn decode_texture(
     bytes: Vec<u8>,
     max_dim: Option<u16>,
 ) -> anyhow::Result<DecodedTexture> {
-    let (image, source) = crate::utils::tex_loader::decode_preview_sized(&bytes, path, max_dim)?;
-    Ok(DecodedTexture {
-        image: image.to_rgba8(),
-        source,
+    let path = path.to_owned();
+    blocking::unblock(move || {
+        let (image, source) =
+            crate::utils::tex_loader::decode_preview_sized(&bytes, &path, max_dim)?;
+        anyhow::Ok(DecodedTexture {
+            image: image.to_rgba8(),
+            source,
+        })
     })
+    .await
 }
 
 /// Typed reads layered on [`FileProvider`]. Blanket-implemented for every

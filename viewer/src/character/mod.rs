@@ -79,8 +79,8 @@ pub const ODD_EYES: u32 = 102;
 pub const LEFT_EYE_COLOR: u32 = 103;
 pub const LIPSTICK: u32 = 104;
 
-/// Where the light half of a palette the file splits in two begins. Lips and face paint are offered
-/// as a dark run and a light one; the file runs them as one, the second half starting here.
+/// Where the light half of a split palette begins. A lip and a face paint are offered twice over,
+/// the same colours at two weights, and light is the half worn the more lightly of the two.
 const HALF: u32 = 128;
 
 /// The parts of a face the creator deforms, and the shape keys each is named with. A choice picks
@@ -733,10 +733,8 @@ impl CharacterBuilder {
                     let [red, green, blue, _] = palettes.features.shaded(at);
                     customize.option = [red, green, blue];
                 }
-                // The decal buffer takes its colour as the file holds it rather than squared, and
-                // the swatch's own last lane is the weight the paint is worn at.
                 if menu.customize == FACE_PAINT_COLOR {
-                    customize.decal = palettes.face_paint.plain(at);
+                    customize.decal = palettes.face_paint.shaded(at);
                 }
             }
             // Only the lane, since the muscle tone menu comes before the skin colour that would
@@ -1265,9 +1263,8 @@ impl CharacterBuilder {
                         _ => true,
                     };
                     if worn {
-                        // Lips and face paint are offered as a dark run and a light one, which is
-                        // one palette in the file: the half a colour belongs to is the top bit of
-                        // its own index, so switching halves is that bit and nothing else.
+                        // The half a colour belongs to is the top bit of its own index, so
+                        // switching halves is that bit and nothing else.
                         let mut half = 0;
                         if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
                             half = current / HALF;

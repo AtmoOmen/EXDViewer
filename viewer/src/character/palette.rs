@@ -30,17 +30,12 @@ impl Swatches {
         self.shown.get(index).copied()
     }
 
-    /// The colour a shader is given, which every buffer but the decal's takes squared. The fourth
-    /// lane is not a colour and passes through either way: a lip's own opacity goes in as the file
-    /// states it, byte for byte.
+    /// The colour a shader is given, which goes in squared. The fourth lane is not a colour and
+    /// passes through as the file states it: a lip and a face paint are worn at the weight their
+    /// own swatch carries.
     pub fn shaded(&self, index: usize) -> [f32; 4] {
-        let [red, green, blue, weight] = self.plain(index);
+        let [red, green, blue, weight] = self.held.get(index).copied().unwrap_or([1.0; 4]);
         [red * red, green * green, blue * blue, weight]
-    }
-
-    /// The swatch as the file holds it, which is what the decal buffer takes.
-    pub fn plain(&self, index: usize) -> [f32; 4] {
-        self.held.get(index).copied().unwrap_or([1.0; 4])
     }
 }
 
@@ -88,9 +83,9 @@ impl Made {
             ),
             highlights: pair(shared.hair_highlights(), shown.hair_highlights()),
             eyes: pair(shared.eyes(), shown.eyes()),
-            lips: halves(shared, shown, cmp::ColorParameters::lips),
+            lips: pair(shared.lips(), shown.lips()),
             features: pair(shared.features(), shown.features()),
-            face_paint: halves(shared, shown, cmp::ColorParameters::face_paint),
+            face_paint: pair(shared.face_paint(), shown.face_paint()),
             height: match female {
                 true => [scale.female_min_height(), scale.female_max_height()],
                 false => [scale.male_min_height(), scale.male_max_height()],
@@ -107,24 +102,6 @@ fn pair(held: &[cmp::Color], shown: &[cmp::Color]) -> Swatches {
     }
 }
 
-/// A palette the file splits into a dark half and a light one, which the creator offers as one run.
-fn halves(
-    shaded: &cmp::ColorParameters,
-    shown: &cmp::ColorParameters,
-    pick: fn(&cmp::ColorParameters, usize) -> Option<cmp::Color>,
-) -> Swatches {
-    Swatches {
-        held: (0..256)
-            .filter_map(|at| pick(shaded, at))
-            .map(|held| lanes(&held))
-            .collect(),
-        shown: (0..256)
-            .filter_map(|at| pick(shown, at))
-            .map(|held| color(&held))
-            .collect(),
-    }
-}
-
 /// A swatch as the file holds it, each channel over the range it is stated in.
 fn lanes(held: &cmp::Color) -> [f32; 4] {
     let over = |channel: u8| f32::from(channel) / 255.0;
@@ -136,6 +113,8 @@ fn lanes(held: &cmp::Color) -> [f32; 4] {
     ]
 }
 
+/// A swatch as the creator draws it. Lips and face paint are offered twice over, the same colours
+/// at two weights, and the alpha the file gives each is all that tells the two halves apart.
 fn color(held: &cmp::Color) -> Color32 {
-    Color32::from_rgb(held.red(), held.green(), held.blue())
+    Color32::from_rgba_unmultiplied(held.red(), held.green(), held.blue(), held.alpha())
 }

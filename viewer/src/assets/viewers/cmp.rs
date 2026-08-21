@@ -87,8 +87,10 @@ fn named(ui: &egui::Ui, deps: &mut Deps, backend: &Backend, clan: usize) -> Stri
         .to_owned()
 }
 
+/// A swatch as the file holds it. Lips and face paint carry the same colours twice over and the
+/// alpha is all that tells the lightly worn half from the other.
 fn color(color: cmp::Color) -> Color32 {
-    Color32::from_rgb(color.red(), color.green(), color.blue())
+    Color32::from_rgba_unmultiplied(color.red(), color.green(), color.blue(), color.alpha())
 }
 
 fn palettes(colors: &cmp::ColorParameters) -> Vec<Palette> {
@@ -96,18 +98,11 @@ fn palettes(colors: &cmp::ColorParameters) -> Vec<Palette> {
         name,
         colors: colors.iter().copied().map(color).collect(),
     };
-    let halved = |name, pick: fn(&cmp::ColorParameters, usize) -> Option<cmp::Color>| Palette {
-        name,
-        colors: (0..256)
-            .filter_map(|index| pick(colors, index))
-            .map(color)
-            .collect(),
-    };
     vec![
         run("Eyes", colors.eyes()),
         run("Hair highlights", colors.hair_highlights()),
-        halved("Lips", cmp::ColorParameters::lips),
-        halved("Face paint", cmp::ColorParameters::face_paint),
+        run("Lips", colors.lips()),
+        run("Face paint", colors.face_paint()),
         run("Features", colors.features()),
         run("Unused eyes A", colors.unused_eyes_a()),
         run("Unused eyes B", colors.unused_eyes_b()),

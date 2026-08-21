@@ -1,0 +1,49 @@
+Game    tuli  thumbnail 2048x1113 of a 2560x1392 swapchain
+        eye (-6.535, 18.583, 36.727)  looking (-0.568, -0.187, -0.802)  fov 55.00 vertical  near 0.1  78 copies, 1 camera(s) stated
+Viewer  0ca8aa0f049f2bc8adcf504f85080adc66770d0a (dirty) built 2026-08-20 23:44:16 -07:00  bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb  preset tuli
+        eye (-6.535, 18.583, 36.727)  looking (-0.568, -0.187, -0.802)  fov 55.00 vertical  viewport 1834x1044 at (224, 132)
+        14:10 weather 1  exposure 3.000 from a frame measuring 0.063
+        drawn 7523 of 11866 placed, models 297 of 926, materials 156 of 205, passes shadow, sky, sun, band, fog, reflection, vignette
+
+Alignment  the viewer's own frame is 1834x1044, resampled onto the game's 2048x1113
+           the viewer's frame covers 95.3% of the game's, 84.9 deg wide against 87.5
+           step 0.000 units  turn 0.000 deg  roll -0.000 deg  fov +0.000 deg  parallax 0.000 deg at a hundred units, the turn worth 0.0 px here
+           0 of the region's pixels lay past the viewer's own frame
+           camera, lens and frame shape are read out of the capture; the clock and the weather are stated
+
+Region  (150,170)-(1450,1040), 1131000 pixels measured
+        the zone is 63% placed and 297 of 926 modelled, so what is missing reads as sky and the exposure follows it
+  game    lum  81.24  sat 0.4151  rgb ( 85.7,  82.4,  56.2)  med  63.49  p99 228.34  clip  1.38%  white  0.04%  black  0.00%
+  viewer  lum 107.46  sat 0.3213  rgb (103.7, 109.4,  99.0)  med  81.97  p99 255.00  clip  8.76%  white  4.19%  black  0.18%
+  its own lum 118.76  sat 0.2937  rgb (117.1, 120.3, 108.5)  med  83.54  p99 255.00  clip 15.10%  white  7.07%  black  0.15%   over its whole viewport
+  apart   gain 0.756  saturation -0.0938  per channel (0.827, 0.753, 0.567)
+
+Gain, game over viewer, 6 across
+    0.55   0.50   0.73   0.66   0.70   0.54
+    0.47   0.52   0.71   0.71   0.57   0.66
+    0.72   0.74   0.97   1.04   0.96   0.72
+    1.94   1.29   1.14   0.68   0.56   0.85
+
+Saturation, viewer less game
+  -0.059 -0.046 -0.105 -0.077 -0.086 -0.074
+  -0.038 -0.094 -0.035 -0.093 -0.278 -0.088
+  +0.005 +0.013 -0.024 -0.125 -0.098 -0.102
+  -0.203 -0.101 -0.102 -0.088 -0.229 -0.124
+
+Rows, top to bottom
+  y  170- 278  gain  0.58  sat -0.049  lum  50.61 against  87.48  clip  0.06% against  2.48%  black  0.00% against  0.00%
+  y  278- 387  gain  0.65  sat -0.100  lum  53.57 against  82.07  clip  0.04% against  1.21%  black  0.00% against  0.25%
+  y  387- 496  gain  0.59  sat -0.081  lum  56.20 against  95.87  clip  0.39% against  5.73%  black  0.00% against  0.00%
+  y  496- 605  gain  0.62  sat -0.128  lum  66.78 against 107.85  clip  2.27% against 10.36%  black  0.00% against  0.00%
+  y  605- 713  gain  0.79  sat -0.079  lum  84.01 against 106.09  clip  4.22% against  7.58%  black  0.00% against  0.30%
+  y  713- 822  gain  0.93  sat -0.031  lum 101.14 against 108.96  clip  2.32% against  6.21%  black  0.00% against  0.28%
+  y  822- 931  gain  0.85  sat -0.146  lum 113.41 against 133.24  clip  0.90% against 19.19%  black  0.00% against  0.48%
+  y  931-1040  gain  0.90  sat -0.136  lum 123.97 against 137.95  clip  0.89% against 17.27%  black  0.00% against  0.15%
+
+Worst cells
+  (1016, 387)-(1233, 605)  gain  0.57  sat -0.278 (game 0.426, here 0.148)  lum game 103.82 here 182.55
+  (1016, 822)-(1233,1040)  gain  0.56  sat -0.229 (game 0.379, here 0.150)  lum game 124.48 here 221.33
+  ( 150, 822)-( 366,1040)  gain  1.94  sat -0.203 (game 0.566, here 0.363)  lum game  94.13 here  48.61
+  ( 150, 387)-( 366, 605)  gain  0.47  sat -0.038 (game 0.368, here 0.330)  lum game  37.33 here  79.14
+  ( 366, 170)-( 583, 387)  gain  0.50  sat -0.046 (game 0.378, here 0.332)  lum game  40.79 here  81.44
+  ( 366, 387)-( 583, 605)  gain  0.52  sat -0.094 (game 0.378, here 0.284)  lum game  40.53 here  77.78

@@ -1,0 +1,95 @@
+tree b371fb3432bbb5db4720ff0fc8a5dae3e7a411f3, last drawn by b371fb3432bbb5db4720ff0fc8a5dae3e7a411f3
+building viewer/dist
+dist built 2026-08-21T16:28:58.912Z
+frame.png  2048x1113 of a 2560x1392 swapchain
+camera 0   eye (-6.535, 18.583, 36.727)  looking (-0.568, -0.187, -0.802)  fov 55.00 vertical  near 0.1  x78
+sun        14:21 from (-0.5774, 0.5774, 0.5774) in camera space  x116
+sun        21:38 from (-0.5774, -0.5774, -0.5774) in camera space  x116
+sun        18:05 from (-0.9997, -0.0161, -0.0161) in world space  x59
+sun        06:58 from (0.9672, 0.1796, 0.1796) in camera space  x48
+preset.te3 bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb at 14:10 weather 1
+   11s  drawn 5625 of 11824, models 250 of 926, exposure 1.000
+   53s  drawn 5864 of 11824, models 261 of 926, exposure 1.000
+   67s  drawn 5931 of 11835, models 267 of 926, exposure 1.965
+   82s  drawn 6359 of 11836, models 273 of 926, exposure 1.975
+   96s  drawn 6410 of 11836, models 276 of 926, exposure 1.980
+   112s  drawn 6442 of 11836, models 283 of 926, exposure 1.983
+   127s  drawn 6579 of 11844, models 293 of 926, exposure 2.004
+   143s  drawn 6631 of 11844, models 297 of 926, exposure 1.957
+   159s  drawn 6732 of 11848, models 300 of 926, exposure 2.156
+   176s  drawn 7169 of 11848, models 308 of 926, exposure 2.161
+   194s  drawn 7282 of 11848, models 309 of 926, exposure 2.161
+   205s  drawn 7362 of 11848, models 314 of 926, exposure 3.000
+   225s  drawn 7491 of 11850, models 319 of 926, exposure 3.000
+   242s  drawn 7686 of 11851, models 326 of 926, exposure 3.000
+   261s  drawn 7734 of 11851, models 334 of 926, exposure 3.000
+   271s  drawn 7755 of 11853, models 337 of 926, exposure 2.125
+   296s  drawn 7804 of 11853, models 344 of 926, exposure 2.107
+   311s  drawn 7878 of 11853, models 350 of 926, exposure 3.000
+   322s  drawn 7980 of 11853, models 353 of 926, exposure 2.109
+   333s  drawn 7989 of 11853, models 357 of 926, exposure 3.000
+   343s  drawn 8097 of 11854, models 360 of 926, exposure 2.115
+   355s  drawn 8164 of 11854, models 361 of 926, exposure 3.000
+   367s  drawn 8263 of 11859, models 365 of 926, exposure 2.124
+   379s  drawn 8272 of 11859, models 367 of 926, exposure 3.000
+   389s  drawn 8286 of 11859, models 370 of 926, exposure 2.279
+   400s  drawn 8299 of 11859, models 377 of 926, exposure 3.000
+   410s  drawn 8370 of 11864, models 381 of 926, exposure 2.278
+   420s  drawn 8393 of 11864, models 384 of 926, exposure 3.000
+   441s  drawn 8437 of 11866, models 393 of 926, exposure 3.000
+   460s  drawn 8484 of 11866, models 404 of 926, exposure 3.000
+   471s  drawn 8502 of 11866, models 408 of 926, exposure 2.282
+   481s  drawn 8509 of 11866, models 411 of 926, exposure 3.000
+   the build was made from a dirty tree, so b371fb3432bbb5db4720ff0fc8a5dae3e7a411f3 does not name it
+Game    tuli  thumbnail 2048x1113 of a 2560x1392 swapchain
+        eye (-6.535, 18.583, 36.727)  looking (-0.568, -0.187, -0.802)  fov 55.00 vertical  near 0.1  78 copies, 1 camera(s) stated
+Viewer  b371fb3432bbb5db4720ff0fc8a5dae3e7a411f3 (dirty) built 2026-08-21 09:27:55 -07:00  bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb  preset tuli
+        eye (-6.535, 18.583, 36.727)  looking (-0.568, -0.187, -0.802)  fov 55.00 vertical  viewport 1834x1044 at (224, 132)
+        14:10 weather 1  exposure 2.282 from a frame measuring 0.097
+        drawn 8528 of 11866 placed, models 415 of 926, materials 190 of 234, passes shadow, sky, sun, band, fog, reflection, vignette
+
+Alignment  the viewer's own frame is 1834x1044, resampled onto the game's 2048x1113
+           the viewer's frame covers 95.3% of the game's, 84.9 deg wide against 87.5
+           step 0.000 units  turn 0.000 deg  roll -0.000 deg  fov +0.000 deg  parallax 0.000 deg at a hundred units, the turn worth 0.0 px here
+           0 of the region's pixels lay past the viewer's own frame
+           camera, lens and frame shape are read out of the capture; the clock and the weather are stated
+
+Region  (150,170)-(1450,1040), 1131000 pixels measured
+        the zone is 72% placed and 415 of 926 modelled, so what is missing reads as sky and the exposure follows it
+  game    lum  81.24  sat 0.4151  rgb ( 85.7,  82.4,  56.2)  med  63.49  p99 228.34  clip  1.38%  white  0.04%  black  0.00%
+  viewer  lum  97.96  sat 0.3260  rgb ( 97.7,  99.7,  81.8)  med  76.68  p99 255.00  clip  6.30%  white  3.54%  black  0.21%
+  its own lum 106.74  sat 0.3172  rgb (108.5, 108.3,  86.7)  med  77.97  p99 255.00  clip 10.62%  white  4.07%  black  0.19%   over its whole viewport
+  apart   gain 0.829  saturation -0.0891  per channel (0.877, 0.827, 0.686)
+
+Gain, game over viewer, 6 across
+    0.64   0.67   0.89   0.79   0.75   0.60
+    0.62   0.63   0.75   0.77   0.59   0.68
+    0.74   0.77   0.98   1.13   0.99   0.85
+    2.34   1.32   1.20   0.79   0.59   0.88
+
+Saturation, viewer less game
+  -0.013 -0.069 -0.100 -0.073 -0.089 -0.074
+  -0.034 -0.088 -0.041 -0.103 -0.262 -0.086
+  +0.007 +0.002 -0.023 -0.110 -0.099 -0.093
+  -0.162 -0.116 -0.103 -0.079 -0.205 -0.119
+
+Rows, top to bottom
+  y  170- 278  gain  0.68  sat -0.049  lum  50.61 against  74.23  clip  0.06% against  1.27%  black  0.00% against  0.02%
+  y  278- 387  gain  0.77  sat -0.091  lum  53.57 against  69.88  clip  0.04% against  0.63%  black  0.00% against  0.25%
+  y  387- 496  gain  0.65  sat -0.088  lum  56.20 against  86.45  clip  0.39% against  5.48%  black  0.00% against  0.00%
+  y  496- 605  gain  0.67  sat -0.117  lum  66.78 against  99.62  clip  2.27% against  9.99%  black  0.00% against  0.00%
+  y  605- 713  gain  0.85  sat -0.072  lum  84.01 against  99.15  clip  4.22% against  5.97%  black  0.00% against  0.30%
+  y  713- 822  gain  1.00  sat -0.033  lum 101.14 against 101.54  clip  2.32% against  4.72%  black  0.00% against  0.28%
+  y  822- 931  gain  0.89  sat -0.128  lum 113.41 against 127.38  clip  0.90% against 14.74%  black  0.00% against  0.64%
+  y  931-1040  gain  0.99  sat -0.134  lum 123.97 against 125.26  clip  0.89% against  7.57%  black  0.00% against  0.21%
+
+Worst cells
+  (1016, 387)-(1233, 605)  gain  0.59  sat -0.262 (game 0.426, here 0.163)  lum game 103.82 here 176.74
+  ( 150, 822)-( 366,1040)  gain  2.34  sat -0.162 (game 0.566, here 0.404)  lum game  94.13 here  40.19
+  (1016, 822)-(1233,1040)  gain  0.59  sat -0.205 (game 0.379, here 0.174)  lum game 124.48 here 212.57
+  (1233, 170)-(1450, 387)  gain  0.60  sat -0.074 (game 0.356, here 0.281)  lum game  48.81 here  80.74
+  ( 150, 387)-( 366, 605)  gain  0.62  sat -0.034 (game 0.368, here 0.334)  lum game  37.33 here  60.50
+  (1233, 822)-(1450,1040)  gain  0.88  sat -0.119 (game 0.488, here 0.369)  lum game 144.05 here 164.50
+
+written to /home/asriel/Code/EXDViewer-threads/smoke/ao-base
+

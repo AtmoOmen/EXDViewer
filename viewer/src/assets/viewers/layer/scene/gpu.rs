@@ -500,7 +500,7 @@ impl Renderer {
                     let Some(held) = surface
                         .shaded
                         .as_ref()
-                        .and_then(|shaded| shaded.shadow.as_deref())
+                        .and_then(|shaded| shaded.shadow.as_ref())
                     else {
                         continue;
                     };
@@ -610,7 +610,7 @@ impl Renderer {
                 let Some(shaded) = &surface.shaded else {
                     continue;
                 };
-                let Some(held) = shaded.resolve.as_deref() else {
+                let Some(held) = shaded.resolve.as_ref() else {
                     continue;
                 };
                 let program =
@@ -892,8 +892,8 @@ impl Renderer {
                             continue;
                         };
                         let held = match depth {
-                            true => shaded.depth.as_deref(),
-                            false => shaded.buffer.get(page).map(Arc::as_ref),
+                            true => shaded.depth.as_ref(),
+                            false => shaded.buffer.get(page),
                         };
                         let Some(held) = held.filter(|held| depth || !held.targets.is_empty())
                         else {
@@ -1052,7 +1052,7 @@ impl Renderer {
             }
             // Before the lighting too: the shadowed variant reads the mask as a weight on what it
             // works out, so it has to be standing before the first light is resolved.
-            match lighting.shadow.as_deref() {
+            match lighting.shadow.as_ref() {
                 Some(held) => self.buffers.shade(gl, held, &scene)?,
                 None => self.buffers.unshade(),
             }

@@ -691,8 +691,8 @@ impl Game {
                         continue;
                     }
                     let held = match depth {
-                        true => shaded.depth.as_deref(),
-                        false => shaded.buffer.get(page).map(Arc::as_ref),
+                        true => shaded.depth.as_ref(),
+                        false => shaded.buffer.get(page),
                     };
                     let Some(held) = held.filter(|held| depth || !held.targets.is_empty()) else {
                         continue;
@@ -861,7 +861,7 @@ impl Game {
                 let held = surface
                     .shaded
                     .as_ref()
-                    .and_then(|shaded| shaded.resolve.as_deref())
+                    .and_then(|shaded| shaded.resolve.as_ref())
                     .ok_or("no pass to resolve with")?;
                 let program =
                     deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;

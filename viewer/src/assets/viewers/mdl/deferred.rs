@@ -765,7 +765,7 @@ struct Mirrored {
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
 /// it rather than a stale program drawing on.
 pub struct Linked {
-    source: String,
+    source: std::sync::Arc<program::Program>,
     pub program: glow::Program,
 }
 
@@ -1451,7 +1451,7 @@ impl Buffers {
     pub fn post(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1587,7 +1587,7 @@ impl Buffers {
     pub fn shade(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (into, _) = self.mask.ok_or("no shadow mask")?;
@@ -1662,7 +1662,7 @@ impl Buffers {
     pub fn sky(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1698,7 +1698,7 @@ impl Buffers {
     pub fn sun(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1728,7 +1728,7 @@ impl Buffers {
     pub fn moon(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1774,7 +1774,7 @@ impl Buffers {
         &mut self,
         gl: &glow::Context,
         at: usize,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -1891,7 +1891,7 @@ impl Buffers {
     pub fn fog(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let into = self.bare.ok_or("no lit frame")?;
@@ -2624,7 +2624,7 @@ impl Buffers {
     pub fn vignette(
         &mut self,
         gl: &glow::Context,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (lit, _) = self.lit.ok_or("no lit frame")?;
@@ -3086,7 +3086,7 @@ impl Buffers {
         &mut self,
         gl: &glow::Context,
         at: usize,
-        held: &program::Program,
+        held: &std::sync::Arc<program::Program>,
         into: glow::Framebuffer,
         scene: &program::Scene,
         over: Over,
@@ -3100,15 +3100,14 @@ impl Buffers {
             | Over::Reflecting(size, _, _) => size,
             _ => self.size,
         };
-        let source = format!("{}\n{}", held.vertex, held.fragment);
         let program = match self.resolvers.get(&at) {
-            Some(linked) if linked.source == source => linked.program,
+            Some(linked) if std::sync::Arc::ptr_eq(&linked.source, held) => linked.program,
             _ => {
                 let built = build_pair(gl, &held.vertex, &held.fragment)?;
                 if let Some(stale) = self.resolvers.insert(
                     at,
                     Linked {
-                        source,
+                        source: held.clone(),
                         program: built,
                     },
                 ) {
@@ -3522,17 +3521,17 @@ impl Drop for Buffers {
     }
 }
 
-/// One linked pair, kept against the source it was built from so a change rebuilds it rather than a
-/// stale program drawing on.
+/// One linked pair, kept against the reading it was built from so a change rebuilds it rather than a
+/// stale program drawing on. Held by identity rather than by source: a zone links thousands of times
+/// a frame, and the two shaders behind one of them run to tens of kilobytes.
 pub fn link<K: Ord>(
     gl: &glow::Context,
     into: &mut BTreeMap<K, Linked>,
     key: K,
-    held: &program::Program,
+    held: &std::sync::Arc<program::Program>,
 ) -> Result<glow::Program, String> {
-    let source = format!("{}\n{}", held.vertex, held.fragment);
     if let Some(linked) = into.get(&key)
-        && linked.source == source
+        && std::sync::Arc::ptr_eq(&linked.source, held)
     {
         return Ok(linked.program);
     }
@@ -3540,7 +3539,7 @@ pub fn link<K: Ord>(
     if let Some(stale) = into.insert(
         key,
         Linked {
-            source,
+            source: held.clone(),
             program: built,
         },
     ) {

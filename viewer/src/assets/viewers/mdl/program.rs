@@ -1140,6 +1140,18 @@ pub fn shadow_reach(at: usize) -> f32 {
     SHADOW_REACH * SPLIT_STEP.powi(at as i32)
 }
 
+/// How far a face is pushed away from the light before its depth is kept: a slope the map's own
+/// step is multiplied by, and a flat push in those same steps. This is what keeps a surface off its
+/// own shadow, since the pass rasterises both of a surface's sides.
+pub const SHADOW_SLOPE: f32 = 2.0;
+const SHADOW_PUSH: f32 = 131.0;
+
+/// That flat push for the split at `at`. A step of the map spans the whole of the split's own box,
+/// so it is scaled down as the box grows and the push comes to the same distance in the world.
+pub fn shadow_push(at: usize) -> f32 {
+    SHADOW_PUSH * SHADOW_REACH / shadow_reach(at)
+}
+
 /// Where the sun stands to draw one split of the scene's depth, as a view and an orthographic
 /// projection about `focus`. The projection matches the one the frame is drawn with in handing back
 /// a nought-to-one depth, which is what the translator's own fixup leaves in the buffer.
@@ -3040,10 +3052,15 @@ impl Buffer {
         // The wind carries the whole reach: a mesh weights it down to a tenth at most, which is what
         // leaves the stated strength in world units. The pair below is read by every one of the
         // twenty-eight shaders holding the buffer, and the two past it by none of them.
+        //
+        // Both are added to a position the instancing record has already brought into view space, so
+        // they are handed over in that space too. The sun draws the same sway under its own view,
+        // and a leaf whose shadow leans one way while it leans another is what leaving them in the
+        // world looks like.
         let waving = "g_WavingParam";
-        let wind = scene.wind.heading * scene.wind.reach;
+        let wind = view.transform_vector3(scene.wind.heading * scene.wind.reach);
         put(waving, "m_WindVector", wind.to_array().to_vec());
-        put(waving, "m_UpVector", vec![0.0, 1.0, 0.0]);
+        put(waving, "m_UpVector", view.transform_vector3(Vec3::Y).to_array().to_vec());
         put(waving, "m_WavingParam", vec![1.0, 1.0, 0.0, 0.0]);
 
         // A light is read in view space: the shader dots its direction against a normal it has just

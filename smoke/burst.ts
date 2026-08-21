@@ -110,7 +110,9 @@ async function main() {
         await cdp.send("Emulation.setDeviceMetricsOverride", {
             width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, mobile: false,
         });
-        await cdp.send("Page.navigate", { url: `${origin}/assets/${level}` });
+        await cdp.send("Page.navigate", {
+            url: level.startsWith("/") ? `${origin}${level}` : `${origin}/assets/${level}`,
+        });
         await cdp.eval("localStorage.clear()").catch(() => {});
         const began = Date.now();
         // The scene is a tab over the level's own listing, and that tab only exists once the file

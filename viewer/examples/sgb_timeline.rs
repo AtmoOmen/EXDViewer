@@ -24,7 +24,31 @@ fn main() {
             }
         };
         let held = file.scene();
-        println!("== {path}  {} timelines", held.timelines().len());
+        println!(
+            "== {path}  {} timelines  {} repeating",
+            held.timelines().len(),
+            held.animations().len()
+        );
+        for animation in held.animations() {
+            println!("   repeats over {:?}", animation.instances());
+            for (name, lane) in [
+                ("shift", animation.translation()),
+                ("turn ", animation.rotation()),
+                ("size ", animation.scale()),
+            ] {
+                println!(
+                    "      {name} {} {:?} over {} after {}  wrap {}",
+                    match lane.active() {
+                        true => "on ",
+                        false => "off",
+                    },
+                    lane.amount(),
+                    lane.period(),
+                    lane.delay(),
+                    lane.wrap(),
+                );
+            }
+        }
         for group in held.layer_groups() {
             for layer in group.layers() {
                 for instance in layer.instances() {

@@ -63,6 +63,9 @@ const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
 const MUSCLE_TONE: u32 = 21;
+/// A tail, or a Viera's ears: the game files both under the one customisation, and under one
+/// numbered set beneath the body that grows it.
+const TAIL: u32 = 22;
 
 /// What the creator ticks beside a menu rather than offering as a menu of its own, keyed past every
 /// menu number so the two can never collide. The game holds each of them all the same: a highlight
@@ -195,6 +198,7 @@ pub struct CharacterBuilder {
     body: Vec<String>,
     faces: Vec<Set>,
     hairs: Vec<Set>,
+    tails: Vec<Set>,
     face: u16,
     hair: u16,
     attire: Attire,
@@ -271,6 +275,7 @@ impl Default for CharacterBuilder {
             body: Vec::new(),
             faces: Vec::new(),
             hairs: Vec::new(),
+            tails: Vec::new(),
             face: 1,
             hair: 1,
             attire: Attire::default(),
@@ -525,6 +530,7 @@ impl CharacterBuilder {
             self.body = body(&listing, &deformers, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
+            self.tails = grown(&listing, self.code);
             // Both name the files the character is built from, so both are read out of what the
             // menus have been left at rather than kept alongside it. Where nothing has been picked
             // that is the creator's own opening choice, which is not the first of either: a
@@ -774,6 +780,16 @@ impl CharacterBuilder {
             .unwrap_or(menu.init)
     }
 
+    /// The tail or ear set the creator has been left at, which is one past where the choice sits.
+    fn tail(&self) -> u16 {
+        let at = self
+            .creator
+            .body(self.tribe, self.female)
+            .and_then(|body| body.menus.iter().find(|menu| menu.customize == TAIL))
+            .map_or(0, |menu| self.choice(menu) as u16 + 1);
+        pick(&self.tails, at)
+    }
+
     /// What one of the creator's own boxes has been left at, and whether it is ticked.
     fn held(&self, key: u32) -> u32 {
         self.choices.get(&key).copied().unwrap_or(0)
@@ -874,6 +890,7 @@ impl CharacterBuilder {
                 true => held(&self.hairs, self.hair),
                 false => Vec::new(),
             })
+            .chain(held(&self.tails, self.tail()))
             .map(|path| (path, 0))
             .collect();
         for slot in Slot::ALL {
@@ -1406,6 +1423,15 @@ impl CharacterBuilder {
     /// offered under. A menu either names icons outright or names rows that carry one.
     fn choice_of(&self, menu: &menus::Menu, index: u32) -> Choice {
         let param = menu.params.get(index as usize).copied().unwrap_or(0);
+        // The icons a tail or a pair of ears is offered under end at 91 to 94 whatever the body,
+        // so the choice is where it sits and the set it names is one past that.
+        if menu.customize == TAIL {
+            return Choice {
+                at: index,
+                id: index as u16,
+                icon: (param > 0).then_some(param as u32),
+            };
+        }
         // A row's icon stands whatever it is: nought is the empty box wearing no face paint is
         // offered under, not a choice the creator left undrawn. One no row holds falls back to
         // naming the icon outright, and to its own number where it names nothing.
@@ -1679,6 +1705,16 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
             parts: parts(listing, &under, id),
         })
         .collect()
+}
+
+/// The sets of whichever part the body grows: a tail where it has one, a Viera's ears where it does
+/// not. Both are numbered the same way and neither body ships the other.
+fn grown(listing: &Listing, code: u16) -> Vec<Set> {
+    ["tail", "zear"]
+        .into_iter()
+        .map(|kind| sets(listing, &code, kind))
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
 }
 
 /// The model a code wears a set as, by slot. A set is one directory, so the whole of it is listed

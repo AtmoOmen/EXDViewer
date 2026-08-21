@@ -3,6 +3,7 @@
 //
 //   CHROMIUM=$(...) bun smoke/frame.ts --capture=~/rdcaps/tuli.zip.xml \
 //       --level=bg/ex5/02_ykt_y6/twn/y6t1/level/y6t1.lvb --time=14:10 --weather=1 \
+//       --crop=150,170,1450,1040 --mask=0,0,2048,70 \
 //       --out=smoke/y6t1
 //
 // The camera and the lens come out of the capture, so the two views are the same view rather than
@@ -153,6 +154,7 @@ async function main() {
         run([
             rdframe, capture, `--level=${level}`,
             `--time=${flag("time", "12:00")}`, `--weather=${flag("weather", "1")}`,
+            ...flags("camera").map((one) => `--camera=${one}`),
             `--out=${outDir}`,
         ]).trim(),
     );

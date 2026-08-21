@@ -30,7 +30,7 @@ use ironworks::file::sklb::{SkeletonBinary, Transform};
 use super::super::skeleton::{Placement, Rig, middle};
 use super::super::{link, placed, section};
 use crate::backend::Backend;
-use crate::data::listing::Listed;
+use crate::data::listing::{Listed, Listing};
 use crate::settings::api_base;
 use crate::utils::{TrackedPromise, file_name};
 
@@ -268,8 +268,9 @@ pub struct Animation {
     built: RefCell<Vec<String>>,
     /// Whether the bones this rig cannot name have been counted since it was last built.
     counted: Cell<bool>,
-    /// Where the model's own path says its packs are filed, and the ones the listing names there.
-    root: Option<String>,
+    /// The bodies to read packs from, nearest first, which is the model's own until it is told
+    /// what it is built on.
+    built_on: RefCell<Vec<String>>,
     packs: RefCell<Option<Result<Vec<Pack>, Rc<str>>>>,
     /// Cuts the pack list down while the picker is open.
     filter: RefCell<String>,
@@ -300,7 +301,7 @@ impl Animation {
             skin: RefCell::new(None),
             built: Default::default(),
             counted: Cell::new(false),
-            root: code.as_deref().and_then(pack_root),
+            built_on: RefCell::new(code.iter().cloned().collect()),
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
             wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
@@ -327,23 +328,10 @@ impl Animation {
         }
         self.poll_extras(backend);
         let mut held = self.packs.borrow_mut();
-        if let Some(root) = &self.root
-            && held.is_none()
-        {
+        if held.is_none() {
             *held = match backend.listing(&api_base(ctx)) {
                 Listed::Loading => None,
-                Listed::Ready(listing) => {
-                    let packs = found(root, listing.under(root));
-                    // The conventional pack is right for nearly every model but not for all of
-                    // them, and a weapon is named none at all; either way the listing knows better.
-                    let mut wanted = self.wanted.borrow_mut();
-                    if !packs.iter().any(|pack| pack.path == *wanted)
-                        && let Some(first) = packs.first()
-                    {
-                        first.path.clone_into(&mut wanted);
-                    }
-                    Some(Ok(packs))
-                }
+                Listed::Ready(listing) => Some(Ok(self.listed(&listing))),
                 Listed::Failed(why) => Some(Err(why)),
             };
         }
@@ -352,6 +340,47 @@ impl Animation {
         if !wanted.is_empty() {
             Fetch::poll(&mut self.pack.borrow_mut(), backend, &wanted, Motions::read);
         }
+    }
+
+    /// The bodies to read packs from, nearest first. A body the game files no animation under is
+    /// played from the one it is built on, which is the same tree that says where it borrows its
+    /// clothes from.
+    pub fn built_on(&self, lineage: Vec<String>) {
+        if !lineage.is_empty() {
+            *self.built_on.borrow_mut() = lineage;
+        }
+    }
+
+    /// The packs of the nearest body that files any, opened on the nearest body's own idle. Few
+    /// bodies carry an idle at all, and one that does not is stood in the idle of the body it is
+    /// built on rather than in whichever pack the listing happens to name first.
+    fn listed(&self, listing: &Listing) -> Vec<Pack> {
+        let mut listed: Vec<Pack> = Vec::new();
+        let mut idle = None;
+        for code in self.built_on.borrow().iter() {
+            let Some(root) = pack_root(code) else {
+                continue;
+            };
+            let packs = found(&root, listing.under(&root));
+            if idle.is_none() {
+                idle = pack_path(code).filter(|path| packs.iter().any(|pack| pack.path == *path));
+            }
+            if listed.is_empty() {
+                listed = packs;
+            }
+            if idle.is_some() {
+                break;
+            }
+        }
+        // The conventional pack is right for nearly every model but not for all of them, and a
+        // weapon is named none at all; either way the listing knows better.
+        let mut wanted = self.wanted.borrow_mut();
+        if !listed.iter().any(|pack| pack.path == *wanted)
+            && let Some(path) = idle.or_else(|| listed.first().map(|pack| pack.path.clone()))
+        {
+            *wanted = path;
+        }
+        listed
     }
 
     /// Asks for the tables the parts on screen need, for the skeletons those tables name, and

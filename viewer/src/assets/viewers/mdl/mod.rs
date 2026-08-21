@@ -2728,6 +2728,12 @@ impl Rendered {
     /// Puts a different set of files on the same character, which is what a change of clothes is.
     /// The camera, the rig and the motion it is playing all stay where they are; the rig is rebuilt
     /// only where the body under the clothes changed.
+    /// The bodies to read animation from, nearest first, which the caller reads off the same tree
+    /// that says where a body borrows its clothes from.
+    pub fn built_on(&self, lineage: Vec<String>) {
+        self.animation.built_on(lineage);
+    }
+
     pub fn redress(&mut self, parts: &[Source]) -> Result<()> {
         let first = parts.first().context("a model of no files")?;
         // Whatever is still being worn is kept as it stands, imc and all, so a change of one slot

@@ -44,6 +44,12 @@ impl Deformers {
         Ok(Self { built_on, moves })
     }
 
+    /// Whether the file carries this body at all. A code it does not name is one the game builds
+    /// nothing on: no model of its own and none borrowed.
+    pub fn knows(&self, code: u16) -> bool {
+        self.moves.contains_key(&code)
+    }
+
     /// This body and every one it is built on, nearest first.
     pub fn lineage(&self, code: u16) -> impl Iterator<Item = u16> + '_ {
         std::iter::successors(Some(code), |code| self.built_on.get(code).copied())

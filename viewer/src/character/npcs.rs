@@ -19,7 +19,13 @@ const SINGULAR: u32 = 0;
 const CUSTOMIZE: u32 = 202;
 const RACE: u32 = 0;
 const GENDER: u32 = 1;
+const BODY: u32 = 2;
 const TRIBE: u32 = 4;
+
+/// What `BODY` reads for a child. The elderly are stated apart from both and are an adult body
+/// under an old face, so nothing here tells them from anyone else.
+const CHILD: u32 = 4;
+
 /// The customisations stated as the menu's own position, which counts from one where a menu counts
 /// from nought, each with the mask picking it out of a byte two menus share.
 const LISTED: [(u32, u8); 6] = [
@@ -70,6 +76,7 @@ pub struct Npc {
     pub race: u32,
     pub tribe: u32,
     pub female: bool,
+    pub child: bool,
     /// What each of the creator's menus was left at, by the `Customize` it drives.
     pub choices: Vec<(u32, u32)>,
     pub outfit: [Option<Gear>; 10],
@@ -114,6 +121,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
             race,
             tribe,
             female: gender != 0,
+            child: byte(BODY) == CHILD,
             choices: LISTED
                 .into_iter()
                 .map(|(at, mask)| (at, (byte(at) & u32::from(mask)).saturating_sub(1)))

@@ -2665,6 +2665,8 @@ impl Scene {
             .collect();
         readings.sort_unstable();
         readings.dedup();
+        // One reading of each package, shared by every surface that names it.
+        let mut read: HashMap<String, ShaderPackage> = HashMap::new();
         for (at, waving) in readings {
             let Some((_, Slot::Ready(material))) = self.materials.get(at) else {
                 continue;
@@ -2676,24 +2678,38 @@ impl Scene {
             {
                 continue;
             }
-            let Some(Package::Ready(bytes)) = self.packages.get(&material.package()) else {
+            let name = material.package();
+            let Some(Package::Ready(bytes)) = self.packages.get(&name) else {
                 continue;
             };
             // A package still owed bytecode holds nought where a shader would be, which translates
             // to a program that draws nothing rather than to an error worth reporting.
             if self
                 .blobs
-                .get(&material.package())
+                .get(&name)
                 .is_some_and(|held| !held.wanted.is_empty())
             {
                 continue;
             }
+            if !read.contains_key(&name) {
+                match ShaderPackage::parse(bytes) {
+                    Ok(held) => {
+                        read.insert(name.clone(), held);
+                    }
+                    Err(why) => {
+                        log::error!("assets/layer: {name}: {why}");
+                        continue;
+                    }
+                }
+            }
+            let package = &read[&name];
             let mut keys = KEYS.to_vec();
             if waving {
                 keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
             }
             let page = |pass, page| {
                 program::Program::build(
+                    package,
                     bytes,
                     material,
                     &keys,
@@ -2729,6 +2745,7 @@ impl Scene {
             let depth = match blended {
                 true => Err("a blending surface writes its own depth".into()),
                 false => program::Program::build(
+                    package,
                     bytes,
                     material,
                     &keys,
@@ -2741,6 +2758,7 @@ impl Scene {
             // The same depth pass as the light sees it. A package that answers no shadow subview
             // casts none, which is what the flag on a placed instance says anyway.
             let shadow = program::Program::build(
+                package,
                 bytes,
                 material,
                 &keys,
@@ -2766,7 +2784,7 @@ impl Scene {
                 })
                 .flatten();
             if buffer.is_empty() && resolve.is_none() {
-                log::warn!("assets/layer: {}: {opaque}", material.package());
+                log::warn!("assets/layer: {name}: {opaque}");
                 continue;
             }
             // The engine binds these rather than the material, so nothing names them as a path;

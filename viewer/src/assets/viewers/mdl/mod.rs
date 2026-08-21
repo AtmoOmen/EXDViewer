@@ -24,7 +24,7 @@ pub use deform::{Deform, Deformers};
 pub use program::Customize;
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -35,6 +35,7 @@ use ironworks::file::{
     File,
     imc::ImageChange,
     mdl::{Lod, MeshKind, ModelContainer, VertexAttributeKind, VertexFormat, VertexValues},
+    shpk::ShaderPackage,
     spm::ShaderParameters,
 };
 use std::io::Cursor;
@@ -2501,6 +2502,7 @@ impl Rendered {
             set.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
         }
         let set = &set[..];
+        let mut read: HashMap<String, ShaderPackage> = HashMap::new();
         for (index, slot) in slots.iter().enumerate() {
             let Some(Slot::Ready(material)) = slot else {
                 continue;
@@ -2511,11 +2513,25 @@ impl Rendered {
             {
                 continue;
             }
-            let Some(Package::Ready(bytes)) = packages.get(&material.package()) else {
+            let name = material.package();
+            let Some(Package::Ready(bytes)) = packages.get(&name) else {
                 continue;
             };
+            if !read.contains_key(&name) {
+                match ShaderPackage::parse(bytes) {
+                    Ok(held) => {
+                        read.insert(name.clone(), held);
+                    }
+                    Err(why) => {
+                        log::error!("assets/mdl: {name}: {why}");
+                        continue;
+                    }
+                }
+            }
+            let package = &read[&name];
             let build = |pass, at| {
                 program::Program::build(
+                    package,
                     bytes,
                     material,
                     set,

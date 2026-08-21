@@ -21,6 +21,7 @@ const origin = flag("origin", "http://127.0.0.2:9084");
 const wait = Number(flag("wait", "60000"));
 const spin = Number(flag("spin", "6000"));
 const label = flag("label", "");
+const logFile = flag("log", "");
 const scale = Number(flag("scale", "1"));
 const [WIDTH, HEIGHT] = flag("size", "1600x1000").split("x").map(Number);
 
@@ -30,10 +31,10 @@ const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 // wrapped callback counts painted frames and the gaps between them are the frame times.
 const PROBE = `
 (() => {
-  const held = { frames: 0, marks: [], calls: {} };
+  const held = { frames: 0, marks: [], calls: {}, stalls: [], last: 0 };
   window.__perf = held;
   const raf = window.requestAnimationFrame.bind(window);
-  window.requestAnimationFrame = (fn) => raf((at) => { held.frames += 1; held.marks.push(at); if (held.marks.length > 4000) held.marks.shift(); return fn(at); });
+  window.requestAnimationFrame = (fn) => raf((at) => { held.frames += 1; held.marks.push(at); if (held.marks.length > 4000) held.marks.shift(); if (held.last && at - held.last > 400) held.stalls.push([Math.round(held.last), Math.round(at - held.last)]); held.last = at; return fn(at); });
   const watched = [
     "drawElements", "drawElementsInstanced", "drawArrays", "drawArraysInstanced",
     "getUniformLocation", "useProgram", "bindTexture", "bindBufferRange", "bindBuffer",
@@ -102,7 +103,7 @@ async function main() {
     const timings: string[] = [];
     cdp.on("Runtime.consoleAPICalled", (p: any) => {
         const line = p.args.map((one: any) => String(one?.value ?? one?.description ?? "")).join(" ");
-        if (line.includes("TIMING")) timings.push(line.slice(line.indexOf("TIMING")));
+        if (line.includes("TIMING")) timings.push(`${Date.now() - opened} ${line.slice(line.indexOf("TIMING"))}`);
     });
     cdp.on("Runtime.exceptionThrown", (p: any) => {
         const held = p.exceptionDetails ?? {};
@@ -124,11 +125,38 @@ async function main() {
     let latency = 0;
     let answered = 0;
     const started = new Map<string, number>();
+    // Every request as it happened, so a load's shape can be read back off one run rather than
+    // inferred from the totals. Written only where `--log` names a file.
+    type Record = { url: string; range: string; at: number; head: number; done: number; bytes: number; status: number; cache: string };
+    const logged: Record[] = [];
+    const tracked = new Map<string, Record>();
+    const samples: Array<{ at: number; live: string[]; frame: string | null }> = [];
     cdp.on("Network.requestWillBeSent", (p: any) => {
         seen.set(p.requestId, p.request.url);
         started.set(p.requestId, Date.now());
         outstanding += 1;
         peak = Math.max(peak, outstanding);
+        if (!logFile) return;
+        const one = {
+            url: p.request.url,
+            range: p.request.headers?.Range ?? p.request.headers?.range ?? "",
+            at: Date.now() - opened,
+            head: -1,
+            done: -1,
+            bytes: 0,
+            status: 0,
+            cache: "",
+        };
+        tracked.set(p.requestId, one);
+        logged.push(one);
+    });
+    cdp.on("Network.responseReceived", (p: any) => {
+        const one = tracked.get(p.requestId);
+        if (!one) return;
+        one.head = Date.now() - opened;
+        one.status = p.response.status;
+        const headers = p.response.headers ?? {};
+        one.cache = headers["cf-cache-status"] ?? headers["Cf-Cache-Status"] ?? "";
     });
     const settled = (id: string) => {
         const at = started.get(id);
@@ -137,17 +165,21 @@ async function main() {
         outstanding -= 1;
         latency += Date.now() - at;
         answered += 1;
+        const one = tracked.get(id);
+        if (one) one.done = Date.now() - opened;
     };
     cdp.on("Network.loadingFailed", (p: any) => { failed += 1; settled(p.requestId); });
     cdp.on("Network.loadingFinished", (p: any) => {
+        const one = tracked.get(p.requestId);
+        if (one) one.bytes = p.encodedDataLength;
         settled(p.requestId);
         const url = seen.get(p.requestId) ?? "?";
         const kind = url.includes("/api/") ? (url.split("?")[0].split(".").pop() ?? "api") : "app";
-        const held = moved.get(kind) ?? { bytes: 0, count: 0, last: 0 };
-        held.bytes += p.encodedDataLength;
-        held.count += 1;
-        held.last = Date.now() - opened;
-        moved.set(kind, held);
+        const moving = moved.get(kind) ?? { bytes: 0, count: 0, last: 0 };
+        moving.bytes += p.encodedDataLength;
+        moving.count += 1;
+        moving.last = Date.now() - opened;
+        moved.set(kind, moving);
         carried += p.encodedDataLength;
         timeline.push([Date.now() - opened, carried]);
     });
@@ -182,6 +214,9 @@ async function main() {
             latency = 0;
             answered = 0;
             started.clear();
+            logged.length = 0;
+            tracked.clear();
+            samples.length = 0;
             await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
             await cdp.eval("localStorage.clear()").catch(() => {});
             const base = { x: 287, y: 116, button: "left", clickCount: 1, buttons: 1 };
@@ -192,13 +227,29 @@ async function main() {
                 await sleep(40);
                 await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
             };
+            // What was in flight moment to moment, which is what separates a load waiting on the
+            // wire from one that has nothing to ask for yet.
+            const ticker = logFile
+                ? setInterval(() => {
+                      samples.push({
+                          at: Date.now() - opened,
+                          live: [...started.keys()].map((id) => seen.get(id) ?? "?"),
+                          frame: null,
+                      });
+                  }, 250)
+                : undefined;
             // Clicked all the way through the wait rather than a fixed few times: the tab only
             // exists once the file has been read, and the server reloads the page from under a run
             // whenever it rebuilds.
             for (let waited = 0; waited < wait; waited += 6000) {
                 await sleep(Math.min(6000, wait - waited));
                 await tab();
+                if (logFile) {
+                    const held = await cdp.eval("window.__frame ?? null").catch(() => null);
+                    samples.push({ at: Date.now() - opened, live: [], frame: held });
+                }
             }
+            if (ticker !== undefined) clearInterval(ticker);
 
             // The pointer has to stand over the viewport for the keys to fly it, and the flight
             // integrates the frame's own delta, so the distance covered is the same however fast
@@ -265,6 +316,12 @@ async function main() {
             const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
             const name = `${String(at).padStart(2, "0")}-${path.split("/").pop()}`;
             writeFileSync(join(outDir, `${name}.png`), Buffer.from(shot.data, "base64"));
+            if (logFile) {
+                const to = paths.length > 1 ? `${logFile}.${at}` : logFile;
+                const stalls = await cdp.eval("window.__perf ? window.__perf.stalls : []").catch(() => []);
+                writeFileSync(to, JSON.stringify({ path, requests: logged, samples, stalls, timings }));
+                console.log(`   log: ${to}, ${logged.length} requests, ${samples.length} samples`);
+            }
         }
     } finally {
         cdp.close();

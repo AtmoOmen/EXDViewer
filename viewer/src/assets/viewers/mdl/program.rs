@@ -1826,7 +1826,9 @@ impl Program {
     /// Translates the pair this material would draw with. `target` names a G-buffer channel; the
     /// page holding it is what the fragment shader is emitted with, so a context with four draw
     /// buffers reaches the fifth target through a reading of its own.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
+        package: &ShaderPackage,
         bytes: &[u8],
         material: &Material,
         set: &[(u32, u32)],
@@ -1835,11 +1837,10 @@ impl Program {
         target: usize,
         attachments: usize,
     ) -> Result<Self, String> {
-        let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
-        let pair = picks(&package, material, set, pass, subview)
+        let pair = picks(package, material, set, pass, subview)
             .ok_or("this material's keys reach no such pass")?;
         Self::assemble(
-            &package,
+            package,
             bytes,
             pair,
             Some(material.held()),

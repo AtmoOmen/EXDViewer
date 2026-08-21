@@ -2931,8 +2931,20 @@ impl Buffer {
         // when one is picked is the swatch's own last lane, which is what the game writes for a lip
         // and what nothing else in the file could be.
         put(DECAL, DECAL, held.decal.to_vec());
-        put(customize, "m_LeftColor", held.left_eye.to_vec());
-        put(customize, "m_RightColor", held.right_eye.to_vec());
+        // The last lane of an eye color is not the swatch's own alpha either: it is how strongly
+        // `iris` rings the iris edge with the race feature color.
+        put(customize, "m_LeftColor", vec![
+            held.left_eye[0],
+            held.left_eye[1],
+            held.left_eye[2],
+            0.0,
+        ]);
+        put(customize, "m_RightColor", vec![
+            held.right_eye[0],
+            held.right_eye[1],
+            held.right_eye[2],
+            0.0,
+        ]);
         put(customize, "m_OptionColor0", held.option.to_vec());
 
         // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a

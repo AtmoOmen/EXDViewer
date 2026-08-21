@@ -667,6 +667,10 @@ fn main() {
                                     "C018 scaled to",
                                     format!("{:?}", found.scale()),
                                 );
+                                tally(
+                                    "C018 over an instance the file scaled to",
+                                    format!("{:?}", stated.scale()),
+                                );
                             }
                             tmb::CommandKind::C112(found) => {
                                 let InstanceData::Light(light) = held.data() else {

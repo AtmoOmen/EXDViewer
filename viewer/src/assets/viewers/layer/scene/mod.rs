@@ -1037,10 +1037,12 @@ impl Scene {
                                 }
                             }
                         }
+                        // The command's own scale is the identity in every file the game ships, so
+                        // taking it would only throw away a scale the scene did state.
                         tmb::CommandKind::C018(driven) => steps.push((
                             f32::from(found.time()),
                             Mat4::from_scale_rotation_translation(
-                                Vec3::from_array(driven.scale()),
+                                Vec3::from_array(placement.scale()),
                                 Quat::from_mat3(&rotation(driven.rotation())),
                                 Vec3::from_array(driven.translation()),
                             ),

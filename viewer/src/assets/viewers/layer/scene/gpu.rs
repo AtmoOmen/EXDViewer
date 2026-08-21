@@ -517,12 +517,14 @@ impl Renderer {
                         .unwrap_or(0) as u32;
                     unsafe {
                         gl.bind_vertex_array(Some(mesh.0));
-                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                        for location in 0..16 {
-                            gl.disable_vertex_attrib_array(location);
-                        }
-                        for held in &held.attributes {
-                            attribute(gl, held);
+                        if !deferred::laid_out(program, mesh.0) {
+                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                            for location in 0..16 {
+                                gl.disable_vertex_attrib_array(location);
+                            }
+                            for held in &held.attributes {
+                                attribute(gl, held);
+                            }
                         }
                         let count = held.batch() as i32;
                         for at in 0..*windows {
@@ -701,12 +703,14 @@ impl Renderer {
                     .unwrap_or(0) as u32;
                 unsafe {
                     gl.bind_vertex_array(Some(mesh.0));
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                    for location in 0..16 {
-                        gl.disable_vertex_attrib_array(location);
-                    }
-                    for held in &held.attributes {
-                        attribute(gl, held);
+                    if !deferred::laid_out(program, mesh.0) {
+                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                        for location in 0..16 {
+                            gl.disable_vertex_attrib_array(location);
+                        }
+                        for held in &held.attributes {
+                            attribute(gl, held);
+                        }
                     }
                     let count = held.batch() as i32;
                     for at in 0..*windows {
@@ -820,12 +824,14 @@ impl Renderer {
                 }
                 unsafe {
                     gl.bind_vertex_array(Some(layout));
-                    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
-                    for location in 0..16 {
-                        gl.disable_vertex_attrib_array(location);
-                    }
-                    for held in &held.attributes {
-                        corner(gl, held);
+                    if !deferred::laid_out(program, layout) {
+                        gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
+                        for location in 0..16 {
+                            gl.disable_vertex_attrib_array(location);
+                        }
+                        for held in &held.attributes {
+                            corner(gl, held);
+                        }
                     }
                     gl.draw_elements(glow::TRIANGLES, count, glow::UNSIGNED_INT, 0);
                     gl.bind_vertex_array(None);
@@ -975,18 +981,20 @@ impl Renderer {
                             .iter()
                             .position(|buffer| buffer.instances() > 1)
                             .unwrap_or(0) as u32;
+                        let viewport = deferred::uniform(gl, program, "dx_Viewport");
                         unsafe {
-                            if let Some(location) = gl.get_uniform_location(program, "dx_Viewport")
-                            {
+                            if let Some(location) = viewport {
                                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                             }
                             gl.bind_vertex_array(Some(mesh.0));
-                            gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
-                            for location in 0..16 {
-                                gl.disable_vertex_attrib_array(location);
-                            }
-                            for held in &held.attributes {
-                                attribute(gl, held);
+                            if !deferred::laid_out(program, mesh.0) {
+                                gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
+                                for location in 0..16 {
+                                    gl.disable_vertex_attrib_array(location);
+                                }
+                                for held in &held.attributes {
+                                    attribute(gl, held);
+                                }
                             }
                             let count = held.batch() as i32;
                             for at in 0..*windows {

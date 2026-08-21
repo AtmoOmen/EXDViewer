@@ -4,7 +4,7 @@
 //! the composite that turns those into a frame. One model and a whole zone want the same thing here,
 //! so this is what they share; what differs is only the draw list that fills the G-buffer.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use glow::HasContext;
 
@@ -535,10 +535,126 @@ pub fn graveyard() -> &'static std::sync::Mutex<Vec<Dead>> {
     GRAVEYARD.get_or_init(Default::default)
 }
 
+/// What a linked program has already answered about its own names, and which vertex arrays are
+/// already pointed at what it reads. Each of these is a question put to the driver, and a zone puts
+/// the same ones to the same programs thousands of times a frame.
+#[derive(Default)]
+struct Learned {
+    uniforms: HashMap<String, Option<glow::UniformLocation>>,
+    samplers: HashMap<String, Sampled>,
+    blocks: HashMap<String, Option<(u32, usize)>>,
+    layouts: HashSet<glow::VertexArray>,
+}
+
+/// Where a program takes the unit a sampler reads from, and where it takes how many levels the
+/// texture on that unit has.
+#[derive(Clone, Default)]
+struct Sampled {
+    unit: Option<glow::UniformLocation>,
+    levels: Option<glow::UniformLocation>,
+}
+
+type Lessons = std::sync::Mutex<HashMap<glow::Program, Learned>>;
+static LEARNED: std::sync::OnceLock<Lessons> = std::sync::OnceLock::new();
+
+fn learned() -> &'static Lessons {
+    LEARNED.get_or_init(Default::default)
+}
+
+/// Where a program holds the uniform of this name.
+pub fn uniform(
+    gl: &glow::Context,
+    program: glow::Program,
+    name: &str,
+) -> Option<glow::UniformLocation> {
+    let mut learned = learned().lock().unwrap();
+    let held = learned.entry(program).or_default();
+    if let Some(found) = held.uniforms.get(name) {
+        return found.as_ref().cloned();
+    }
+    let found = unsafe { gl.get_uniform_location(program, name) };
+    held.uniforms.insert(name.to_owned(), found);
+    held.uniforms[name].as_ref().cloned()
+}
+
+fn sampled(gl: &glow::Context, program: glow::Program, name: &str) -> Sampled {
+    let mut learned = learned().lock().unwrap();
+    let held = learned.entry(program).or_default();
+    if let Some(found) = held.samplers.get(name) {
+        return found.clone();
+    }
+    let found = unsafe {
+        Sampled {
+            unit: gl.get_uniform_location(program, name),
+            levels: gl.get_uniform_location(program, &format!("{name}_levels")),
+        }
+    };
+    held.samplers.insert(name.to_owned(), found.clone());
+    found
+}
+
+/// Which block a program holds for the buffer of this name, and how large it declares it. The
+/// translator names a block after the buffer it carries, with a suffix that keeps the two apart.
+pub fn block(gl: &glow::Context, program: glow::Program, name: &str) -> Option<(u32, usize)> {
+    let mut learned = learned().lock().unwrap();
+    let held = learned.entry(program).or_default();
+    if let Some(found) = held.blocks.get(name) {
+        return *found;
+    }
+    let found = unsafe {
+        gl.get_uniform_block_index(program, &format!("{name}_b")).map(|index| {
+            let size = gl.get_active_uniform_block_parameter_i32(
+                program,
+                index,
+                glow::UNIFORM_BLOCK_DATA_SIZE,
+            );
+            (index, size as usize)
+        })
+    };
+    held.blocks.insert(name.to_owned(), found);
+    found
+}
+
+/// Whether a vertex array is already pointed at what a program reads, marking it as pointed there
+/// where it is not. The pointers are the array's own state, so a mesh drawn again through the same
+/// program keeps what it was given.
+pub fn laid_out(program: glow::Program, layout: glow::VertexArray) -> bool {
+    !learned()
+        .lock()
+        .unwrap()
+        .entry(program)
+        .or_default()
+        .layouts
+        .insert(layout)
+}
+
 /// Deletes what an earlier viewer left behind. Called at the top of a draw, because that is the
 /// only moment a context exists.
 pub fn bury(gl: &glow::Context) {
-    for dead in graveyard().lock().unwrap().drain(..) {
+    let dead: Vec<Dead> = graveyard().lock().unwrap().drain(..).collect();
+    if !dead.is_empty() {
+        // A handle is the driver's to hand out again, so what was learned about one being deleted
+        // cannot be left standing for whatever takes its number next.
+        let mut learned = learned().lock().unwrap();
+        let layouts: HashSet<glow::VertexArray> = dead
+            .iter()
+            .filter_map(|dead| match dead {
+                Dead::Layout(layout) => Some(*layout),
+                _ => None,
+            })
+            .collect();
+        for dead in &dead {
+            if let Dead::Program(program) = dead {
+                learned.remove(program);
+            }
+        }
+        if !layouts.is_empty() {
+            for held in learned.values_mut() {
+                held.layouts.retain(|layout| !layouts.contains(layout));
+            }
+        }
+    }
+    for dead in dead {
         unsafe {
             match dead {
                 Dead::Layout(layout) => gl.delete_vertex_array(layout),
@@ -2944,17 +3060,10 @@ impl Buffers {
         instances: &[program::Instance],
     ) -> Result<(), String> {
         for (at, buffer) in held.buffers.iter().enumerate() {
-            let Some(block) =
-                (unsafe { gl.get_uniform_block_index(program, &format!("{}_b", buffer.name)) })
-            else {
+            let Some((block, size)) = block(gl, program, &buffer.name) else {
                 continue;
             };
             unsafe {
-                let size = gl.get_active_uniform_block_parameter_i32(
-                    program,
-                    block,
-                    glow::UNIFORM_BLOCK_DATA_SIZE,
-                ) as usize;
                 let mut data = buffer.fill(scene, held.pass, instances);
                 data.resize(size.max(16), 0);
                 while self.blocks.len() <= at {
@@ -3676,14 +3785,15 @@ pub fn bind(
     texture: glow::Texture,
     target: u32,
 ) {
+    let held = sampled(gl, program, name);
     unsafe {
         gl.active_texture(glow::TEXTURE0 + unit);
         gl.bind_texture(target, Some(texture));
-        if let Some(location) = gl.get_uniform_location(program, name) {
+        if let Some(location) = held.unit {
             gl.uniform_1_i32(Some(&location), unit as i32);
         }
         // Nothing in GLSL says how many levels a texture has, so a shader that asks is told.
-        if let Some(location) = gl.get_uniform_location(program, &format!("{name}_levels")) {
+        if let Some(location) = held.levels {
             gl.uniform_1_i32(Some(&location), 1);
         }
     }

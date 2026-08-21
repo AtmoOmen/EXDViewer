@@ -1,5 +1,5 @@
 /// Quest row ids start here, and the generated per-quest files bucket by hundreds of rows.
-const FIRST_ROW: u32 = 65536;
+pub const FIRST_ROW: u32 = 65536;
 
 fn folder(row_id: u32) -> u32 {
     row_id.saturating_sub(FIRST_ROW) / 100

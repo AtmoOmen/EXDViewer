@@ -32,10 +32,11 @@ use web_time::Instant;
 
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use half::f16;
 use ironworks::file::layer::{
-    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneSpin, SceneTimeline, Transform,
+    Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneGlow, SceneSpin,
+    SceneTimeline, Transform,
 };
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
@@ -220,6 +221,36 @@ enum Motion {
     },
 }
 
+/// The lane a scene cycles one of its own instances through, where it names one and gives it a
+/// colour of its own.
+fn tinted(glows: &[SceneGlow], instance: u32, lane: fn(&SceneGlow) -> Glow) -> Option<Glow> {
+    glows
+        .iter()
+        .find(|held| held.instances().contains(&instance))
+        .map(lane)
+        .filter(|held| held.active() && held.tints())
+}
+
+/// The colour a cycled lane stands at, and the strength it is taken at, from the two ends it names
+/// and the ticks it swings between them in.
+///
+/// Swung out and back rather than started over: nothing in the file says which of the two it is.
+fn cycled(lane: Glow, time: f32) -> (Vec3, f32) {
+    let rgb = |held: Colour| {
+        Vec3::new(
+            f32::from(held.red()),
+            f32::from(held.green()),
+            f32::from(held.blue()),
+        ) / 255.0
+    };
+    let (from, to) = (lane.from(), lane.to());
+    let along = phase(lane.period(), 0, 1, time);
+    (
+        rgb(from).lerp(rgb(to), along),
+        from.intensity() + (to.intensity() - from.intensity()) * along,
+    )
+}
+
 /// How far along its swing a repeating lane stands, from nought at rest to one at full reach. A
 /// lane that wraps at nought starts over, which is what a whole turn wants; the rest swing back.
 fn phase(period: u32, delay: u32, wrap: u32, time: f32) -> f32 {
@@ -349,6 +380,8 @@ struct Placement {
     layer: usize,
     /// How the zone's own `.svb` reaches this part, the way an `.lcb` reaches a light.
     key: (u32, [u8; 4]),
+    /// Set where the scene cycles the colour its material's emissive is taken at.
+    glow: Option<Glow>,
 }
 
 enum State {
@@ -478,6 +511,9 @@ struct Light {
     /// How the zone's own `.lcb` reaches this light: the instance at the top of the tree, then an
     /// index per shared group under it.
     key: (u32, [u8; 4]),
+    /// Set where the scene cycles its colour, in which case the colour above is only where the
+    /// file left it.
+    glow: Option<Glow>,
 }
 
 /// A file the scene names beside itself and reads once: the boxes its lights are clipped against,
@@ -694,6 +730,9 @@ pub struct Scene {
     /// What the zone's shared groups animate, and how far along their timelines it stands, in the
     /// ticks a timeline is keyed in.
     motions: Vec<Motion>,
+    /// Whether anything the zone places has a colour the clock moves, which a scene holding no
+    /// motion at all can still have.
+    cycling: bool,
     clock: f32,
     /// Placements the last rebuild would have drawn had their model arrived.
     absent: usize,
@@ -928,6 +967,7 @@ impl Scene {
             renderer: gpu::Renderer::new(),
             placed: Vec::new(),
             motions: Vec::new(),
+            cycling: false,
             clock: 0.0,
             absent: 0,
         };
@@ -953,6 +993,7 @@ impl Scene {
                 source.scene().map_or(&[][..], SceneTimeline::of),
                 source.scene().map_or(&[][..], SceneAnimation::of),
                 source.scene().map_or(&[][..], SceneSpin::of),
+                source.scene().map_or(&[][..], SceneGlow::of),
                 Mat4::IDENTITY,
                 (0, [0; 4]),
                 1.0,
@@ -1113,6 +1154,7 @@ impl Scene {
         timelines: &[SceneTimeline],
         animations: &[SceneAnimation],
         spins: &[SceneSpin],
+        glows: &[SceneGlow],
         transform: Mat4,
         key: (u32, [u8; 4]),
         scale: f32,
@@ -1165,6 +1207,8 @@ impl Scene {
                             let model = self.model(part.asset_path());
                             self.models[model].instances += 1;
                             self.layers[at].placements += 1;
+                            let glow = tinted(glows, instance.id(), SceneGlow::surface);
+                            self.cycling |= glow.is_some();
                             self.placements.push(Placement {
                                 model,
                                 transform: here,
@@ -1179,6 +1223,7 @@ impl Scene {
                                 fade: part.fade_out_distance(),
                                 layer: at,
                                 key: reach(key, depth, instance.id()),
+                                glow,
                             });
                         }
                         InstanceData::SharedGroup(shared)
@@ -1226,6 +1271,8 @@ impl Scene {
                             // one the zone cut for it.
                             let (_, turn, at) = here.to_scale_rotation_translation();
                             let here = Mat4::from_rotation_translation(turn, at);
+                            let glow = tinted(glows, instance.id(), SceneGlow::light);
+                            self.cycling |= glow.is_some();
                             self.lights.push(Light {
                                 placement: here,
                                 center: at,
@@ -1247,6 +1294,7 @@ impl Scene {
                                     .to_radians()
                                     .cos(),
                                 key: reach(key, depth, instance.id()),
+                                glow,
                             });
                         }
                         _ => {}
@@ -1334,6 +1382,7 @@ impl Scene {
                 fade: 0.0,
                 layer: at,
                 key: (0, [0; 4]),
+                glow: None,
             });
         }
         self.dirty = true;
@@ -1475,6 +1524,7 @@ impl Scene {
                         fade: 0.0,
                         layer,
                         key: (0, [0; 4]),
+                        glow: None,
                     });
                 }
             }
@@ -1672,6 +1722,13 @@ impl Scene {
             placed[placement.model][level].push(program::Instance {
                 transform: self.posed(&placement),
                 sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
+                emissive: match placement.glow {
+                    Some(lane) => {
+                        let (color, power) = cycled(lane, self.clock);
+                        color.extend(power)
+                    }
+                    None => Vec4::ONE,
+                },
             });
         }
         self.placed = placed;
@@ -1710,7 +1767,13 @@ impl Scene {
                     min,
                     max,
                     range: light.range,
-                    color: light.color,
+                    color: match light.glow {
+                        Some(lane) => {
+                            let (color, power) = cycled(lane, self.clock);
+                            color * power
+                        }
+                        None => light.color,
+                    },
                     kind: light.kind,
                     direction: light.direction,
                     cone: light.cone,
@@ -2008,6 +2071,7 @@ impl Scene {
                 source.scene().map_or(&[][..], SceneTimeline::of),
                 source.scene().map_or(&[][..], SceneAnimation::of),
                 source.scene().map_or(&[][..], SceneSpin::of),
+                source.scene().map_or(&[][..], SceneGlow::of),
                 transform,
                 key,
                 scale,
@@ -3167,7 +3231,7 @@ impl Scene {
         // A timeline states where its node stands rather than how far it has moved, so what a frame
         // draws follows the clock rather than the frame before it. The placements themselves are
         // already worked out; only where the moving ones stand is done again.
-        if !self.motions.is_empty() {
+        if !self.motions.is_empty() || self.cycling {
             self.clock += ui.input(|input| input.stable_dt).min(0.25) * TICKS;
             self.dirty = true;
             ui.ctx().request_repaint();

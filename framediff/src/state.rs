@@ -25,6 +25,9 @@ pub struct State {
     pub weather: u32,
     pub exposure: f32,
     pub measured: f32,
+    /// How long the frame took. The adaptation's rate is stated per second and the loop it closes
+    /// only settles while the two multiply to under two thirds.
+    pub step: f32,
     pub placed: usize,
     pub drawn: usize,
     pub models: String,

@@ -64,6 +64,9 @@ const DENSITY_RATE: f32 = 100.0;
 /// The lanes of the ambient entry no file states, each read off a frame the game drew: what the sky
 /// harmonics come back up by, the scale and bias a sampled reflection takes against the term the
 /// frame picks, and which of the reflection array's cubes a place stands under.
+/// What every shader in the engine weighs a colour's channels by to take its brightness.
+const LUMA: Vec3 = Vec3::new(0.29891, 0.58661, 0.11448);
+
 const SKY_SCALE: f32 = 1.0;
 const REFLECTION: Vec3 = Vec3::X;
 const CAPTURE: f32 = 0.0;
@@ -947,7 +950,7 @@ fn switch(held: Between<'_>, name: &str) -> f32 {
 /// The harmonics taken toward grey by however far the weather's `ambient_light_saturation` says. A
 /// row is one channel, so the three of them at a lane are the colour arriving from that direction.
 fn greyer(held: [Vec4; 3], saturation: f32) -> [Vec4; 3] {
-    let grey = held[0] * 0.2126 + held[1] * 0.7152 + held[2] * 0.0722;
+    let grey = held[0] * LUMA.x + held[1] * LUMA.y + held[2] * LUMA.z;
     held.map(|row| grey + (row - grey) * saturation)
 }
 

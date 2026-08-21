@@ -381,6 +381,9 @@ pub const OCCLUDERS: [&str; 8] = [
 /// The buffers the exposure chain reads, and the frame, the measure and the table the passes read
 /// them through. `cToneMapParam` is shared with the grading pass, which reads the same two lanes as
 /// something else entirely: `.z` as how much of its table reaches the frame, `.w` as an exponent.
+/// The most of a frame's own measurement the adaptation carries, however long the frame took.
+const SETTLE: f32 = 1.0 / 3.0;
+
 const TONE_MAP_PARAM: &str = "cToneMapParam";
 const ADAPT_LUM_PARAM: &str = "cAdaptLumParam";
 const SKY_PARAM: &str = "cSkyParam";
@@ -758,6 +761,9 @@ pub struct Instance {
     pub transform: Mat4,
     /// How much sky reaches it, which a zone states per instance in its `.svb`.
     pub sky_visibility: f32,
+    /// The colour its own material's emissive is taken at, and in `w` the strength. A scene cycles
+    /// this where one of its animation handlers names the instance.
+    pub emissive: Vec4,
 }
 
 impl Default for Instance {
@@ -765,6 +771,7 @@ impl Default for Instance {
         Self {
             transform: Mat4::IDENTITY,
             sky_visibility: 1.0,
+            emissive: Vec4::ONE,
         }
     }
 }
@@ -2419,10 +2426,12 @@ impl Buffer {
         // The exposure the last frame settled on, which is what this one is measured and read under.
         let adapted = exposure.adapted.max(f32::EPSILON);
         if self.name == ADAPT_LUM_PARAM {
-            // The rate is stated per second and the buffer wants what one frame moves by. The pass
-            // reads a weight of one and over as a frame to start again from rather than carry on
-            // through, which is what a step long enough to overshoot should do anyway.
-            let step = (exposure.rate * exposure.step).min(1.0);
+            // The rate is stated per second and the buffer wants what one frame moves by. The
+            // measure squares the exposure its own frame was lit under, so the loop's slope at the
+            // answer it settles on is `1 - 3 * step`: past two thirds it swings apart, and a third
+            // reaches the answer in one frame. A frame as short as the game's leaves it far below
+            // either.
+            let step = (exposure.rate * exposure.step).min(SETTLE);
             write(
                 &mut out,
                 0,
@@ -3204,10 +3213,11 @@ impl Buffer {
             put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
             // At the strength that leaves a surface emitting what its own material states. Left at
             // nought the shading takes its non-emissive branch, and every glowing thing a zone
-            // places - a crystal naming an emissive colour of 2.89 among them - comes out dark. No
-            // file found states a per-object strength, so this is the identity rather than a value.
-            put(at, "m_EmissivePower", &[1.0]);
-            put(at, "m_EmissiveColor", &[1.0, 1.0, 1.0]);
+            // places - a crystal naming an emissive colour of 2.89 among them - comes out dark.
+            // Nothing but a scene's own colour handler states a strength, so the rest come in at
+            // the identity.
+            put(at, "m_EmissivePower", &[instance.emissive.w]);
+            put(at, "m_EmissiveColor", &instance.emissive.to_array()[..3]);
         }
     }
 }
@@ -3520,9 +3530,9 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE, JOINT, ROW,
-        SHADER_TYPE, SUN_PARAM, Pass, Scene, Sky, Volume, ambient, decal_field, instance_fields,
-        joints, selector, shader_types, sun,
+        ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
+        JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, Pass, Scene, Sky, Volume, ambient, decal_field,
+        instance_fields, joints, selector, shader_types, sun,
     };
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -3584,6 +3594,33 @@ mod test {
                 0.000698741,
             ]
         ));
+    }
+
+    /// A frame long enough that the stated rate would carry the whole of its own measurement. The
+    /// measure squares the exposure, so a weight of one leaves the loop swinging between its clamps
+    /// rather than settling.
+    #[test]
+    fn a_slow_frame_carries_no_more_than_the_loop_settles_under() {
+        let scene = Scene {
+            exposure: Exposure {
+                rate: 2.0,
+                step: 19.5,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: ADAPT_LUM_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 1,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::Composite, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        assert_eq!(filled[2], SETTLE);
     }
 
     /// The instance record a character is drawn with, against the bytes a capture of the running

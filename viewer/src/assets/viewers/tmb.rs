@@ -240,10 +240,10 @@ fn body(item: &Item) -> String {
         ),
         Item::Track(track) => format!("{} commands", track.commands().len()),
         Item::Curves(curves) => format!(
-            "{} curves, end {}, unknown {}, {}",
+            "{} curves over {} targets, end {}, unknown {}",
             curves.curves().len(),
+            curves.targets(),
             curves.end(),
-            curves.unknown_a(),
             curves.unknown_b()
         ),
         Item::Command(command) => described(command.kind()).1,

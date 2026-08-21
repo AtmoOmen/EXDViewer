@@ -697,8 +697,9 @@ impl CharacterBuilder {
     }
 
     /// The seams the outfit covers, which draw nothing rather than through what is over them.
-    /// Only a piece with a model of its own covers anything: where a slot falls back to the body,
-    /// what would be hidden is the very skin standing in for the piece.
+    /// Only a piece whose own model is on hand covers anything: where a slot falls back to the
+    /// body what would be hidden is the very skin standing in for the piece, and a seam hidden
+    /// for a piece still on its way is a hole in the character already on screen.
     fn covered(&self) -> BTreeSet<String> {
         let Some(worn) = &self.worn_over else {
             return BTreeSet::new();
@@ -710,7 +711,8 @@ impl CharacterBuilder {
             .filter_map(|slot| Some((slot, outfit[slot as usize]?)))
             .filter(|(slot, gear)| {
                 sets.get(&gear.set)
-                    .is_some_and(|held| held[*slot as usize].is_some())
+                    .and_then(|held| held[*slot as usize].as_ref())
+                    .is_some_and(|path| self.held.contains_key(path))
             })
             .flat_map(|(slot, gear)| worn.covers(slot, gear.set))
             .map(str::to_owned)

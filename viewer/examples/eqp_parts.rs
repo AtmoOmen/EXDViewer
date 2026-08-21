@@ -6,6 +6,7 @@
 //! `eqp_parts sweep <slot> [n]`       how often each combination of a slot's flags is stated
 //! `eqp_parts reach <suffix> [n]`     a set's flags against how far its own model reaches
 //! `eqp_parts split <suffix> <attr>`  the same, splitting a model at one attribute
+//! `eqp_parts imc <path.mdl> <part> <path.imc>`  which of a model's parts each variant shows
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
@@ -243,14 +244,8 @@ fn main() {
         "imc" => {
             let path = &arguments[1];
             let part: u8 = arguments[2].parse().unwrap();
-            let bytes: Vec<u8> = ironworks
-                .file(&format!(
-                    "{}.imc",
-                    path.rsplit_once("/model/").unwrap().0.rsplit_once('/').map(|(under, set)| format!("{under}/{set}/{set}")).unwrap()
-                ))
-                .unwrap();
-            let file =
-                ironworks::file::imc::ImageChange::read(Cursor::new(bytes)).unwrap();
+            let bytes: Vec<u8> = ironworks.file(&arguments[3]).unwrap();
+            let file = ironworks::file::imc::ImageChange::read(Cursor::new(bytes)).unwrap();
             let held: Vec<u8> = ironworks.file(path).unwrap();
             let container = ModelContainer::read(Cursor::new(held)).unwrap();
             let declared = container

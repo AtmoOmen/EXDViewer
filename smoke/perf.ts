@@ -116,9 +116,28 @@ async function main() {
     let failed = 0;
     const timeline: Array<[number, number]> = [];
     let carried = 0;
-    cdp.on("Network.requestWillBeSent", (p: any) => seen.set(p.requestId, p.request.url));
-    cdp.on("Network.loadingFailed", () => { failed += 1; });
+    let outstanding = 0;
+    let peak = 0;
+    let latency = 0;
+    let answered = 0;
+    const started = new Map<string, number>();
+    cdp.on("Network.requestWillBeSent", (p: any) => {
+        seen.set(p.requestId, p.request.url);
+        started.set(p.requestId, Date.now());
+        outstanding += 1;
+        peak = Math.max(peak, outstanding);
+    });
+    const settled = (id: string) => {
+        const at = started.get(id);
+        if (at === undefined) return;
+        started.delete(id);
+        outstanding -= 1;
+        latency += Date.now() - at;
+        answered += 1;
+    };
+    cdp.on("Network.loadingFailed", (p: any) => { failed += 1; settled(p.requestId); });
     cdp.on("Network.loadingFinished", (p: any) => {
+        settled(p.requestId);
         const url = seen.get(p.requestId) ?? "?";
         const kind = url.includes("/api/") ? (url.split("?")[0].split(".").pop() ?? "api") : "app";
         const held = moved.get(kind) ?? { bytes: 0, count: 0, last: 0 };
@@ -155,6 +174,11 @@ async function main() {
             failed = 0;
             failures.length = 0;
             timings.length = 0;
+            outstanding = 0;
+            peak = 0;
+            latency = 0;
+            answered = 0;
+            started.clear();
             await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
             await cdp.eval("localStorage.clear()").catch(() => {});
             const base = { x: 287, y: 116, button: "left", clickCount: 1, buttons: 1 };
@@ -212,6 +236,7 @@ async function main() {
                 return found ? (found[0] / 1000).toFixed(1) : "-";
             };
             console.log(`   net reached: 50% at ${share(0.5)} s, 90% at ${share(0.9)} s, rate ${(bytes / 1048576 / Math.max(done / 1000, 0.001)).toFixed(2)} MiB/s`);
+            console.log(`   net in flight: ${peak} at the peak, ${answered ? (latency / answered).toFixed(0) : "-"} ms a request over ${answered} answered`);
             console.log(
                 `   fps: ${(frames / elapsed).toFixed(1)} over ${elapsed.toFixed(1)} s (${frames} frames), frame median ${gaps.median.toFixed(1)} ms, p95 ${gaps.p95.toFixed(1)} ms, worst ${gaps.worst.toFixed(0)} ms`,
             );
@@ -223,6 +248,12 @@ async function main() {
             console.log(
                 `   per frame: ${per("drawElementsInstanced").toFixed(0)} instanced draws, ${per("drawElements").toFixed(0)} draws, ${per("getUniformLocation").toFixed(0)} uniform lookups, ${per("disableVertexAttribArray").toFixed(0)} attrib disables, ${per("useProgram").toFixed(0)} programs, ${per("bindTexture").toFixed(0)} texture binds, ${per("bufferData").toFixed(0)} buffer uploads`,
             );
+            const frame = await cdp.eval("window.__frame ?? null").catch(() => null);
+            if (frame) {
+                const held = JSON.parse(frame);
+                console.log(`   build: ${held.commit}${held.clean ? "" : "+dirty"} at ${held.built}`);
+                console.log(`   loaded: ${held.models} models, ${held.materials} materials, ${held.drawn} drawn of ${held.placed} placed`);
+            }
             for (const line of timings.slice(-14)) console.log(`   ${line}`);
             if (failures.length) {
                 console.log(`   failures: ${failures.length}`);

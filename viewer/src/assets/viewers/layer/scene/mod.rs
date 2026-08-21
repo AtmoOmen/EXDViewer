@@ -17,6 +17,7 @@
 mod ambient;
 mod gpu;
 mod preset;
+mod report;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
@@ -2872,6 +2873,31 @@ impl Scene {
         self.resident += taken;
     }
 
+    /// Which of the passes past the lighting ran. A weather that names no clouds draws none, and so
+    /// does a draw that quietly went wrong; only the graph knows which of the two a frame without
+    /// any is.
+    fn passes(&self) -> String {
+        let held = self.renderer.lock().unwrap().drawn();
+        let ran: Vec<&str> = [
+            (held.shadow, "shadow"),
+            (held.sky, "sky"),
+            (held.sun, "sun"),
+            (held.moon, "moon"),
+            (held.clouds[0], "band"),
+            (held.clouds[1], "sheet"),
+            (held.fog, "fog"),
+            (held.reflection, "reflection"),
+            (held.vignette, "vignette"),
+        ]
+        .into_iter()
+        .filter_map(|(ran, name)| ran.then_some(name))
+        .collect();
+        match ran.is_empty() {
+            true => "none".to_owned(),
+            false => ran.join(", "),
+        }
+    }
+
     /// The viewport, and the navigation over it.
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
@@ -3079,6 +3105,54 @@ impl Scene {
             })),
         });
         self.outline(ui, rect, projection * view);
+        self.state(rect, ui.ctx().pixels_per_point());
+    }
+
+    /// Publishes what this frame was drawn from, for a harness measuring it against a capture.
+    fn state(&self, rect: egui::Rect, scale: f32) {
+        let (exposure, measured) = match self.exposure.is_some() {
+            true => {
+                let held = self.renderer.lock().unwrap();
+                (held.exposed(), held.measured())
+            }
+            false => (f32::NAN, f32::NAN),
+        };
+        report::publish(&report::Frame {
+            commit: crate::build::COMMIT_HASH,
+            clean: crate::build::GIT_CLEAN,
+            built: crate::build::BUILD_TIME,
+            level: &self.path,
+            preset: self.preset.as_ref().map(|held| held.name.as_str()),
+            eye: self.camera.position.to_array(),
+            forward: self.camera.forward().to_array(),
+            fov: self.fov,
+            viewport: [
+                rect.left() * scale,
+                rect.top() * scale,
+                rect.width() * scale,
+                rect.height() * scale,
+            ],
+            time: self.ambient.time,
+            weather: self.ambient.weather_id().unwrap_or_default(),
+            exposure,
+            measured,
+            placed: self.placements.len(),
+            drawn: self.placed.iter().flatten().map(Vec::len).sum(),
+            models: format!(
+                "{} of {}",
+                self.models
+                    .iter()
+                    .filter(|model| matches!(model.state, State::Ready))
+                    .count(),
+                self.models.len()
+            ),
+            materials: format!(
+                "{} of {}",
+                self.translated.keys().filter(|(_, waving)| !waving).count(),
+                self.materials.len()
+            ),
+            passes: self.passes(),
+        });
     }
 
     /// Everything the zone states about the placement the pointer picked.
@@ -3624,27 +3698,7 @@ impl Scene {
                             (None, _) => "never asked for".to_owned(),
                         },
                     ),
-                    ("Passes", {
-                        let held = self.renderer.lock().unwrap().drawn();
-                        let ran: Vec<&str> = [
-                            (held.shadow, "shadow"),
-                            (held.sky, "sky"),
-                            (held.sun, "sun"),
-                            (held.moon, "moon"),
-                            (held.clouds[0], "band"),
-                            (held.clouds[1], "sheet"),
-                            (held.fog, "fog"),
-                            (held.reflection, "reflection"),
-                            (held.vignette, "vignette"),
-                        ]
-                        .into_iter()
-                        .filter_map(|(ran, name)| ran.then_some(name))
-                        .collect();
-                        match ran.is_empty() {
-                            true => "none".to_owned(),
-                            false => ran.join(", "),
-                        }
-                    }),
+                    ("Passes", self.passes()),
                     (
                         "Textures",
                         format!(

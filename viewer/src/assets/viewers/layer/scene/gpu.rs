@@ -431,21 +431,22 @@ impl Renderer {
     }
 
     /// Every object of every batch, laid out so that one draw can be pointed at its own window.
-    /// Answers where each batch's windows begin and how large one is.
+    /// Answers where each batch's windows begin, how many it takes and how large one is. The size
+    /// is the batch's own record rather than the frame's largest: read back wider than it was
+    /// written, a window lands on the next batch's bytes.
     fn windows(
         &mut self,
         gl: &glow::Context,
         frame: &Frame,
         scene: &program::Scene,
         lit: bool,
-    ) -> Result<(Vec<(i32, i32)>, i32), String> {
+    ) -> Result<Vec<(i32, i32, i32)>, String> {
         if self.alignment == ALIGNMENT {
             let held = unsafe { gl.get_parameter_i32(glow::UNIFORM_BUFFER_OFFSET_ALIGNMENT) };
             self.alignment = held.clamp(1, ALIGNMENT);
         }
         let mut blob: Vec<u8> = Vec::new();
-        let mut at: Vec<(i32, i32)> = Vec::new();
-        let mut window = 0i32;
+        let mut at: Vec<(i32, i32, i32)> = Vec::new();
         for batch in &frame.batches {
             let held = batch
                 .surfaces
@@ -456,19 +457,22 @@ impl Renderer {
             let Some((buffer, count)) = held else {
                 // A package that reads no instancing buffer is drawn one object at a time and
                 // takes no window of its own.
-                at.push((0, 0));
+                at.push((0, 0, 0));
                 continue;
             };
-            at.push((
-                blob.len() as i32,
-                batch.instances.len().div_ceil(count) as i32,
-            ));
+            let offset = blob.len() as i32;
+            let mut window = 0;
             for held in batch.instances.chunks(count) {
                 let mut bytes = buffer.fill(scene, program::Pass::Buffer, held);
-                window = window.max(bytes.len() as i32);
-                bytes.resize(aligned(bytes.len() as i32, self.alignment) as usize, 0);
+                window = bytes.len() as i32;
+                bytes.resize(aligned(window, self.alignment) as usize, 0);
                 blob.extend(bytes);
             }
+            at.push((
+                offset,
+                batch.instances.len().div_ceil(count) as i32,
+                window,
+            ));
         }
         // The record holds `view * transform`, so the sun's own pass cannot share the frame's.
         let into = match lit {
@@ -487,7 +491,7 @@ impl Renderer {
             gl.bind_buffer(glow::UNIFORM_BUFFER, Some(held));
             gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &blob, glow::DYNAMIC_DRAW);
         }
-        Ok((at, window))
+        Ok(at)
     }
 
     /// The scene's depth as the sun sees it, which the lighting tests a pixel against. Depth only:
@@ -528,13 +532,13 @@ impl Renderer {
                 split,
                 ..scene.clone()
             };
-            let (offsets, window) = self.windows(gl, frame, &sun, false)?;
+            let offsets = self.windows(gl, frame, &sun, false)?;
             let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
             unsafe {
                 gl.viewport(0, split as i32 * size, size, size);
                 gl.polygon_offset(program::SHADOW_SLOPE, program::shadow_push(split));
             }
-            for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
+            for (batch, (offset, windows, window)) in frame.batches.iter().zip(&offsets) {
                 let meshes: Vec<i32> = match self
                     .models
                     .get(batch.model)
@@ -577,13 +581,20 @@ impl Renderer {
                     unsafe {
                         gl.bind_vertex_array(Some(array));
                         let count = held.batch() as i32;
-                        for at in 0..*windows {
+                        // The batch's windows were laid out for its buffer pass, and a page or
+                        // subview of the same material reading no instancing buffer takes none of
+                        // them.
+                        let taken = match count > 1 {
+                            true => *windows,
+                            false => 0,
+                        };
+                        for at in 0..taken {
                             gl.bind_buffer_range(
                                 glow::UNIFORM_BUFFER,
                                 slot,
                                 Some(instances),
-                                offset + at * aligned(window, self.alignment),
-                                window,
+                                offset + at * aligned(*window, self.alignment),
+                                *window,
                             );
                             let drawn = (batch.instances.len() as i32 - at * count).min(count);
                             gl.draw_elements_instanced(
@@ -615,8 +626,7 @@ impl Renderer {
         painter: &egui_glow::Painter,
         frame: &Frame,
         scene: &program::Scene,
-        offsets: &[(i32, i32)],
-        window: i32,
+        offsets: &[(i32, i32, i32)],
     ) -> Result<(), String> {
         let wanted = frame.batches.iter().any(|batch| {
             batch
@@ -639,7 +649,7 @@ impl Renderer {
             gl.enable(glow::DEPTH_TEST);
             gl.depth_mask(false);
         }
-        for (batch, (offset, windows)) in frame.batches.iter().zip(offsets) {
+        for (batch, (offset, windows, window)) in frame.batches.iter().zip(offsets) {
             let meshes: Vec<i32> = match self
                 .models
                 .get(batch.model)
@@ -755,16 +765,23 @@ impl Renderer {
                 let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
                     continue;
                 };
+                let count = held.batch() as i32;
+                // The batch's windows were laid out for its buffer pass, and a resolve reading no
+                // instancing buffer of its own takes none of them: those draw one object at a time,
+                // off the transform the scene carries.
+                let taken = match count > 1 {
+                    true => *windows,
+                    false => 0,
+                };
                 unsafe {
                     gl.bind_vertex_array(Some(array));
-                    let count = held.batch() as i32;
-                    for at in 0..*windows {
+                    for at in 0..taken {
                         gl.bind_buffer_range(
                             glow::UNIFORM_BUFFER,
                             slot,
                             Some(instances),
-                            offset + at * aligned(window, self.alignment),
-                            window,
+                            offset + at * aligned(*window, self.alignment),
+                            *window,
                         );
                         let drawn = (batch.instances.len() as i32 - at * count).min(count);
                         gl.draw_elements_instanced(
@@ -777,10 +794,7 @@ impl Renderer {
                     }
                     gl.bind_vertex_array(None);
                 }
-                // The batch's windows were laid out for its buffer pass, and a resolve reading no
-                // instancing buffer of its own takes none of them: those draw one object at a time,
-                // off the transform the scene carries.
-                if *windows == 0 {
+                if taken == 0 {
                     for instance in &batch.instances {
                         let held_scene = program::Scene {
                             model: instance.transform,
@@ -898,7 +912,7 @@ impl Renderer {
             size: (size.0 as f32, size.1 as f32),
             ..frame.scene.clone()
         };
-        let (offsets, window) = self.windows(gl, frame, &scene, true)?;
+        let offsets = self.windows(gl, frame, &scene, true)?;
         let instances = self.instances.ok_or("no instance buffer")?;
         self.shadow(gl, frame, &scene)?;
 
@@ -910,7 +924,7 @@ impl Renderer {
             // opened.
             let mut standing: Option<(glow::Program, bool, Vec<u32>, bool)> = None;
             for depth in [true, false] {
-                for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
+                for (batch, (offset, windows, window)) in frame.batches.iter().zip(&offsets) {
                     // Taken by value first: the draw wants the frame's own buffers mutably, and
                     // the models would still be borrowed.
                     let meshes: Vec<i32> = match self
@@ -1035,19 +1049,23 @@ impl Renderer {
                         let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
                             continue;
                         };
+                        let count = held.batch() as i32;
+                        let taken = match count > 1 {
+                            true => *windows,
+                            false => 0,
+                        };
                         unsafe {
                             if let Some(location) = viewport {
                                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                             }
                             gl.bind_vertex_array(Some(array));
-                            let count = held.batch() as i32;
-                            for at in 0..*windows {
+                            for at in 0..taken {
                                 gl.bind_buffer_range(
                                     glow::UNIFORM_BUFFER,
                                     slot,
                                     Some(instances),
-                                    offset + at * aligned(window, self.alignment),
-                                    window,
+                                    offset + at * aligned(*window, self.alignment),
+                                    *window,
                                 );
                                 let drawn = (batch.instances.len() as i32 - at * count).min(count);
                                 gl.draw_elements_instanced(
@@ -1062,7 +1080,7 @@ impl Renderer {
                         }
                         // A package that reads no instancing buffer draws one object at a time,
                         // off the transform the scene carries.
-                        if held.batch() == 1 {
+                        if taken == 0 {
                             for instance in &batch.instances {
                                 let held_scene = program::Scene {
                                     model: instance.transform,
@@ -1144,7 +1162,7 @@ impl Renderer {
                 }
                 // After both, which is what it fades the far distance toward, and before the
                 // exposure, which measures the frame the fog leaves rather than the one under it.
-                self.blended(gl, painter, frame, &scene, &offsets, window)?;
+                self.blended(gl, painter, frame, &scene, &offsets)?;
                 if let Some(haze) = frame.haze.as_ref() {
                     self.buffers.fog(gl, haze, &scene)?;
                 }

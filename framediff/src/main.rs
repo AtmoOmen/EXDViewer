@@ -301,7 +301,7 @@ fn run() -> Result<String, String> {
     // pixels. A clip or a percentile taken off the aligned row is not comparable with a recorded
     // one; the mean and the saturation barely move either way.
     if let Some(native) = &native {
-        let _ = writeln!(out, "  its own {}", native.row());
+        let _ = writeln!(out, "  its own {}   over its whole viewport", native.row());
     }
     let _ = writeln!(
         out,

@@ -33,11 +33,29 @@ impl Worn {
         ))?))
     }
 
-    /// Whether the body's own model for one slot still draws under a piece worn in another. A set
-    /// the file leaves disabled says nothing, so the body draws as it would bare.
-    pub fn shows(&self, worn: Slot, set: u16, under: Slot) -> bool {
+    /// Whether the model for one slot still draws under a piece worn in another: the body's own
+    /// where the slot is gear, and the adornment itself where it is not, since nothing stands in
+    /// for a ring. A set the file leaves disabled says nothing, so both draw as they would bare.
+    ///
+    /// Which earrings a helmet leaves on is stated per race rather than once, ears being where the
+    /// races differ most: a hat that clears a Hyur's ear sits over a Miqo'te's.
+    pub fn shows(&self, worn: Slot, set: u16, under: Slot, race: u32) -> bool {
         let held = self.0.set(set);
         match worn {
+            Slot::Head => {
+                let head = held.head();
+                match (head.enabled(), under) {
+                    (false, _) => true,
+                    (_, Slot::Neck) => head.show_necklace(),
+                    (_, Slot::Ears) => match race {
+                        2 | 3 => head.show_earrings_elezen_lalafell(),
+                        4 | 7 | 8 => head.show_earrings_miqote_hrothgar_viera(),
+                        6 => head.show_earrings_au_ra(),
+                        _ => head.show_earrings_hyur_roegadyn(),
+                    },
+                    _ => true,
+                }
+            }
             Slot::Body => {
                 let body = held.body();
                 match (body.enabled(), under) {
@@ -45,6 +63,18 @@ impl Worn {
                     (_, Slot::Legs) => body.show_legs(),
                     (_, Slot::Hands) => body.show_hands(),
                     (_, Slot::Head) => body.show_head(),
+                    (_, Slot::Neck) => body.show_necklace(),
+                    (_, Slot::Wrists) => body.show_bracelets(),
+                    _ => true,
+                }
+            }
+            Slot::Hands => {
+                let hands = held.hands();
+                match (hands.enabled(), under) {
+                    (false, _) => true,
+                    (_, Slot::Wrists) => hands.show_bracelets(),
+                    (_, Slot::RingLeft) => hands.show_ring_left(),
+                    (_, Slot::RingRight) => hands.show_ring_right(),
                     _ => true,
                 }
             }
@@ -113,6 +143,9 @@ impl Worn {
                     }
                 }
             }
+            // An adornment sits over a garment rather than through it, and the file names no seam
+            // for one.
+            _ => {}
         }
         found
     }

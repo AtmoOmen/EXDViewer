@@ -62,7 +62,7 @@ const IRIS: u32 = 15;
 const LIPSTICK_AT: u32 = 19;
 /// The model quad worn in each of `Slot::ALL`, packed as the set in the low half and the variant
 /// in the high one.
-const MODELS: [u32; 5] = [148, 152, 156, 160, 164];
+const MODELS: [u32; 10] = [148, 152, 156, 160, 164, 168, 172, 176, 180, 184];
 
 /// One of the game's own characters, as far as building it goes.
 pub struct Npc {
@@ -72,7 +72,7 @@ pub struct Npc {
     pub female: bool,
     /// What each of the creator's menus was left at, by the `Customize` it drives.
     pub choices: Vec<(u32, u32)>,
-    pub outfit: [Option<Gear>; 5],
+    pub outfit: [Option<Gear>; 10],
 }
 
 /// Every named character the game builds out of a human body. The unnamed ones are left out: a
@@ -100,7 +100,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
         if name.is_empty() {
             continue;
         }
-        let mut outfit = [None; 5];
+        let mut outfit = [None; 10];
         for (slot, at) in MODELS.into_iter().enumerate() {
             outfit[slot] = row
                 .read::<u32>(at)

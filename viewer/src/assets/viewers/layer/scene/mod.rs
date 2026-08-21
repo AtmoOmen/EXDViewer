@@ -3069,8 +3069,10 @@ impl Scene {
                 Slot::Ready(material) => Some(material),
                 _ => None,
             })
-            .flat_map(|material| material.textures())
-            .cloned()
+            // By the sampler each is bound to, not by the four roles this viewer's own shading
+            // knows: the game's shaders read every one, and water names its wave maps through
+            // samplers no other package declares.
+            .flat_map(|material| material.bound().map(|(_, path)| path.to_owned()))
             .chain(maps.iter().cloned())
             .filter(|path| !self.textures.contains_key(path) && !sliced.contains(path))
             .collect();

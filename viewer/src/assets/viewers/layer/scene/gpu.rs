@@ -688,8 +688,15 @@ impl Renderer {
                     ),
                     _ => (glow::EQUAL, None),
                 };
+                // What the fragment's own coordinate is turned back into the game's convention by.
+                // Left at nought a pass reading it addresses every buffer at a negative row, and
+                // water reads five of them: the frame behind it, the lighting and where it stands.
+                let viewport = deferred::uniform(gl, program, "dx_Viewport");
                 unsafe {
                     gl.use_program(Some(program));
+                    if let Some(location) = viewport {
+                        gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
+                    }
                     gl.depth_func(test);
                     match blend {
                         Some((source, into)) => {

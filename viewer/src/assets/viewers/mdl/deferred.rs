@@ -4,7 +4,7 @@
 //! the composite that turns those into a frame. One model and a whole zone want the same thing here,
 //! so this is what they share; what differs is only the draw list that fills the G-buffer.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use glow::HasContext;
 
@@ -535,16 +535,14 @@ pub fn graveyard() -> &'static std::sync::Mutex<Vec<Dead>> {
     GRAVEYARD.get_or_init(Default::default)
 }
 
-/// What a linked program has already answered about its own names, and which vertex arrays are
-/// already pointed at what it reads. Each of these is a question put to the driver, and a zone puts
-/// the same ones to the same programs thousands of times a frame.
+/// What a linked program has already answered about its own names. Each of these is a question put
+/// to the driver, and a zone puts the same ones to the same programs thousands of times a frame.
 #[derive(Default)]
 struct Learned {
     uniforms: HashMap<String, Option<glow::UniformLocation>>,
     samplers: HashMap<String, Sampled>,
     blocks: HashMap<String, Option<(u32, usize)>>,
     bindings: HashMap<u32, u32>,
-    layouts: HashSet<glow::VertexArray>,
 }
 
 /// Where a program takes the unit a sampler reads from, where it takes how many levels the texture
@@ -560,6 +558,13 @@ static LEARNED: std::sync::OnceLock<Lessons> = std::sync::OnceLock::new();
 
 fn learned() -> &'static Lessons {
     LEARNED.get_or_init(Default::default)
+}
+
+type Pointing = std::sync::Mutex<HashMap<glow::VertexArray, glow::Program>>;
+static POINTING: std::sync::OnceLock<Pointing> = std::sync::OnceLock::new();
+
+fn pointing() -> &'static Pointing {
+    POINTING.get_or_init(Default::default)
 }
 
 /// Where a program holds the uniform of this name.
@@ -644,16 +649,11 @@ pub fn block(gl: &glow::Context, program: glow::Program, name: &str) -> Option<(
 }
 
 /// Whether a vertex array is already pointed at what a program reads, marking it as pointed there
-/// where it is not. The pointers are the array's own state, so a mesh drawn again through the same
-/// program keeps what it was given.
+/// where it is not. The pointers are the array's own, and one mesh has one array that every pass
+/// drawing it shares: a pass reading fewer attributes leaves the array pointed for its own, so what
+/// stands is whichever program pointed it last rather than whether this one ever has.
 pub fn laid_out(program: glow::Program, layout: glow::VertexArray) -> bool {
-    !learned()
-        .lock()
-        .unwrap()
-        .entry(program)
-        .or_default()
-        .layouts
-        .insert(layout)
+    pointing().lock().unwrap().insert(layout, program) == Some(program)
 }
 
 /// Deletes what an earlier viewer left behind. Called at the top of a draw, because that is the
@@ -664,21 +664,17 @@ pub fn bury(gl: &glow::Context) {
         // A handle is the driver's to hand out again, so what was learned about one being deleted
         // cannot be left standing for whatever takes its number next.
         let mut learned = learned().lock().unwrap();
-        let layouts: HashSet<glow::VertexArray> = dead
-            .iter()
-            .filter_map(|dead| match dead {
-                Dead::Layout(layout) => Some(*layout),
-                _ => None,
-            })
-            .collect();
+        let mut pointing = pointing().lock().unwrap();
         for dead in &dead {
-            if let Dead::Program(program) = dead {
-                learned.remove(program);
-            }
-        }
-        if !layouts.is_empty() {
-            for held in learned.values_mut() {
-                held.layouts.retain(|layout| !layouts.contains(layout));
+            match dead {
+                Dead::Program(program) => {
+                    learned.remove(program);
+                    pointing.retain(|_, held| held != program);
+                }
+                Dead::Layout(layout) => {
+                    pointing.remove(layout);
+                }
+                _ => (),
             }
         }
     }

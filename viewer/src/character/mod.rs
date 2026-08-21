@@ -10,6 +10,7 @@
 mod emotes;
 mod gating;
 mod menus;
+mod mounts;
 mod npcs;
 mod palette;
 
@@ -230,6 +231,12 @@ pub struct CharacterBuilder {
     emote: Option<usize>,
     emote_search: String,
     emotes_matched: RefCell<(Option<String>, Vec<usize>)>,
+    /// The mounts the game names, and which of them is being stood on instead of the character.
+    mounts: Vec<mounts::Mount>,
+    reading_mounts: Option<TrackedPromise<Result<Vec<mounts::Mount>>>>,
+    mount: Option<usize>,
+    mount_search: String,
+    mounts_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The models each set is worn as under the current code, by slot. The picker asks about every
     /// set it lists, and a directory listing is too dear to pay for one on every frame.
     sets: RefCell<BTreeMap<u16, [Option<String>; 5]>>,
@@ -290,6 +297,11 @@ impl Default for CharacterBuilder {
             emote: None,
             emote_search: String::new(),
             emotes_matched: Default::default(),
+            mounts: Vec::new(),
+            reading_mounts: None,
+            mount: None,
+            mount_search: String::new(),
+            mounts_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
             shaped: RefCell::new(BTreeMap::new()),
@@ -321,6 +333,10 @@ impl CharacterBuilder {
         self.reading_emotes = None;
         self.emote = None;
         self.emotes_matched.take();
+        self.mounts.clear();
+        self.reading_mounts = None;
+        self.mount = None;
+        self.mounts_matched.take();
         self.stood = false;
         self.body.clear();
         self.faces.clear();
@@ -355,8 +371,8 @@ impl CharacterBuilder {
     }
 
     /// Asks the install for everything the tab is built out of: what the creator offers, the
-    /// colours it offers them in, the deformers, the emotes, what a worn piece covers, and the
-    /// characters the game stands itself.
+    /// colours it offers them in, the deformers, the emotes and mounts, what a worn piece covers,
+    /// and the characters the game stands itself.
     fn read(&mut self, ctx: &egui::Context, backend: &Backend) {
         let language = LANGUAGE.get(ctx);
         let creator = backend.clone();
@@ -374,6 +390,10 @@ impl CharacterBuilder {
         let played = backend.clone();
         self.reading_emotes = Some(TrackedPromise::spawn_local(async move {
             emotes::read(&played, language).await
+        }));
+        let stood = backend.clone();
+        self.reading_mounts = Some(TrackedPromise::spawn_local(async move {
+            mounts::read(&stood, language).await
         }));
         let gated = backend.clone();
         self.reading_worn = Some(TrackedPromise::spawn_local(async move {
@@ -430,6 +450,16 @@ impl CharacterBuilder {
                 }
                 Ok(Err(why)) => log::warn!("character: no emotes to play: {why}"),
                 Err(promise) => self.reading_emotes = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_mounts.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.mounts = read;
+                    self.mounts_matched.take();
+                }
+                Ok(Err(why)) => log::warn!("character: no mounts to stand on: {why}"),
+                Err(promise) => self.reading_mounts = Some(promise),
             }
         }
         if let Some(promise) = self.reading_made.take() {
@@ -805,6 +835,15 @@ impl CharacterBuilder {
     /// The face leads, since the first file is what names the skeleton the rest are posed on and a
     /// piece of equipment worn by a race that has no model of its own is filed under another's code.
     fn wearing(&self, listing: &Listing, deformers: &mdl::Deformers) -> Vec<(String, u16)> {
+        if let Some(mount) = self.mount.and_then(|at| self.mounts.get(at)) {
+            let mut found = listing.under(&mount.under);
+            found.retain(|path| path.ends_with(".mdl"));
+            found.sort();
+            return found
+                .into_iter()
+                .map(|path| (path, mount.variant))
+                .collect();
+        }
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -1255,46 +1294,77 @@ impl CharacterBuilder {
                 .hint_text("Search")
                 .desired_width(f32::INFINITY),
         );
-        let mut picked = None;
         let query = self.emote_search.clone();
         let matched = self.emotes_matching(&query);
-        let step = PIECE + 2.0 * ui.spacing().button_padding.y + ui.spacing().item_spacing.y;
-        ScrollArea::vertical()
-            .id_salt("character_emotes")
-            .max_height(step * SHOWN as f32)
-            .show_rows(ui, step, matched.len(), |ui, rows| {
-                for row in rows {
-                    let index = matched[row];
-                    let emote = &self.emotes[index];
-                    let path = get_icon_path(backend.icons(), emote.icon, false, Language::None);
-                    let excel = backend.excel().clone();
-                    let source = icons.get_or_insert_icon(&path, ui.ctx(), || {
-                        let path = path.clone();
-                        TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
-                    });
-                    let button = match source {
-                        ManagedIcon::Loaded(source) => egui::Button::image_and_text(
-                            egui::Image::new(source)
-                                .maintain_aspect_ratio(true)
-                                .fit_to_exact_size(egui::Vec2::splat(PIECE)),
-                            &emote.name,
-                        ),
-                        _ => egui::Button::new(&emote.name),
-                    };
-                    if ui
-                        .add(
-                            button
-                                .truncate()
-                                .selected(self.emote == Some(index))
-                                .min_size(egui::vec2(ui.available_width(), PIECE)),
-                        )
-                        .clicked()
-                    {
-                        picked = Some(Pick::Emote(index));
-                    }
-                }
-            });
-        picked
+        listed(
+            ui,
+            backend,
+            icons,
+            "character_emotes",
+            &matched,
+            self.emote,
+            |index| {
+                let emote = &self.emotes[index];
+                (emote.name.as_str(), emote.icon)
+            },
+        )
+        .map(Pick::Emote)
+    }
+
+    /// The mounts the game names, one of which stands in place of the character. A mount is a body
+    /// of its own rather than something the character is put on, so picking one draws it alone.
+    fn mounts_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        backend: &Backend,
+        icons: &IconManager,
+    ) -> Option<Pick> {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Mount").strong());
+            if self.reading_mounts.is_some() {
+                ui.spinner();
+            }
+        });
+        ui.add(
+            TextEdit::singleline(&mut self.mount_search)
+                .hint_text("Search")
+                .desired_width(f32::INFINITY),
+        );
+        let query = self.mount_search.clone();
+        let matched = self.mounts_matching(&query);
+        listed(
+            ui,
+            backend,
+            icons,
+            "character_mounts",
+            &matched,
+            self.mount,
+            |index| {
+                let mount = &self.mounts[index];
+                (mount.name.as_str(), mount.icon)
+            },
+        )
+        .map(|index| Pick::Mount((self.mount != Some(index)).then_some(index)))
+    }
+
+    /// Which mounts a search names, kept the way a slot's own list is.
+    fn mounts_matching(&self, query: &str) -> Ref<'_, Vec<usize>> {
+        if self.mounts_matched.borrow().0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.mounts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, mount)| (index, mount.name.as_str())),
+                |mount| mount.1,
+            );
+            *self.mounts_matched.borrow_mut() = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.mounts_matched.borrow(), |(_, rows)| rows)
     }
 
     /// Which emotes a search names, kept the way a slot's own list is.
@@ -1445,6 +1515,8 @@ impl CharacterBuilder {
                         .inspect(|made| picked = Some(*made));
                     self.emotes_ui(ui, backend, icons)
                         .inspect(|emote| picked = Some(*emote));
+                    self.mounts_ui(ui, backend, icons)
+                        .inspect(|mount| picked = Some(*mount));
                     self.npcs_ui(ui).inspect(|npc| picked = Some(*npc));
                 });
                 picked
@@ -1492,6 +1564,7 @@ impl CharacterBuilder {
                     model.play(&path);
                 }
             }
+            Some(Pick::Mount(mount)) => self.mount = mount,
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }
@@ -1520,6 +1593,8 @@ enum Pick {
     /// The same, where what a menu holds is the number the file tree files the choice under.
     Choice(u32, u16),
     Emote(usize),
+    /// A mount to stand in place of the character, or none to stand it again.
+    Mount(Option<usize>),
     Npc(usize),
 }
 
@@ -1646,6 +1721,57 @@ fn held(sets: &[Set], wanted: u16) -> Vec<String> {
         .find(|set| set.id == wanted)
         .map(|set| set.parts.clone())
         .unwrap_or_default()
+}
+
+/// A searched list to pick one row of, each drawn with the icon the game offers it under. The rows
+/// are the indices a search left, and what comes back is the one clicked.
+fn listed<'a>(
+    ui: &mut egui::Ui,
+    backend: &Backend,
+    icons: &IconManager,
+    id: &str,
+    rows: &[usize],
+    chosen: Option<usize>,
+    held: impl Fn(usize) -> (&'a str, u32),
+) -> Option<usize> {
+    let mut picked = None;
+    let step = PIECE + 2.0 * ui.spacing().button_padding.y + ui.spacing().item_spacing.y;
+    ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(step * SHOWN as f32)
+        .show_rows(ui, step, rows.len(), |ui, drawn| {
+            for row in drawn {
+                let index = rows[row];
+                let (name, icon) = held(index);
+                let path = get_icon_path(backend.icons(), icon, false, Language::None);
+                let excel = backend.excel().clone();
+                let source = icons.get_or_insert_icon(&path, ui.ctx(), || {
+                    let path = path.clone();
+                    TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
+                });
+                let button = match source {
+                    ManagedIcon::Loaded(source) => egui::Button::image_and_text(
+                        egui::Image::new(source)
+                            .maintain_aspect_ratio(true)
+                            .fit_to_exact_size(egui::Vec2::splat(PIECE)),
+                        name,
+                    ),
+                    _ => egui::Button::new(name),
+                };
+                if ui
+                    .add(
+                        button
+                            .truncate()
+                            .selected(chosen == Some(index))
+                            .min_size(egui::vec2(ui.available_width(), PIECE)),
+                    )
+                    .clicked()
+                {
+                    picked = Some(index);
+                }
+            }
+        });
+    picked
 }
 
 /// Sets to pick from, laid out as many to a row as the panel is wide enough for. Every cell is the

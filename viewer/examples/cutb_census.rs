@@ -159,8 +159,17 @@ impl Census {
         for item in timeline.items() {
             let entry = self.items.entry(magic_of(item)).or_default();
             entry.0 += 1;
-            if let Item::Unknown(unknown) = item {
-                entry.1.insert(unknown.body().len() + 8);
+            match item {
+                Item::Unknown(unknown) => {
+                    entry.1.insert(unknown.body().len() + 8);
+                }
+                // A command spends four bytes on its id and its time ahead of the body.
+                Item::Command(command) => {
+                    if let CommandKind::Unknown { body, .. } = command.kind() {
+                        entry.1.insert(body.len() + 12);
+                    }
+                }
+                _ => {}
             }
 
             match item {

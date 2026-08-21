@@ -560,7 +560,7 @@ fn learned() -> &'static Lessons {
     LEARNED.get_or_init(Default::default)
 }
 
-type Pointing = std::sync::Mutex<HashMap<glow::VertexArray, glow::Program>>;
+type Pointing = std::sync::Mutex<HashMap<glow::VertexArray, Vec<program::Attribute>>>;
 static POINTING: std::sync::OnceLock<Pointing> = std::sync::OnceLock::new();
 
 fn pointing() -> &'static Pointing {
@@ -648,12 +648,19 @@ pub fn block(gl: &glow::Context, program: glow::Program, name: &str) -> Option<(
     found
 }
 
-/// Whether a vertex array is already pointed at what a program reads, marking it as pointed there
-/// where it is not. The pointers are the array's own, and one mesh has one array that every pass
-/// drawing it shares: a pass reading fewer attributes leaves the array pointed for its own, so what
-/// stands is whichever program pointed it last rather than whether this one ever has.
-pub fn laid_out(program: glow::Program, layout: glow::VertexArray) -> bool {
-    pointing().lock().unwrap().insert(layout, program) == Some(program)
+/// Whether a vertex array is already pointed at what a draw reads, marking it as pointed there where
+/// it is not. The pointers are the array's own, and one mesh has one array that every pass drawing it
+/// shares, so what stands is the last set of attributes pointed rather than which program pointed
+/// them: the shadow and depth passes ask for the same ones and need not undo each other.
+pub fn laid_out(attributes: &[program::Attribute], layout: glow::VertexArray) -> bool {
+    let mut pointing = pointing().lock().unwrap();
+    match pointing.get(&layout) {
+        Some(held) if held.as_slice() == attributes => true,
+        _ => {
+            pointing.insert(layout, attributes.to_vec());
+            false
+        }
+    }
 }
 
 /// Deletes what an earlier viewer left behind. Called at the top of a draw, because that is the
@@ -669,7 +676,6 @@ pub fn bury(gl: &glow::Context) {
             match dead {
                 Dead::Program(program) => {
                     learned.remove(program);
-                    pointing.retain(|_, held| held != program);
                 }
                 Dead::Layout(layout) => {
                     pointing.remove(layout);

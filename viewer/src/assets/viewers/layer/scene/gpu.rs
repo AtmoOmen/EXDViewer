@@ -525,7 +525,7 @@ impl Renderer {
                         .unwrap_or(0) as u32;
                     unsafe {
                         gl.bind_vertex_array(Some(mesh.0));
-                        if !deferred::laid_out(program, mesh.0) {
+                        if !deferred::laid_out(&held.attributes, mesh.0) {
                             gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
                             for location in 0..16 {
                                 gl.disable_vertex_attrib_array(location);
@@ -716,7 +716,7 @@ impl Renderer {
                     .unwrap_or(0) as u32;
                 unsafe {
                     gl.bind_vertex_array(Some(mesh.0));
-                    if !deferred::laid_out(program, mesh.0) {
+                    if !deferred::laid_out(&held.attributes, mesh.0) {
                         gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
                         for location in 0..16 {
                             gl.disable_vertex_attrib_array(location);
@@ -837,7 +837,7 @@ impl Renderer {
                 }
                 unsafe {
                     gl.bind_vertex_array(Some(layout));
-                    if !deferred::laid_out(program, layout) {
+                    if !deferred::laid_out(&held.attributes, layout) {
                         gl.bind_buffer(glow::ARRAY_BUFFER, Some(vertices));
                         for location in 0..16 {
                             gl.disable_vertex_attrib_array(location);
@@ -1015,7 +1015,7 @@ impl Renderer {
                                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                             }
                             gl.bind_vertex_array(Some(mesh.0));
-                            if !deferred::laid_out(program, mesh.0) {
+                            if !deferred::laid_out(&held.attributes, mesh.0) {
                                 gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.1));
                                 for location in 0..16 {
                                     gl.disable_vertex_attrib_array(location);

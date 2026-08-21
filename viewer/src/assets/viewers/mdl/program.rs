@@ -711,6 +711,7 @@ pub enum Components {
 }
 
 /// One vertex attribute, as the shader's own input signature asks for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Attribute {
     pub location: u32,
     pub field: Field,

@@ -2721,8 +2721,14 @@ impl Rendered {
     }
 
     /// Poses the character out of a different pack, which is what picking an emote is.
-    pub fn play(&self, path: &str) {
-        self.animation.play(path);
+    pub fn play(&self, path: &str, then: Option<&str>) {
+        self.animation.play(path, then);
+    }
+
+    /// Puts an expression on the character's face, which is what picking an emote that only makes
+    /// one is.
+    pub fn express(&self, name: &str) {
+        self.animation.express(name);
     }
 
     /// Puts a different set of files on the same character, which is what a change of clothes is.

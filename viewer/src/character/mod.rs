@@ -1684,10 +1684,15 @@ impl CharacterBuilder {
             }
             Some(Pick::Emote(emote)) => {
                 self.emote = Some(emote);
-                if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote))
-                    && let Some(path) = emote.pack(self.code, 0)
-                {
-                    model.play(&path);
+                if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
+                    match emote.expression() {
+                        Some(name) => model.express(name),
+                        None => match emote.packs(self.code).as_slice() {
+                            [start, standing] => model.play(start, Some(standing)),
+                            [only] => model.play(only, None),
+                            _ => {}
+                        },
+                    }
                 }
             }
             Some(Pick::Mount(mount)) => self.mount = mount,

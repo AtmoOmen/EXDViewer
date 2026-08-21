@@ -96,7 +96,7 @@ impl Default for Config {
             cache: ServerBuilder::default(),
             assets: AssetCache::default(),
             file_readahead: 0x800000, // 8 MiB
-            api_workers: 1,
+            api_workers: 4,
             github_client_id: String::new(),
             github_client_secret: String::new(),
             path_list: PathList::default(),

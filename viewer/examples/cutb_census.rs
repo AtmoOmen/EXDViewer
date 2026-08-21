@@ -27,6 +27,17 @@ struct Census {
     participants: BTreeMap<u32, usize>,
     /// Participants whose id is not `0xff000000 | (index + 1)`.
     misnumbered: usize,
+    /// Participants holding a rotation outside a half turn either way, and the widest angle any
+    /// of them reaches.
+    unturned: usize,
+    widest: f32,
+    actors: usize,
+    /// Actors whose participant the same file's `CTAL` holds.
+    stood_for: usize,
+    /// Camera bindings shaped like a participant id, and how many of those resolve.
+    bound: [usize; 2],
+    /// Cameras whose last modelled field is neither zero nor one, which a short body would leave.
+    overrun: usize,
     groups: usize,
     /// `CTPA` records, split by whether the first field names a participant.
     records: [usize; 2],
@@ -67,6 +78,17 @@ fn main() {
 
 impl Census {
     fn take(&mut self, path: &str, file: &Cutscene) {
+        let ids: BTreeSet<u32> = file
+            .nodes()
+            .iter()
+            .filter_map(|node| match node {
+                Node::Participants(participants) => Some(participants),
+                _ => None,
+            })
+            .flatten()
+            .map(|participant| participant.id())
+            .collect();
+
         let mut held: BTreeMap<String, usize> = BTreeMap::new();
         for node in file.nodes() {
             *held.entry(magic(node).to_owned()).or_default() += 1;
@@ -87,6 +109,12 @@ impl Census {
                         *self.participants.entry(participant.kind()).or_default() += 1;
                         let expected = 0xff00_0000 | (index as u32 + 1);
                         self.misnumbered += usize::from(participant.id() != expected);
+                        let widest = participant
+                            .rotation()
+                            .iter()
+                            .fold(0.0f32, |held, angle| held.max(angle.abs()));
+                        self.unturned += usize::from(widest > std::f32::consts::PI);
+                        self.widest = self.widest.max(widest);
                     }
                 }
                 Node::Groups(groups) => {
@@ -98,7 +126,7 @@ impl Census {
                         }
                     }
                 }
-                Node::Timeline(timeline) => self.timeline(timeline),
+                Node::Timeline(timeline) => self.timeline(timeline, &ids),
                 Node::Unknown(unknown) => {
                     let entry = self
                         .unread
@@ -118,7 +146,7 @@ impl Census {
         }
     }
 
-    fn timeline(&mut self, timeline: &Timeline) {
+    fn timeline(&mut self, timeline: &Timeline, ids: &BTreeSet<u32>) {
         let sets: BTreeSet<i16> = timeline
             .items()
             .iter()
@@ -136,6 +164,10 @@ impl Census {
             }
 
             match item {
+                Item::Actor(actor) => {
+                    self.actors += 1;
+                    self.stood_for += usize::from(ids.contains(&actor.participant()));
+                }
                 Item::Curves(curves) => {
                     for curve in curves.curves() {
                         *self.tags.entry(curve.tag()).or_default() += 1;
@@ -152,6 +184,13 @@ impl Census {
                             .entry((camera.near_plane().to_bits(), camera.far_plane().to_bits()))
                             .or_default() += 1;
                         self.names.insert(camera.name().unwrap_or_default().to_owned());
+                        self.overrun += usize::from(camera.bindings()[16] > 1);
+                        for held in camera.bindings() {
+                            if held >> 24 == 0xff && *held != u32::MAX {
+                                self.bound[0] += 1;
+                                self.bound[1] += usize::from(ids.contains(held));
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -183,6 +222,14 @@ impl Census {
         println!("\nparticipants by kind: {:?}", self.participants);
         println!("  {} numbered outside 0xff000000 | (index + 1)", self.misnumbered);
         println!(
+            "  {} holding a rotation past a half turn, the widest {}",
+            self.unturned, self.widest
+        );
+        println!(
+            "\n{} actors, {} standing for a participant the same file holds",
+            self.actors, self.stood_for
+        );
+        println!(
             "\n{} groups holding {} records naming a participant and {} naming something else",
             self.groups, self.records[1], self.records[0]
         );
@@ -207,6 +254,11 @@ impl Census {
             );
         }
         println!("  {} distinct shot names", self.names.len());
+        println!(
+            "  {} bindings shaped like a participant, {} of them resolving",
+            self.bound[0], self.bound[1]
+        );
+        println!("  {} whose last modelled field is neither zero nor one", self.overrun);
     }
 }
 

@@ -60,6 +60,16 @@ impl Camera {
     }
 }
 
+/// A direction the frame holds shaped like this engine's sun, and the hour that shape states.
+#[derive(Clone, Debug)]
+pub struct Sun {
+    pub world: Vec3,
+    pub hour: f32,
+    /// Whether the buffer held it in the world or in the camera's own space.
+    pub viewed: bool,
+    pub copies: usize,
+}
+
 impl Capture {
     /// Opens a capture by either of the two files `convert` writes.
     pub fn open(path: &Path) -> Result<Self, String> {
@@ -169,6 +179,36 @@ impl Capture {
         }
         held.sort_by_key(|held| std::cmp::Reverse(held.copies));
         Ok(held)
+    }
+
+    /// The hours the frame's own light directions state. This engine's sun runs
+    /// `(cos t, sin t/sqrt2, sin t/sqrt2)` with `t = 15 deg * (hour - 6)`, so any unit direction
+    /// whose y and z are equal names an hour. More than one is stated and which of them is the sun
+    /// is not something the buffers say, so these are evidence rather than an answer.
+    pub fn suns(&self, camera: &Camera) -> Result<Vec<Sun>, String> {
+        let mut zip = self.archive()?;
+        let view = camera.view(1, 1).rotation.transpose();
+        let mut found: Vec<Sun> = Vec::new();
+        for id in &self.written {
+            let Ok(mut entry) = zip.by_name(&format!("{id:06}")) else {
+                continue;
+            };
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            if entry.read_to_end(&mut bytes).is_err() {
+                continue;
+            }
+            for held in suns(&bytes, view) {
+                match found
+                    .iter_mut()
+                    .find(|other| other.viewed == held.viewed && (other.hour - held.hour).abs() < 1e-3)
+                {
+                    Some(other) => other.copies += 1,
+                    None => found.push(held),
+                }
+            }
+        }
+        found.sort_by_key(|held| std::cmp::Reverse(held.copies));
+        Ok(found)
     }
 
     fn cameras_in(&self, blobs: &[u32]) -> Result<Vec<Camera>, String> {
@@ -297,6 +337,36 @@ fn cameras(bytes: &[u8], aspect: f32) -> Vec<Camera> {
             near,
             copies: 1,
         });
+    }
+    out
+}
+
+/// The hour a sun-shaped direction states, or nothing where it names no hour.
+fn hour(held: Vec3) -> Option<f32> {
+    let sunlike = (held.length_squared() - 1.0).abs() < 1e-5
+        && (held.y - held.z).abs() < 1e-4
+        && held.y.abs() > 1e-3;
+    sunlike.then(|| {
+        let turn = (held.y * std::f32::consts::SQRT_2).atan2(held.x).to_degrees();
+        (6.0 + turn / 15.0).rem_euclid(24.0)
+    })
+}
+
+fn suns(bytes: &[u8], view: glam::Mat3) -> Vec<Sun> {
+    let held = floats(bytes);
+    let mut out = Vec::new();
+    for at in (0..held.len().saturating_sub(3)).step_by(4) {
+        let raw = Vec3::new(held[at], held[at + 1], held[at + 2]);
+        for (viewed, world) in [(false, raw), (true, view * raw)] {
+            if let Some(hour) = hour(world) {
+                out.push(Sun {
+                    world,
+                    hour,
+                    viewed,
+                    copies: 1,
+                });
+            }
+        }
     }
     out
 }

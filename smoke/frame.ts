@@ -7,7 +7,8 @@
 //
 // The camera and the lens come out of the capture, so the two views are the same view rather than
 // two hand-flown ones. The build that drew the frame states its own commit, and a run against a
-// tree that did not draw it fails rather than reporting the difference.
+// build older than the last change to what the wasm is made of fails rather than reporting the
+// difference; `--build=<sha>` is how a run against a deliberately older wasm is asked for.
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { statSync } from "node:fs";
@@ -55,6 +56,13 @@ function serve() {
         },
     });
 }
+
+// What the wasm is built from. A commit that only moved the harness leaves the frame valid, so the
+// build is checked against the last change to these rather than against HEAD.
+const SOURCES = [
+    "viewer", ":!viewer/examples",
+    "shaders", "shadermerge", "glyphnames", "luadec", "pathlist", "deps",
+];
 
 function run(command: string[], where = root) {
     const held = Bun.spawnSync(command, { cwd: where, stdout: "pipe", stderr: "pipe" });
@@ -129,8 +137,8 @@ async function main() {
     if (!level) throw new Error("--level wants the .lvb path the capture stood in");
     mkdirSync(outDir, { recursive: true });
 
-    const head = run(["git", "rev-parse", "HEAD"]).trim();
-    console.log(`tree ${head}`);
+    const source = run(["git", "log", "-1", "--format=%H", "--", ...SOURCES]).trim();
+    console.log(`tree ${run(["git", "rev-parse", "HEAD"]).trim()}, last drawn by ${source}`);
     if (!argv.includes("--no-build")) {
         console.log("building viewer/dist");
         run(["trunk", "build", "index.html", "--release"], join(root, "viewer"));
@@ -212,6 +220,15 @@ async function main() {
     if (!state.clean) {
         console.log(`   the build was made from a dirty tree, so ${state.commit} does not name it`);
     }
+    const behind = Bun.spawnSync(["git", "merge-base", "--is-ancestor", source, state.commit], {
+        cwd: root,
+    }).exitCode !== 0;
+    if (behind && !build) {
+        throw new Error(
+            `the frame was drawn by ${state.commit}, which does not carry ${source}, the last ` +
+            "commit to touch what the wasm is built from: rebuild without --no-build",
+        );
+    }
     const framediff = join(root, "target/release/framediff");
     const args = [
         framediff,
@@ -219,7 +236,7 @@ async function main() {
         join(outDir, "window.png"),
         `--capture=${capture}`,
         `--state=${join(outDir, "state.json")}`,
-        `--commit=${build || head}`,
+        ...(build ? [`--commit=${build}`] : []),
         `--out=${outDir}`,
         ...flags("crop").map((one) => `--crop=${one}`),
         ...flags("mask").map((one) => `--mask=${one}`),

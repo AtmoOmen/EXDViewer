@@ -13,7 +13,9 @@ use std::process::ExitCode;
 
 use framediff::capture::Capture;
 use framediff::state::State;
-use framediff::{Aligned, Cell, Rect, Region, Residual, Stats, View, align, difference, grid, worst};
+use framediff::{
+    Aligned, Cell, Rect, Region, Residual, Stats, View, align, difference, grid, overlay, worst,
+};
 use image::RgbImage;
 
 fn main() -> ExitCode {
@@ -201,7 +203,7 @@ fn run() -> Result<String, String> {
     };
     let view = framediff::open(view)?;
 
-    let (view, region) = match (&capture, &state) {
+    let (view, region, native) = match (&capture, &state) {
         (Some((_, cameras)), Some(state)) => {
             let camera = cameras
                 .first()
@@ -251,9 +253,18 @@ fn run() -> Result<String, String> {
             );
             let _ = writeln!(
                 out,
-                "           {lost} of the region's pixels lay past the viewer's own frame\n",
+                "           {lost} of the region's pixels lay past the viewer's own frame",
             );
-            (held.image, region)
+            // Everything geometric here is read out of the capture. The hour and the weather are
+            // not: they are whatever was handed to `rdframe`, and a wrong one makes every number
+            // below a difference in environment rather than in shading.
+            let _ = writeln!(
+                out,
+                "           camera, lens and frame shape are read out of the capture; the clock and \
+                 the weather are stated\n",
+            );
+            let native = Stats::of(&inside, &Region::new(Rect::of(&inside), Vec::new()));
+            (held.image, region, Some(native))
         }
         _ => {
             if view.dimensions() != game.dimensions() {
@@ -266,13 +277,32 @@ fn run() -> Result<String, String> {
                 ));
             }
             let region = Region::new(args.crop.unwrap_or_else(|| Rect::of(&game)), args.masks);
-            (view, region)
+            (view, region, None)
         }
     };
     let _ = writeln!(out, "{}", place(&region));
+    // A zone still streaming is the loudest confounder there is: what has not arrived reads as sky,
+    // and the auto-exposure measures the frame it is in.
+    if let Some(state) = &state
+        && state.drawn * 10 < state.placed * 9
+    {
+        let _ = writeln!(
+            out,
+            "        the zone is {:.0}% placed and {} modelled, so what is missing reads as sky and \
+             the exposure follows it",
+            100.0 * state.drawn as f64 / state.placed.max(1) as f64,
+            state.models,
+        );
+    }
     let (left, right) = (Stats::of(&game, &region), Stats::of(&view, &region));
     let _ = writeln!(out, "  game    {}", left.row());
     let _ = writeln!(out, "  viewer  {}", right.row());
+    // Resampling onto a larger grid smooths, so what the viewer clips is only stated by its own
+    // pixels. A clip or a percentile taken off the aligned row is not comparable with a recorded
+    // one; the mean and the saturation barely move either way.
+    if let Some(native) = &native {
+        let _ = writeln!(out, "  its own {}", native.row());
+    }
     let _ = writeln!(
         out,
         "  apart   gain {:.3}  saturation {:+.4}  per channel ({:.3}, {:.3}, {:.3})",
@@ -319,6 +349,7 @@ fn run() -> Result<String, String> {
         write("game.png", &game)?;
         write("view-aligned.png", &view)?;
         write("difference.png", &difference(&game, &view, &region, 4.0))?;
+        write("overlay.png", &overlay(&game, &view, &region))?;
         fs::write(dir.join("report.txt"), &out).map_err(|why| why.to_string())?;
         let _ = writeln!(out, "\nwritten to {}", dir.display());
     }

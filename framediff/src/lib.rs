@@ -260,7 +260,7 @@ impl View {
     }
 
     /// Half the frame's height at unit depth.
-    fn reach(&self) -> f32 {
+    pub fn reach(&self) -> f32 {
         (self.fov.to_radians() * 0.5).tan()
     }
 
@@ -318,7 +318,7 @@ impl Residual {
             roll,
             fov: view.fov - game.fov,
             parallax: (step / 100.0).atan().to_degrees(),
-            pixels: turn / game.fov * game.height as f32,
+            pixels: turn.to_radians() * 0.5 * game.height as f32 / game.reach(),
         }
     }
 }
@@ -462,6 +462,23 @@ pub fn worst(cells: &[Vec<Cell>], keep: usize) -> String {
             cell.game.luminance,
             cell.view.luminance,
         );
+    }
+    out
+}
+
+/// The two frames on one image, the game as red and this one as green. Where they agree the frame
+/// is grey; a structure in one colour alone is geometry only one of them drew, and a wash of one is
+/// a difference in brightness. This is what says whether a diff is measuring shading or aim.
+pub fn overlay(game: &RgbImage, view: &RgbImage, region: &Region) -> RgbImage {
+    let mut out = RgbImage::new(game.width(), game.height());
+    for y in 0..game.height() {
+        for x in 0..game.width() {
+            if !region.holds(x, y) {
+                continue;
+            }
+            let held = |image: &RgbImage| luminance(*image.get_pixel(x, y)).round() as u8;
+            out.put_pixel(x, y, Rgb([held(game), held(view), 0]));
+        }
     }
     out
 }

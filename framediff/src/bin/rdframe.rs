@@ -75,6 +75,26 @@ fn run() -> Result<(), String> {
             camera.copies,
         );
     }
+    let suns = cameras
+        .first()
+        .map(|camera| held.suns(camera))
+        .transpose()?
+        .unwrap_or_default();
+    for sun in suns.iter().take(4) {
+        println!(
+            "sun        {:02}:{:02} from ({:.4}, {:.4}, {:.4}) in {} space  x{}",
+            sun.hour as u32,
+            ((sun.hour % 1.0) * 60.0) as u32,
+            sun.world.x,
+            sun.world.y,
+            sun.world.z,
+            match sun.viewed {
+                true => "camera",
+                false => "world",
+            },
+            sun.copies,
+        );
+    }
     let facts = serde_json::json!({
         "capture": held.name,
         "swapchain": [held.extent.0, held.extent.1],
@@ -86,6 +106,12 @@ fn run() -> Result<(), String> {
             "aspect": camera.aspect,
             "near": camera.near,
             "copies": camera.copies,
+        })).collect::<Vec<_>>(),
+        "suns": suns.iter().map(|sun| serde_json::json!({
+            "hour": sun.hour,
+            "world": sun.world.to_array(),
+            "viewed": sun.viewed,
+            "copies": sun.copies,
         })).collect::<Vec<_>>(),
     });
     fs::write(

@@ -3283,6 +3283,7 @@ impl Scene {
             });
         gpu::Surface {
             material: slot,
+            waving,
             shaded,
             cull: held.is_some_and(|material| material.cull()),
             hidden: held.is_some_and(|material| !material.drawn()),

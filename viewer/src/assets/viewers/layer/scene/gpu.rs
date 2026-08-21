@@ -145,6 +145,9 @@ pub struct Pending {
 /// What one mesh needs beyond its geometry.
 pub struct Surface {
     pub material: usize,
+    /// Whether the model this belongs to is drawn through the wind's own reading of the material,
+    /// which is a second pair of shaders off the same package.
+    pub waving: bool,
     /// The material's own shaders, once its package has arrived.
     pub shaded: Option<Shaded>,
     pub cull: bool,
@@ -210,7 +213,7 @@ pub struct Renderer {
     /// The table the shading passes index, waiting for a context.
     types: Option<Vec<u32>>,
     /// One linked pair per material, pass and page of the G-buffer.
-    programs: BTreeMap<(usize, bool, usize), Linked>,
+    programs: BTreeMap<(usize, bool, bool, usize), Linked>,
     tables: BTreeMap<usize, glow::Texture>,
     /// Every object of the frame, in the layout the packages read them, and how far apart its
     /// windows sit.
@@ -505,7 +508,12 @@ impl Renderer {
                         continue;
                     };
                     let program =
-                        deferred::link(gl, &mut self.programs, (surface.material, true, SUN), held)?;
+                        deferred::link(
+                            gl,
+                            &mut self.programs,
+                            (surface.material, surface.waving, true, SUN),
+                            held,
+                        )?;
                     unsafe { gl.use_program(Some(program)) };
                     if held.batch() > 1 {
                         self.buffers.bind(gl, program, held, &sun, &[])?;
@@ -614,7 +622,12 @@ impl Renderer {
                     continue;
                 };
                 let program =
-                    deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
+                    deferred::link(
+                    gl,
+                    &mut self.programs,
+                    (surface.material, surface.waving, false, LIT),
+                    held,
+                )?;
                 // A surface that filled the G-buffer is tested against exactly what its own buffer
                 // pass settled, so one layered over itself keeps the fragment that pass kept. An
                 // overlay filled none of it and is tested against the scene in front of it: a shaft
@@ -780,7 +793,7 @@ impl Renderer {
             let Some(held) = held.filter(|held| !held.targets.is_empty()) else {
                 continue;
             };
-            let program = deferred::link(gl, &mut self.programs, (TURF, normal, page), held)?;
+            let program = deferred::link(gl, &mut self.programs, (TURF, false, normal, page), held)?;
             let supplied = held
                 .textures
                 .iter()
@@ -902,7 +915,7 @@ impl Renderer {
                         let program = deferred::link(
                             gl,
                             &mut self.programs,
-                            (surface.material, depth, page),
+                            (surface.material, surface.waving, depth, page),
                             held,
                         )?;
                         unsafe {

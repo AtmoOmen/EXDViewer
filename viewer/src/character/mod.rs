@@ -235,6 +235,10 @@ pub struct CharacterBuilder {
     sets: RefCell<BTreeMap<u16, [Option<String>; 5]>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<(String, u16)>,
+    /// What each borrowed body is shaped onto this one by, kept rather than rebuilt. The model
+    /// keeps a piece across a change of clothes by the deform it was built with, and one built
+    /// afresh is a different one however equal it is.
+    shaped: RefCell<BTreeMap<u16, Option<Arc<mdl::Deform>>>>,
     /// Every file read so far, so a change of clothes only asks for what it newly needs.
     held: Files,
     /// Batches of files still on their way. A batch is never abandoned: dropping one cancels the
@@ -288,6 +292,7 @@ impl Default for CharacterBuilder {
             emotes_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
+            shaped: RefCell::new(BTreeMap::new()),
             held: Files::new(),
             fetching: Vec::new(),
             model: None,
@@ -324,6 +329,7 @@ impl CharacterBuilder {
         self.chosen = [None; 5];
         self.matched.take();
         self.sets.borrow_mut().clear();
+        self.shaped.borrow_mut().clear();
         self.worn.clear();
         self.held.clear();
         self.fetching.clear();
@@ -482,6 +488,7 @@ impl CharacterBuilder {
             // one say nothing about this one.
             if code != self.code {
                 self.sets.borrow_mut().clear();
+                self.shaped.borrow_mut().clear();
             }
             self.code = code;
             self.skin = skin(&listing, &deformers, self.code);
@@ -860,13 +867,13 @@ impl CharacterBuilder {
     /// Puts what has arrived on screen, keeping the character that is already there where there is
     /// one so a change of clothes neither moves the view nor asks for anything twice.
     fn dress(&mut self) {
-        let mut shaped: BTreeMap<u16, Option<Arc<mdl::Deform>>> = BTreeMap::new();
         let parts: Vec<_> = self
             .worn
             .iter()
             .filter_map(|(path, variant)| {
                 let deform = made_for(path).and_then(|made_for| {
-                    shaped
+                    self.shaped
+                        .borrow_mut()
                         .entry(made_for)
                         .or_insert_with(|| {
                             let deformers = self.deformers.as_ref()?;

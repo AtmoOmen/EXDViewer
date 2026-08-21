@@ -295,12 +295,17 @@ struct Level {
 /// `.imc`, so the variant a part's visibility is read from is the piece's rather than the level's.
 struct Piece {
     path: String,
-    bytes: Vec<u8>,
+    /// The file, read once. A change of clothes builds its level out of the pieces it already
+    /// holds, and re-reading a file nothing changed about is most of what that used to cost.
+    container: ModelContainer,
     /// The file's own `.imc`, once asked for.
     imc: RefCell<Option<Imc>>,
     /// Which of that imc's variants a part's default visibility is drawn from. Nought is the file's
     /// own default entry.
     variant: Cell<u16>,
+    /// Which one it was asked for, which is not always where it settles: a file whose variants are
+    /// alternatives rather than toggles is drawn at the first of them.
+    asked: u16,
     deform: Option<Arc<Deform>>,
     skin: Option<u16>,
 }
@@ -319,15 +324,30 @@ pub struct Source {
 }
 
 impl Piece {
-    fn new(source: &Source) -> Self {
-        Self {
+    fn new(source: &Source) -> Result<Self> {
+        Ok(Self {
             path: source.path.clone(),
-            bytes: source.bytes.clone(),
+            container: ModelContainer::read(Cursor::new(source.bytes.clone()))?,
             imc: RefCell::new(None),
             variant: Cell::new(source.variant),
+            asked: source.variant,
             deform: source.deform.clone(),
             skin: source.skin,
-        }
+        })
+    }
+
+    /// Whether this is already the file being asked for, worn the same way. The deform is compared
+    /// by identity: one is built per body a piece is borrowed from and handed to every piece
+    /// borrowing from it, so two that are not the same allocation were built for different bodies.
+    fn wears(&self, source: &Source) -> bool {
+        self.path == source.path
+            && self.asked == source.variant
+            && self.skin == source.skin
+            && match (&self.deform, &source.deform) {
+                (None, None) => true,
+                (Some(held), Some(wanted)) => Arc::ptr_eq(held, wanted),
+                _ => false,
+            }
     }
 
     /// The picked variant's attribute mask, once the imc has arrived. `None` before it has, or where
@@ -450,8 +470,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 /// the way the game draws it, standing in its idle rather than in the pose its files hold.
 pub fn compose(parts: &[Source]) -> Result<Rendered> {
     parts.first().context("a model of no files")?;
-    let pieces: Vec<_> = parts.iter().map(Piece::new).collect();
-    let drawn = drawn_levels(&pieces)?;
+    let pieces = parts.iter().map(Piece::new).collect::<Result<Vec<_>>>()?;
+    let drawn = drawn_levels(&pieces);
     let level = level_of(&pieces, 0)?;
     let camera = level.home;
     Ok(Rendered {
@@ -496,40 +516,36 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
     })
 }
 
-fn containers(pieces: &[Piece]) -> Result<Vec<ModelContainer>> {
-    pieces
-        .iter()
-        .map(|piece| Ok(ModelContainer::read(Cursor::new(piece.bytes.clone()))?))
-        .collect()
-}
-
 fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
-    let containers = containers(pieces)?;
     let sources: Vec<_> = pieces
         .iter()
-        .map(|piece| Worn {
-            path: piece.path.as_str(),
-            variant: piece.variant.get(),
-            deform: piece.deform.as_deref(),
-            skin: piece.skin,
+        .map(|piece| {
+            (
+                Worn {
+                    path: piece.path.as_str(),
+                    variant: piece.variant.get(),
+                    deform: piece.deform.as_deref(),
+                    skin: piece.skin,
+                },
+                &piece.container,
+            )
         })
-        .zip(&containers)
         .collect();
     read_level(&sources, lod)
 }
 
 /// Which detail levels the pieces draw anything at.
-fn drawn_levels(pieces: &[Piece]) -> Result<[bool; 3]> {
-    let containers = containers(pieces)?;
-    Ok(std::array::from_fn(|lod| {
-        containers.iter().any(|container| {
-            container
+fn drawn_levels(pieces: &[Piece]) -> [bool; 3] {
+    std::array::from_fn(|lod| {
+        pieces.iter().any(|piece| {
+            piece
+                .container
                 .model(detail(lod as u8))
                 .meshes()
                 .iter()
                 .any(draws)
         })
-    }))
+    })
 }
 
 pub(super) fn detail(lod: u8) -> Lod {
@@ -2690,8 +2706,20 @@ impl Rendered {
     /// only where the body under the clothes changed.
     pub fn redress(&mut self, parts: &[Source]) -> Result<()> {
         let first = parts.first().context("a model of no files")?;
-        let pieces: Vec<_> = parts.iter().map(Piece::new).collect();
-        let drawn = drawn_levels(&pieces)?;
+        // Whatever is still being worn is kept as it stands, imc and all, so a change of one slot
+        // reads one file rather than every file the character is drawn from.
+        let mut held: BTreeMap<String, Piece> = std::mem::take(&mut self.pieces)
+            .into_iter()
+            .map(|piece| (piece.path.clone(), piece))
+            .collect();
+        let pieces = parts
+            .iter()
+            .map(|source| match held.remove(&source.path) {
+                Some(piece) if piece.wears(source) => Ok(piece),
+                _ => Piece::new(source),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let drawn = drawn_levels(&pieces);
         let lod = match drawn[usize::from(self.lod.get())] {
             true => self.lod.get(),
             false => 0,

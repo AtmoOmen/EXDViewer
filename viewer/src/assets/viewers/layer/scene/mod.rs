@@ -35,7 +35,7 @@ use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3};
 use half::f16;
 use ironworks::file::layer::{
-    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneTimeline, Transform,
+    InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneSpin, SceneTimeline, Transform,
 };
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
@@ -189,8 +189,8 @@ struct Driven {
     tail: Mat4,
 }
 
-/// What moves a shared group's node, either way it is stated. Nothing names the unit of either
-/// span; the game's own timelines run at thirty to the second.
+/// What moves a shared group's node, whichever way it is stated. Nothing names the unit any of
+/// their spans are in; the game's own timelines run at thirty to the second.
 enum Motion {
     /// A timeline's nine curves over its span, which state where the node stands outright.
     Keyed {
@@ -203,6 +203,13 @@ enum Motion {
         translation: Lane,
         rotation: Lane,
         scale: Lane,
+    },
+    /// A turn about one axis the scene never stops, on top of where the file placed it. The period
+    /// is signed, and runs the turn the other way where it is negative.
+    Spin {
+        placement: Transform,
+        axis: Vec3,
+        period: f32,
     },
 }
 
@@ -287,6 +294,21 @@ impl Motion {
                     Quat::from_mat3(&rotation(placement.rotation()))
                         * Quat::from_euler(glam::EulerRot::XYZ, turn.x, turn.y, turn.z),
                     Vec3::from_array(placement.translation()) + shift,
+                )
+            }
+            Self::Spin {
+                placement,
+                axis,
+                period,
+            } => {
+                // Kept as a fraction of a whole turn rather than wrapped in radians, so a negative
+                // period runs backwards instead of mirroring.
+                let along = (time / period).fract();
+                Mat4::from_scale_rotation_translation(
+                    Vec3::from_array(placement.scale()),
+                    Quat::from_mat3(&rotation(placement.rotation()))
+                        * Quat::from_axis_angle(*axis, along * std::f32::consts::TAU),
+                    Vec3::from_array(placement.translation()),
                 )
             }
         }
@@ -911,6 +933,7 @@ impl Scene {
                 source.groups(),
                 source.scene().map_or(&[][..], SceneTimeline::of),
                 source.scene().map_or(&[][..], SceneAnimation::of),
+                source.scene().map_or(&[][..], SceneSpin::of),
                 Mat4::IDENTITY,
                 (0, [0; 4]),
                 1.0,
@@ -928,11 +951,12 @@ impl Scene {
     /// Reads placements out of a file's layers, queueing every shared group it names.
     #[allow(clippy::too_many_arguments)]
     /// The motion a scene gives one of its own instances, where it gives it one: a timeline that
-    /// plays curves over it, or a swing it repeats forever without one.
+    /// plays curves over it, or a swing or a turn it repeats forever without one.
     fn motion(
         &mut self,
         timelines: &[SceneTimeline],
         animations: &[SceneAnimation],
+        spins: &[SceneSpin],
         instance: u32,
         placement: Transform,
     ) -> Option<usize> {
@@ -1019,6 +1043,21 @@ impl Scene {
             });
             return Some(self.motions.len() - 1);
         }
+        for spin in spins {
+            if spin.instance() != instance || spin.period() == 0.0 {
+                continue;
+            }
+            self.motions.push(Motion::Spin {
+                placement,
+                axis: match spin.axis() {
+                    0 => Vec3::X,
+                    2 => Vec3::Z,
+                    _ => Vec3::Y,
+                },
+                period: spin.period(),
+            });
+            return Some(self.motions.len() - 1);
+        }
         None
     }
 
@@ -1028,6 +1067,7 @@ impl Scene {
         groups: &[LayerGroup],
         timelines: &[SceneTimeline],
         animations: &[SceneAnimation],
+        spins: &[SceneSpin],
         transform: Mat4,
         key: (u32, [u8; 4]),
         scale: f32,
@@ -1057,7 +1097,7 @@ impl Scene {
                     let placed = instance.transform();
                     // What a timeline moves stands where the curves put it rather than where the
                     // file did, and everything under it follows.
-                    let moved = self.motion(timelines, animations, instance.id(), placed);
+                    let moved = self.motion(timelines, animations, spins, instance.id(), placed);
                     let local = match moved {
                         Some(at) => self.motions[at].at(0.0),
                         None => matrix(placed),
@@ -1922,6 +1962,7 @@ impl Scene {
                 source.groups(),
                 source.scene().map_or(&[][..], SceneTimeline::of),
                 source.scene().map_or(&[][..], SceneAnimation::of),
+                source.scene().map_or(&[][..], SceneSpin::of),
                 transform,
                 key,
                 scale,

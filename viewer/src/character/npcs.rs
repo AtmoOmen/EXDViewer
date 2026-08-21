@@ -22,17 +22,18 @@ const GENDER: u32 = 1;
 const TRIBE: u32 = 4;
 /// The customisations stated as the menu's own position, which counts from one where a menu counts
 /// from nought, each with the mask picking it out of a byte two menus share.
-const LISTED: [(u32, u8); 5] = [
+const LISTED: [(u32, u8); 6] = [
     (14, 0xFF), // Eyebrows
     (16, 0x7F), // Eye shape
     (17, 0xFF), // Nose
     (18, 0xFF), // Jaw
     (19, 0x7F), // Mouth
+    (22, 0xFF), // Tail or ear shape
 ];
 /// The ones stated outright: a palette index, a slider's own place, a mask of features, or the
 /// number the file tree files a set under. A face and a hairstyle are the last of those and not a
 /// position: the artillerist's face is 216, which is `f0216` on disk and a face no menu offers.
-const STATED: [(u32, u8); 14] = [
+const STATED: [(u32, u8); 13] = [
     (3, 0xFF),  // Height
     (5, 0xFF),  // Face
     (6, 0xFF),  // Hairstyle
@@ -43,7 +44,6 @@ const STATED: [(u32, u8); 14] = [
     (13, 0xFF), // Tattoo colour
     (20, 0xFF), // Lip colour
     (21, 0xFF), // Muscle tone
-    (22, 0xFF), // Tail or ear shape
     (23, 0xFF), // Bust size
     (24, 0x7F), // Face paint
     (25, 0xFF), // Face paint colour

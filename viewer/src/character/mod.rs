@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use egui::{CentralPanel, Color32, RichText, ScrollArea, TextEdit, containers::panel::Panel};
+use glam::Vec3;
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -63,6 +64,10 @@ const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
 const MUSCLE_TONE: u32 = 21;
+const BUST: u32 = 23;
+/// A tail, or a Viera's ears: the game files both under the one customisation, and under one
+/// numbered set beneath the body that grows it.
+const TAIL: u32 = 22;
 
 /// What the creator ticks beside a menu rather than offering as a menu of its own, keyed past every
 /// menu number so the two can never collide. The game holds each of them all the same: a highlight
@@ -195,6 +200,7 @@ pub struct CharacterBuilder {
     body: Vec<String>,
     faces: Vec<Set>,
     hairs: Vec<Set>,
+    tails: Vec<Set>,
     face: u16,
     hair: u16,
     attire: Attire,
@@ -271,6 +277,7 @@ impl Default for CharacterBuilder {
             body: Vec::new(),
             faces: Vec::new(),
             hairs: Vec::new(),
+            tails: Vec::new(),
             face: 1,
             hair: 1,
             attire: Attire::default(),
@@ -525,6 +532,7 @@ impl CharacterBuilder {
             self.body = body(&listing, &deformers, self.code);
             self.faces = sets(&listing, &self.code, "face");
             self.hairs = sets(&listing, &self.code, "hair");
+            self.tails = grown(&listing, self.code);
             // Both name the files the character is built from, so both are read out of what the
             // menus have been left at rather than kept alongside it. Where nothing has been picked
             // that is the creator's own opening choice, which is not the first of either: a
@@ -554,6 +562,22 @@ impl CharacterBuilder {
             }
             self.face = pick(&self.faces, self.face);
             self.hair = pick(&self.hairs, self.hair);
+            // The two feature menus are halves of the one byte the game holds them in, so where
+            // each opens has to be laid into its own half of it before either menu reads it. Left
+            // until the creator has landed: a body it cannot answer for yet would seed nothing,
+            // and nothing is what the menus would then be held at.
+            let features = self.creator.body(self.tribe, self.female).map(|body| {
+                body.menus
+                    .iter()
+                    .filter(|menu| menu.customize == FEATURES)
+                    .fold((0, 0), |(mask, first), menu| {
+                        (mask | menu.init << first, first + menu.count)
+                    })
+                    .0
+            });
+            if let Some(features) = features {
+                self.choices.entry(FEATURES).or_insert(features);
+            }
         }
 
         let wanted = self.wearing(&listing, &deformers);
@@ -601,14 +625,14 @@ impl CharacterBuilder {
         // Cheap enough to hand over on every frame: it walks the parts of one character and the
         // model keeps what it was already at, so nothing is rebuilt where nothing was picked.
         if let Some(Ok(model)) = &self.model {
-            let (customize, hidden, shapes, stature) = self.made();
-            model.made(customize, hidden, shapes, stature);
+            let (customize, hidden, shapes, stature, bust) = self.made();
+            model.made(customize, hidden, shapes, stature, bust);
         }
     }
 
     /// What the creator's menus have been left at, and what the shaders and the model make of it:
     /// the colours to tint with, the parts to leave undrawn and the shape keys to deform by.
-    fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32) {
+    fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32, Vec3) {
         let mut customize = mdl::Customize::default();
         // Every feature the face declares, less the ones the creator has been left on.
         let mut hidden: BTreeSet<String> = FEATURE_LETTERS
@@ -618,9 +642,10 @@ impl CharacterBuilder {
         hidden.extend(self.covered());
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
+        let mut bust = Vec3::ONE;
         let mut tone = 0.5;
         let Some(body) = self.creator.body(self.tribe, self.female) else {
-            return (customize, hidden, shapes, stature);
+            return (customize, hidden, shapes, stature, bust);
         };
         let palettes = self
             .made
@@ -669,28 +694,20 @@ impl CharacterBuilder {
             }
             // Only the lane, since the muscle tone menu comes before the skin colour that would
             // otherwise write over what it left.
-            // An icon menu holds what it was left at as the number the file tree files the set
-            // under, and nought is the empty box a face wearing no paint is offered under.
-            if menu.customize == FACE_PAINT {
-                let held = match self.choices.get(&FACE_PAINT) {
-                    Some(id) => *id as u16,
-                    None => {
-                        self.choice_of(menu, menu.init.min(menu.count.saturating_sub(1)))
-                            .id
-                    }
-                };
-                customize.paint = (held > 0).then_some(held);
-            }
             if menu.customize == MUSCLE_TONE {
-                let last = menu.count.saturating_sub(1).max(1) as usize;
-                tone = at.min(last) as f32 / last as f32;
+                tone = slid(menu, at as u32);
             }
             if menu.customize == HEIGHT
                 && let Some(palettes) = &palettes
             {
                 let [short, tall] = palettes.height;
-                let last = menu.count.saturating_sub(1).max(1) as usize;
-                stature = short + (tall - short) * (at.min(last) as f32 / last as f32);
+                stature = short + (tall - short) * slid(menu, at as u32);
+            }
+            if menu.customize == BUST
+                && let Some(palettes) = &palettes
+            {
+                let [small, full] = palettes.bust;
+                bust = Vec3::from(small).lerp(Vec3::from(full), slid(menu, at as u32));
             }
             if menu.customize == FEATURES {
                 // The two menus that share this one number are halves of the same run of parts,
@@ -702,8 +719,8 @@ impl CharacterBuilder {
                     .filter(|held| held.customize == FEATURES)
                     .map(|held| held.count as usize)
                     .sum::<usize>();
-                for bit in 0..menu.count as usize {
-                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(first + bit) {
+                for bit in first..first + menu.count as usize {
+                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(bit) {
                         hidden.remove(&format!("{FEATURE}{letter}"));
                     }
                 }
@@ -716,6 +733,7 @@ impl CharacterBuilder {
             }
         }
         customize.skin[3] = tone;
+        customize.paint = self.paint();
         if customize.paint.is_none() {
             customize.decal[3] = 0.0;
         }
@@ -723,7 +741,7 @@ impl CharacterBuilder {
         if !self.ticked(LIPSTICK) {
             customize.lip[3] = 0.0;
         }
-        (customize, hidden, shapes, stature)
+        (customize, hidden, shapes, stature, bust)
     }
 
     /// The seams the outfit covers, which draw nothing rather than through what is over them.
@@ -756,6 +774,33 @@ impl CharacterBuilder {
             .get(&menu.customize)
             .copied()
             .unwrap_or(menu.init)
+    }
+
+    /// The face paint the creator has been left at, as the number the file tree files the set
+    /// under. Nought is the empty box a face wearing none is offered under.
+    fn paint(&self) -> Option<u16> {
+        let menu = self
+            .creator
+            .body(self.tribe, self.female)
+            .and_then(|body| body.menus.iter().find(|menu| menu.customize == FACE_PAINT))?;
+        let held = match self.choices.get(&FACE_PAINT) {
+            Some(id) => *id as u16,
+            None => {
+                self.choice_of(menu, menu.init.min(menu.count.saturating_sub(1)))
+                    .id
+            }
+        };
+        (held > 0).then_some(held)
+    }
+
+    /// The tail or ear set the creator has been left at, which is one past where the choice sits.
+    fn tail(&self) -> u16 {
+        let at = self
+            .creator
+            .body(self.tribe, self.female)
+            .and_then(|body| body.menus.iter().find(|menu| menu.customize == TAIL))
+            .map_or(0, |menu| self.choice(menu) as u16 + 1);
+        pick(&self.tails, at)
     }
 
     /// What one of the creator's own boxes has been left at, and whether it is ticked.
@@ -858,6 +903,7 @@ impl CharacterBuilder {
                 true => held(&self.hairs, self.hair),
                 false => Vec::new(),
             })
+            .chain(held(&self.tails, self.tail()))
             .map(|path| (path, 0))
             .collect();
         for slot in Slot::ALL {
@@ -1096,9 +1142,9 @@ impl CharacterBuilder {
             let current = self.choice(menu);
             match menu.kind {
                 menus::Kind::Slider => {
-                    let last = menu.count.saturating_sub(1);
-                    let mut held = current.min(last);
-                    if ui.add(egui::Slider::new(&mut held, 0..=last)).changed() {
+                    let [low, high] = menu.range;
+                    let mut held = current.clamp(low, high);
+                    if ui.add(egui::Slider::new(&mut held, low..=high)).changed() {
                         picked = Some(Pick::Made(menu.customize, held));
                     }
                 }
@@ -1124,7 +1170,7 @@ impl CharacterBuilder {
                     let shown = body.features.get(face);
                     let bits: Vec<Choice> = (0..menu.count)
                         .map(|bit| Choice {
-                            at: bit,
+                            at: first as u32 + bit,
                             id: bit as u16 + 1,
                             icon: shown
                                 .and_then(|icons| icons.get(first + bit as usize))
@@ -1158,24 +1204,37 @@ impl CharacterBuilder {
                             picked = Some(Pick::Made(LIPSTICK, u32::from(on)));
                         }
                     }
-                    // Lips and face paint are offered as a dark run and a light one, which is one
-                    // palette in the file: the half a colour belongs to is the top bit of its own
-                    // index, so switching halves is that bit and nothing else.
-                    let mut half = 0;
-                    if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
-                        half = current / HALF;
-                        ui.horizontal(|ui| {
-                            for (at, name) in [(0, "Dark"), (1, "Light")] {
-                                if ui.selectable_label(half == at, name).clicked() {
-                                    picked =
-                                        Some(Pick::Made(menu.customize, current % HALF + at * HALF));
+                    // A colour the character is not wearing has nothing to pick: what puts it on
+                    // is the box beside it, or the paint the colour is for.
+                    let worn = match menu.customize {
+                        LIP_COLOR => self.ticked(LIPSTICK),
+                        FACE_PAINT_COLOR => self.paint().is_some(),
+                        _ => true,
+                    };
+                    if worn {
+                        // Lips and face paint are offered as a dark run and a light one, which is
+                        // one palette in the file: the half a colour belongs to is the top bit of
+                        // its own index, so switching halves is that bit and nothing else.
+                        let mut half = 0;
+                        if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
+                            half = current / HALF;
+                            ui.horizontal(|ui| {
+                                for (at, name) in [(0, "Dark"), (1, "Light")] {
+                                    if ui.selectable_label(half == at, name).clicked() {
+                                        picked = Some(Pick::Made(
+                                            menu.customize,
+                                            current % HALF + at * HALF,
+                                        ));
+                                    }
                                 }
-                            }
-                        });
-                    }
-                    let offered = half * HALF..half * HALF + menu.count;
-                    if let Some(index) = colors(ui, ("character_colors", at), swatches, offered, current) {
-                        picked = Some(Pick::Made(menu.customize, index));
+                            });
+                        }
+                        let offered = half * HALF..half * HALF + menu.count;
+                        if let Some(index) =
+                            colors(ui, ("character_colors", at), swatches, offered, current)
+                        {
+                            picked = Some(Pick::Made(menu.customize, index));
+                        }
                     }
                     // A second colour the creator only offers once its own box is ticked: a strand
                     // is mixed between two hair colours, and an eye takes one each.
@@ -1390,6 +1449,15 @@ impl CharacterBuilder {
     /// offered under. A menu either names icons outright or names rows that carry one.
     fn choice_of(&self, menu: &menus::Menu, index: u32) -> Choice {
         let param = menu.params.get(index as usize).copied().unwrap_or(0);
+        // The icons a tail or a pair of ears is offered under end at 91 to 94 whatever the body,
+        // so the choice is where it sits and the set it names is one past that.
+        if menu.customize == TAIL {
+            return Choice {
+                at: index,
+                id: index as u16,
+                icon: (param > 0).then_some(param as u32),
+            };
+        }
         // A row's icon stands whatever it is: nought is the empty box wearing no face paint is
         // offered under, not a choice the creator left undrawn. One no row holds falls back to
         // naming the icon outright, and to its own number where it names nothing.
@@ -1598,6 +1666,17 @@ enum Pick {
     Npc(usize),
 }
 
+/// How far along a bar a menu has been left, over the range the row states for it rather than over
+/// its count: every slider counts a hundred and runs nought to a hundred, so its middle is exactly
+/// the middle.
+fn slid(menu: &menus::Menu, at: u32) -> f32 {
+    let [low, high] = menu.range;
+    match high > low {
+        true => (at.clamp(low, high) - low) as f32 / (high - low) as f32,
+        false => 0.0,
+    }
+}
+
 /// One choice a menu offers: where it sits in the menu, the number the file tree files it under,
 /// and the icon the creator draws it as.
 struct Choice {
@@ -1663,6 +1742,16 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
             parts: parts(listing, &under, id),
         })
         .collect()
+}
+
+/// The sets of whichever part the body grows: a tail where it has one, a Viera's ears where it does
+/// not. Both are numbered the same way and neither body ships the other.
+fn grown(listing: &Listing, code: u16) -> Vec<Set> {
+    ["tail", "zear"]
+        .into_iter()
+        .map(|kind| sets(listing, &code, kind))
+        .find(|found| !found.is_empty())
+        .unwrap_or_default()
 }
 
 /// The model a code wears a set as, by slot. A set is one directory, so the whole of it is listed

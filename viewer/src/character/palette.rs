@@ -56,6 +56,8 @@ pub struct Palettes {
     pub face_paint: Swatches,
     /// How tall a body may be built, as the file states the clan's range.
     pub height: [f32; 2],
+    /// What a bust may be scaled to, three axes in the bone's own frame.
+    pub bust: [[f32; 3]; 2],
 }
 
 /// The file, read once and asked for a clan at a time.
@@ -93,6 +95,7 @@ impl Made {
                 true => [scale.female_min_height(), scale.female_max_height()],
                 false => [scale.male_min_height(), scale.male_max_height()],
             },
+            bust: [scale.bust_min(), scale.bust_max()],
         }
     }
 }

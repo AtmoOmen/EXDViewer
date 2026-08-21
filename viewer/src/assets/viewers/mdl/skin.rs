@@ -43,6 +43,9 @@ const PACK_LIST_HEIGHT: f32 = 240.0;
 /// way out and swings them, and averaging every bone instead walks the frame around with it.
 const ANCHOR: &str = "n_hara";
 
+/// The pair of bones the creator's bust slider scales, which are leaves of the body's own skeleton.
+const BUST: [&str; 2] = ["j_mune_l", "j_mune_r"];
+
 /// The rig a model is skinned to, ready to answer a mesh's bone table with a palette.
 pub struct Skin {
     rig: Rig,
@@ -278,6 +281,8 @@ pub struct Animation {
     motion: Cell<Option<usize>>,
     /// How far into it, in seconds.
     time: Cell<f32>,
+    /// What the bust bones are scaled by, three axes in their own frame.
+    bust: Cell<Vec3>,
     running: Cell<bool>,
 }
 
@@ -302,6 +307,7 @@ impl Animation {
             pack: RefCell::new(None),
             motion: Cell::new(Some(0)),
             time: Cell::new(0.0),
+            bust: Cell::new(Vec3::ONE),
             running: Cell::new(false),
         }
     }
@@ -423,6 +429,12 @@ impl Animation {
         self.motion.set(None);
     }
 
+    /// What the bust bones are scaled by, which `human.cmp` states as a pair of bounds a slider
+    /// runs between.
+    pub fn shaped(&self, bust: Vec3) {
+        self.bust.set(bust);
+    }
+
     /// Plays `path` from its first motion, since a pack picked by hand was picked to be watched.
     pub fn play(&self, path: &str) {
         path.clone_into(&mut self.wanted.borrow_mut());
@@ -459,10 +471,16 @@ impl Animation {
             .motion
             .get()
             .and_then(|at| pack.as_ref().and_then(Fetch::ready)?.binding(at));
-        let posed = match binding {
+        let mut posed = match binding {
             Some(binding) => skin.rig.posed(binding, self.time.get()),
             None => skin.rig.world(skin.rig.reference()),
         };
+        let bust = self.bust.get();
+        if bust != Vec3::ONE {
+            for bone in BUST.iter().filter_map(|name| skin.named.get(*name)) {
+                posed[*bone] = posed[*bone].scaled(bust);
+            }
+        }
         let (center, spread) = middle(&posed, skin.anchor);
         Pose {
             joints: tables

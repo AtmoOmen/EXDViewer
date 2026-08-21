@@ -37,6 +37,15 @@ impl Placement {
     pub fn matrix(&self) -> Mat4 {
         Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.translation)
     }
+
+    /// Scaled about its own origin, along its own axes, which is what a proportion slider does to
+    /// the one pair of bones it names.
+    pub fn scaled(&self, by: Vec3) -> Self {
+        Self {
+            scale: self.scale * by,
+            ..*self
+        }
+    }
 }
 
 fn axes(values: [f32; 4], count: usize) -> String {

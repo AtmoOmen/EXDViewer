@@ -119,8 +119,8 @@ const KEYS: [(u32, u32); 3] = [
 /// reach: the file's own `range` is one in nearly every light a zone places.
 const REACH: f32 = 6.0;
 
-/// How fast a shared group's timeline runs. No file names the unit its keys are stated in; this is
-/// the rate the game's own timelines are read at.
+/// How fast a shared group's timeline runs. An animation pack states one span both in seconds and
+/// in these, and the two agree on thirty a second.
 const TICKS: f32 = 30.0;
 
 /// Requests of each kind in flight at once.
@@ -189,8 +189,8 @@ struct Driven {
     tail: Mat4,
 }
 
-/// What moves a shared group's node, either way it is stated. Nothing names the unit of either
-/// span; the game's own timelines run at thirty to the second.
+/// What moves a shared group's node, whichever way it is stated. Both spans are in the ticks a
+/// timeline is keyed in.
 enum Motion {
     /// A timeline's nine curves over its span, which state where the node stands outright.
     Keyed {
@@ -669,8 +669,8 @@ pub struct Scene {
     renderer: Arc<Mutex<gpu::Renderer>>,
     /// Where each model stands at each detail level, as the last rebuild left them.
     placed: Vec<[Vec<program::Instance>; 3]>,
-    /// What the zone's shared groups animate, and how far along their timelines it stands. The unit
-    /// is not named by any file; the game's own timelines run at thirty of these to the second.
+    /// What the zone's shared groups animate, and how far along their timelines it stands, in the
+    /// ticks a timeline is keyed in.
     motions: Vec<Motion>,
     clock: f32,
     /// Placements the last rebuild would have drawn had their model arrived.

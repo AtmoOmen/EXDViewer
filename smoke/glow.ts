@@ -29,7 +29,7 @@ const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 
 function serve() {
     return Bun.serve({
-        port: Number(flag("port", "9085")),
+        port: Number(flag("port", "0")),
         async fetch(request) {
             const asked = join(dist, decodeURIComponent(new URL(request.url).pathname));
             if (asked.startsWith(dist) && !asked.endsWith("/")) {

@@ -73,7 +73,7 @@ fn names(ironworks: &Ironworks<SqPack<Install>>, path: &str) -> Option<Vec<(Stri
                 _ => String::new(),
             };
             found.push((
-                format!("mesh {index} x{:5} {span}", part.count),
+                format!("mesh {index} [{}] x{:5} {span}", mesh.material().unwrap_or_default(), part.count),
                 claimed,
             ));
         }
@@ -193,6 +193,10 @@ fn flags(set: &eqp::Set) -> Vec<&'static str> {
         ("head.show_hair_override", head.show_hair_override()),
         ("head.hide_neck", head.hide_neck()),
         ("head.show_necklace", head.show_necklace()),
+        ("head.show_earrings_hyur_roegadyn", head.show_earrings_hyur_roegadyn()),
+        ("head.show_earrings_elezen_lalafell", head.show_earrings_elezen_lalafell()),
+        ("head.show_earrings_miqote_hrothgar_viera", head.show_earrings_miqote_hrothgar_viera()),
+        ("head.show_earrings_au_ra", head.show_earrings_au_ra()),
         ("head.show_ears_human", head.show_ears_human()),
         ("head.show_ears_miqote", head.show_ears_miqote()),
         ("head.show_ears_au_ra", head.show_ears_au_ra()),
@@ -215,7 +219,7 @@ fn main() {
             match names(&ironworks, path) {
                 Some(parts) => {
                     for (where_, claimed) in parts {
-                        println!("  {where_:24} {}", claimed.join(", "));
+                        println!("  {where_:70} {}", claimed.join(", "));
                     }
                 }
                 None => println!("  {path}: unreadable"),
@@ -264,6 +268,98 @@ fn main() {
                     .map(|(_, name)| name.as_str())
                     .collect();
                 println!("  variant {variant}: mask {mask:#012b} shows {}", shown.join(" "));
+            }
+        }
+        "legs" => {
+            let bytes: Vec<u8> = ironworks.file(EQP).unwrap();
+            let file = eqp::EquipmentParameter::read(Cursor::new(bytes)).unwrap();
+            println!("set,knee,calf,ankle,sho,dwn_hiz,dwn_sne,dwn_lpd");
+            for id in 1..arguments.get(1).and_then(|h| h.parse::<u16>().ok()).unwrap_or(1200) {
+                let sho = format!("chara/equipment/e{id:04}/model/c0101e{id:04}_sho.mdl");
+                let dwn = format!("chara/equipment/e{id:04}/model/c0101e{id:04}_dwn.mdl");
+                let held = file.set(id);
+                let feet = held.feet();
+                if !feet.enabled() {
+                    continue;
+                }
+                let high = |parts: &Option<Vec<(String, Vec<String>)>>, want: Option<&str>| -> f32 {
+                    let Some(parts) = parts else { return -1.0 };
+                    let mut top = -1.0f32;
+                    for (span, claimed) in parts {
+                        let matched = match want {
+                            Some(name) => claimed.iter().any(|held| held == name),
+                            None => claimed.is_empty(),
+                        };
+                        if !matched {
+                            continue;
+                        }
+                        if let Some(value) = span.rsplit("..").next().and_then(|h| h.trim().parse::<f32>().ok()) {
+                            top = top.max(value);
+                        }
+                    }
+                    top
+                };
+                let sho_parts = names(&ironworks, &sho);
+                let dwn_parts = names(&ironworks, &dwn);
+                if sho_parts.is_none() {
+                    continue;
+                }
+                let boot = high(&sho_parts, None).max(high(&sho_parts, Some("atr_leg")));
+                println!(
+                    "{id},{},{},{},{:.3},{:.3},{:.3},{:.3}",
+                    u8::from(feet.hide_knee()),
+                    u8::from(feet.hide_calf()),
+                    u8::from(feet.hide_ankle()),
+                    boot,
+                    high(&dwn_parts, Some("atr_hiz")),
+                    high(&dwn_parts, Some("atr_sne")),
+                    high(&sho_parts, Some("atr_lpd")),
+                );
+            }
+        }
+        "arms" => {
+            let bytes: Vec<u8> = ironworks.file(EQP).unwrap();
+            let file = eqp::EquipmentParameter::read(Cursor::new(bytes)).unwrap();
+            println!("set,elbow,forearm,glv_base,glv_arm,top_hij,top_ude");
+            for id in 1..arguments.get(1).and_then(|h| h.parse::<u16>().ok()).unwrap_or(1200) {
+                let glv = format!("chara/equipment/e{id:04}/model/c0101e{id:04}_glv.mdl");
+                let top = format!("chara/equipment/e{id:04}/model/c0101e{id:04}_top.mdl");
+                let held = file.set(id);
+                let hands = held.hands();
+                if !hands.enabled() {
+                    continue;
+                }
+                let high = |parts: &Option<Vec<(String, Vec<String>)>>, want: Option<&str>| -> f32 {
+                    let Some(parts) = parts else { return -1.0 };
+                    let mut top = -1.0f32;
+                    for (span, claimed) in parts {
+                        let matched = match want {
+                            Some(name) => claimed.iter().any(|held| held == name),
+                            None => claimed.is_empty(),
+                        };
+                        if !matched {
+                            continue;
+                        }
+                        if let Some(value) = span.rsplit("..").next().and_then(|h| h.trim().parse::<f32>().ok()) {
+                            top = top.max(value);
+                        }
+                    }
+                    top
+                };
+                let glv_parts = names(&ironworks, &glv);
+                let top_parts = names(&ironworks, &top);
+                if glv_parts.is_none() {
+                    continue;
+                }
+                println!(
+                    "{id},{},{},{:.3},{:.3},{:.3},{:.3}",
+                    u8::from(hands.hide_elbow()),
+                    u8::from(hands.hide_forearm()),
+                    high(&glv_parts, None),
+                    high(&glv_parts, Some("atr_arm")),
+                    high(&top_parts, Some("atr_hij")),
+                    high(&top_parts, Some("atr_ude")),
+                );
             }
         }
         "set" => {

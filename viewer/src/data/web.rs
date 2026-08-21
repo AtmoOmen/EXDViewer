@@ -1,26 +1,20 @@
-use crate::utils::{GameVersion, HttpResponse, fetch, fetch_range, fetch_url, tex_loader};
+use crate::utils::{GameVersion, HttpResponse, fetch, fetch_range, fetch_url};
 
-use super::{
-    DecodedTexture, FileProvider, ModelLods, PackageSpans, decode_texture, list_url, with_list_id,
-};
+use super::{DecodedTexture, FileProvider, decode_texture, list_url, with_list_id};
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
-use ironworks::file::{File, tex::Texture};
+use ironworks::file::{mdl::Lods, shpk::Spans};
 use serde::Deserialize;
-use std::io::Cursor;
 use url::Url;
 
 /// Header the API names a file's sqpack stream kind in. Absent from a server predating it, which is
 /// why the kind is optional rather than a parse failure.
 const STREAM_KIND: &str = "x-stream-kind";
 
-/// Where a texture's mipmap offsets sit in its head.
-const SURFACES: usize = 28;
-
-/// How much of a model is asked for before its head has said where its geometry begins. Whatever
-/// of the head falls past this takes a second request.
-const HEAD: u64 = 4096;
+/// Header the API names the part of a file it served in. Absent from a server predating it, which
+/// is how a whole file is told from a slice of one.
+const SLICE: &str = "x-slice";
 
 pub struct WebFileProvider(Url);
 
@@ -173,6 +167,10 @@ impl WebFileProvider {
     }
 }
 
+fn sliced(response: &HttpResponse) -> Option<&str> {
+    response.headers.get(SLICE)
+}
+
 fn stream(response: HttpResponse) -> (Option<String>, Vec<u8>) {
     let kind = response.headers.get(STREAM_KIND).map(str::to_owned);
     (kind, response.bytes)
@@ -224,109 +222,55 @@ impl FileProvider for WebFileProvider {
         Ok(stream(fetch(url).await?))
     }
 
-    /// Only the mipmap the caller will draw at, taken from the file where it sits rather than by
-    /// reading the chain that leads up to it.
+    /// Only the mipmap the caller will draw at, cut server side so the levels above it cost
+    /// neither a transfer nor a request of their own.
     async fn read_texture(
         &self,
         path: &str,
         max_dim: Option<u16>,
     ) -> anyhow::Result<DecodedTexture> {
-        if max_dim.is_none() {
-            return decode_texture(path, self.read(path).await?, max_dim).await;
+        let mut url = self.file_url(path)?;
+        if let Some(max_dim) = max_dim {
+            url.query_pairs_mut()
+                .append_pair("mip", &max_dim.to_string());
         }
-        let url = self.file_url(path)?;
-        let head = fetch_range(url.clone(), 0, Some(u64::from(Texture::HEADER_SIZE) - 1)).await?;
-        // A store that will not serve part of a file answers with the whole of it.
-        if head.status != 206 || head.bytes.len() != Texture::HEADER_SIZE as usize {
-            return decode_texture(path, head.bytes, max_dim).await;
-        }
-
-        let texture = Texture::read(Cursor::new(head.bytes.clone()))?;
-        let level = tex_loader::preview_level(&texture, max_dim);
-        let Some(from) = texture.mip_offset(level) else {
-            return decode_texture(path, self.read(path).await?, max_dim).await;
-        };
-        let to = texture.mip_offset(level + 1);
-        let mip = fetch_range(url, u64::from(from), to.map(|to| u64::from(to) - 1)).await?;
-
-        let mut bytes = head.bytes;
-        let at = SURFACES + usize::from(level) * 4;
-        bytes[at..at + 4].copy_from_slice(&Texture::HEADER_SIZE.to_le_bytes());
-        if at + 8 <= Texture::HEADER_SIZE as usize {
-            bytes[at + 4..at + 8].copy_from_slice(&0u32.to_le_bytes());
-        }
-        bytes.extend(mip.bytes);
-        decode_texture(path, bytes, max_dim).await
+        decode_texture(path, fetch(url).await?.bytes, max_dim).await
     }
 
     /// Only the detail level the scene will draw, with the head that names it and nothing of the
     /// levels either side.
     async fn read_model(&self, path: &str, lod: u8) -> anyhow::Result<(Vec<u8>, u8)> {
-        let url = self.file_url(path)?;
-        let head = fetch_range(url.clone(), 0, Some(HEAD - 1)).await?;
-        let Some(lods) = ModelLods::read(&head.bytes) else {
-            return Ok((head.bytes, lod));
-        };
-        let level = lods.level(lod);
-        if head.status != 206 || (head.bytes.len() as u64) < HEAD {
-            return Ok((head.bytes, level));
-        }
-
-        let (Some(start), Some(span)) = (lods.head(), lods.span(level)) else {
-            return Ok((self.read(path).await?, level));
-        };
-        let mut bytes = head.bytes;
-        if u64::from(start) > HEAD {
-            bytes.extend(
-                fetch_range(url.clone(), HEAD, Some(u64::from(start) - 1))
-                    .await?
-                    .bytes,
-            );
-        }
-        bytes.truncate(start as usize);
-        lods.keep(&mut bytes, level);
-        bytes.extend(
-            fetch_range(url, u64::from(span.start), Some(u64::from(span.end) - 1))
-                .await?
-                .bytes,
-        );
-        Ok((bytes, level))
+        let mut url = self.file_url(path)?;
+        url.query_pairs_mut().append_pair("lod", &lod.to_string());
+        let held = fetch(url).await?;
+        let level = sliced(&held)
+            .and_then(|held| held.strip_prefix("lod=")?.parse().ok())
+            .or_else(|| Lods::read(&held.bytes).map(|lods| lods.level(lod)))
+            .unwrap_or(lod);
+        Ok((held.bytes, level))
     }
 
     /// The tables and the string block alone, with the bytecode left a hole for whatever a draw
     /// turns out to select.
     async fn read_package(&self, path: &str) -> anyhow::Result<(Vec<u8>, bool)> {
-        let url = self.file_url(path)?;
-        let head = fetch_range(url.clone(), 0, Some(HEAD - 1)).await?;
-        // A store that will not serve part of a file answers with the whole of it.
-        if head.status != 206 || (head.bytes.len() as u64) < HEAD {
-            return Ok((head.bytes, false));
+        let mut url = self.file_url(path)?;
+        url.query_pairs_mut().append_pair("tables", "1");
+        let held = fetch(url).await?;
+        if sliced(&held) != Some("tables") {
+            return Ok((held.bytes, false));
         }
-        let Some(spans) = PackageSpans::read(&head.bytes) else {
-            return Ok((self.read(path).await?, false));
+        // The hole is never sent, so it is opened here from the spans the tables state.
+        let Some(spans) = Spans::read(&held.bytes) else {
+            return Ok((held.bytes, false));
         };
-
-        let mut bytes = head.bytes;
-        if u64::from(spans.blobs) > HEAD {
-            bytes.extend(
-                fetch_range(url.clone(), HEAD, Some(u64::from(spans.blobs) - 1))
-                    .await?
-                    .bytes,
-            );
-        }
-        bytes.truncate(spans.blobs as usize);
+        let mut bytes = held.bytes;
+        let strings = bytes.split_off(spans.blobs as usize);
         bytes.resize(spans.strings as usize, 0);
-        if spans.strings < spans.size {
-            bytes.extend(
-                fetch_range(url, u64::from(spans.strings), Some(u64::from(spans.size) - 1))
-                    .await?
-                    .bytes,
-            );
-        }
-        match bytes.len() == spans.size as usize {
-            true => Ok((bytes, true)),
-            false => Ok((self.read(path).await?, false)),
-        }
+        bytes.extend(strings);
+        Ok(match bytes.len() == spans.size as usize {
+            true => (bytes, true),
+            false => (self.read(path).await?, false),
+        })
     }
 
     async fn read_span(&self, path: &str, span: std::ops::Range<u32>) -> anyhow::Result<Vec<u8>> {

@@ -43,16 +43,7 @@ pub fn decode_preview_sized(
 
 /// The coarsest mipmap that still covers `max_dim` on its longest edge; `None` picks the finest.
 pub fn preview_level(texture: &tex::Texture, max_dim: Option<u16>) -> u8 {
-    max_dim
-        .and_then(|max_dim| {
-            (0..texture.mip_levels())
-                .take_while(|level| {
-                    let (width, height) = texture.mip_size(*level);
-                    width.max(height) >= max_dim
-                })
-                .last()
-        })
-        .unwrap_or(0)
+    max_dim.map_or(0, |max_dim| texture.level_covering(max_dim))
 }
 
 /// Decode an already-read texture. The web backend hands out bytes rather than an

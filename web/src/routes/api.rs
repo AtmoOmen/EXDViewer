@@ -30,10 +30,15 @@ use crate::{
     data::{Region, RepositoryInfo, Target},
     paths::report::{Collector, Submission},
     queue::MessageQueue,
+    slice::Slice,
 };
 
 /// What format a file was stored as.
 pub const STREAM_KIND: header::HeaderName = header::HeaderName::from_static("x-stream-kind");
+
+/// Header naming which part of a file was served, for a request that asked for one. Absent from a
+/// server predating it, which is how a client knows to take the file whole.
+pub const SLICE: header::HeaderName = header::HeaderName::from_static("x-slice");
 
 pub fn service() -> impl HttpServiceFactory {
     web::scope("/api")
@@ -182,7 +187,11 @@ async fn serve_file(
     let data = data.get_file(target, Some(version), path.clone()).await;
     match data {
         Ok(data) => {
-            let asked = partial(request, &data.bytes);
+            let cut = web::Query::<Slice>::from_query(request.query_string())
+                .ok()
+                .and_then(|asked| asked.cut(&data.bytes));
+            let bytes = cut.as_ref().map_or(&data.bytes, |(bytes, _)| bytes);
+            let asked = partial(request, bytes);
             let mut response = match asked {
                 Some(_) => HttpResponse::PartialContent(),
                 None => HttpResponse::Ok(),
@@ -192,9 +201,12 @@ async fn serve_file(
                 .insert_header(CacheControl(directives))
                 .insert_header((header::ACCEPT_RANGES, "bytes"))
                 .insert_header((STREAM_KIND, data.kind.name()));
+            if let Some((_, name)) = &cut {
+                response.insert_header((SLICE, name.clone()));
+            }
             Ok(match asked {
                 Some((bytes, range)) => response.insert_header(range).body(bytes),
-                None => response.body(data.bytes.clone()),
+                None => response.body(bytes.clone()),
             })
         }
         Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),

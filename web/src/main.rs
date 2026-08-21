@@ -4,6 +4,7 @@ mod data;
 mod paths;
 mod queue;
 mod routes;
+mod slice;
 mod smart_bufreader;
 
 use ::config::{Config, Environment, File, FileFormat};
@@ -24,7 +25,7 @@ use thiserror::Error;
 use crate::{
     paths::{PathIndex, report::Collector},
     queue::MessageQueue,
-    routes::api::STREAM_KIND,
+    routes::api::{SLICE, STREAM_KIND},
 };
 
 shadow!(build);
@@ -110,7 +111,7 @@ async fn main() -> Result<(), ServerError> {
                     .allowed_origin_fn(|origin, _req_head| origin.to_str().is_ok_and(is_dev_origin))
                     .allowed_methods(vec!["GET", "POST"])
                     .allowed_headers(vec!["Content-Type"])
-                    .expose_headers(vec![STREAM_KIND]),
+                    .expose_headers(vec![SLICE, STREAM_KIND]),
             )
             .wrap(NormalizePath::new(TrailingSlash::Always))
             .wrap(Condition::new(

@@ -21,8 +21,8 @@ struct Census {
     failed: usize,
     /// How many of each node magic, and how many a file ever holds at once.
     nodes: BTreeMap<String, (usize, BTreeSet<usize>)>,
-    /// Bytes each unmodelled node spends, by magic.
-    unread: BTreeMap<String, usize>,
+    /// How many of each unmodelled node, the bytes they spend, and one file holding one.
+    unread: BTreeMap<String, (usize, usize, String)>,
     extensions: BTreeMap<String, BTreeMap<u32, usize>>,
     participants: BTreeMap<u32, usize>,
     /// Participants whose id is not `0xff000000 | (index + 1)`.
@@ -54,7 +54,7 @@ fn main() {
         match Cutscene::read(std::io::Cursor::new(bytes)) {
             Ok(file) => {
                 census.read += 1;
-                census.take(&file);
+                census.take(path, &file);
             }
             Err(error) => {
                 census.failed += 1;
@@ -66,7 +66,7 @@ fn main() {
 }
 
 impl Census {
-    fn take(&mut self, file: &Cutscene) {
+    fn take(&mut self, path: &str, file: &Cutscene) {
         let mut held: BTreeMap<String, usize> = BTreeMap::new();
         for node in file.nodes() {
             *held.entry(magic(node).to_owned()).or_default() += 1;
@@ -100,10 +100,13 @@ impl Census {
                 }
                 Node::Timeline(timeline) => self.timeline(timeline),
                 Node::Unknown(unknown) => {
-                    *self
+                    let entry = self
                         .unread
                         .entry(String::from_utf8_lossy(&unknown.magic()).into_owned())
-                        .or_default() += unknown.body().len();
+                        .or_default();
+                    entry.0 += 1;
+                    entry.1 += unknown.body().len();
+                    entry.2 = path.to_owned();
                 }
                 Node::Sheet(_) | Node::Scene(_) => {}
             }
@@ -164,8 +167,8 @@ impl Census {
             let held: Vec<String> = held.iter().map(usize::to_string).collect();
             println!("  {magic}  {count:>7}  per file {}", held.join(","));
         }
-        for (magic, bytes) in &self.unread {
-            println!("  {magic} holds {bytes} unread bytes");
+        for (magic, (count, bytes, path)) in &self.unread {
+            println!("  {magic}  {count:>7}  {bytes} unread bytes, last in {path}");
         }
 
         println!("\nresources by extension, and the flag beside each");

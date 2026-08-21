@@ -7342,6 +7342,7 @@ dependencies = [
  "async-trait",
  "base64 0.23.0",
  "binrw",
+ "blocking",
  "bytemuck",
  "catppuccin-egui",
  "compact_str",

@@ -588,7 +588,13 @@ fn kind_name(kind: MeshKind) -> &'static str {
 
 /// The `.imc` this model's part draws with, derived from the model's own path rather than named
 /// anywhere in the file: strip the `model/<name>.mdl` tail and the directory left names it.
+///
+/// A human ships none. Its body, face, hair and ears wear no variant, and asking for one is a
+/// request for a file the game does not have.
 fn imc_path(path: &str) -> Option<String> {
+    if path.starts_with("chara/human/") {
+        return None;
+    }
     let base = &path[..path.rfind("/model/")?];
     let part = base.rsplit('/').next()?;
     Some(format!("{base}/{part}.imc"))

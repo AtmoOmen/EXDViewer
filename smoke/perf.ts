@@ -70,6 +70,9 @@ async function launch(profile: string) {
             "--no-sandbox",
             "--disable-dev-shm-usage",
             ...(process.env.SOFTWARE ? ["--enable-unsafe-swiftshader"] : ["--use-gl=angle", "--use-angle=gl", "--ignore-gpu-blocklist", "--enable-gpu"]),
+            // Paints are vblank-paced otherwise, which rounds every frame time to a multiple of
+            // 16.7 ms and hides any change smaller than that.
+            ...(process.env.UNCAPPED ? ["--disable-gpu-vsync", "--disable-frame-rate-limit"] : []),
             "--no-first-run",
             "--no-default-browser-check",
             "--hide-scrollbars",

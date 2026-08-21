@@ -30,7 +30,7 @@ use ironworks::file::sklb::{SkeletonBinary, Transform};
 use super::super::skeleton::{Placement, Rig, middle};
 use super::super::{link, placed, section};
 use crate::backend::Backend;
-use crate::data::listing::Listed;
+use crate::data::listing::{Listed, Listing};
 use crate::settings::api_base;
 use crate::utils::{TrackedPromise, file_name};
 
@@ -45,6 +45,10 @@ const ANCHOR: &str = "n_hara";
 
 /// The pair of bones the creator's bust slider scales, which are leaves of the body's own skeleton.
 const BUST: [&str; 2] = ["j_mune_l", "j_mune_r"];
+
+/// The bone a mount seats its rider on. Every body the game names a mount carries one, and nothing
+/// else does.
+const SEAT: &str = "n_mount";
 
 /// The rig a model is skinned to, ready to answer a mesh's bone table with a palette.
 pub struct Skin {
@@ -160,6 +164,8 @@ pub struct Pose {
     /// How much further from the middle of them the pose flings the bones than the rest pose does,
     /// which the geometry hung on them reaches by too.
     pub stretch: f32,
+    /// Where this rig seats a rider, for the one that is a mount.
+    seat: Option<Placement>,
 }
 
 /// The motions a pack holds, and the name each of its animations gives one.
@@ -386,8 +392,9 @@ pub struct Animation {
     built: RefCell<Vec<String>>,
     /// Whether the bones this rig cannot name have been counted since it was last built.
     counted: Cell<bool>,
-    /// Where the model's own path says its packs are filed, and the ones the listing names there.
-    root: Option<String>,
+    /// The bodies to read packs from, nearest first, which is the model's own until it is told
+    /// what it is built on.
+    built_on: RefCell<Vec<String>>,
     packs: RefCell<Option<Result<Vec<Pack>, Rc<str>>>>,
     /// Cuts the pack list down while the picker is open.
     filter: RefCell<String>,
@@ -398,22 +405,27 @@ pub struct Animation {
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
     running: Cell<bool>,
+    /// The mount the body is seated on, posed on a rig of its own. A mount names the same bones a
+    /// body does, so the two cannot be merged the way an extra skeleton is.
+    mounted: Option<Box<Animation>>,
 }
 
 impl Animation {
     pub fn new<'a>(models: impl IntoIterator<Item = &'a str>) -> Self {
         let models: Vec<&str> = models.into_iter().collect();
         let code = models.iter().find_map(|model| code(model));
+        let mount = ridden(code.as_deref(), &models);
+        let worn = worn_by(mount.as_deref(), &models);
         Self {
             skeleton: code.as_deref().and_then(skeleton_path),
             base: RefCell::new(None),
-            needs: RefCell::new(needed(&models)),
+            needs: RefCell::new(needed(&worn)),
             tables: Default::default(),
             extras: Default::default(),
             skin: RefCell::new(None),
             built: Default::default(),
             counted: Cell::new(false),
-            root: code.as_deref().and_then(pack_root),
+            built_on: RefCell::new(code.iter().cloned().collect()),
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
             body: Layer {
@@ -423,6 +435,7 @@ impl Animation {
             face: Default::default(),
             bust: Cell::new(Vec3::ONE),
             running: Cell::new(false),
+            mounted: mount.map(|mount| Box::new(Animation::new(filed_under(&mount, &models)))),
             code,
         }
     }
@@ -432,38 +445,54 @@ impl Animation {
         self.code.as_deref()?.get(1..)?.parse().ok()
     }
 
+    /// Whether a model is one this body is drawn from, which its file name states. Asked of a
+    /// mount, which is the one body that never borrows a model from another.
+    fn owns(&self, model: &str) -> bool {
+        code(model) == self.code
+    }
+
+    /// The mount the body is seated on, where it is on one.
+    pub fn rides(&self) -> Option<&str> {
+        self.mounted.as_ref()?.code.as_deref()
+    }
+
+    /// Whether the rigs on hand are the ones a set of models is posed on: the body the first of
+    /// them names, and the mount it is ridden on. Neither can be pointed elsewhere once built, so
+    /// a change to either is what asks for a rig of its own.
+    pub fn poses<'a>(&self, models: impl IntoIterator<Item = &'a str>) -> bool {
+        let models: Vec<&str> = models.into_iter().collect();
+        let code = models.iter().find_map(|model| code(model));
+        let mount = ridden(code.as_deref(), &models);
+        code == self.code && mount == self.mounted.as_ref().and_then(|held| held.code.clone())
+    }
+
     /// Points the extra skeletons at what is being worn now, keeping everything already fetched:
     /// a hat that comes back off a picker is not worth asking for twice.
     pub fn rewear<'a>(&self, models: impl IntoIterator<Item = &'a str>) {
-        *self.needs.borrow_mut() = needed(&models.into_iter().collect::<Vec<_>>());
+        let models: Vec<&str> = models.into_iter().collect();
+        let mount = self.mounted.as_ref().and_then(|held| held.code.as_deref());
+        if let (Some(mounted), Some(mount)) = (&self.mounted, mount) {
+            mounted.rewear(filed_under(mount, &models));
+        }
+        *self.needs.borrow_mut() = needed(&worn_by(mount, &models));
     }
 
     /// Asks for the skeleton, the listing and the pack, and takes up whichever has landed. Only
     /// called for a model that carries bone indices, so nothing is fetched for one that could not
     /// be posed.
     pub fn poll(&self, ctx: &egui::Context, backend: &Backend) {
+        if let Some(mounted) = &self.mounted {
+            mounted.poll(ctx, backend);
+        }
         if let Some(path) = &self.skeleton {
             Fetch::poll(&mut self.base.borrow_mut(), backend, path, Skeleton::read);
         }
         self.poll_extras(backend);
         let mut held = self.packs.borrow_mut();
-        if let Some(root) = &self.root
-            && held.is_none()
-        {
+        if held.is_none() {
             *held = match backend.listing(&api_base(ctx)) {
                 Listed::Loading => None,
-                Listed::Ready(listing) => {
-                    let packs = found(root, listing.under(root));
-                    // The conventional pack is right for nearly every model but not for all of
-                    // them, and a weapon is named none at all; either way the listing knows better.
-                    let mut wanted = self.body.wanted.borrow_mut();
-                    if !packs.iter().any(|pack| pack.path == *wanted)
-                        && let Some(first) = packs.first()
-                    {
-                        first.path.clone_into(&mut wanted);
-                    }
-                    Some(Ok(packs))
-                }
+                Listed::Ready(listing) => Some(Ok(self.listed(&listing))),
                 Listed::Failed(why) => Some(Err(why)),
             };
         }
@@ -502,6 +531,47 @@ impl Animation {
             let held = extras.entry(path.clone()).or_default();
             Fetch::poll(held, backend, &path, Skeleton::read);
         }
+    }
+
+    /// The bodies to read packs from, nearest first. A body the game files no animation under is
+    /// played from the one it is built on, which is the same tree that says where it borrows its
+    /// clothes from.
+    pub fn built_on(&self, lineage: Vec<String>) {
+        if !lineage.is_empty() {
+            *self.built_on.borrow_mut() = lineage;
+        }
+    }
+
+    /// The packs of the nearest body that files any, opened on the nearest body's own idle. Few
+    /// bodies carry an idle at all, and one that does not is stood in the idle of the body it is
+    /// built on rather than in whichever pack the listing happens to name first.
+    fn listed(&self, listing: &Listing) -> Vec<Pack> {
+        let mut listed: Vec<Pack> = Vec::new();
+        let mut idle = None;
+        for code in self.built_on.borrow().iter() {
+            let Some(root) = pack_root(code) else {
+                continue;
+            };
+            let packs = found(&root, listing.under(&root));
+            if idle.is_none() {
+                idle = pack_path(code).filter(|path| packs.iter().any(|pack| pack.path == *path));
+            }
+            if listed.is_empty() {
+                listed = packs;
+            }
+            if idle.is_some() {
+                break;
+            }
+        }
+        // The conventional pack is right for nearly every model but not for all of them, and a
+        // weapon is named none at all; either way the listing knows better.
+        let mut wanted = self.body.wanted.borrow_mut();
+        if !listed.iter().any(|pack| pack.path == *wanted)
+            && let Some(path) = idle.or_else(|| listed.first().map(|pack| pack.path.clone()))
+        {
+            *wanted = path;
+        }
+        listed
     }
 
     /// Asks for the tables the parts on screen need, for the skeletons those tables name, and
@@ -644,14 +714,50 @@ impl Animation {
         Some(format!("chara/human/{code}/animation/f{id:04}/"))
     }
 
-    /// Where the model stands this frame: one walk of the rig, and everything read off it.
-    pub fn pose(&self, tables: &[Vec<String>], skeleton: bool) -> Pose {
+    /// Where the model stands this frame: a walk of each rig it is drawn on. A mesh is posed by
+    /// the rig of the body whose file it came from, and a rider's is then carried to the seat its
+    /// mount names.
+    pub fn pose(&self, tables: &[Vec<String>], worn: &[&str], skeleton: bool) -> Pose {
+        let Some(mounted) = &self.mounted else {
+            return self.walked(tables, &[], None, skeleton);
+        };
+        let ridden: Vec<bool> = worn.iter().map(|path| mounted.owns(path)).collect();
+        let rider: Vec<bool> = ridden.iter().map(|held| !held).collect();
+        let mount = mounted.walked(tables, &ridden, None, skeleton);
+        let mut pose = self.walked(tables, &rider, mount.seat.as_ref(), skeleton);
+        for (mesh, joints) in pose.joints.iter_mut().enumerate() {
+            if ridden[mesh] {
+                joints.clone_from(&mount.joints[mesh]);
+            }
+        }
+        pose.skeleton.extend(mount.skeleton);
+        // Both bodies were measured standing at the origin, so the frame is moved half the lift the
+        // seat carries the rider by and widened by the other half.
+        let lift = mount.seat.map_or(Vec3::ZERO, |seat| seat.translation());
+        pose.drift += lift * 0.5;
+        pose.stretch += lift.length() * 0.5;
+        pose
+    }
+
+    /// Where one rig stands this frame, and everything read off it. `poses` says which meshes this
+    /// rig answers for, the rest being another's to pose; an empty one is every mesh. `at` carries
+    /// the whole rig somewhere, which is where a mount seats its rider.
+    fn walked(
+        &self,
+        tables: &[Vec<String>],
+        poses: &[bool],
+        at: Option<&Placement>,
+        skeleton: bool,
+    ) -> Pose {
+        let mine = |mesh: usize| poses.get(mesh).copied().unwrap_or(true);
         let skin = self.skin.borrow();
         let Some(skin) = skin.as_ref() else {
             return Pose {
-                joints: tables
-                    .iter()
-                    .map(|table| vec![Mat4::IDENTITY; table.len()])
+                joints: (0..tables.len())
+                    .map(|mesh| match mine(mesh) {
+                        true => vec![Mat4::IDENTITY; tables[mesh].len()],
+                        false => Vec::new(),
+                    })
                     .collect(),
                 ..Default::default()
             };
@@ -659,10 +765,16 @@ impl Animation {
         if !self.counted.replace(true) {
             // A bone the rig cannot name poses nothing and leaves its vertices where the file put
             // them, which is a face standing still while the head it hangs on turns.
-            let wanted: usize = tables.iter().map(Vec::len).sum();
-            let missing = tables
+            let named: Vec<&Vec<String>> = tables
                 .iter()
-                .flatten()
+                .enumerate()
+                .filter(|(mesh, _)| mine(*mesh))
+                .map(|(_, table)| table)
+                .collect();
+            let wanted: usize = named.iter().map(|table| table.len()).sum();
+            let missing = named
+                .iter()
+                .flat_map(|table| table.iter())
                 .filter(|name| !skin.named.contains_key(*name))
                 .count();
             log::info!("mdl: {missing} of {wanted} bones are named by no skeleton");
@@ -675,7 +787,7 @@ impl Animation {
             let Some(binding) = layer
                 .motion
                 .get()
-                .and_then(|at| pack.as_ref().and_then(Fetch::ready)?.binding(at))
+                .and_then(|motion| pack.as_ref().and_then(Fetch::ready)?.binding(motion))
             else {
                 continue;
             };
@@ -700,10 +812,18 @@ impl Animation {
             }
         }
         let (center, spread) = middle(&posed, skin.anchor);
+        let seat = skin.named.get(SEAT).map(|bone| posed[*bone]);
+        if let Some(at) = at {
+            for placement in &mut posed {
+                *placement = placement.carried(at);
+            }
+        }
         Pose {
-            joints: tables
-                .iter()
-                .map(|table| skin.palette(table, &posed))
+            joints: (0..tables.len())
+                .map(|mesh| match mine(mesh) {
+                    true => skin.palette(&tables[mesh], &posed),
+                    false => Vec::new(),
+                })
                 .collect(),
             skeleton: match skeleton {
                 true => skin.rig.batches(&posed, None),
@@ -711,6 +831,7 @@ impl Animation {
             },
             drift: center - skin.home,
             stretch: (spread - skin.spread).max(0.0),
+            seat,
         }
     }
 
@@ -718,6 +839,22 @@ impl Animation {
     /// Only the pickers are offered until a motion is picked: with none the model stands where its
     /// own file put it, and there is nothing to play.
     pub fn ui(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| self.row(ui));
+        if let Some(mounted) = &self.mounted {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Mount").strong());
+                mounted.row(ui);
+            });
+        }
+    }
+
+    /// One rig's pickers and clock. Everything in here is named after the body it plays, since a
+    /// mounted character draws two of these rows.
+    fn row(&self, ui: &mut egui::Ui) {
+        ui.push_id(self.code.as_deref().unwrap_or_default(), |ui| self.picked(ui));
+    }
+
+    fn picked(&self, ui: &mut egui::Ui) {
         self.packs_ui(ui);
         self.body.motion_ui(ui, "mdl_motion");
         self.face.motion_ui(ui, "mdl_face_motion");
@@ -831,6 +968,40 @@ impl Animation {
             None => {}
         }
     }
+}
+
+/// The models a mount is drawn from, which are the ones filed under its own code.
+fn filed_under<'a>(mount: &str, models: &[&'a str]) -> Vec<&'a str> {
+    models
+        .iter()
+        .copied()
+        .filter(|model| code(model).as_deref() == Some(mount))
+        .collect()
+}
+
+/// The models the rider is drawn from, which is everything the mount is not. A body wears models
+/// filed under other bodies' codes wherever it ships none of its own, so what a rider is drawn from
+/// cannot be read off the codes its files carry.
+fn worn_by<'a>(mount: Option<&str>, models: &[&'a str]) -> Vec<&'a str> {
+    let Some(mount) = mount else {
+        return models.to_vec();
+    };
+    models
+        .iter()
+        .copied()
+        .filter(|model| code(model).as_deref() != Some(mount))
+        .collect()
+}
+
+/// The mount a body is being drawn seated on. Only a human rides one, and only one of them is
+/// ridden at a time.
+fn ridden(rig: Option<&str>, models: &[&str]) -> Option<String> {
+    if !rig.is_some_and(|code| code.starts_with('c')) {
+        return None;
+    }
+    models.iter().find_map(|model| {
+        code(model).filter(|held| matches!(held.as_bytes().first(), Some(b'm' | b'd')))
+    })
 }
 
 /// The `m0911` of a model's path, which is what its skeleton and its animations are filed under.

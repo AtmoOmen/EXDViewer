@@ -238,6 +238,9 @@ pub struct CharacterBuilder {
     race: u32,
     tribe: u32,
     female: bool,
+    /// Whether the body is the child one the game grows a race's own children on, which only some
+    /// races are built.
+    child: bool,
     /// Whether the sets on hand are the picked clan's. A pick drops it rather than the sets
     /// themselves, so a clan this version ships nothing for is read once and not on every frame.
     stood: bool,
@@ -285,7 +288,7 @@ pub struct CharacterBuilder {
     emote: Option<usize>,
     emote_search: String,
     emotes_matched: RefCell<(Option<String>, Vec<usize>)>,
-    /// The mounts the game names, and which of them is being stood on instead of the character.
+    /// The mounts the game names, and which of them the character is seated on.
     mounts: Vec<mounts::Mount>,
     reading_mounts: Option<TrackedPromise<Result<Vec<mounts::Mount>>>>,
     mount: Option<usize>,
@@ -320,6 +323,7 @@ impl Default for CharacterBuilder {
             race: 1,
             tribe: 1,
             female: false,
+            child: false,
             stood: false,
             code: 101,
             skin: None,
@@ -569,7 +573,13 @@ impl CharacterBuilder {
 
         if !self.stood {
             self.stood = true;
-            let code = resolve(self.tribe, self.female);
+            // Only some races are built a child, and a code the deformers do not carry names
+            // nothing on disk at all.
+            let wanted = resolve(self.tribe, self.female, self.child);
+            let code = match deformers.knows(wanted) {
+                true => wanted,
+                false => resolve(self.tribe, self.female, false),
+            };
             // Which model a set is worn as is the code's to say, so the answers held for the last
             // one say nothing about this one.
             if code != self.code {
@@ -930,15 +940,6 @@ impl CharacterBuilder {
     /// The face leads, since the first file is what names the skeleton the rest are posed on and a
     /// piece of equipment worn by a race that has no model of its own is filed under another's code.
     fn wearing(&self, listing: &Listing, deformers: &mdl::Deformers) -> Vec<(String, u16)> {
-        if let Some(mount) = self.mount.and_then(|at| self.mounts.get(at)) {
-            let mut found = listing.under(&mount.under);
-            found.retain(|path| path.ends_with(".mdl"));
-            found.sort();
-            return found
-                .into_iter()
-                .map(|path| (path, mount.variant))
-                .collect();
-        }
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -974,7 +975,24 @@ impl CharacterBuilder {
                 None => found.extend(part(&self.body, slot).map(|path| (path, 0))),
             }
         }
+        found.extend(self.ridden(listing));
         found
+    }
+
+    /// The mount the character is seated on. A mount is a whole body rather than anything worn, so
+    /// every model under it is drawn, and it comes after the character: the first file is what
+    /// names the skeleton the rest are posed on.
+    fn ridden(&self, listing: &Listing) -> Vec<(String, u16)> {
+        let Some(mount) = self.mount.and_then(|at| self.mounts.get(at)) else {
+            return Vec::new();
+        };
+        let mut found = listing.under(&mount.under);
+        found.retain(|path| path.ends_with(".mdl"));
+        found.sort();
+        found
+            .into_iter()
+            .map(|path| (path, mount.variant))
+            .collect()
     }
 
     /// Whether the body's own model for a slot still draws, which is what a piece worn over it
@@ -1048,6 +1066,29 @@ impl CharacterBuilder {
                 )
             }
         }
+        if let Some(Ok(model)) = &self.model {
+            model.built_on(self.lineage());
+        }
+    }
+
+    /// Whether the game builds a child of the picked clan at all.
+    fn builds_a_child(&self) -> bool {
+        self.deformers
+            .as_ref()
+            .is_some_and(|deformers| deformers.knows(resolve(self.tribe, self.female, true)))
+    }
+
+    /// This body and every one it is built on, as the animation directories name them. Few bodies
+    /// carry animation of their own: a child's is the one child body's, and a Highlander man's is
+    /// the Midlander's.
+    fn lineage(&self) -> Vec<String> {
+        let Some(deformers) = &self.deformers else {
+            return Vec::new();
+        };
+        deformers
+            .lineage(self.code)
+            .map(|code| format!("c{code:04}"))
+            .collect()
     }
 
     /// One slot to dress: what is in it, and, while its picker is open, everything the game names
@@ -1425,8 +1466,9 @@ impl CharacterBuilder {
         .map(Pick::Emote)
     }
 
-    /// The mounts the game names, one of which stands in place of the character. A mount is a body
-    /// of its own rather than something the character is put on, so picking one draws it alone.
+    /// The mounts the game names, one of which the character rides. A mount is a body of its own
+    /// and names the same bones a rider does, so the two are posed apart and the rider is carried
+    /// to the seat the mount's own skeleton names.
     fn mounts_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1600,6 +1642,13 @@ impl CharacterBuilder {
                                 picked = Some(Pick::Gender(female));
                             }
                         }
+                        // Only some races are built a child, and the rest would draw the adult
+                        // under a lit button.
+                        if self.builds_a_child()
+                            && ui.selectable_label(self.child, "Child").clicked()
+                        {
+                            picked = Some(Pick::Child(!self.child));
+                        }
                     });
                     ui.add_space(8.0);
                     ui.label(RichText::new("Attire").strong());
@@ -1670,6 +1719,10 @@ impl CharacterBuilder {
                 self.female = female;
                 self.stood = false;
             }
+            Some(Pick::Child(child)) => {
+                self.child = child;
+                self.stood = false;
+            }
             Some(Pick::Attire(attire)) => self.attire = attire,
             Some(Pick::Job(job)) => self.job = job,
             Some(Pick::Npc(npc)) => {
@@ -1678,6 +1731,7 @@ impl CharacterBuilder {
                     self.race = held.race;
                     self.tribe = held.tribe;
                     self.female = held.female;
+                    self.child = held.child;
                     self.choices = held.choices.iter().copied().collect();
                     self.attire = Attire::Npc;
                     self.chosen = [None; 10];
@@ -1719,6 +1773,7 @@ enum Pick {
     Race(u32),
     Tribe(u32),
     Gender(bool),
+    Child(bool),
     Attire(Attire),
     Job(usize),
     /// A menu left at a choice, by the customisation it drives.
@@ -1726,7 +1781,7 @@ enum Pick {
     /// The same, where what a menu holds is the number the file tree files the choice under.
     Choice(u32, u16),
     Emote(usize),
-    /// A mount to stand in place of the character, or none to stand it again.
+    /// A mount to seat the character on, or none to stand it on the ground again.
     Mount(Option<usize>),
     Npc(usize),
 }
@@ -1760,12 +1815,18 @@ struct Choice {
 /// every other race shares.
 const BUILT_ON: [u16; 16] = [1, 3, 5, 5, 11, 11, 7, 7, 9, 9, 13, 13, 15, 15, 17, 17];
 
-fn resolve(tribe: u32, female: bool) -> u16 {
+/// The variant a code ends in: the body the race is grown to. A child is one shape shared by every
+/// race that has one, which is why the deformers build every `04` on `c0104` rather than on the
+/// adult of its own race.
+const ADULT: u16 = 1;
+const CHILD: u16 = 4;
+
+fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
     let body = BUILT_ON
         .get(tribe.max(1) as usize - 1)
         .copied()
         .unwrap_or(1);
-    (body + u16::from(female)) * 100 + 1
+    (body + u16::from(female)) * 100 + if child { CHILD } else { ADULT }
 }
 
 /// The body a model was made for, which its own file name states.
@@ -2054,4 +2115,29 @@ fn numbered(ui: &mut egui::Ui, choice: &Choice, selected: bool, why: &str) -> bo
     )
     .on_hover_text(why)
     .clicked()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve;
+
+    /// A clan and gender name the body they are built on, and the variant says how grown it is.
+    #[test]
+    fn a_clan_names_its_body() {
+        assert_eq!(resolve(1, false, false), 101);
+        assert_eq!(resolve(1, true, false), 201);
+        assert_eq!(resolve(3, false, false), 501);
+        assert_eq!(resolve(3, true, false), 601);
+        assert_eq!(resolve(16, true, false), 1801);
+    }
+
+    /// The child body is the same clan's, one variant along, which is the only thing that tells
+    /// Alphinaud from an adult Wildwood Elezen.
+    #[test]
+    fn a_child_is_the_same_body_grown_less() {
+        assert_eq!(resolve(3, false, true), 504);
+        assert_eq!(resolve(3, true, true), 604);
+        assert_eq!(resolve(1, false, true), 104);
+        assert_eq!(resolve(8, true, true), 804);
+    }
 }

@@ -1233,7 +1233,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     }
 
     if model.level.borrow().skinned {
-        ui.horizontal(|ui| model.animation.ui(ui));
+        model.animation.ui(ui);
     }
 
     model.poll(ui, backend);
@@ -1924,7 +1924,12 @@ impl Rendered {
 
         // The joints move the geometry after the file stated its bounds, so where the model stands
         // has to be worked out before anything is framed or clipped against it.
-        let pose = self.animation.pose(&level.bones, self.skeleton.get());
+        let worn: Vec<&str> = level
+            .meshes
+            .iter()
+            .map(|mesh| self.pieces[mesh.piece].path.as_str())
+            .collect();
+        let pose = self.animation.pose(&level.bones, &worn, self.skeleton.get());
         // Carried rather than written into the camera, so a motion that walks runs in place and the
         // user's own orbit, pan and zoom still mean what they did.
         let focus = level.home.target + pose.drift;
@@ -2731,11 +2736,17 @@ impl Rendered {
         self.animation.express(name);
     }
 
+    /// The bodies to read animation from, nearest first, which the caller reads off the same tree
+    /// that says where a body borrows its clothes from.
+    pub fn built_on(&self, lineage: Vec<String>) {
+        self.animation.built_on(lineage);
+    }
+
     /// Puts a different set of files on the same character, which is what a change of clothes is.
     /// The camera, the rig and the motion it is playing all stay where they are; the rig is rebuilt
     /// only where the body under the clothes changed.
     pub fn redress(&mut self, parts: &[Source]) -> Result<()> {
-        let first = parts.first().context("a model of no files")?;
+        parts.first().context("a model of no files")?;
         // Whatever is still being worn is kept as it stands, imc and all, so a change of one slot
         // reads one file rather than every file the character is drawn from.
         let mut held: BTreeMap<String, Piece> = std::mem::take(&mut self.pieces)
@@ -2756,11 +2767,10 @@ impl Rendered {
         };
         let level = level_of(&pieces, lod)?;
 
-        if skin::code(&first.path)
-            != self
-                .pieces
-                .first()
-                .and_then(|piece| skin::code(&piece.path))
+        let rode = self.animation.rides().map(str::to_owned);
+        if !self
+            .animation
+            .poses(parts.iter().map(|part| part.path.as_str()))
         {
             self.animation = skin::Animation::new(parts.iter().map(|part| part.path.as_str()));
         }
@@ -2770,6 +2780,11 @@ impl Rendered {
         self.drawn = drawn;
         self.lod.set(lod);
         self.rebuild(level);
+        // Getting on or off a mount is a whole second body coming and going rather than a change of
+        // clothes, so the view is framed on what is there now.
+        if rode.as_deref() != self.animation.rides() {
+            self.camera.set(self.level.borrow().home);
+        }
         Ok(())
     }
 

@@ -2805,11 +2805,14 @@ impl Scene {
             .filter(|texture| matches!(texture, Texture::Fetching(_)))
             .count();
         let maps = self.maps();
+        // Either reading: a material the wind reaches and no still model carries is translated
+        // only as a waving one.
+        let drawn: HashSet<usize> = self.translated.keys().map(|(at, _)| *at).collect();
         let wanted: Vec<String> = self
             .materials
             .iter()
             .enumerate()
-            .filter(|(at, _)| self.translated.contains_key(&(*at, false)))
+            .filter(|(at, _)| drawn.contains(at))
             .filter_map(|(_, (_, slot))| match slot {
                 Slot::Ready(material) => Some(material),
                 _ => None,

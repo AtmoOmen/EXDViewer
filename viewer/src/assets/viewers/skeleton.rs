@@ -59,6 +59,8 @@ fn axes(values: [f32; 4], count: usize) -> String {
 /// A skeleton's bones, ready to list and to draw.
 pub struct Rig {
     names: Vec<String>,
+    /// Which bone the skeleton calls each name, since everything else names one that way.
+    at: HashMap<String, usize>,
     parents: Vec<i16>,
     reference: Vec<Transform>,
     /// Each bone and the depth it hangs at, ordered so a bone follows its parent.
@@ -112,8 +114,14 @@ impl Rig {
             ("Scale", 26),
         ];
 
+        let at = names
+            .iter()
+            .enumerate()
+            .map(|(bone, name)| (name.clone(), bone))
+            .collect();
         let mut rig = Self {
             names,
+            at,
             parents,
             reference,
             rows,
@@ -127,17 +135,12 @@ impl Rig {
 
     /// This rig with another skeleton's bones hung off the ones it already names. A name both
     /// carry stays this one's: an extra skeleton states the head where its own file put it rather
-    /// than where the body's chain carries it. New bones are appended, so the indices a motion's
-    /// tracks name still reach the bones they were authored against.
+    /// than where the body's chain carries it.
     pub fn merged(&self, names: &[String], parents: &[i16], reference: &[Transform]) -> Self {
         let mut held = self.names.clone();
         let mut hung = self.parents.clone();
         let mut rest = self.reference.clone();
-        let mut at: HashMap<String, usize> = held
-            .iter()
-            .enumerate()
-            .map(|(bone, name)| (name.clone(), bone))
-            .collect();
+        let mut at = self.at.clone();
         for (bone, name) in names.iter().enumerate() {
             if at.contains_key(name) {
                 continue;
@@ -163,6 +166,11 @@ impl Rig {
     /// What the skeleton calls each of its bones, which is how anything else names one.
     pub fn names(&self) -> &[String] {
         &self.names
+    }
+
+    /// Which bone the skeleton calls `name`.
+    pub fn bone(&self, name: &str) -> Option<usize> {
+        self.at.get(name).copied()
     }
 
     pub fn reference(&self) -> &[Transform] {
@@ -197,21 +205,29 @@ impl Rig {
         world
     }
 
-    /// Where the bones end up with a motion's tracks sampled over the rest pose at `time`.
+    /// Lays a motion's tracks over `locals` at `time`.
     ///
-    /// A motion's tracks are in its own order, which is not the skeleton's, and a track may name a
-    /// bone the skeleton does not have.
-    pub fn posed(&self, binding: &Binding, time: f32) -> Vec<Placement> {
-        let mut locals = self.reference.clone();
-        for (track, transform) in binding.motion().sample(time).into_iter().enumerate() {
-            if let Some(bone) = binding.bones().get(track).copied()
-                && let Ok(bone) = usize::try_from(bone)
-                && bone < locals.len()
-            {
-                locals[bone] = transform;
-            }
+    /// A motion's tracks are in the order of the skeleton it was authored against, which need not
+    /// be this rig, so `ordering` names that skeleton's bones and the two are matched by name. A
+    /// motion that blends states a delta in each bone's own frame rather than a pose of its own,
+    /// so it composes onto whatever is already there.
+    pub fn lay(&self, locals: &mut [Transform], binding: &Binding, ordering: &[String], time: f32) {
+        let blends = binding.blend_hint() != 0;
+        for (track, sampled) in binding.motion().sample(time).into_iter().enumerate() {
+            let Some(bone) = binding
+                .bones()
+                .get(track)
+                .and_then(|bone| usize::try_from(*bone).ok())
+                .and_then(|bone| ordering.get(bone))
+                .and_then(|name| self.bone(name))
+            else {
+                continue;
+            };
+            locals[bone] = match blends {
+                true => over(&locals[bone], &sampled),
+                false => sampled,
+            };
         }
-        self.world(&locals)
     }
 
     /// A marker at every joint and a stick from every bone back to its parent. The counts are fixed
@@ -301,6 +317,26 @@ impl Rig {
     }
 }
 
+/// A delta applied in the frame the transform under it leaves, which is what a blending motion
+/// states rather than a pose of its own.
+fn over(base: &Transform, delta: &Transform) -> Transform {
+    let rotation = Quat::from_array(base.rotation);
+    let scale = Vec3::from_slice(&base.scale);
+    let translation = Vec3::from_slice(&base.translation)
+        + rotation * (scale * Vec3::from_slice(&delta.translation));
+    let scale = scale * Vec3::from_slice(&delta.scale);
+    Transform {
+        translation: [
+            translation.x,
+            translation.y,
+            translation.z,
+            base.translation[3],
+        ],
+        rotation: (rotation * Quat::from_array(delta.rotation)).to_array(),
+        scale: [scale.x, scale.y, scale.z, base.scale[3]],
+    }
+}
+
 /// A bone with nothing above it, and the one case a file could get wrong: a parent at or past the
 /// bone itself, which the walks here read in order and so could not reach.
 fn parent_of(parents: &[i16], bone: usize) -> Option<usize> {
@@ -355,7 +391,11 @@ fn extent(world: &[Placement]) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Rig, Transform};
+    use std::f32::consts::FRAC_PI_2;
+
+    use glam::{Quat, Vec3};
+
+    use super::{Rig, Transform, over};
 
     fn transform(translation: [f32; 3]) -> Transform {
         Transform {
@@ -402,6 +442,71 @@ mod tests {
                 .all(|instance| instance.turn.iter().all(|value| value.is_finite())),
             "a bone of no length turned to nowhere"
         );
+    }
+
+    /// A blending motion states a delta in the frame the bone it drives already sits in, so its
+    /// translation turns with that bone rather than with the parent.
+    #[test]
+    fn a_delta_is_applied_in_the_frame_below_it() {
+        let base = Transform {
+            translation: [1.0, 0.0, 0.0, 0.0],
+            rotation: Quat::from_rotation_z(FRAC_PI_2).to_array(),
+            scale: [2.0, 2.0, 2.0, 0.0],
+        };
+        let delta = Transform {
+            translation: [1.0, 0.0, 0.0, 0.0],
+            rotation: Quat::from_rotation_z(FRAC_PI_2).to_array(),
+            scale: [0.5, 0.5, 0.5, 0.0],
+        };
+        let held = over(&base, &delta);
+        assert!(Vec3::from_slice(&held.translation).abs_diff_eq(Vec3::new(1.0, 2.0, 0.0), 1e-5));
+        assert!(
+            Quat::from_array(held.rotation)
+                .abs_diff_eq(Quat::from_rotation_z(2.0 * FRAC_PI_2), 1e-5)
+        );
+        assert_eq!(Vec3::from_slice(&held.scale), Vec3::ONE);
+    }
+
+    /// The neutral face states an identity delta, so a blending motion of nothing must leave the
+    /// pose under it exactly as it rests.
+    #[test]
+    fn a_delta_of_nothing_leaves_the_pose_alone() {
+        let base = Transform {
+            translation: [1.0, -2.0, 3.0, 0.0],
+            rotation: Quat::from_rotation_y(0.7).to_array(),
+            scale: [1.5, 1.5, 1.5, 0.0],
+        };
+        let held = over(
+            &base,
+            &Transform {
+                translation: [0.0; 4],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0, 1.0, 1.0, 0.0],
+            },
+        );
+        assert!(Vec3::from_slice(&held.translation)
+            .abs_diff_eq(Vec3::from_slice(&base.translation), 1e-6));
+        assert!(Quat::from_array(held.rotation).abs_diff_eq(Quat::from_array(base.rotation), 1e-6));
+        assert_eq!(held.scale, base.scale);
+    }
+
+    /// A face skeleton is merged onto a body's by name, so a motion authored against either
+    /// reaches the same bones through the names its own skeleton lists.
+    #[test]
+    fn a_merged_bone_is_reached_by_the_name_its_own_skeleton_lists() {
+        let body = Rig::new(
+            &["n_root".to_owned(), "j_kao".to_owned()],
+            &[-1, 0],
+            &[transform([0.0, 0.0, 0.0]), transform([0.0, 1.0, 0.0])],
+        );
+        let merged = body.merged(
+            &["j_kao".to_owned(), "j_f_face".to_owned()],
+            &[-1, 0],
+            &[transform([0.0, 9.0, 0.0]), transform([0.0, 0.1, 0.0])],
+        );
+        assert_eq!(merged.bone("j_kao"), Some(1));
+        assert_eq!(merged.bone("j_f_face"), Some(2));
+        assert_eq!(merged.bone("j_f_ago"), None);
     }
 
     /// A parent index at or past its own bone would leave the ordered walks below it unreachable,

@@ -178,10 +178,9 @@ impl Motions {
             .iter()
             .filter_map(|animation| {
                 let motion = usize::try_from(animation.havok_index()).ok()?;
-                // A motion that blends is a delta over whatever is already playing rather than a
-                // pose of its own, and posing a model on one scatters it.
-                (bindings.get(motion)?.blend_hint() == 0)
-                    .then(|| (animation.name().to_owned(), motion))
+                bindings
+                    .get(motion)
+                    .map(|_| (animation.name().to_owned(), motion))
             })
             .collect();
         Ok(Self { named, bindings })
@@ -191,6 +190,125 @@ impl Motions {
     fn binding(&self, motion: usize) -> Option<&Binding> {
         let (_, at) = self.named.get(motion)?;
         self.bindings.get(*at)
+    }
+
+    /// Which motion the pack opens on: the first that stands on its own, since the first of a
+    /// human's idle pack is a delta over whatever else is playing and a model posed on one alone
+    /// scatters. A pack of nothing but deltas, which every facial one is, opens on its first.
+    fn standing(&self) -> Option<usize> {
+        (0..self.named.len())
+            .find(|at| self.binding(*at).is_some_and(|held| held.blend_hint() == 0))
+            .or((!self.named.is_empty()).then_some(0))
+    }
+}
+
+/// One motion playing on the rig: the pack it comes from, which of that pack's motions, and how
+/// far into it.
+#[derive(Default)]
+struct Layer {
+    /// The pack to play, as the user or an emote has it.
+    wanted: RefCell<String>,
+    pack: RefCell<Option<Fetch<Motions>>>,
+    /// What to hold once this pack has played through, which is how an emote states the pose it
+    /// settles into apart from the motion that gets it there.
+    then: RefCell<Option<String>>,
+    /// Which of the pack's motions to open on, by name. A face keeps the ones it uses often in a
+    /// pack together, so an expression is not always a file of its own.
+    opening: RefCell<Option<String>>,
+    /// Which motion is playing, indexing [`Motions::named`]. None leaves the bones where the
+    /// skeleton rests, which is what a file being inspected shows.
+    motion: Cell<Option<usize>>,
+    time: Cell<f32>,
+}
+
+impl Layer {
+    fn load(&self, path: &str, motion: Option<&str>, then: Option<&str>) {
+        path.clone_into(&mut self.wanted.borrow_mut());
+        *self.pack.borrow_mut() = None;
+        *self.then.borrow_mut() = then.map(ToOwned::to_owned);
+        *self.opening.borrow_mut() = motion.map(ToOwned::to_owned);
+        self.motion.set(None);
+        self.time.set(0.0);
+    }
+
+    /// Takes up the pack once it lands, opening on the motion asked for. A pack that never
+    /// arrives gives way to whatever was queued behind it: not every race ships the motion an
+    /// emote starts with.
+    fn poll(&self, backend: &Backend) {
+        let wanted = self.wanted.borrow().clone();
+        let mut held = self.pack.borrow_mut();
+        if wanted.is_empty() || !matches!(held.as_ref(), None | Some(Fetch::Fetching(_))) {
+            return;
+        }
+        Fetch::poll(&mut held, backend, &wanted, Motions::read);
+        let motion = held
+            .as_ref()
+            .and_then(Fetch::ready)
+            .and_then(|motions| match self.opening.borrow().as_deref() {
+                Some(name) => motions.named.iter().position(|(held, _)| held == name),
+                None => motions.standing(),
+            });
+        let failed = matches!(held.as_ref(), Some(Fetch::Failed(_)));
+        drop(held);
+        self.motion.set(motion);
+        if failed {
+            let then = self.then.borrow_mut().take();
+            if let Some(then) = then {
+                self.load(&then, None, None);
+            }
+        }
+    }
+
+    /// Which of the pack's motions is playing, with the rest pose as the way out of playing any.
+    fn motion_ui(&self, ui: &mut egui::Ui, id: &str) {
+        let pack = self.pack.borrow();
+        let Some(motions) = pack.as_ref().and_then(Fetch::ready) else {
+            return;
+        };
+        let motion = self.motion.get();
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(match motion.and_then(|at| motions.named.get(at)) {
+                Some((name, _)) => name.as_str(),
+                None => REST,
+            })
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(motion.is_none(), REST).clicked() {
+                    self.motion.set(None);
+                    self.time.set(0.0);
+                }
+                for (at, (name, _)) in motions.named.iter().enumerate() {
+                    if ui.selectable_label(motion == Some(at), name).clicked() {
+                        self.motion.set(Some(at));
+                        self.time.set(0.0);
+                    }
+                }
+            });
+    }
+
+    /// How far the motion on screen runs, or nothing if none is playing.
+    fn duration(&self) -> Option<f32> {
+        let pack = self.pack.borrow();
+        let motions = pack.as_ref().and_then(Fetch::ready)?;
+        let binding = self.motion.get().and_then(|at| motions.binding(at))?;
+        Some(binding.motion().duration().max(f32::EPSILON))
+    }
+
+    /// Runs the clock on by `step`, taking up whatever was queued behind the motion once it has
+    /// played through. Nothing queued means it loops, which is what a pose held forever wants.
+    fn advance(&self, step: f32) {
+        let Some(duration) = self.duration() else {
+            return;
+        };
+        let time = self.time.get() + step.min(duration);
+        if time <= duration {
+            self.time.set(time);
+            return;
+        }
+        let then = self.then.borrow_mut().take();
+        match then {
+            Some(then) => self.load(&then, None, None),
+            None => self.time.set(time - duration),
+        }
     }
 }
 
@@ -249,13 +367,13 @@ struct Pack {
     label: String,
 }
 
-/// What plays a model: the skeleton it is skinned to, a pack of motions, and the clock.
+/// What plays a model: the skeleton it is skinned to, the motions laid over it, and the clock.
 pub struct Animation {
+    /// The `c0101` of the model's own path, which everything it plays is filed under.
+    code: Option<String>,
     /// Where the model's own path says its skeleton is, and the file that came of it.
     skeleton: Option<String>,
     base: RefCell<Option<Fetch<Skeleton>>>,
-    /// The body a code names, which is what the tables key their answers on.
-    body: Option<u16>,
     /// Which extra skeleton each part on screen asks for, out of the parts' own file names.
     needs: RefCell<Vec<(Extra, u16)>>,
     /// The tables naming which skeleton a set is posed on, fetched only where a part needs one.
@@ -273,14 +391,10 @@ pub struct Animation {
     packs: RefCell<Option<Result<Vec<Pack>, Rc<str>>>>,
     /// Cuts the pack list down while the picker is open.
     filter: RefCell<String>,
-    /// The pack to play, as the user has it.
-    wanted: RefCell<String>,
-    pack: RefCell<Option<Fetch<Motions>>>,
-    /// Which motion is playing, indexing [`Motions::named`]. None stands the model at rest, which
-    /// is what a file being inspected shows; a character stands in its idle instead.
-    motion: Cell<Option<usize>>,
-    /// How far into it, in seconds.
-    time: Cell<f32>,
+    /// What the body does, and the expression laid over it. A facial motion states a delta on
+    /// bones the body's own motions never touch, so the two play at once rather than in turn.
+    body: Layer,
+    face: Layer,
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
     running: Cell<bool>,
@@ -293,7 +407,6 @@ impl Animation {
         Self {
             skeleton: code.as_deref().and_then(skeleton_path),
             base: RefCell::new(None),
-            body: code.as_deref().and_then(|code| code[1..].parse().ok()),
             needs: RefCell::new(needed(&models)),
             tables: Default::default(),
             extras: Default::default(),
@@ -303,13 +416,20 @@ impl Animation {
             root: code.as_deref().and_then(pack_root),
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
-            wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
-            pack: RefCell::new(None),
-            motion: Cell::new(Some(0)),
-            time: Cell::new(0.0),
+            body: Layer {
+                wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
+                ..Default::default()
+            },
+            face: Default::default(),
             bust: Cell::new(Vec3::ONE),
             running: Cell::new(false),
+            code,
         }
+    }
+
+    /// The `101` of `c0101`, which is what the extra skeleton tables key their answers on.
+    fn body_code(&self) -> Option<u16> {
+        self.code.as_deref()?.get(1..)?.parse().ok()
     }
 
     /// Points the extra skeletons at what is being worn now, keeping everything already fetched:
@@ -336,7 +456,7 @@ impl Animation {
                     let packs = found(root, listing.under(root));
                     // The conventional pack is right for nearly every model but not for all of
                     // them, and a weapon is named none at all; either way the listing knows better.
-                    let mut wanted = self.wanted.borrow_mut();
+                    let mut wanted = self.body.wanted.borrow_mut();
                     if !packs.iter().any(|pack| pack.path == *wanted)
                         && let Some(first) = packs.first()
                     {
@@ -348,16 +468,46 @@ impl Animation {
             };
         }
         drop(held);
-        let wanted = self.wanted.borrow();
-        if !wanted.is_empty() {
-            Fetch::poll(&mut self.pack.borrow_mut(), backend, &wanted, Motions::read);
+        for layer in self.layers() {
+            layer.poll(backend);
+        }
+        self.poll_ordering(backend);
+        if self.running.get() {
+            let step = ctx.input(|input| input.stable_dt);
+            for layer in self.layers() {
+                layer.advance(step);
+            }
+            // Nothing else asks for a frame while the pointer is still, so playback has to.
+            ctx.request_repaint();
+        }
+    }
+
+    fn layers(&self) -> [&Layer; 2] {
+        [&self.body, &self.face]
+    }
+
+    /// Asks for the skeleton each playing motion's tracks are ordered by. A facial motion names a
+    /// face skeleton of its own, whose bones the body's skeleton does not carry.
+    fn poll_ordering(&self, backend: &Backend) {
+        let Some(code) = self.code.as_deref() else {
+            return;
+        };
+        let wanted: Vec<String> = self
+            .layers()
+            .iter()
+            .filter_map(|layer| ordering(code, &layer.wanted.borrow()))
+            .collect();
+        for path in wanted {
+            let mut extras = self.extras.borrow_mut();
+            let held = extras.entry(path.clone()).or_default();
+            Fetch::poll(held, backend, &path, Skeleton::read);
         }
     }
 
     /// Asks for the tables the parts on screen need, for the skeletons those tables name, and
     /// builds the rig again whenever another of them lands.
     fn poll_extras(&self, backend: &Backend) {
-        let Some(body) = self.body else {
+        let Some(body) = self.body_code() else {
             return;
         };
         for kind in Extra::ALL {
@@ -426,7 +576,9 @@ impl Animation {
 
     /// Stands it where its own file put it, which is what a file being inspected should show.
     pub fn rest(&self) {
-        self.motion.set(None);
+        for layer in self.layers() {
+            layer.motion.set(None);
+        }
     }
 
     /// What the bust bones are scaled by, which `human.cmp` states as a pair of bounds a slider
@@ -435,12 +587,61 @@ impl Animation {
         self.bust.set(bust);
     }
 
-    /// Plays `path` from its first motion, since a pack picked by hand was picked to be watched.
-    pub fn play(&self, path: &str) {
-        path.clone_into(&mut self.wanted.borrow_mut());
-        *self.pack.borrow_mut() = None;
-        self.motion.set(Some(0));
-        self.time.set(0.0);
+    /// Plays `path`, settling into `then` once it has played through.
+    ///
+    /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
+    /// so which of the two it lands on is the pack's to say.
+    pub fn play(&self, path: &str, then: Option<&str>) {
+        match facial(path) {
+            true => &self.face,
+            false => &self.body,
+        }
+        .load(path, None, then);
+        self.running.set(true);
+    }
+
+    /// Puts an expression on the face the character wears, out of whichever pack the listing files
+    /// it under: most are a pack of their own, the rest motions of the one a face keeps resident.
+    /// A name filed nowhere leaves the face as it rests, which is the game's own neutral pose.
+    pub fn express(&self, name: &str) {
+        let Some(root) = self.face_root() else {
+            return;
+        };
+        let file = format!("{name}.pap");
+        let found = self.packs.borrow().as_ref().and_then(|packs| {
+            let found = packs
+                .as_ref()
+                .ok()?
+                .iter()
+                .find(|pack| pack.path.starts_with(&root) && file_name(&pack.path) == file)?;
+            Some(found.path.clone())
+        });
+        match found {
+            Some(path) => self.face.load(&path, None, None),
+            None => self.face.load(
+                &format!("{root}resident/face.pap"),
+                Some(&format!("cfxf_{name}")),
+                None,
+            ),
+        }
+        self.running.set(true);
+    }
+
+    /// Where the packs of the face the character wears are filed.
+    fn face_root(&self) -> Option<String> {
+        let code = self.code.as_deref()?;
+        let body = self.body_code()?;
+        let (_, set) = *self
+            .needs
+            .borrow()
+            .iter()
+            .find(|(kind, _)| *kind == Extra::Face)?;
+        let id = self.tables.borrow()[Extra::Face as usize]
+            .as_ref()
+            .and_then(Fetch::ready)?
+            .skeleton(body, set)
+            .filter(|id| *id > 0)?;
+        Some(format!("chara/human/{code}/animation/f{id:04}/"))
     }
 
     /// Where the model stands this frame: one walk of the rig, and everything read off it.
@@ -466,15 +667,32 @@ impl Animation {
                 .count();
             log::info!("mdl: {missing} of {wanted} bones are named by no skeleton");
         }
-        let pack = self.pack.borrow();
-        let binding = self
-            .motion
-            .get()
-            .and_then(|at| pack.as_ref().and_then(Fetch::ready)?.binding(at));
-        let mut posed = match binding {
-            Some(binding) => skin.rig.posed(binding, self.time.get()),
-            None => skin.rig.world(skin.rig.reference()),
-        };
+        let base = self.base.borrow();
+        let extras = self.extras.borrow();
+        let mut locals = skin.rig.reference().to_vec();
+        for layer in self.layers() {
+            let pack = layer.pack.borrow();
+            let Some(binding) = layer
+                .motion
+                .get()
+                .and_then(|at| pack.as_ref().and_then(Fetch::ready)?.binding(at))
+            else {
+                continue;
+            };
+            let ordered = self
+                .code
+                .as_deref()
+                .and_then(|code| ordering(code, &layer.wanted.borrow()));
+            let held = match &ordered {
+                Some(path) => extras.get(path).and_then(Option::as_ref),
+                None => base.as_ref(),
+            };
+            let Some(names) = held.and_then(Fetch::ready).map(|held| &held.names) else {
+                continue;
+            };
+            skin.rig.lay(&mut locals, binding, names, layer.time.get());
+        }
+        let mut posed = skin.rig.world(&locals);
         let bust = self.bust.get();
         if bust != Vec3::ONE {
             for bone in BUST.iter().filter_map(|name| skin.named.get(*name)) {
@@ -496,57 +714,35 @@ impl Animation {
         }
     }
 
-    /// Which pack is loaded, which motion is playing, play and pause, and the scrubber that is also
-    /// what advances the clock. Only the pickers are offered until a motion is picked: with none
-    /// the model stands where its own file put it, and there is nothing to play.
+    /// Which packs are loaded, which motion each of them plays, play and pause, and the scrubber.
+    /// Only the pickers are offered until a motion is picked: with none the model stands where its
+    /// own file put it, and there is nothing to play.
     pub fn ui(&self, ui: &mut egui::Ui) {
         self.packs_ui(ui);
-        let pack = self.pack.borrow();
-        let Some(motions) = pack.as_ref().and_then(Fetch::ready) else {
+        self.body.motion_ui(ui, "mdl_motion");
+        self.face.motion_ui(ui, "mdl_face_motion");
+        let scrubbed = match self.body.duration() {
+            Some(duration) => Some((&self.body, duration)),
+            None => self.face.duration().map(|duration| (&self.face, duration)),
+        };
+        let Some((layer, duration)) = scrubbed else {
             return;
         };
-        let motion = self.motion.get();
-        egui::ComboBox::from_id_salt("mdl_motion")
-            .selected_text(match motion.and_then(|at| motions.named.get(at)) {
-                Some((name, _)) => name.as_str(),
-                None => REST,
-            })
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(motion.is_none(), REST).clicked() {
-                    self.motion.set(None);
-                    self.time.set(0.0);
-                }
-                for (at, (name, _)) in motions.named.iter().enumerate() {
-                    if ui.selectable_label(motion == Some(at), name).clicked() {
-                        self.motion.set(Some(at));
-                        self.time.set(0.0);
-                    }
-                }
-            });
-        let Some(binding) = self.motion.get().and_then(|at| motions.binding(at)) else {
-            return;
-        };
-
-        let duration = binding.motion().duration().max(f32::EPSILON);
-        let mut time = self.time.get().clamp(0.0, duration);
-        if self.running.get() {
-            time += ui.input(|input| input.stable_dt).min(duration);
-            if time > duration {
-                time -= duration;
-            }
-            // Nothing else asks for a frame while the pointer is still, so playback has to.
-            ui.ctx().request_repaint();
-        }
         let running = self.running.get();
         if ui.button(if running { "Pause" } else { "Play" }).clicked() {
             self.running.set(!running);
         }
-        ui.add(
-            egui::Slider::new(&mut time, 0.0..=duration)
-                .fixed_decimals(2)
-                .suffix(" s"),
-        );
-        self.time.set(time);
+        let mut time = layer.time.get().clamp(0.0, duration);
+        if ui
+            .add(
+                egui::Slider::new(&mut time, 0.0..=duration)
+                    .fixed_decimals(2)
+                    .suffix(" s"),
+            )
+            .changed()
+        {
+            layer.time.set(time);
+        }
     }
 
     /// Every pack filed under the model's own animation directory. A human carries thousands, so
@@ -556,12 +752,15 @@ impl Animation {
         let Some(Ok(packs)) = packs.as_ref() else {
             return;
         };
-        let wanted = self.wanted.borrow().clone();
+        let held = [
+            self.body.wanted.borrow().clone(),
+            self.face.wanted.borrow().clone(),
+        ];
         let mut picked = None;
         egui::ComboBox::from_id_salt("mdl_pack")
-            .selected_text(match packs.iter().find(|pack| pack.path == wanted) {
+            .selected_text(match packs.iter().find(|pack| pack.path == held[0]) {
                 Some(pack) => pack.label.as_str(),
-                None => file_name(&wanted),
+                None => file_name(&held[0]),
             })
             .show_ui(ui, |ui| {
                 let mut filter = self.filter.borrow_mut();
@@ -581,7 +780,7 @@ impl Animation {
                     .show_rows(ui, row, matching.len(), |ui, rows| {
                         for pack in &matching[rows] {
                             if ui
-                                .selectable_label(pack.path == wanted, &pack.label)
+                                .selectable_label(held.contains(&pack.path), &pack.label)
                                 .clicked()
                             {
                                 picked = Some(pack.path.clone());
@@ -590,7 +789,7 @@ impl Animation {
                     });
             });
         if let Some(path) = picked {
-            self.play(&path);
+            self.play(&path, None);
         }
     }
 
@@ -610,18 +809,17 @@ impl Animation {
                 ui.label(RichText::new("this model's path names no skeleton").weak());
             }
         }
-        let mut wanted = self.wanted.borrow().clone();
+        let mut wanted = self.body.wanted.borrow().clone();
         if ui
             .add(egui::TextEdit::singleline(&mut wanted).hint_text("animation pack"))
             .changed()
         {
-            *self.wanted.borrow_mut() = wanted;
-            *self.pack.borrow_mut() = None;
-            self.motion.set(None);
-            self.time.set(0.0);
+            self.body.load(&wanted, None, None);
         }
-        if let Some(Fetch::Failed(why)) = self.pack.borrow().as_ref() {
-            ui.label(RichText::new(why).color(Color32::LIGHT_RED));
+        for layer in self.layers() {
+            if let Some(Fetch::Failed(why)) = layer.pack.borrow().as_ref() {
+                ui.label(RichText::new(why).color(Color32::LIGHT_RED));
+            }
         }
         match self.packs.borrow().as_ref() {
             Some(Ok(packs)) => {
@@ -666,6 +864,30 @@ fn extra(model: &str) -> Option<(Extra, u16)> {
         _ => return None,
     };
     Some((kind, set))
+}
+
+/// The `f0003` of a pack filed under a face skeleton's own directory. Those hold the motions that
+/// move a face, and their tracks are ordered by that skeleton's bones rather than the body's.
+fn face_set(pack: &str) -> Option<&str> {
+    let set = pack.split_once("/animation/")?.1.split('/').next()?;
+    let named = set.len() == 5
+        && set.starts_with('f')
+        && set[1..].bytes().all(|byte| byte.is_ascii_digit());
+    named.then_some(set)
+}
+
+/// Whether a pack moves a face rather than a body.
+fn facial(pack: &str) -> bool {
+    face_set(pack).is_some()
+}
+
+/// Where the skeleton a pack's tracks are ordered by is filed, or nothing where that is the
+/// model's own base skeleton.
+fn ordering(code: &str, pack: &str) -> Option<String> {
+    let set = face_set(pack)?;
+    Some(format!(
+        "chara/human/{code}/skeleton/face/{set}/skl_{code}{set}.sklb"
+    ))
 }
 
 /// Where the model class a code names files its skeletons and animations.
@@ -739,7 +961,9 @@ mod tests {
     use ironworks::file::sklb::Transform;
 
     use super::super::super::skeleton::{Rig, middle};
-    use super::{Extra, Skin, code, extra, found, pack_path, pack_root, skeleton_path};
+    use super::{
+        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, skeleton_path,
+    };
 
     fn transform(translation: [f32; 3]) -> Transform {
         Transform {
@@ -755,6 +979,27 @@ mod tests {
             &[-1, 0],
             &[transform([0.0, 1.0, 0.0]), transform([0.0, 2.0, 0.0])],
         )
+    }
+
+    /// A pack under a face skeleton's own directory moves a face, and its tracks are ordered by
+    /// that skeleton rather than by the body's.
+    #[test]
+    fn a_pack_filed_under_a_face_is_ordered_by_it() {
+        let face = "chara/human/c0101/animation/f0003/nonresident/smile.pap";
+        assert!(facial(face));
+        assert_eq!(
+            ordering("c0101", face).as_deref(),
+            Some("chara/human/c0101/skeleton/face/f0003/skl_c0101f0003.sklb")
+        );
+
+        for body in [
+            "chara/human/c0101/animation/a0001/bt_common/resident/idle.pap",
+            "chara/monster/m0911/animation/a0001/bt_common/resident/monster.pap",
+            "chara/weapon/w2616/animation/a0001/wp_common/resident/weapon.pap",
+        ] {
+            assert!(!facial(body), "{body}");
+            assert_eq!(ordering("c0101", body), None, "{body}");
+        }
     }
 
     /// A tail swinging is not the body moving.

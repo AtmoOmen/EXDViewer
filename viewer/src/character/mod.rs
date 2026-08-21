@@ -63,6 +63,8 @@ const LIP_COLOR: u32 = 20;
 const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
 const HEIGHT: u32 = 3;
+/// Muscle tone, on a body the creator offers no tail or ears; every other race spends the same
+/// customisation on how far the pair its [`TAIL`] menu shapes reaches.
 const MUSCLE_TONE: u32 = 21;
 const BUST: u32 = 23;
 /// A tail, or a Viera's ears: the game files both under the one customisation, and under one
@@ -690,10 +692,13 @@ impl CharacterBuilder {
         let mut shapes = BTreeSet::new();
         let mut stature = 1.0;
         let mut bust = Vec3::ONE;
-        let mut tone = 0.5;
+        let mut tone = 1.0;
         let Some(body) = self.creator.body(self.tribe, self.female) else {
             return (customize, hidden, shapes, stature, bust);
         };
+        // A body that is offered a tail or a pair of ears lengthens those with the customisation
+        // the rest spend on muscle, and is left at the tone a race with none to set is given.
+        let muscled = !body.menus.iter().any(|menu| menu.customize == TAIL);
         let palettes = self
             .made
             .as_ref()
@@ -739,7 +744,7 @@ impl CharacterBuilder {
             }
             // Only the lane, since the muscle tone menu comes before the skin colour that would
             // otherwise write over what it left.
-            if menu.customize == MUSCLE_TONE {
+            if menu.customize == MUSCLE_TONE && muscled {
                 tone = slid(menu, at as u32);
             }
             if menu.customize == HEIGHT

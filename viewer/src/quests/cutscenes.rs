@@ -47,8 +47,6 @@ impl Owner {
 
 pub struct Entry {
     pub path: String,
-    /// The `Cutscene` row that names the file, where one does.
-    pub row: Option<u32>,
     pub owners: Vec<Owner>,
 }
 
@@ -127,12 +125,12 @@ pub async fn load(
     let mut entries: Vec<Entry> = shipping
         .into_iter()
         .map(|path| {
-            let row = named.get(&path).copied();
-            let owners = row
-                .and_then(|row| owners.get(&row))
+            let owners = named
+                .get(&path)
+                .and_then(|row| owners.get(row))
                 .map(|held| held.iter().copied().collect())
                 .unwrap_or_default();
-            Entry { path, row, owners }
+            Entry { path, owners }
         })
         .collect();
     entries.sort_by(|left, right| left.path.cmp(&right.path));

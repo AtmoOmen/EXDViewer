@@ -233,6 +233,16 @@ fn main() {
         "CompleteJournal: {} entries offer a cutscene; of the {shared} whose 65536+Unknown0 quest also names one, {overlapping} share a file and {identical} state the same set",
         by_journal.len()
     );
+    let only: Vec<u32> = by_journal
+        .keys()
+        .filter(|quest| !by_quest.contains_key(quest))
+        .copied()
+        .collect();
+    println!(
+        "CompleteJournal: {} quests get a cutscene from the journal alone, first at row {:?}",
+        only.len(),
+        only.first()
+    );
 
     let mut owners: BTreeMap<&str, HashSet<u32>> = BTreeMap::new();
     owners.insert(

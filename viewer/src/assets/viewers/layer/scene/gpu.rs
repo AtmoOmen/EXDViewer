@@ -880,6 +880,11 @@ impl Renderer {
 
         for page in 0..self.buffers.pages() {
             self.buffers.open(gl, page);
+            // What the last draw left the context set to. Thousands of surfaces run through the
+            // same handful of readings, and a draw only has to set what the one before it left
+            // wrong. Kept per page, since the draw buffers belong to the framebuffer that page
+            // opened.
+            let mut standing: Option<(glow::Program, bool, Vec<u32>, bool)> = None;
             for depth in [true, false] {
                 for (batch, (offset, windows)) in frame.batches.iter().zip(&offsets) {
                     // Taken by value first: the draw wants the frame's own buffers mutably, and
@@ -918,21 +923,31 @@ impl Renderer {
                             (surface.material, surface.waving, depth, page),
                             held,
                         )?;
-                        unsafe {
-                            gl.use_program(Some(program));
-                            // A material with no depth pass writes its own, since the depth buffer
-                            // is what says which pixels the frame covered.
-                            gl.depth_mask(depth || shaded.depth.is_none());
-                            gl.color_mask(!depth, !depth, !depth, !depth);
-                            gl.draw_buffers(&deferred::written(held));
-                            match surface.cull {
-                                true => {
-                                    gl.enable(glow::CULL_FACE);
-                                    gl.cull_face(glow::BACK);
-                                    gl.front_face(glow::CCW);
+                        // A material with no depth pass writes its own, since the depth buffer is
+                        // what says which pixels the frame covered.
+                        let wanted = (
+                            program,
+                            depth || shaded.depth.is_none(),
+                            deferred::written(held),
+                            surface.cull,
+                        );
+                        if standing.as_ref() != Some(&wanted) {
+                            let (program, writes, targets, cull) = &wanted;
+                            unsafe {
+                                gl.use_program(Some(*program));
+                                gl.depth_mask(*writes);
+                                gl.color_mask(!depth, !depth, !depth, !depth);
+                                gl.draw_buffers(targets);
+                                match cull {
+                                    true => {
+                                        gl.enable(glow::CULL_FACE);
+                                        gl.cull_face(glow::BACK);
+                                        gl.front_face(glow::CCW);
+                                    }
+                                    false => gl.disable(glow::CULL_FACE),
                                 }
-                                false => gl.disable(glow::CULL_FACE),
                             }
+                            standing = Some(wanted);
                         }
                         if held.batch() > 1 {
                             self.buffers.bind(gl, program, held, &scene, &[])?;

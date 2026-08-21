@@ -543,15 +543,16 @@ struct Learned {
     uniforms: HashMap<String, Option<glow::UniformLocation>>,
     samplers: HashMap<String, Sampled>,
     blocks: HashMap<String, Option<(u32, usize)>>,
+    bindings: HashMap<u32, u32>,
     layouts: HashSet<glow::VertexArray>,
 }
 
-/// Where a program takes the unit a sampler reads from, and where it takes how many levels the
-/// texture on that unit has.
-#[derive(Clone, Default)]
+/// Where a program takes the unit a sampler reads from, where it takes how many levels the texture
+/// on that unit has, and which unit it was last told to read.
 struct Sampled {
     unit: Option<glow::UniformLocation>,
     levels: Option<glow::UniformLocation>,
+    at: Option<u32>,
 }
 
 type Lessons = std::sync::Mutex<HashMap<glow::Program, Learned>>;
@@ -577,20 +578,47 @@ pub fn uniform(
     held.uniforms[name].as_ref().cloned()
 }
 
-fn sampled(gl: &glow::Context, program: glow::Program, name: &str) -> Sampled {
+/// Points a program's sampler at a unit, where it is not pointed there already. The value is the
+/// program's own state, so it stands until something points it elsewhere.
+fn point_sampler(gl: &glow::Context, program: glow::Program, name: &str, unit: u32) {
     let mut learned = learned().lock().unwrap();
-    let held = learned.entry(program).or_default();
-    if let Some(found) = held.samplers.get(name) {
-        return found.clone();
+    let held = learned
+        .entry(program)
+        .or_default()
+        .samplers
+        .entry(name.to_owned())
+        .or_insert_with(|| unsafe {
+            Sampled {
+                unit: gl.get_uniform_location(program, name),
+                levels: gl.get_uniform_location(program, &format!("{name}_levels")),
+                at: None,
+            }
+        });
+    if held.at == Some(unit) {
+        return;
     }
-    let found = unsafe {
-        Sampled {
-            unit: gl.get_uniform_location(program, name),
-            levels: gl.get_uniform_location(program, &format!("{name}_levels")),
+    held.at = Some(unit);
+    unsafe {
+        if let Some(location) = &held.unit {
+            gl.uniform_1_i32(Some(location), unit as i32);
         }
-    };
-    held.samplers.insert(name.to_owned(), found.clone());
-    found
+        // Nothing in GLSL says how many levels a texture has, so a shader that asks is told.
+        if let Some(location) = &held.levels {
+            gl.uniform_1_i32(Some(location), 1);
+        }
+    }
+}
+
+/// Whether a program's block already reads the binding point it is about to be pointed at.
+pub fn pointed(program: glow::Program, block: u32, at: u32) -> bool {
+    learned()
+        .lock()
+        .unwrap()
+        .entry(program)
+        .or_default()
+        .bindings
+        .insert(block, at)
+        == Some(at)
 }
 
 /// Which block a program holds for the buffer of this name, and how large it declares it. The
@@ -879,7 +907,7 @@ pub struct Buffers {
     resolvers: BTreeMap<usize, Linked>,
     present: Option<glow::Program>,
     /// One uniform buffer per binding slot, and how many bytes the last fill of it came to.
-    blocks: Vec<(glow::Buffer, usize)>,
+    blocks: Vec<(glow::Buffer, Vec<u8>)>,
     /// Whether the graph has already brought the frame into the range a screen holds, which is what
     /// keeps the pass that puts it up from bending it a second time.
     toned: bool,
@@ -3067,14 +3095,18 @@ impl Buffers {
                 let mut data = buffer.fill(scene, held.pass, instances);
                 data.resize(size.max(16), 0);
                 while self.blocks.len() <= at {
-                    self.blocks.push((gl.create_buffer()?, 0));
+                    self.blocks.push((gl.create_buffer()?, Vec::new()));
                 }
                 let held = self.blocks[at].0;
                 gl.bind_buffer(glow::UNIFORM_BUFFER, Some(held));
-                gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &data, glow::DYNAMIC_DRAW);
+                if self.blocks[at].1 != data {
+                    gl.buffer_data_u8_slice(glow::UNIFORM_BUFFER, &data, glow::DYNAMIC_DRAW);
+                    self.blocks[at].1 = data;
+                }
                 gl.bind_buffer_base(glow::UNIFORM_BUFFER, at as u32, Some(held));
-                gl.uniform_block_binding(program, block, at as u32);
-                self.blocks[at].1 = data.len();
+                if !pointed(program, block, at as u32) {
+                    gl.uniform_block_binding(program, block, at as u32);
+                }
             }
         }
         Ok(())
@@ -3252,7 +3284,7 @@ impl Buffers {
     /// One more draw of the pass just run, with only the light it carries written again. Every lamp
     /// of a kind reads the same program over the same volume, so what that pass bound - its
     /// framebuffer, its textures, the rest of its buffers - stands as it left it.
-    fn again(&self, gl: &glow::Context, held: &program::Program, scene: &program::Scene) {
+    fn again(&mut self, gl: &glow::Context, held: &program::Program, scene: &program::Scene) {
         let Some((layout, _, _)) = self.volume else {
             return;
         };
@@ -3260,15 +3292,20 @@ impl Buffers {
             if buffer.name != program::LIGHT {
                 continue;
             }
-            let Some(&(block, size)) = self.blocks.get(at).filter(|held| held.1 != 0) else {
+            let Some((block, standing)) = self.blocks.get_mut(at).filter(|held| !held.1.is_empty())
+            else {
                 continue;
             };
             let mut data = buffer.fill(scene, held.pass, &[]);
-            data.resize(size, 0);
+            data.resize(standing.len(), 0);
+            if *standing == data {
+                continue;
+            }
             unsafe {
-                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(block));
+                gl.bind_buffer(glow::UNIFORM_BUFFER, Some(*block));
                 gl.buffer_sub_data_u8_slice(glow::UNIFORM_BUFFER, 0, &data);
             }
+            *standing = data;
         }
         unsafe {
             gl.bind_vertex_array(Some(layout));
@@ -3784,18 +3821,11 @@ pub fn bind(
     texture: glow::Texture,
     target: u32,
 ) {
-    let held = sampled(gl, program, name);
     unsafe {
         gl.active_texture(glow::TEXTURE0 + unit);
         gl.bind_texture(target, Some(texture));
-        if let Some(location) = held.unit {
-            gl.uniform_1_i32(Some(&location), unit as i32);
-        }
-        // Nothing in GLSL says how many levels a texture has, so a shader that asks is told.
-        if let Some(location) = held.levels {
-            gl.uniform_1_i32(Some(&location), 1);
-        }
     }
+    point_sampler(gl, program, name, unit);
 }
 
 /// The geometry the screen-wide passes and a light's volume are drawn from, in one array each so a

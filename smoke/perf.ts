@@ -21,6 +21,7 @@ const origin = flag("origin", "http://127.0.0.2:9084");
 const wait = Number(flag("wait", "60000"));
 const spin = Number(flag("spin", "6000"));
 const label = flag("label", "");
+const scale = Number(flag("scale", "1"));
 const [WIDTH, HEIGHT] = flag("size", "1600x1000").split("x").map(Number);
 
 const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
@@ -68,7 +69,7 @@ async function launch(profile: string) {
             "--headless",
             "--no-sandbox",
             "--disable-dev-shm-usage",
-            "--enable-unsafe-swiftshader",
+            ...(process.env.SOFTWARE ? ["--enable-unsafe-swiftshader"] : ["--use-gl=angle", "--use-angle=gl", "--ignore-gpu-blocklist", "--enable-gpu"]),
             "--no-first-run",
             "--no-default-browser-check",
             "--hide-scrollbars",
@@ -95,6 +96,11 @@ async function main() {
         targets.find((one: any) => one.type === "page").webSocketDebuggerUrl,
     );
     const failures: string[] = [];
+    const timings: string[] = [];
+    cdp.on("Runtime.consoleAPICalled", (p: any) => {
+        const line = p.args.map((one: any) => String(one?.value ?? one?.description ?? "")).join(" ");
+        if (line.includes("TIMING")) timings.push(line.slice(line.indexOf("TIMING")));
+    });
     cdp.on("Runtime.exceptionThrown", (p: any) => {
         const held = p.exceptionDetails ?? {};
         failures.push(String(held.exception?.description ?? held.text ?? "").slice(0, 200));
@@ -133,9 +139,11 @@ async function main() {
     await cdp.send("Emulation.setDeviceMetricsOverride", {
         width: WIDTH,
         height: HEIGHT,
-        deviceScaleFactor: 1,
+        deviceScaleFactor: scale,
         mobile: false,
     });
+    const renderer = await cdp.eval(`(() => { const c = document.createElement('canvas'); const g = c.getContext('webgl2'); if (!g) return 'no webgl2'; const d = g.getExtension('WEBGL_debug_renderer_info'); return String(g.getParameter(d ? d.UNMASKED_RENDERER_WEBGL : g.RENDERER)); })()`).catch(() => "unknown");
+    console.log(`   gl: ${renderer}`);
     mkdirSync(outDir, { recursive: true });
     try {
         for (const [at, path] of paths.entries()) {
@@ -146,6 +154,7 @@ async function main() {
             carried = 0;
             failed = 0;
             failures.length = 0;
+            timings.length = 0;
             await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
             await cdp.eval("localStorage.clear()").catch(() => {});
             const base = { x: 287, y: 116, button: "left", clickCount: 1, buttons: 1 };
@@ -156,13 +165,13 @@ async function main() {
                 await sleep(40);
                 await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
             };
-            let waited = 0;
-            for (const step of [6000, 6000, 8000]) {
-                await sleep(step);
-                waited += step;
+            // Clicked all the way through the wait rather than a fixed few times: the tab only
+            // exists once the file has been read, and the server reloads the page from under a run
+            // whenever it rebuilds.
+            for (let waited = 0; waited < wait; waited += 6000) {
+                await sleep(Math.min(6000, wait - waited));
                 await tab();
             }
-            await sleep(Math.max(wait - waited, 0));
 
             // The pointer has to stand over the viewport for the keys to fly it, and the flight
             // integrates the frame's own delta, so the distance covered is the same however fast
@@ -206,9 +215,15 @@ async function main() {
             console.log(
                 `   fps: ${(frames / elapsed).toFixed(1)} over ${elapsed.toFixed(1)} s (${frames} frames), frame median ${gaps.median.toFixed(1)} ms, p95 ${gaps.p95.toFixed(1)} ms, worst ${gaps.worst.toFixed(0)} ms`,
             );
+            const calls = frames ? Object.keys(after.calls).reduce((a, k) => a + ((after.calls[k] ?? 0) - (before.calls[k] ?? 0)), 0) / frames : 0;
+            const drawn = per("drawElementsInstanced") + per("drawElements") + per("drawArrays") + per("drawArraysInstanced");
+            console.log(
+                `   cost: ${drawn ? ((gaps.median * 1000) / drawn).toFixed(1) : "-"} us per draw, ${drawn.toFixed(0)} draws and ${calls.toFixed(0)} watched gl calls a frame`,
+            );
             console.log(
                 `   per frame: ${per("drawElementsInstanced").toFixed(0)} instanced draws, ${per("drawElements").toFixed(0)} draws, ${per("getUniformLocation").toFixed(0)} uniform lookups, ${per("disableVertexAttribArray").toFixed(0)} attrib disables, ${per("useProgram").toFixed(0)} programs, ${per("bindTexture").toFixed(0)} texture binds, ${per("bufferData").toFixed(0)} buffer uploads`,
             );
+            for (const line of timings.slice(-14)) console.log(`   ${line}`);
             if (failures.length) {
                 console.log(`   failures: ${failures.length}`);
                 for (const line of failures.slice(0, 6)) console.log(`     !! ${line}`);

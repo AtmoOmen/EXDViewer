@@ -197,6 +197,13 @@ enum Motion {
         curves: Vec<(tmb::Channel, tmb::Curve)>,
         duration: f32,
     },
+    /// Transforms a timeline states outright with no curve to play them over, each holding from the
+    /// time its command runs. Where the node stands before the first is where the file put it.
+    Placed {
+        placement: Transform,
+        steps: Vec<(f32, Mat4)>,
+        duration: f32,
+    },
     /// A swing the scene repeats with no timeline to play it, on top of where the file placed it.
     Repeat {
         placement: Transform,
@@ -253,6 +260,18 @@ impl Motion {
                     ),
                     shift,
                 )
+            }
+            Self::Placed {
+                placement,
+                steps,
+                duration,
+            } => {
+                let along = time.rem_euclid(duration.max(1.0));
+                steps
+                    .iter()
+                    .rev()
+                    .find(|(at, _)| *at <= along)
+                    .map_or_else(|| matrix(*placement), |(_, held)| *held)
             }
             Self::Repeat {
                 placement,
@@ -959,6 +978,7 @@ impl Scene {
             // across all of them: eight of the game's aetherytes hang four tracks off one actor.
             // The first to name a channel keeps it, so a lone track reads exactly as it did.
             let mut curves: Vec<(tmb::Channel, tmb::Curve)> = Vec::new();
+            let mut steps: Vec<(f32, Mat4)> = Vec::new();
             for track in tracks {
                 let Some(commands) = held.items().iter().find_map(|item| match item {
                     tmb::Item::Track(held) if held.id() == *track => Some(held.commands()),
@@ -967,32 +987,40 @@ impl Scene {
                     continue;
                 };
                 for command in commands {
-                    let curve_id = held.items().iter().find_map(|item| match item {
-                        tmb::Item::Command(held) if held.id() == *command => match held.kind() {
-                            tmb::CommandKind::C013(held) => Some(held.curve_id()),
-                            _ => None,
-                        },
-                        _ => None,
-                    });
-                    let Some(found) = curve_id.and_then(|curve_id| {
-                        held.items().iter().find_map(|item| match item {
-                            tmb::Item::Curves(held) if i32::from(held.id()) == curve_id => {
-                                Some(held.curves())
-                            }
-                            _ => None,
-                        })
-                    }) else {
+                    let Some(tmb::Item::Command(found)) = held.items().iter().find(
+                        |item| matches!(item, tmb::Item::Command(held) if held.id() == *command),
+                    ) else {
                         continue;
                     };
-                    for curve in found {
-                        if curves.iter().all(|(channel, _)| *channel != curve.channel()) {
-                            curves.push((curve.channel(), curve.clone()));
+                    match found.kind() {
+                        tmb::CommandKind::C013(driven) => {
+                            let Some(set) = held.items().iter().find_map(|item| match item {
+                                tmb::Item::Curves(held)
+                                    if i32::from(held.id()) == driven.curve_id() =>
+                                {
+                                    Some(held.curves())
+                                }
+                                _ => None,
+                            }) else {
+                                continue;
+                            };
+                            for curve in set {
+                                if curves.iter().all(|(channel, _)| *channel != curve.channel()) {
+                                    curves.push((curve.channel(), curve.clone()));
+                                }
+                            }
                         }
+                        tmb::CommandKind::C018(driven) => steps.push((
+                            f32::from(found.time()),
+                            Mat4::from_scale_rotation_translation(
+                                Vec3::from_array(driven.scale()),
+                                Quat::from_mat3(&rotation(driven.rotation())),
+                                Vec3::from_array(driven.translation()),
+                            ),
+                        )),
+                        _ => (),
                     }
                 }
-            }
-            if curves.is_empty() {
-                continue;
             }
             let duration = held
                 .items()
@@ -1002,7 +1030,19 @@ impl Scene {
                     _ => None,
                 })
                 .unwrap_or(1.0);
-            self.motions.push(Motion::Keyed { curves, duration });
+            if !curves.is_empty() {
+                self.motions.push(Motion::Keyed { curves, duration });
+                return Some(self.motions.len() - 1);
+            }
+            if steps.is_empty() {
+                continue;
+            }
+            steps.sort_by(|left, right| left.0.total_cmp(&right.0));
+            self.motions.push(Motion::Placed {
+                placement,
+                steps,
+                duration,
+            });
             return Some(self.motions.len() - 1);
         }
         // Only where no timeline already plays over it: a few scenes state both, and the curves are

@@ -3684,13 +3684,10 @@ fn pyramid(
         gl.tex_storage_2d(glow::TEXTURE_2D, levels, internal, size.0, size.1);
         for (name, value) in [
             (glow::TEXTURE_MAG_FILTER, filter),
-            // Linear within a level and not across them: a read at a whole level still weighs the
-            // one under it, and nought against a non-finite texel is still non-finite, which is how
-            // one bad texel of the reflection reaches every level and stays there a frame later.
             (
                 glow::TEXTURE_MIN_FILTER,
                 match filter {
-                    glow::LINEAR => glow::LINEAR_MIPMAP_NEAREST,
+                    glow::LINEAR => glow::LINEAR_MIPMAP_LINEAR,
                     _ => glow::NEAREST_MIPMAP_NEAREST,
                 },
             ),

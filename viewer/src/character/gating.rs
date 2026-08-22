@@ -1,4 +1,5 @@
-//! What a worn piece does to the body under it, out of `chara/xls/equipmentparameter/equipmentparameter.eqp`.
+//! What a worn piece does to the body under it, out of `equipmentparameter.eqp` and the gimmicks
+//! `gimmickparameter.gmp` states for the head.
 //!
 //! A set states, per slot, which of the body's own models still draw beneath it. That is what keeps
 //! a character's bare legs out of a full-length coat, and it is the file's answer rather than a
@@ -7,12 +8,13 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use ironworks::file::{File, eqp};
+use ironworks::file::{File, eqp, gmp};
 
 use super::{Outfit, Slot};
 use crate::backend::Backend;
 
 pub const PATH: &str = "chara/xls/equipmentparameter/equipmentparameter.eqp";
+pub const GIMMICKS: &str = "chara/xls/equipmentparameter/gimmickparameter.gmp";
 
 /// The seams themselves, each named for the part of the body it sits at. Nearly every name
 /// belongs to one slot's models, so hiding it by name reaches only the model that owns it.
@@ -27,15 +29,31 @@ const CUFF: &str = "atr_arm";
 const SHAFT: &str = "atr_leg";
 const GORGET: &str = "atr_inr";
 
-/// The file, read once and asked about a set at a time.
-pub struct Worn(eqp::EquipmentParameter);
+/// The files, read once and asked about a set at a time.
+pub struct Worn(eqp::EquipmentParameter, gmp::GimmickParameter);
 
 impl Worn {
     pub async fn read(backend: &Backend) -> Result<Self> {
         let bytes = backend.files().read(PATH).await?;
-        Ok(Self(eqp::EquipmentParameter::read(std::io::Cursor::new(
-            bytes,
-        ))?))
+        let gimmicks = backend.files().read(GIMMICKS).await?;
+        Ok(Self(
+            eqp::EquipmentParameter::read(std::io::Cursor::new(bytes))?,
+            gmp::GimmickParameter::read(std::io::Cursor::new(gimmicks))?,
+        ))
+    }
+
+    /// Whether a head set has a visor to raise at all.
+    pub fn visored(&self, set: u16) -> bool {
+        set != 0 && self.1.set(set).enabled()
+    }
+
+    /// How far a raised visor turns, in radians, one angle per bone it hinges on. The set states
+    /// them in whole degrees, and a visor left down is the pose the model is stored in.
+    pub fn visor(&self, set: u16) -> [f32; 3] {
+        match self.visored(set) {
+            true => self.1.set(set).rotation().map(|held| f32::from(held).to_radians()),
+            false => [0.0; 3],
+        }
     }
 
     /// Whether the model for one slot still draws under a piece worn in another: the body's own

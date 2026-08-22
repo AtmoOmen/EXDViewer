@@ -275,6 +275,8 @@ pub struct CharacterBuilder {
     reading_deformers: Option<TrackedPromise<Result<mdl::Deformers>>>,
     /// What a worn piece leaves showing of the body under it.
     worn_over: Option<gating::Worn>,
+    /// Whether the visor of the hat being worn is raised.
+    visor: bool,
     reading_worn: Option<TrackedPromise<Result<gating::Worn>>>,
     /// The game's own characters, and which of them is being stood in.
     npcs: Vec<npcs::Npc>,
@@ -346,6 +348,7 @@ impl Default for CharacterBuilder {
             deformers: None,
             reading_deformers: None,
             worn_over: None,
+            visor: false,
             reading_worn: None,
             npcs: Vec::new(),
             reading_npcs: None,
@@ -686,6 +689,7 @@ impl CharacterBuilder {
         if let Some(Ok(model)) = &self.model {
             let (customize, hidden, shapes, stature, bust) = self.made();
             model.made(customize, hidden, shapes, stature, bust);
+            model.hinged(self.raised());
         }
     }
 
@@ -802,6 +806,16 @@ impl CharacterBuilder {
             customize.lip[3] = 0.0;
         }
         (customize, hidden, shapes, stature, bust)
+    }
+
+    /// How far the visor of the hat being worn has been raised, which is nothing at all where the
+    /// set states no gimmick or the box is unticked.
+    fn raised(&self) -> [f32; 3] {
+        let (outfit, _) = self.dressed();
+        match (self.visor, outfit[Slot::Head as usize], &self.worn_over) {
+            (true, Some(hat), Some(worn)) => worn.visor(hat.set),
+            _ => [0.0; 3],
+        }
     }
 
     /// The seams the outfit covers, which draw nothing rather than through what is over them.
@@ -1122,12 +1136,23 @@ impl CharacterBuilder {
             },
         };
         let open = self.picking == Some(slot);
-        if ui
-            .selectable_label(open, format!("{}: {worn}", slot.name()))
-            .clicked()
-        {
-            self.picking = (!open).then_some(slot);
-        }
+        let visored = slot == Slot::Head
+            && outfit[at].is_some_and(|gear| {
+                self.worn_over
+                    .as_ref()
+                    .is_some_and(|worn| worn.visored(gear.set))
+            });
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(open, format!("{}: {worn}", slot.name()))
+                .clicked()
+            {
+                self.picking = (!open).then_some(slot);
+            }
+            if visored {
+                ui.checkbox(&mut self.visor, "Visor");
+            }
+        });
         if !open {
             return;
         }

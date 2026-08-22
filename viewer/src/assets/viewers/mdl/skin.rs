@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use anyhow::Result;
 use egui::{Color32, RichText};
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use ironworks::file::File;
 use ironworks::file::est::ExtraSkeletonTemplate;
 use ironworks::file::pap::{AnimationPack, Binding};
@@ -45,6 +45,10 @@ const ANCHOR: &str = "n_hara";
 
 /// The pair of bones the creator's bust slider scales, which are leaves of the body's own skeleton.
 const BUST: [&str; 2] = ["j_mune_l", "j_mune_r"];
+
+/// The bones a visor hinges on, each turned about its own Z by one of the three angles the
+/// gimmick states for the set. A head that names none of them raises nothing.
+const VISOR: [&str; 3] = ["j_ex_met_va", "j_ex_met_vb", "j_ex_met_vc"];
 
 /// The bone a mount seats its rider on. Every body the game names a mount carries one, and nothing
 /// else does.
@@ -404,6 +408,8 @@ pub struct Animation {
     face: Layer,
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
+    /// How far a raised visor has turned, one angle per bone it hinges on.
+    visor: Cell<[f32; 3]>,
     running: Cell<bool>,
     /// The mount the body is seated on, posed on a rig of its own. A mount names the same bones a
     /// body does, so the two cannot be merged the way an extra skeleton is.
@@ -434,6 +440,7 @@ impl Animation {
             },
             face: Default::default(),
             bust: Cell::new(Vec3::ONE),
+            visor: Cell::new([0.0; 3]),
             running: Cell::new(false),
             mounted: mount.map(|mount| Box::new(Animation::new(filed_under(&mount, &models)))),
             code,
@@ -657,6 +664,11 @@ impl Animation {
         self.bust.set(bust);
     }
 
+    /// How far a raised visor has turned, in radians, one angle per bone it hinges on.
+    pub fn hinged(&self, visor: [f32; 3]) {
+        self.visor.set(visor);
+    }
+
     /// Plays `path`, settling into `then` once it has played through.
     ///
     /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
@@ -803,6 +815,15 @@ impl Animation {
                 continue;
             };
             skin.rig.lay(&mut locals, binding, names, layer.time.get());
+        }
+        for (name, angle) in VISOR.iter().zip(self.visor.get()) {
+            if angle != 0.0
+                && let Some(bone) = skin.named.get(*name)
+                && let Some(local) = locals.get_mut(*bone)
+            {
+                let turned = Quat::from_array(local.rotation) * Quat::from_rotation_z(angle);
+                local.rotation = turned.to_array();
+            }
         }
         let mut posed = skin.rig.world(&locals);
         let bust = self.bust.get();
@@ -1128,7 +1149,7 @@ fn found(root: &str, paths: Vec<String>) -> Vec<Pack> {
 
 #[cfg(test)]
 mod tests {
-    use glam::{Mat4, Vec3};
+    use glam::{Mat4, Quat, Vec3};
     use ironworks::file::sklb::Transform;
 
     use super::super::super::skeleton::{Rig, middle};

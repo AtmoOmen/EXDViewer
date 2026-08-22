@@ -2915,8 +2915,8 @@ impl Buffer {
         );
         // The weight the character resolve carries a material's own emissive into the frame's alpha
         // at, which the glare pass reads that frame back through. It reaches no color of its own,
-        // and nought would leave a lit surface keying no halo at all.
-        put(INSTANCE, "m_EnvParameter", vec![0.0, 0.0, 0.0, 1.0]);
+        // and the engine drives the weight over a span narrow enough to stand on its low end.
+        put(INSTANCE, "m_EnvParameter", vec![0.0, 0.0, 0.0, 0.17]);
         // A fill light standing where the camera does, added over whatever the frame's own lighting
         // left. The first register weighs it: a diffuse and a specular for the character path, then
         // the pair skin takes instead. The second is the rim it draws around a silhouette, how far
@@ -3646,7 +3646,7 @@ mod test {
             .chunks_exact(4)
             .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
             .collect();
-        assert_eq!(filled[4..8], [0.0, 0.0, 0.0, 1.0]);
+        assert_eq!(filled[4..8], [0.0, 0.0, 0.0, 0.17]);
         assert_eq!(filled[8..12], [0.15, 0.15, 0.15, 0.17]);
         assert_eq!(filled[12..16], [0.01584, 0.9, 0.01584, 0.8]);
     }

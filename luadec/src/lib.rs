@@ -14,7 +14,7 @@ mod read;
 use crate::chunk::{Function, Opcode};
 
 pub use chunk::Chunk;
-pub use expr::{Closure, Expr, Stat};
+pub use expr::{Closure, Expr, Stat, Target, write_block};
 
 /// A chunk as source, and how much of it the reading resolved.
 pub struct Decompiled {
@@ -90,6 +90,15 @@ pub fn source(held: &Function) -> Option<Source> {
         vararg: closure.vararg,
         lines,
     })
+}
+
+/// Read one function as statements, with anything the reading could not resolve left as
+/// [`Stat::Raw`].
+///
+/// This is [`decompile`] stopping a step early, for a caller that walks the reading rather than
+/// printing it.
+pub fn read(held: &Function) -> Closure {
+    read::closure(held, Vec::new(), 0, &mut read::Counts::default())
 }
 
 /// Disassemble a chunk, every function in the order the file holds them.

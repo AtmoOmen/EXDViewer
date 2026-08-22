@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use anyhow::{Result, anyhow};
 use compact_str::ToCompactString;
 use egui::{CollapsingHeader, Color32, Label, RichText, ScrollArea, Sense};
@@ -11,8 +13,9 @@ use crate::{
     },
     quests::{
         Load,
-        derive::{self, Line, Param},
+        derive::{self, Param},
         index::Index,
+        script::{self, Script},
     },
     settings::EVALUATE_STRINGS,
     sheet::{CellResponse, SheetColumnDefinition},
@@ -118,16 +121,43 @@ fn reward_fields() -> Vec<String> {
     names
 }
 
+/// One line of a quest's dialogue, by the row key the script names it with.
+pub struct Line {
+    pub key: String,
+    pub speaker: String,
+    pub text: Vec<u8>,
+}
+
 pub struct Dialogue {
-    /// The three fixed buckets first, then one group per speaker in the order they first talk.
-    groups: Vec<(String, Vec<Vec<u8>>)>,
-    lines: usize,
+    lines: Vec<Line>,
+    /// The three fixed buckets first, then one group per speaker in the order they first talk, as
+    /// indices into [`Self::lines`].
+    groups: Vec<(String, Vec<usize>)>,
+    by_key: HashMap<String, usize>,
+}
+
+impl Dialogue {
+    pub fn line(&self, key: &str) -> Option<&Line> {
+        self.by_key.get(key).map(|at| &self.lines[*at])
+    }
 }
 
 pub struct Links {
     script: String,
-    music: Vec<String>,
-    cutscenes: Vec<String>,
+    /// The instruction a script reads the asset by, and the file it names.
+    music: Vec<(String, String)>,
+    cutscenes: Vec<(String, String)>,
+}
+
+impl Links {
+    /// The file a `QuestParams` instruction names, for a script reading `self.<param>`.
+    pub fn asset(&self, param: &str) -> Option<&str> {
+        self.music
+            .iter()
+            .chain(&self.cutscenes)
+            .find(|(name, _)| name == param)
+            .map(|(_, path)| path.as_str())
+    }
 }
 
 #[derive(Default)]
@@ -135,6 +165,7 @@ pub struct Detail {
     node: Option<u32>,
     dialogue: Load<Dialogue>,
     links: Load<Links>,
+    script: Load<Script>,
 }
 
 pub enum Action {
@@ -150,6 +181,7 @@ impl Detail {
             self.node = Some(node);
             self.dialogue = Load::Idle;
             self.links = Load::Idle;
+            self.script = Load::Idle;
         }
         let quest = index.quest(node);
         if matches!(self.dialogue, Load::Idle) {
@@ -164,8 +196,33 @@ impl Detail {
             let params = index.assets(node);
             self.links = Load::spawn(async move { links(backend, language, script, params).await });
         }
+        if matches!(self.script, Load::Idle) {
+            let files = backend.files().clone();
+            let path = derive::script_path(quest.row_id, &quest.id);
+            self.script = Load::spawn(async move { script::read(&files.read(&path).await?) });
+        }
         self.dialogue.poll();
         self.links.poll();
+        self.script.poll();
+    }
+
+    /// The quest's dialogue, its assets and its scenes, each once the read finishes.
+    pub fn dialogue_lines(&self) -> Option<&Dialogue> {
+        match &self.dialogue {
+            Load::Ready(held) => Some(held),
+            _ => None,
+        }
+    }
+
+    pub fn links(&self) -> Option<&Links> {
+        match &self.links {
+            Load::Ready(held) => Some(held),
+            _ => None,
+        }
+    }
+
+    pub fn script(&self) -> &Load<Script> {
+        &self.script
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui, index: &Index, node: u32) -> Option<Action> {
@@ -271,7 +328,7 @@ impl Detail {
             }
             Load::Ready(links) => {
                 let mut action = asset_link(ui, &links.script);
-                for path in links.music.iter().chain(&links.cutscenes) {
+                for (_, path) in links.music.iter().chain(&links.cutscenes) {
                     action = action.or(asset_link(ui, path));
                 }
                 action
@@ -281,7 +338,7 @@ impl Detail {
 
     fn dialogue(&self, ui: &mut egui::Ui) -> Option<Action> {
         let title = match &self.dialogue {
-            Load::Ready(dialogue) => format!("Dialogue ({})", dialogue.lines),
+            Load::Ready(dialogue) => format!("Dialogue ({})", dialogue.lines.len()),
             _ => "Dialogue".to_string(),
         };
         section(ui, &title, false, |ui| {
@@ -293,11 +350,11 @@ impl Detail {
                     ui.colored_label(Color32::RED, error.clone());
                 }
                 Load::Ready(dialogue) => {
-                    for (speaker, lines) in &dialogue.groups {
+                    for (speaker, held) in &dialogue.groups {
                         ui.add_space(4.0);
                         ui.label(RichText::new(speaker).strong());
-                        for line in lines {
-                            ui.label(sestring(ui, line));
+                        for at in held {
+                            ui.label(sestring(ui, &dialogue.lines[*at].text));
                         }
                     }
                 }
@@ -406,7 +463,7 @@ fn asset_link(ui: &mut egui::Ui, path: &str) -> Option<Action> {
 
 /// Dialogue leans on more payload kinds than most sheets, so a player-name macro reads as a gap in
 /// the sentence. That is the formatter having nothing to put there, not a decode failure.
-fn sestring(ui: &egui::Ui, bytes: &[u8]) -> String {
+pub fn sestring(ui: &egui::Ui, bytes: &[u8]) -> String {
     let text: &SeStr = bytes.into();
     if EVALUATE_STRINGS.get(ui.ctx()) {
         text.format()
@@ -432,8 +489,9 @@ async fn dialogue(
         _ => return Err(anyhow!("{name} is not a two column text sheet")),
     };
 
-    let mut groups: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
-    let mut lines = 0;
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut lines: Vec<Line> = Vec::new();
+    let mut by_key = HashMap::new();
     for row_id in sheet.get_row_ids() {
         let Ok(row) = sheet.get_row(row_id) else {
             continue;
@@ -447,31 +505,41 @@ async fn dialogue(
         if text.as_bytes().is_empty() {
             continue;
         }
-        let key = String::from_utf8_lossy(key.as_bytes());
+        let key = String::from_utf8_lossy(key.as_bytes()).into_owned();
         let speaker = match derive::line_of(&key, &id_upper) {
-            Line::Journal => "Journal".to_string(),
-            Line::Objective => "Objectives".to_string(),
-            Line::System => "System".to_string(),
-            Line::Speaker(speaker) => speaker.to_string(),
+            derive::Line::Journal => "Journal".to_string(),
+            derive::Line::Objective => "Objectives".to_string(),
+            derive::Line::System => "System".to_string(),
+            derive::Line::Speaker(speaker) => speaker.to_string(),
         };
-        lines += 1;
+        let at = lines.len();
+        by_key.insert(key.clone(), at);
         match groups.iter_mut().find(|(name, _)| *name == speaker) {
-            Some((_, texts)) => texts.push(text.as_bytes().to_vec()),
-            None => groups.push((speaker, vec![text.as_bytes().to_vec()])),
+            Some((_, held)) => held.push(at),
+            None => groups.push((speaker.clone(), vec![at])),
         }
+        lines.push(Line {
+            key,
+            speaker,
+            text: text.as_bytes().to_vec(),
+        });
     }
-    Ok(Dialogue { groups, lines })
+    Ok(Dialogue {
+        lines,
+        groups,
+        by_key,
+    })
 }
 
 async fn links(
     backend: Backend,
     language: Language,
     script: String,
-    params: Vec<(Param, u32)>,
+    params: Vec<(String, Param, u32)>,
 ) -> Result<Links> {
     let mut music = Vec::new();
     let mut cutscenes = Vec::new();
-    for (param, arg) in params {
+    for (instruction, param, arg) in params {
         let name = match param {
             Param::Bgm => "BGM",
             Param::Cutscene => "Cutscene",
@@ -493,8 +561,8 @@ async fn links(
             continue;
         }
         match param {
-            Param::Bgm => music.push(value),
-            Param::Cutscene => cutscenes.push(derive::cutscene_path(&value)),
+            Param::Bgm => music.push((instruction, value)),
+            Param::Cutscene => cutscenes.push((instruction, derive::cutscene_path(&value))),
         }
     }
     music.sort_unstable();
@@ -504,11 +572,12 @@ async fn links(
 
     // An instruction name can carry a cutscene id in a namespace of its own, so a link is only
     // offered for a file that is really there. A missing one means "not shown", not "absent".
-    let present = backend.files().exists_many(&cutscenes).await?;
+    let paths: Vec<String> = cutscenes.iter().map(|(_, path)| path.clone()).collect();
+    let present = backend.files().exists_many(&paths).await?;
     let cutscenes = cutscenes
         .into_iter()
         .zip(present)
-        .filter_map(|(path, exists)| exists.then_some(path))
+        .filter_map(|(held, exists)| exists.then_some(held))
         .collect();
 
     Ok(Links {

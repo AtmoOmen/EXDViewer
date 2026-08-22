@@ -2,8 +2,10 @@ mod cutscenes;
 mod dag;
 mod derive;
 mod detail;
-mod graph;
+pub mod graph;
 mod index;
+mod play;
+pub mod script;
 mod tree;
 
 use std::collections::HashSet;
@@ -43,6 +45,7 @@ enum View {
     Journal,
     Chains,
     Cutscenes,
+    Play,
 }
 
 #[derive(Default)]
@@ -104,6 +107,7 @@ pub struct QuestBrowser {
     /// A quest the view has yet to bring on screen.
     reveal: Option<u32>,
     detail: detail::Detail,
+    player: play::Player,
     matcher: FuzzyMatcher,
     palette: Option<Palette>,
     nav: ListNav,
@@ -134,6 +138,7 @@ impl Default for QuestBrowser {
             pending: None,
             reveal: None,
             detail: detail::Detail::default(),
+            player: play::Player::default(),
             matcher: FuzzyMatcher::new(),
             palette: None,
             nav: ListNav::default(),
@@ -171,6 +176,7 @@ impl QuestBrowser {
         self.rows_stale = true;
         self.cutscenes = Load::Idle;
         self.shelf_for = None;
+        self.player.reset();
         self.pending = self.pending.take().or(self.selected.take());
     }
 
@@ -376,6 +382,7 @@ impl QuestBrowser {
                     View::Journal => self.draw_tree(ui),
                     View::Chains => self.draw_chains(ui),
                     View::Cutscenes => self.draw_cutscenes(ui),
+                    View::Play => self.draw_play(ui),
                 };
             });
         });
@@ -389,6 +396,7 @@ impl QuestBrowser {
                 (View::Journal, "📖", "Journal"),
                 (View::Chains, "🕸", "Prerequisite chains"),
                 (View::Cutscenes, "▶", "Every cutscene that ships"),
+                (View::Play, "📝", "Play the selected quest's scenes"),
             ] {
                 if ui
                     .add(Button::selectable(self.view == view, glyph))
@@ -455,6 +463,17 @@ impl QuestBrowser {
                     held.entries.len(),
                     held.entries.len() - held.owned
                 ),
+                _ => String::new(),
+            },
+            View::Play => match self.detail.script() {
+                Load::Ready(script) => {
+                    let mut held =
+                        format!("{} scenes · {} branches", script.scenes.len(), script.branches);
+                    if script.disassembled > 0 {
+                        held.push_str(&format!(" · {} unread", script.disassembled));
+                    }
+                    held
+                }
                 _ => String::new(),
             },
             View::Chains => {
@@ -557,6 +576,20 @@ impl QuestBrowser {
             },
         );
         action
+    }
+
+    fn draw_play(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let Some(node) = self
+            .selected
+            .zip(self.index.as_ref())
+            .and_then(|(row_id, index)| index.node_of(row_id))
+        else {
+            ui.centered_and_justified(|ui| {
+                ui.label(RichText::new("No quest selected").weak());
+            });
+            return None;
+        };
+        self.player.ui(ui, &self.detail, node)
     }
 
     fn draw_chains(&mut self, ui: &mut egui::Ui) -> Option<Action> {

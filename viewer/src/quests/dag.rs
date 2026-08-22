@@ -30,6 +30,11 @@ pub fn ui(
             .vertical_scroll_offset((at.center().y - ui.available_height() / 2.0).max(0.0));
     }
 
+    // A component holds every branch anyone ever took to reach a quest; the chain through the one
+    // in hand is the part of it that answers what leads here and what it opens.
+    let chain = focus.map(|node| graph.chain(node));
+    let on_chain = |node: u32| chain.as_ref().is_none_or(|held| held[node as usize]);
+
     let mut picked = None;
     area.show_viewport(ui, |ui, viewport| {
         let (canvas, _) = ui.allocate_exact_size(content, Sense::hover());
@@ -40,13 +45,18 @@ pub fn ui(
 
         let painter = ui.painter();
         let faint = ui.visuals().weak_text_color().gamma_multiply(0.6);
+        let lit = ui.visuals().text_color();
         for node in visible {
             let to = at_of(origin, graph, *node);
             // An OR-joined set needs any one of its quests, so those edges are drawn apart from
             // the ones that are really required.
             let optional = index.quest(*node).join == 2 && graph.prereqs(*node).len() > 1;
             for prereq in graph.prereqs(*node) {
-                edge(painter, at_of(origin, graph, *prereq), to, faint, optional);
+                let color = match on_chain(*node) && on_chain(*prereq) {
+                    true => lit,
+                    false => faint,
+                };
+                edge(painter, at_of(origin, graph, *prereq), to, color, optional);
             }
             for dependent in graph.dependents(*node) {
                 if !(first..last).contains(&graph.rank(*dependent)) {
@@ -56,7 +66,10 @@ pub fn ui(
                         painter,
                         to,
                         at_of(origin, graph, *dependent),
-                        faint,
+                        match on_chain(*node) && on_chain(*dependent) {
+                            true => lit,
+                            false => faint,
+                        },
                         dependent_optional,
                     );
                 }
@@ -67,7 +80,7 @@ pub fn ui(
             let rect = at_of(origin, graph, *node);
             let quest = index.quest(*node);
             let chosen = focus == Some(*node);
-            let hit = unfiltered || matched[*node as usize];
+            let hit = (unfiltered || matched[*node as usize]) && on_chain(*node);
             let response = ui
                 .interact(rect, ui.id().with(*node), Sense::click())
                 .on_hover_text(format!(

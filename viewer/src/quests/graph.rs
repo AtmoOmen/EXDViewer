@@ -247,6 +247,28 @@ impl Graph {
         &nodes[start..end]
     }
 
+    /// Everything one quest reaches and is reached by, itself included: the chain it sits on,
+    /// rather than the whole component it shares with every sibling branch.
+    pub fn chain(&self, node: u32) -> Vec<bool> {
+        let mut on = vec![false; self.len()];
+        on[node as usize] = true;
+        for back in [true, false] {
+            let mut queue = vec![node];
+            while let Some(held) = queue.pop() {
+                let next = match back {
+                    true => self.prereqs(held),
+                    false => self.dependents(held),
+                };
+                for reached in next {
+                    if !std::mem::replace(&mut on[*reached as usize], true) {
+                        queue.push(*reached);
+                    }
+                }
+            }
+        }
+        on
+    }
+
     /// The last rank and slot a component occupies, so the canvas knows how big it is.
     pub fn extent(&self, component: u32) -> (u32, u32) {
         self.component_nodes(component)

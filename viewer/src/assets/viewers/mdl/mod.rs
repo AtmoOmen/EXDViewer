@@ -462,7 +462,6 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     }])?;
     model.chrome.set(Chrome::Asset);
     model.shaded.set(false);
-    model.animation.rest();
     Ok(Preview::Model(Box::new(model)))
 }
 

@@ -168,6 +168,9 @@ pub struct Pose {
     seat: Option<Placement>,
 }
 
+/// What a pack names the motion a model stands in, whatever rig it is built on.
+const IDLE: &str = "_id0";
+
 /// The motions a pack holds, and the name each of its animations gives one.
 struct Motions {
     /// Animation names, each with the motion it plays.
@@ -198,12 +201,16 @@ impl Motions {
         self.bindings.get(*at)
     }
 
-    /// Which motion the pack opens on: the first that stands on its own, since the first of a
-    /// human's idle pack is a delta over whatever else is playing and a model posed on one alone
-    /// scatters. A pack of nothing but deltas, which every facial one is, opens on its first.
+    /// Which motion the pack opens on: the idle where it names one, since a monster's pack leads
+    /// with a special rather than with the motion it stands in. Otherwise the first that stands on
+    /// its own, since the first of a human's idle pack is a delta over whatever else is playing and
+    /// a model posed on one alone scatters. A pack of nothing but deltas, which every facial one
+    /// is, opens on its first.
     fn standing(&self) -> Option<usize> {
+        let alone = |at: &usize| self.binding(*at).is_some_and(|held| held.blend_hint() == 0);
         (0..self.named.len())
-            .find(|at| self.binding(*at).is_some_and(|held| held.blend_hint() == 0))
+            .find(|at| alone(at) && self.named[*at].0.ends_with(IDLE))
+            .or_else(|| (0..self.named.len()).find(alone))
             .or((!self.named.is_empty()).then_some(0))
     }
 }
@@ -434,7 +441,7 @@ impl Animation {
             },
             face: Default::default(),
             bust: Cell::new(Vec3::ONE),
-            running: Cell::new(false),
+            running: Cell::new(true),
             mounted: mount.map(|mount| Box::new(Animation::new(filed_under(&mount, &models)))),
             code,
         }
@@ -642,13 +649,6 @@ impl Animation {
         found.sort();
         found.dedup();
         found
-    }
-
-    /// Stands it where its own file put it, which is what a file being inspected should show.
-    pub fn rest(&self) {
-        for layer in self.layers() {
-            layer.motion.set(None);
-        }
     }
 
     /// What the bust bones are scaled by, which `human.cmp` states as a pair of bounds a slider

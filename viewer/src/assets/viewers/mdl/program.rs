@@ -1065,6 +1065,9 @@ pub struct Exposure {
     pub step: f32,
     /// The exposure `AdaptLum` last answered, which is what the passes here read the frame under.
     pub adapted: f32,
+    /// What every pass writing into the lit frame scales its color by and the tone pass divides
+    /// back out, which is also where the curve's knee falls. One where nothing divides it back.
+    pub encode: f32,
 }
 
 /// What the sky pass reads itself against: the hour, which places the sun and picks the slice of the
@@ -1397,8 +1400,18 @@ impl Default for Exposure {
             shoulder: 0.0,
             step: 0.0,
             adapted: 1.0,
+            encode: 1.0,
         }
     }
+}
+
+/// What the frame is scaled by against the root of the exposure the adaptation answered, which is
+/// also where the tone curve's knee falls. Every capture reads the same coefficient whatever the
+/// zone, the weather or the frame's own luminance.
+const ENCODE: f32 = 0.7;
+
+pub fn encode(adapted: f32) -> f32 {
+    ENCODE * adapted.max(0.0).sqrt()
 }
 
 /// What the engine decides rather than the files. Everything a constant buffer holds that is not the
@@ -2449,14 +2462,12 @@ impl Buffer {
             }
         };
         let exposure = scene.exposure;
-        // The exposure the last frame settled on, which is what this one is measured and read under.
-        let adapted = exposure.adapted.max(f32::EPSILON);
+        // What the frame is written at, which every pass reading it back divides through again.
+        let encode = exposure.encode.max(f32::EPSILON);
         if self.name == ADAPT_LUM_PARAM {
             // The rate is stated per second and the buffer wants what one frame moves by. The
-            // measure squares the exposure its own frame was lit under, so the loop's slope at the
-            // answer it settles on is `1 - 3 * step`: past two thirds it swings apart, and a third
-            // reaches the answer in one frame. A frame as short as the game's leaves it far below
-            // either.
+            // measure reads the frame divided by what wrote it, so what it reports does not follow
+            // the exposure and a whole step would reach the answer in one frame.
             let step = (exposure.rate * exposure.step).min(SETTLE);
             write(
                 &mut out,
@@ -2534,8 +2545,8 @@ impl Buffer {
             // for the eight by thirty-two every sky but one is.
             write(&mut out, 2, &[0.5, 1.0 - 0.5 / tall, 0.0, 0.0]);
             write(&mut out, 3, &[(1.0 - 1.0 / wide) * 0.5, -(1.0 - 1.0 / tall), 0.0, 0.0]);
-            // The hour's own slice, and the exposure the sky is read under with everything else.
-            write(&mut out, 4, &[(hours + 0.5) / held.depth, 0.0, 1.0 / adapted, 0.0]);
+            // The hour's own slice, and the scale the sky is written at with everything else.
+            write(&mut out, 4, &[(hours + 0.5) / held.depth, 0.0, encode, 0.0]);
             // The color the sky is mixed toward, at the weight a real frame carried: nought, so it
             // never reaches the frame. Nothing found states either.
             write(&mut out, 5, &[0.0; 4]);
@@ -2627,10 +2638,10 @@ impl Buffer {
         }
         if self.name == FOG_PARAM {
             let held = scene.fog;
-            // Divided by the exposure the frame is read under, the way the sky it fades toward
-            // already is: the two are mixed together and have to stand in one space.
-            let color = held.color / adapted;
-            let glow = held.glow / adapted;
+            // Scaled the way the sky it fades toward already is: the two are mixed together and
+            // have to stand in one space.
+            let color = held.color * encode;
+            let glow = held.glow * encode;
             let eye = view.inverse().w_axis;
             // What the depth buffer holds and the distance in front of the camera it stands for are
             // one over the other about the planes the projection states. The table is addressed
@@ -2727,7 +2738,7 @@ impl Buffer {
             return out;
         }
         if self.name == COMMON_TEX_PARAM {
-            write(&mut out, 0, &[1.0 / adapted, adapted, 0.0, 0.0]);
+            write(&mut out, 0, &[encode, 1.0 / encode, 0.0, 0.0]);
             return out;
         }
         if self.name == TONE_MAP_PARAM {
@@ -2737,9 +2748,9 @@ impl Buffer {
             write(
                 &mut out,
                 0,
-                &[exposure.strength, exposure.shoulder, 1.0 / adapted, 0.0],
+                &[exposure.strength, exposure.shoulder, encode, 0.0],
             );
-            write(&mut out, 1, &[half, 1.0 - half, adapted, adapted * half]);
+            write(&mut out, 1, &[half, 1.0 - half, 1.0 / encode, half / encode]);
             return out;
         }
         if self.name == BRIGHT_PASS_PARAM {
@@ -3015,7 +3026,7 @@ impl Buffer {
         let held = scene.bloom;
         let [gain, floor] = REFLECTION_WEIGHT;
         put(common, "m_Misc", vec![held.specular, held.emissive, gain, floor]);
-        put(common, "m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
+        put(common, "m_Misc2", vec![scene.exposure.encode, 0.0, 0.0, 0.0]);
         // Which of the two G-buffers the lighting is reading. The opaque one carries the shader
         // type in the first target's alpha and the transparent one in the second's first channel,
         // and every lighting pass picks between them with this.
@@ -3581,7 +3592,7 @@ mod test {
     use super::{
         ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
         JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, Pass, Scene, Sky, Volume, ambient, decal_field,
-        instance_fields, joints, selector, shader_types, sun,
+        encode, instance_fields, joints, selector, shader_types, sun,
     };
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -3598,7 +3609,8 @@ mod test {
                 strength: 0.5,
                 shoulder: 0.95,
                 step: 0.027_392_5,
-                adapted: 1.431022,
+                adapted: 1.0,
+                encode: 0.698_801_4,
             },
             ..Default::default()
         };
@@ -3643,6 +3655,9 @@ mod test {
                 0.000698741,
             ]
         ));
+        // The one number here no file states, against the frame that held the largest adaptation
+        // measured. The tolerance is the drift a single frame of the game's own shows.
+        assert!((encode(3.0) - 1.21097).abs() < 1.21097 * 4e-3);
     }
 
     /// A frame long enough that the stated rate would carry the whole of its own measurement. The

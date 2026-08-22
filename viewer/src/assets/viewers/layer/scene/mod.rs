@@ -3403,14 +3403,23 @@ impl Scene {
                 ambient: self.ambient.scene(),
                 // How far the adaptation moves is stated per second, so it needs to know how long a
                 // frame took. A frame after an idle spell is capped by the pass itself.
-                // The adaptation the last frame settled on, which every pass writing into the lit
-                // frame divides by so the tone pass can multiply it back.
-                exposure: program::Exposure {
-                    adapted: self.renderer.lock().unwrap().exposed(),
-                    ..self
-                        .ambient
-                        .exposure(ui.input(|input| input.stable_dt))
-                        .unwrap_or_default()
+                // The adaptation the last frame settled on, and the scale every pass writing into
+                // the lit frame takes against it so the tone pass can divide it back out.
+                exposure: {
+                    let adapted = self.renderer.lock().unwrap().exposed();
+                    program::Exposure {
+                        adapted,
+                        // Nothing divides the frame back out until the chain that does has arrived,
+                        // so until then it is written as the composite resolved it.
+                        encode: match self.exposure.is_some() {
+                            true => program::encode(adapted),
+                            false => 1.0,
+                        },
+                        ..self
+                            .ambient
+                            .exposure(ui.input(|input| input.stable_dt))
+                            .unwrap_or_default()
+                    }
                 },
                 fog: self.ambient.fog().unwrap_or_default(),
                 cloud: self
@@ -3978,9 +3987,10 @@ impl Scene {
                             true => {
                                 let held = self.renderer.lock().unwrap();
                                 format!(
-                                    "{:.3} from a frame measuring {:.3}",
+                                    "{:.3} from a frame measuring {:.3}, written at {:.3}",
                                     held.exposed(),
-                                    held.measured()
+                                    held.measured(),
+                                    program::encode(held.exposed())
                                 )
                             }
                             false => "not run".to_owned(),

@@ -2092,6 +2092,7 @@ impl Rendered {
                     ),
                     min: Vec3::splat(-level.radius * LAMP_SPAN),
                     max: Vec3::splat(level.radius * LAMP_SPAN),
+                    reach: level.radius * LAMP_SPAN,
                     color: Vec3::splat(LAMP_FILL),
                     ..Default::default()
                 },

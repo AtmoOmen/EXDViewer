@@ -116,9 +116,12 @@ const KEYS: [(u32, u32); 3] = [
     (APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON),
 ];
 
-/// What a light is worth where the zone states no box for it. Nothing in the placement carries the
-/// reach: the file's own `range` is one in nearly every light a zone places.
+/// How large a box a light is drawn as where the zone states none for it.
 const REACH: f32 = 6.0;
+
+/// What a light's falloff is taken down to at the far edge of its reach, as a share of its
+/// brightest channel. The reciprocal, since the reach is worked out from it.
+const CUTOFF: f32 = 255.0 / 5.0;
 
 /// How fast a shared group's timeline runs. An animation pack states one span both in seconds and
 /// in these, and the two agree on thirty a second.
@@ -510,19 +513,18 @@ struct Translated {
 }
 
 /// One light the zone places. The box it is clipped against is stated in its own space, so the
-/// placement carries where it stands and the box how far it carries.
+/// placement carries where it stands and the box how much of its reach the zone kept.
 struct Light {
     placement: Mat4,
-    /// How far it stays at full strength, which its own record states.
-    range: f32,
+    /// How far it carries, worked out from how bright it is rather than read.
+    reach: f32,
     center: Vec3,
-    min: Vec3,
-    max: Vec3,
     color: Vec3,
     kind: program::LampKind,
     /// Which way it throws, in world space.
     direction: Vec3,
-    /// The cosine its cone is cut at.
+    /// The cosines its cone is full strength within and cut at.
+    inner: f32,
     cone: f32,
     /// How the zone's own `.lcb` reaches this light: the instance at the top of the tree, then an
     /// index per shared group under it.
@@ -771,6 +773,14 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
         *slot = id as u8;
     }
     (key.0, held)
+}
+
+/// How far a light carries. No field states it: the engine solves it out of the light's brightest
+/// channel and the power its own record attenuates by, and the light's pass drops every pixel past
+/// it. The colour is the one the file states, not the one an animation cycles it to.
+fn carry(color: Vec3, attenuation: f32) -> f32 {
+    let peak = color.max_element().max(0.0);
+    (CUTOFF * peak * peak).powf(1.0 / attenuation.max(1.0))
 }
 
 /// The quad one auto-layer placement stands as, measured from its grid's own origin. The blade
@@ -1294,26 +1304,31 @@ impl Scene {
                             let here = Mat4::from_rotation_translation(turn, at);
                             let glow = tinted(glows, instance.id(), SceneGlow::light);
                             self.cycling |= glow.is_some();
+                            let kind = match light.kind() {
+                                LightKind::Spot => program::LampKind::Spot,
+                                LightKind::Line => program::LampKind::Line,
+                                LightKind::Flat => program::LampKind::Plane,
+                                _ => program::LampKind::Point,
+                            };
+                            let color = color * held.intensity();
+                            // Halved, since each angle is stated across the whole cone. Only a spot
+                            // carries them, and the light's own package reads a different lane
+                            // where its kind does not have a cone at all.
+                            let half = |angle: f32| match kind {
+                                program::LampKind::Spot => (angle * 0.5).to_radians().cos(),
+                                _ => 0.0,
+                            };
                             self.lights.push(Light {
                                 placement: here,
                                 center: at,
-                                min: Vec3::splat(-REACH),
-                                max: Vec3::splat(REACH),
-                                range: light.range(),
-                                color: color * held.intensity(),
-                                kind: match light.kind() {
-                                    LightKind::Spot => program::LampKind::Spot,
-                                    LightKind::Line => program::LampKind::Line,
-                                    LightKind::Flat => program::LampKind::Plane,
-                                    _ => program::LampKind::Point,
-                                },
+                                reach: carry(color, light.attenuation()),
+                                color,
+                                kind,
                                 direction: here.transform_vector3(Vec3::Z).normalize_or_zero(),
-                                // The two angles the file states together and halved, which is
-                                // what the box its zone clips it against is cut to.
-                                cone: ((light.spot_angle() + light.attenuation_cone_coefficient())
-                                    * 0.5)
-                                    .to_radians()
-                                    .cos(),
+                                inner: half(light.spot_angle()),
+                                cone: half(
+                                    light.spot_angle() + light.attenuation_cone_coefficient(),
+                                ),
                                 key: reach(key, depth, instance.id()),
                                 glow,
                             });
@@ -1768,26 +1783,24 @@ impl Scene {
         let mut near: Vec<(f32, &Light)> = self
             .lights
             .iter()
-            .map(|light| {
-                let reach = light.min.abs().max(light.max.abs()).max_element();
-                (((light.center - eye).length() - reach).max(0.0), light)
-            })
+            .map(|light| (((light.center - eye).length() - light.reach).max(0.0), light))
             .filter(|(span, _)| *span <= self.load)
             .collect();
         near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         near.into_iter()
             .take(LAMPS)
             .map(|(_, light)| {
-                let (min, max) = self
-                    .clips
-                    .get(&light.key)
-                    .copied()
-                    .unwrap_or((light.min, light.max));
+                // A light the `.lcb` says nothing about is drawn as the box the zone would have to
+                // cut before its reach starts to matter.
+                let (min, max) = self.clips.get(&light.key).copied().unwrap_or((
+                    Vec3::splat(-REACH.min(light.reach)),
+                    Vec3::splat(REACH.min(light.reach)),
+                ));
                 program::Lamp {
                     placement: light.placement,
                     min,
                     max,
-                    range: light.range,
+                    reach: light.reach,
                     color: match light.glow {
                         Some(lane) => {
                             let (color, power) = cycled(lane, self.clock);
@@ -1797,6 +1810,7 @@ impl Scene {
                     },
                     kind: light.kind,
                     direction: light.direction,
+                    inner: light.inner,
                     cone: light.cone,
                 }
             })

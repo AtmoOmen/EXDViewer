@@ -789,24 +789,25 @@ pub enum LampKind {
 }
 
 /// One placed light, as `g_LightParam` reads it. The box is the one a zone's `.lcb` clips the light
-/// against: stated in the light's own space, in the same units the placement stands in, which is
-/// what makes its extent the distance the light carries.
+/// against: stated in the light's own space, in the same units the placement stands in, so it cuts
+/// the volume the light is drawn as without changing how far the light itself carries.
 #[derive(Clone, Copy)]
 pub struct Lamp {
     /// Takes the light's own space into the world, without scaling it.
     pub placement: Mat4,
     pub min: Vec3,
     pub max: Vec3,
-    /// How far the light stays at full strength, which its own record states and the box it is
-    /// clipped against does not. The shading saturates an inverse-distance term against it, so a
-    /// light given its whole clip volume here is at full strength everywhere inside it and falls off
-    /// only over the last tenth of the way out.
-    pub range: f32,
+    /// How far the light carries, which is what its falloff is scaled by and where its own pass
+    /// drops a pixel.
+    pub reach: f32,
     pub color: Vec3,
     pub kind: LampKind,
     /// Which way the light throws, in world space. Its own space points it along positive z: that
     /// is the axis a spot's vertex shader keeps the half of its box on.
     pub direction: Vec3,
+    /// The cosine a spot is at full strength within. Nothing but a spot reads it, and a line reads
+    /// the same lane as the reciprocal of its own length instead.
+    pub inner: f32,
     /// The cosine a spot's cone is cut at, which its own shader compares the direction to a pixel
     /// against. Nothing but a spot reads it.
     pub cone: f32,
@@ -818,27 +819,13 @@ impl Default for Lamp {
             placement: Mat4::IDENTITY,
             min: Vec3::splat(-1.0),
             max: Vec3::ONE,
-            range: 1.0,
+            reach: 1.0,
             color: Vec3::ONE,
             kind: LampKind::Point,
             direction: Vec3::Z,
-            cone: -1.0,
+            inner: 0.0,
+            cone: 0.0,
         }
-    }
-}
-
-impl Lamp {
-    /// How far the light carries, which is what its own falloff is scaled by.
-    fn reach(&self) -> f32 {
-        self.min.abs().max(self.max.abs()).max_element().max(0.001)
-    }
-
-    /// The box in units of that reach. The vertex shader clamps a unit cube against it, so a box
-    /// stated any larger would leave the corners where they were and the light would draw the cube
-    /// rather than the box.
-    fn clip(&self) -> (Vec3, Vec3) {
-        let reach = self.reach();
-        (self.min / reach, self.max / reach)
     }
 }
 
@@ -3110,20 +3097,21 @@ impl Buffer {
         // pixel, and the fade is off: the scale is cubed and clamped, so a constant one leaves it
         // alone, and a frame the game drew states the same `(0, 0, 1, 0.05)` - the floor never bites
         // against a ramp already at one. A lamp reads `z` as what its squared distance is taken into
-        // the ramp by, which is its clip volume, and `w` as how far it stays at full strength before
-        // the inverse-distance term stops saturating. Only a spot's own shader reads `y`, and the
-        // sun's reads the lane whatever is in it.
-        let reach = lamp.reach();
-        let cone = match pass {
-            Pass::Lamp => lamp.cone,
-            _ => 0.0,
+        // the ramp by, which is its reach, and `w` as how far it stays at full strength before the
+        // inverse-distance term stops saturating: one metre, in every lamp of every frame the game
+        // drew. The two lanes below it are the cones a spot is cut between, and nothing else reads
+        // them.
+        let reach = lamp.reach.max(0.001);
+        let (inner, cone) = match pass {
+            Pass::Lamp => (lamp.inner, lamp.cone),
+            _ => (0.0, 0.0),
         };
         put(
             light,
             "m_Attenuation",
             match pass {
                 Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.05],
-                _ => vec![0.0, cone, 1.0 / (reach * reach), lamp.range.max(0.001)],
+                _ => vec![inner, cone, 1.0 / (reach * reach), 1.0],
             },
         );
         put(light, "m_LightFadeValueStatic", vec![1.0]);
@@ -3135,7 +3123,7 @@ impl Buffer {
         // fourth extent before clamping and keeps only the half in front of itself, so one leaves it
         // where the clamp alone would have put it.
         let volume = lamp.placement * Mat4::from_scale(Vec3::splat(reach));
-        let (min, max) = lamp.clip();
+        let (min, max) = (lamp.min / reach, lamp.max / reach);
         put(
             light,
             "m_Position",

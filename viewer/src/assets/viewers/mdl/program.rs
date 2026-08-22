@@ -1138,17 +1138,17 @@ pub fn sun(time: f32, tilt: f32) -> Vec3 {
 /// What a place with no level file of its own stands under, which is what most zones state.
 pub const TILT: f32 = 30.0;
 
-/// How far about the point it looks at the nearest of the sun's own depth maps reaches, and how much
-/// further each one past it goes. Wider than the game's own, since every split is a pass over the
-/// scene.
-pub const SHADOW_REACH: f32 = 48.0;
+/// How far down the view the nearest of the sun's own depth maps reaches, and how much further each
+/// one past it goes. The game's own five stop at 400 units and each interval is twice the one
+/// before; three cover the same distance stepping by four.
+pub const SHADOW_REACH: f32 = 25.0;
 const SPLIT_STEP: f32 = 4.0;
 
 /// Depth maps the sun draws, stacked into one image. A pixel is read against the nearest whose own
 /// box still holds it.
 pub const SPLITS: usize = 3;
 
-/// How far the split at `at` reaches about the point it looks at.
+/// How far down the view the split at `at` reaches.
 pub fn shadow_reach(at: usize) -> f32 {
     SHADOW_REACH * SPLIT_STEP.powi(at as i32)
 }
@@ -1168,13 +1168,23 @@ pub fn shadow_push(at: usize) -> f32 {
 /// Where the sun stands to draw one split of the scene's depth, as a view and an orthographic
 /// projection about `focus`. The projection matches the one the frame is drawn with in handing back
 /// a nought-to-one depth, which is what the translator's own fixup leaves in the buffer.
-pub fn shadow_camera(light: Vec3, view: Mat4, at: usize) -> (Mat4, Mat4) {
+pub fn shadow_camera(light: Vec3, view: Mat4, projection: Mat4, at: usize) -> (Mat4, Mat4) {
     // Taken from the frame's own view rather than passed in, so the pass that draws the map and the
     // matrix that reads it cannot be given different boxes.
     let eye = view.inverse().w_axis.truncate();
     let ahead = -view.row(2).truncate().normalize_or(Vec3::Z);
-    let reach = shadow_reach(at);
-    let focus = eye + ahead * reach * 0.5;
+    let near = match at {
+        0 => 0.0,
+        at => shadow_reach(at - 1),
+    };
+    let far = shadow_reach(at);
+    // The sphere that holds the whole slice of the frame's own frustum this split covers. A box no
+    // wider than the split is deep leaves the slice's far corners off the map, and a coordinate off
+    // the edge of one band reads the band beside it rather than the split's own.
+    let spread = (1.0 / projection.x_axis.x).powi(2) + (1.0 / projection.y_axis.y).powi(2) + 1.0;
+    let along = (far + near) * spread * 0.5;
+    let reach = (near * near * (spread - 1.0) + (near - along).powi(2)).sqrt();
+    let focus = eye + ahead * along;
     let toward = light.normalize_or(Vec3::Y);
     // A light straight overhead leaves the usual up vector parallel to it, and the look-at degenerate.
     let up = match toward.y.abs() > 0.999 {
@@ -2647,7 +2657,7 @@ impl Buffer {
         // rows nought and one answer the coordinate while row two answers the depth to compare, so
         // only those two take the half that turns a clip coordinate into a texture one.
         if self.name == DIRECTIONAL_SHADOW_PARAM {
-            let (sun, onto) = shadow_camera(scene.light, view, scene.split);
+            let (sun, onto) = shadow_camera(scene.light, view, projection, scene.split);
             // The splits are stacked into one image, so the half that turns a clip coordinate into a
             // texture one also takes the second lane into this split's own band of it.
             let band = 1.0 / SPLITS as f32;

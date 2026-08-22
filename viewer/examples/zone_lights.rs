@@ -175,6 +175,7 @@ fn scan(ironworks: &Arc<Ironworks>) {
     let mut range: BTreeMap<u32, usize> = BTreeMap::new();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let (mut total, mut unclipped, mut zones) = (0usize, 0usize, 0usize);
+    let (mut far, mut widest) = (0usize, 0f32);
     for row in 0..2000u32 {
         let Ok(held) = sheet.row(row) else { continue };
         let Ok(ironworks::excel::Field::String(bg)) = held.field(1) else {
@@ -201,13 +202,22 @@ fn scan(ironworks: &Arc<Ironworks>) {
         zones += 1;
         total += held.len();
         for light in &held {
-            unclipped += usize::from(light.clip.is_none());
+            if light.clip.is_none() {
+                unclipped += 1;
+                let peak = (light.color * light.intensity).max_element();
+                let reach = (51.0 * peak * peak).powf(1.0 / light.attenuation.max(1.0));
+                far += usize::from(reach > 6.0);
+                widest = widest.max(reach);
+            }
             *attenuation.entry(light.attenuation.to_bits()).or_default() += 1;
             *range.entry(light.range.to_bits()).or_default() += 1;
             *kinds.entry(format!("{:?}", light.kind)).or_default() += 1;
         }
     }
-    println!("{zones} zones, {total} lights, {unclipped} with no clip box");
+    println!(
+        "{zones} zones, {total} lights, {unclipped} with no clip box, {far} of those reaching past \
+         six metres, widest {widest:.1}"
+    );
     for (name, held) in [("attenuation", &attenuation), ("range", &range)] {
         let mut rows: Vec<(f32, usize)> = held
             .iter()

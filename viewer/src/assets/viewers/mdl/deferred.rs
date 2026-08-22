@@ -1951,10 +1951,8 @@ impl Buffers {
         drawn
     }
 
-    /// The table the fog reads its curve out of, built again where the weather or the hour has moved
-    /// it. Filtered: the pass addresses it by a distance rather than by texel.
-    /// The taps the skin blur walks, uploaded once. Filtered, since the pass addresses it by a
-    /// fraction of the kernel rather than by texel.
+    /// The taps the skin blur walks, uploaded once. Point sampled for the reason [`ENGINE`] gives:
+    /// a column and a row are addressed as `n / size`, which is the seam between two texels.
     fn subsurface(&mut self, gl: &glow::Context) -> Result<glow::Texture, String> {
         if let Some(held) = self.kernel {
             return Ok(held);
@@ -1976,7 +1974,6 @@ impl Buffers {
             point(gl);
             held
         };
-        smooth(gl, held);
         self.kernel = Some(held);
         Ok(held)
     }
@@ -1991,6 +1988,8 @@ impl Buffers {
         SHADOW
     }
 
+    /// The table the fog reads its curve out of, built again where the weather or the hour has moved
+    /// it. Filtered: the pass addresses it by a distance rather than by texel.
     fn table(
         &mut self,
         gl: &glow::Context,
@@ -3602,7 +3601,8 @@ pub fn point(gl: &glow::Context) {
     }
 }
 
-/// The exception: the one buffer a pass reads between texels rather than at their centers.
+/// For the buffers a pass reads between texels rather than at their centers. Leaves the wrap modes
+/// alone, so a texture takes this after `point`.
 fn smooth(gl: &glow::Context, texture: glow::Texture) {
     unsafe {
         gl.bind_texture(glow::TEXTURE_2D, Some(texture));

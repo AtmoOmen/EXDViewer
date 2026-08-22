@@ -81,6 +81,56 @@ fn names(ironworks: &Ironworks<SqPack<Install>>, path: &str) -> Option<Vec<(Stri
     Some(found)
 }
 
+/// Every part of a model, as the attributes it declares and the box its own vertices fill.
+fn spans(
+    ironworks: &Ironworks<SqPack<Install>>,
+    path: &str,
+) -> Option<Vec<(Vec<String>, [f32; 4], usize)>> {
+    let bytes: Vec<u8> = ironworks.file(path).ok()?;
+    let container = ModelContainer::read(Cursor::new(bytes)).ok()?;
+    let model = container.model(ironworks::file::mdl::Lod::High);
+    let declared = model.attribute_names().ok()?;
+    let mut found = Vec::new();
+    for mesh in model.meshes() {
+        let Some(positions) = mesh.attributes().ok().and_then(|held| {
+            held.into_iter()
+                .find(|attribute| matches!(attribute.kind, VertexAttributeKind::Position))
+                .and_then(|attribute| match attribute.values {
+                    VertexValues::Vector3(values) => {
+                        Some(values.iter().map(|held| [held[0], held[1]]).collect::<Vec<_>>())
+                    }
+                    VertexValues::Vector4(values) => {
+                        Some(values.iter().map(|held| [held[0], held[1]]).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                })
+        }) else {
+            continue;
+        };
+        let Ok(indices) = mesh.indices() else { continue };
+        for part in mesh.submeshes() {
+            let claimed: Vec<String> = (0..declared.len())
+                .filter(|bit| part.attributes & 1 << bit != 0)
+                .map(|bit| declared[bit].clone())
+                .collect();
+            let mut box_ = [f32::MAX, f32::MIN, f32::MAX, f32::MIN];
+            for at in &indices[part.start..part.start + part.count] {
+                let Some(held) = positions.get(usize::from(*at)) else {
+                    continue;
+                };
+                box_[0] = box_[0].min(held[1]);
+                box_[1] = box_[1].max(held[1]);
+                box_[2] = box_[2].min(held[0].abs());
+                box_[3] = box_[3].max(held[0].abs());
+            }
+            if box_[0] <= box_[1] {
+                found.push((claimed, box_, part.count));
+            }
+        }
+    }
+    Some(found)
+}
+
 fn extent(ironworks: &Ironworks<SqPack<Install>>, path: &str) -> Option<(f32, f32)> {
     let bytes: Vec<u8> = ironworks.file(path).ok()?;
     let container = ModelContainer::read(Cursor::new(bytes)).ok()?;
@@ -268,6 +318,66 @@ fn main() {
                     .map(|(_, name)| name.as_str())
                     .collect();
                 println!("  variant {variant}: mask {mask:#012b} shows {}", shown.join(" "));
+            }
+        }
+        "raw" => {
+            let bytes: Vec<u8> = ironworks.file(EQP).unwrap();
+            let control = u64::from_le_bytes(bytes[..8].try_into().unwrap());
+            let count: u16 = arguments
+                .get(1)
+                .and_then(|held| held.parse().ok())
+                .unwrap_or(1200);
+            for id in 1..count {
+                let block = id / 160;
+                let entry = match control & 1 << block != 0 {
+                    true => {
+                        let index = 160 * (control & ((1 << block) - 1)).count_ones() as usize
+                            + usize::from(id % 160);
+                        bytes
+                            .get(index * 8..index * 8 + 8)
+                            .map_or(0x3fe00070603f00, |held| {
+                                u64::from_le_bytes(held.try_into().unwrap())
+                            })
+                    }
+                    false => 0x3fe00070603f00,
+                };
+                println!("{id},{entry:016x}");
+            }
+        }
+        "dump" => {
+            let count: u16 = arguments
+                .get(1)
+                .and_then(|held| held.parse().ok())
+                .unwrap_or(1200);
+            println!("set,kind,attr,ylo,yhi,xlo,xhi,n");
+            for id in 1..count {
+                for kind in ["top", "glv", "dwn", "sho", "met"] {
+                    let path = format!("chara/equipment/e{id:04}/model/c0101e{id:04}_{kind}.mdl");
+                    let Some(parts) = spans(&ironworks, &path) else {
+                        continue;
+                    };
+                    for (claimed, box_, n) in parts {
+                        let names = match claimed.is_empty() {
+                            true => String::from("-"),
+                            false => claimed.join("+"),
+                        };
+                        println!(
+                            "{id},{kind},{names},{:.4},{:.4},{:.4},{:.4},{n}",
+                            box_[0], box_[1], box_[2], box_[3]
+                        );
+                    }
+                }
+            }
+        }
+        "bits" => {
+            let bytes: Vec<u8> = ironworks.file(EQP).unwrap();
+            let file = eqp::EquipmentParameter::read(Cursor::new(bytes)).unwrap();
+            let count: u16 = arguments
+                .get(1)
+                .and_then(|held| held.parse().ok())
+                .unwrap_or(1200);
+            for id in 0..count {
+                println!("{id},{}", flags(&file.set(id)).join(" "));
             }
         }
         "legs" => {
@@ -497,6 +607,6 @@ fn main() {
                 );
             }
         }
-        _ => println!("attrs | census | set | sweep | reach"),
+        _ => println!("attrs | census | set | sweep | reach | dump | bits"),
     }
 }

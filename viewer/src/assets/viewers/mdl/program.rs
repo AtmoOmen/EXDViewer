@@ -2985,9 +2985,11 @@ impl Buffer {
             vec![2.0 / width, -2.0 / height, -1.0, 1.0],
         );
         // The two lanes the composite weighs its glare by before it divides that through by the
-        // colour and leaves the share in the frame's alpha. The weather states both.
+        // colour and leaves the share in the frame's alpha, which the weather states, and then the
+        // pair a surface takes the brightness it stands in through to weigh what it reflects.
         let held = scene.bloom;
-        put(common, "m_Misc", vec![held.specular, held.emissive, 0.0, 0.0]);
+        let [gain, floor] = REFLECTION_WEIGHT;
+        put(common, "m_Misc", vec![held.specular, held.emissive, gain, floor]);
         put(common, "m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
         let screen = "g_ScreenParameter";
         put(screen, "m_BackBufferSize", vec![width, height]);
@@ -3231,6 +3233,11 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
         }
     }
 }
+
+/// The scale and bias a surface takes the brightness it stands in through, saturated, to weigh
+/// everything it reflects: at nought the whole environment term goes and only what it refracts is
+/// left. Byte-identical across two captured frames, so the engine holds these rather than any file.
+const REFLECTION_WEIGHT: [f32; 2] = [4.0, 0.2];
 
 /// The floor a background surface's ambient never falls below, and the gain its occlusion is read
 /// at. Byte-identical across five captures of four zones, so the engine holds these rather than any

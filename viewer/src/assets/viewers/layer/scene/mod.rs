@@ -3397,6 +3397,7 @@ impl Scene {
                 projection,
                 model: Mat4::IDENTITY,
                 light,
+                reach: self.ambient.reach,
                 diffuse: color,
                 specular: color,
                 ambient: self.ambient.scene(),
@@ -4066,7 +4067,9 @@ impl Scene {
                         ) {
                             (Some(Package::Ready(_)), Some(true)) => {
                                 let reaches: Vec<String> = (0..program::SPLITS)
-                                    .map(|at| format!("{:.0}", program::shadow_reach(at)))
+                                    .map(|at| {
+                                        format!("{:.0}", program::shadow_reach(self.ambient.reach, at))
+                                    })
                                     .collect();
                                 format!(
                                     "translated, {} splits reaching {} (the game draws 5)",

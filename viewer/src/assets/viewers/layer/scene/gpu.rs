@@ -528,7 +528,7 @@ impl Renderer {
             gl.enable(glow::POLYGON_OFFSET_FILL);
         }
         for split in 0..program::SPLITS {
-            let (view, projection) = program::shadow_camera(scene.light, scene.view, scene.projection, split);
+            let (view, projection) = program::shadow_camera(scene.light, scene.view, scene.projection, scene.reach, split);
             let sun = program::Scene {
                 view,
                 projection,

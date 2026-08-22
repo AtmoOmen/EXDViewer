@@ -814,17 +814,20 @@ impl CharacterBuilder {
         };
         let (outfit, _) = self.dressed();
         let sets = self.sets.borrow();
-        Slot::ALL
-            .into_iter()
-            .filter_map(|slot| Some((slot, outfit[slot as usize]?)))
-            .filter(|(slot, gear)| {
-                sets.get(&(slot.adornment(), gear.set))
-                    .and_then(|held| held[*slot as usize].as_ref())
-                    .is_some_and(|path| self.held.contains_key(path))
-            })
-            .flat_map(|(slot, gear)| worn.covers(slot, gear.set))
-            .map(str::to_owned)
-            .collect()
+        let mut arrived = Outfit::default();
+        for slot in Slot::ALL {
+            let Some(gear) = outfit[slot as usize] else {
+                continue;
+            };
+            let held = sets
+                .get(&(slot.adornment(), gear.set))
+                .and_then(|found| found[slot as usize].as_ref())
+                .is_some_and(|path| self.held.contains_key(path));
+            if held {
+                arrived[slot as usize] = Some(gear);
+            }
+        }
+        worn.covers(&arrived).into_iter().map(str::to_owned).collect()
     }
 
     /// Where a menu has been left, which is where the creator opens it until it is picked from.

@@ -4,16 +4,18 @@
 //! a character's bare legs out of a full-length coat, and it is the file's answer rather than a
 //! depth bias: the two meshes are the same skin where a race's smallclothes are its own body.
 
+use std::collections::BTreeSet;
+
 use anyhow::Result;
 use ironworks::file::{File, eqp};
 
-use super::Slot;
+use super::{Outfit, Slot};
 use crate::backend::Backend;
 
 pub const PATH: &str = "chara/xls/equipmentparameter/equipmentparameter.eqp";
 
-/// The seams themselves, each named for the part of the body it sits at. A name belongs to one
-/// slot's models alone, so hiding it by name reaches only the model that owns it.
+/// The seams themselves, each named for the part of the body it sits at. Nearly every name
+/// belongs to one slot's models, so hiding it by name reaches only the model that owns it.
 const NECK: &str = "atr_nek";
 const UPPER_ARM: &str = "atr_ude";
 const FOREARM: &str = "atr_hij";
@@ -21,6 +23,9 @@ const WAIST: &str = "atr_kod";
 const KNEE: &str = "atr_hiz";
 const CALF: &str = "atr_sne";
 const KNEE_PAD: &str = "atr_lpd";
+const CUFF: &str = "atr_arm";
+const SHAFT: &str = "atr_leg";
+const GORGET: &str = "atr_inr";
 
 /// The file, read once and asked about a set at a time.
 pub struct Worn(eqp::EquipmentParameter);
@@ -90,62 +95,88 @@ impl Worn {
         }
     }
 
-    /// The parts a piece worn in one slot covers on the models under it, by the name those models
-    /// file them under. Each is a seam: a garment reaches over one of them and the geometry beneath
-    /// would poke through, so the file states which to leave undrawn rather than the two being told
-    /// apart by depth.
-    pub fn covers(&self, worn: Slot, set: u16) -> Vec<&'static str> {
+    /// The parts the outfit covers on the models under it, by the name those models file them
+    /// under. Each is a seam: two pieces reach over the same stretch of body and the geometry of
+    /// one would poke through the other, so the file states which to leave undrawn rather than the
+    /// two being told apart by depth.
+    ///
+    /// A sleeve and a cuff, or a hem and a boot shaft, both claim the same stretch. Which of them
+    /// gives up its own seam is the reach each states rather than either one always winning, so
+    /// the pair is read together and a piece still on its way states nothing.
+    pub fn covers(&self, outfit: &Outfit) -> BTreeSet<&'static str> {
         // Smallclothes have no entry of their own, entry nought being the file's own control word,
         // and reach over nothing: taking the next set's leaves a bare leg with its knee cut out.
-        if set == 0 {
-            return Vec::new();
+        let stated = |slot: Slot| {
+            outfit[slot as usize]
+                .map(|gear| gear.set)
+                .filter(|set| *set != 0)
+                .map(|set| self.0.set(set))
+        };
+        let body = stated(Slot::Body);
+        let legs = stated(Slot::Legs);
+        let hands = stated(Slot::Hands);
+        let feet = stated(Slot::Feet);
+        let head = stated(Slot::Head);
+        let sleeve = body.as_ref().map_or(0, |held| held.body().sleeve_reach());
+        let cuff = hands.as_ref().map_or(0, |held| held.hands().cuff_reach());
+        let hem = legs.as_ref().map_or(0, |held| held.legs().hem_reach());
+        let shaft = feet.as_ref().map_or(0, |held| held.feet().shaft_reach());
+
+        let mut found = BTreeSet::new();
+        if let Some(body) = body.as_ref().map(eqp::Set::body).filter(eqp::Body::enabled) {
+            // Both bits sit at the waistband, one for a garment that reaches the waist and one for
+            // a coat that goes on past the knee and takes the pad with it.
+            if body.hide_waist() || body.hide_thighs() {
+                found.insert(WAIST);
+            }
+            if body.hide_thighs() && !body.hide_waist() {
+                found.insert(KNEE_PAD);
+            }
+            if body.hide_gorget() {
+                found.insert(GORGET);
+            }
+            if sleeve > cuff {
+                found.insert(CUFF);
+            }
         }
-        let held = self.0.set(set);
-        let mut found = Vec::new();
-        match worn {
-            Slot::Head => {
-                let head = held.head();
-                if head.enabled() && head.hide_neck() {
-                    found.push(NECK);
-                }
+        if let Some(hands) = hands.as_ref().map(eqp::Set::hands).filter(eqp::Hands::enabled)
+            && sleeve <= cuff
+            && hands.hide_forearm()
+        {
+            // The two bits are one reach rather than two seams: a glove ends at the wrist, the
+            // forearm, the elbow or the upper arm, and only the last two reach over anything.
+            found.insert(FOREARM);
+            if hands.hide_elbow() {
+                found.insert(UPPER_ARM);
             }
-            Slot::Body => {
-                let body = held.body();
-                if body.enabled() && body.hide_waist() {
-                    found.push(WAIST);
-                }
+        }
+        if let Some(legs) = legs.as_ref().map(eqp::Set::legs).filter(eqp::Legs::enabled) {
+            if legs.hide_knee_pads() {
+                found.insert(KNEE_PAD);
             }
-            Slot::Hands => {
-                // The two bits are one reach rather than two seams: a glove ends at the wrist, the
-                // forearm, the elbow or the upper arm, and only the last two reach over anything.
-                let hands = held.hands();
-                if hands.enabled() && hands.hide_forearm() {
-                    found.push(FOREARM);
-                    if hands.hide_elbow() {
-                        found.push(UPPER_ARM);
-                    }
-                }
+            if hem > shaft {
+                found.insert(SHAFT);
+                found.insert(KNEE_PAD);
             }
-            Slot::Legs => {
-                let legs = held.legs();
-                if legs.enabled() && legs.hide_knee_pads() {
-                    found.push(KNEE_PAD);
-                }
+        }
+        if let Some(feet) = feet.as_ref().map(eqp::Set::feet).filter(eqp::Feet::enabled)
+            && hem <= shaft
+            && feet.hide_calf()
+        {
+            // A reach again: a boot ends at the ankle, the calf or the knee, and the shoe that
+            // ends below the calf covers neither.
+            found.insert(CALF);
+            if feet.hide_knee() {
+                found.insert(KNEE);
             }
-            Slot::Feet => {
-                // A reach again: a boot ends at the ankle, the calf or the knee, and the shoe that
-                // ends below the calf covers neither.
-                let feet = held.feet();
-                if feet.enabled() && feet.hide_calf() {
-                    found.push(CALF);
-                    if feet.hide_knee() {
-                        found.push(KNEE);
-                    }
-                }
-            }
-            // An adornment sits over a garment rather than through it, and the file names no seam
-            // for one.
-            _ => {}
+        }
+        // A helmet takes the collar off what is under it, unless the piece there states a gorget
+        // of its own, which is the helmet's own neck piece rather than the collar.
+        if let Some(head) = head.as_ref().map(eqp::Set::head).filter(eqp::Head::enabled)
+            && head.hide_neck()
+            && !body.as_ref().is_some_and(|held| held.body().hide_gorget())
+        {
+            found.insert(NECK);
         }
         found
     }

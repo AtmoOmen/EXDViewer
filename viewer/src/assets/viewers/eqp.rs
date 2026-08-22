@@ -51,7 +51,8 @@ fn slots(set: &Set) -> Vec<(&'static str, String)> {
             "hands",
             flags!(
                 set.hands(),
-                enabled hide_elbow hide_forearm show_bracelets show_ring_left show_ring_right
+                enabled hide_elbow hide_forearm over_sleeve show_bracelets show_ring_left
+                show_ring_right
             ),
         ),
         (

@@ -39,6 +39,8 @@ struct Census {
     /// Cameras whose last modelled field is neither zero nor one, which a short body would leave.
     overrun: usize,
     groups: usize,
+    runs: usize,
+    values: usize,
     /// `CTPA` records, split by whether the first field names a participant.
     records: [usize; 2],
     /// How many of each timeline item magic, and the body sizes the unmodelled ones take.
@@ -135,6 +137,10 @@ impl Census {
                     entry.0 += 1;
                     entry.1 += unknown.body().len();
                     entry.2 = path.to_owned();
+                }
+                Node::Tracks(tracks) => {
+                    self.runs += tracks.len();
+                    self.values += tracks.iter().map(|track| track.values().len()).sum::<usize>();
                 }
                 Node::Sheet(_) | Node::Scene(_) => {}
             }
@@ -238,6 +244,7 @@ impl Census {
             "\n{} actors, {} standing for a participant the same file holds",
             self.actors, self.stood_for
         );
+        println!("\n{} runs of scalars holding {} values", self.runs, self.values);
         println!(
             "\n{} groups holding {} records naming a participant and {} naming something else",
             self.groups, self.records[1], self.records[0]
@@ -278,6 +285,7 @@ fn magic(node: &Node) -> &str {
         Node::Scene(_) => "CTDS",
         Node::Participants(_) => "CTAL",
         Node::Groups(_) => "CTPA",
+        Node::Tracks(_) => "CTEX",
         Node::Timeline(_) => "CTTL",
         Node::Unknown(_) => "?",
     }

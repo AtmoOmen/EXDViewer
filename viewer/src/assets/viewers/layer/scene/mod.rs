@@ -36,7 +36,7 @@ use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use half::f16;
 use ironworks::file::layer::{
     Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneGlow, SceneSpin,
-    SceneTimeline, Transform,
+    SceneTimeline, ShadowMode, Transform,
 };
 use ironworks::file::tmb;
 use ironworks::file::mdl::ModelContainer;
@@ -398,6 +398,8 @@ struct Placement {
     key: (u32, [u8; 4]),
     /// Set where the scene cycles the colour its material's emissive is taken at.
     glow: Option<Glow>,
+    /// Whether the sun's own pass draws this at all, which the instance states for itself.
+    casts: bool,
 }
 
 enum State {
@@ -741,8 +743,11 @@ pub struct Scene {
     /// its first file lands rather than leaving the camera at the origin.
     fitted: usize,
     renderer: Arc<Mutex<gpu::Renderer>>,
-    /// Where each model stands at each detail level, as the last rebuild left them.
+    /// Where each model stands at each detail level, as the last rebuild left them. The ones that
+    /// cast lead, so the sun's pass takes a prefix of the same records rather than a list of its own.
     placed: Vec<[Vec<program::Instance>; 3]>,
+    /// How long that prefix is.
+    casts: Vec<[usize; 3]>,
     /// What the zone's shared groups animate, and how far along their timelines it stands, in the
     /// ticks a timeline is keyed in.
     motions: Vec<Motion>,
@@ -982,6 +987,7 @@ impl Scene {
             fitted: 0,
             renderer: gpu::Renderer::new(),
             placed: Vec::new(),
+            casts: Vec::new(),
             motions: Vec::new(),
             cycling: false,
             clock: 0.0,
@@ -1245,6 +1251,7 @@ impl Scene {
                                 layer: at,
                                 key: reach(key, depth, instance.id()),
                                 glow,
+                                casts: part.world_light_shadow_mode() != ShadowMode::ForceOff,
                             });
                         }
                         InstanceData::SharedGroup(shared)
@@ -1404,6 +1411,7 @@ impl Scene {
                 layer: at,
                 key: (0, [0; 4]),
                 glow: None,
+                casts: true,
             });
         }
         self.dirty = true;
@@ -1546,6 +1554,7 @@ impl Scene {
                         layer,
                         key: (0, [0; 4]),
                         glow: None,
+                        casts: true,
                     });
                 }
             }
@@ -1715,6 +1724,7 @@ impl Scene {
         let mut placed: Vec<[Vec<program::Instance>; 3]> = (0..self.models.len())
             .map(|_| std::array::from_fn(|_| Vec::new()))
             .collect();
+        let mut blocked = placed.clone();
         for model in &mut self.models {
             model.nearest = f32::INFINITY;
             model.finest = 2;
@@ -1740,7 +1750,11 @@ impl Scene {
                 }
                 continue;
             };
-            placed[placement.model][level].push(program::Instance {
+            let into = match placement.casts {
+                true => &mut placed,
+                false => &mut blocked,
+            };
+            into[placement.model][level].push(program::Instance {
                 transform: self.posed(&placement),
                 sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
                 emissive: match placement.glow {
@@ -1752,6 +1766,17 @@ impl Scene {
                 },
             });
         }
+        self.casts = placed
+            .iter_mut()
+            .zip(&mut blocked)
+            .map(|(held, rest)| {
+                std::array::from_fn(|level| {
+                    let casts = held[level].len();
+                    held[level].append(&mut rest[level]);
+                    casts
+                })
+            })
+            .collect();
         self.placed = placed;
         self.written = eye;
         self.dirty = false;
@@ -2927,17 +2952,29 @@ impl Scene {
                 ),
             };
             // The same depth pass as the light sees it. A package that answers no shadow subview
-            // casts none, which is what the flag on a placed instance says anyway.
-            let shadow = program::Program::build(
+            // casts none, which is what the flag on a placed instance says anyway. One that answers
+            // it and then fails to translate is a fault, and is reported rather than dropped.
+            let shadow = program::picks(
                 package,
-                bytes,
                 material,
                 &keys,
                 program::Pass::Depth,
                 program::SUB_VIEW_SHADOW_0,
-                0,
-                attachments,
-            );
+            )
+            .and_then(|_| {
+                program::Program::build(
+                    package,
+                    bytes,
+                    material,
+                    &keys,
+                    program::Pass::Depth,
+                    program::SUB_VIEW_SHADOW_0,
+                    0,
+                    attachments,
+                )
+                .inspect_err(|why| log::warn!("assets/layer: {name}: no shadow pass: {why}"))
+                .ok()
+            });
             // What it answers into the lit frame with, which only a blending surface has.
             // Water reads the lit frame back and shades itself from it, where anything else that
             // blends is lit where it stands and an overlay carries its own colour.
@@ -2976,7 +3013,7 @@ impl Scene {
                     attachments,
                     buffer,
                     depth: depth.ok().map(Arc::new),
-                    shadow: shadow.ok().map(Arc::new),
+                    shadow: shadow.map(Arc::new),
                     resolve,
                 },
             );
@@ -3291,6 +3328,7 @@ impl Scene {
                 batches.push(gpu::Batch {
                     model: at,
                     level,
+                    casts: self.casts[at][level],
                     instances,
                     surfaces: meshes
                         .iter()
@@ -3430,6 +3468,7 @@ impl Scene {
             step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
+            casting: self.casts.iter().flatten().sum(),
             models: format!(
                 "{} of {}",
                 self.models

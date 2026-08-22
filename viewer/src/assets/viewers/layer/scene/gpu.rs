@@ -191,6 +191,9 @@ pub struct Batch {
     pub model: usize,
     pub level: usize,
     pub instances: Vec<program::Instance>,
+    /// How many of them lead, being the ones the sun's own pass draws. An instance states for
+    /// itself whether it casts, and those that do are laid out first.
+    pub casts: usize,
     /// One per mesh of the level, in the order they were uploaded.
     pub surfaces: Vec<Surface>,
 }
@@ -460,19 +463,19 @@ impl Renderer {
                 at.push((0, 0, 0));
                 continue;
             };
+            let drawn = match lit {
+                true => batch.instances.len(),
+                false => batch.casts,
+            };
             let offset = blob.len() as i32;
             let mut window = 0;
-            for held in batch.instances.chunks(count) {
+            for held in batch.instances[..drawn].chunks(count) {
                 let mut bytes = buffer.fill(scene, program::Pass::Buffer, held);
                 window = bytes.len() as i32;
                 bytes.resize(aligned(window, self.alignment) as usize, 0);
                 blob.extend(bytes);
             }
-            at.push((
-                offset,
-                batch.instances.len().div_ceil(count) as i32,
-                window,
-            ));
+            at.push((offset, drawn.div_ceil(count) as i32, window));
         }
         // The record holds `view * transform`, so the sun's own pass cannot share the frame's.
         let into = match lit {
@@ -596,7 +599,7 @@ impl Renderer {
                                 offset + at * aligned(*window, self.alignment),
                                 *window,
                             );
-                            let drawn = (batch.instances.len() as i32 - at * count).min(count);
+                            let drawn = (batch.casts as i32 - at * count).min(count);
                             gl.draw_elements_instanced(
                                 glow::TRIANGLES,
                                 *indices,

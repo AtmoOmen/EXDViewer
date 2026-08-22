@@ -2724,6 +2724,11 @@ impl Rendered {
         }
     }
 
+    /// How far a raised visor has turned, one angle per bone it hinges on.
+    pub fn hinged(&self, visor: [f32; 3]) {
+        self.animation.hinged(visor);
+    }
+
     /// Poses the character out of a different pack, which is what picking an emote is.
     pub fn play(&self, path: &str, then: Option<&str>) {
         self.animation.play(path, then);

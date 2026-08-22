@@ -275,6 +275,8 @@ pub struct CharacterBuilder {
     reading_deformers: Option<TrackedPromise<Result<mdl::Deformers>>>,
     /// What a worn piece leaves showing of the body under it.
     worn_over: Option<gating::Worn>,
+    /// Whether the visor of the hat being worn is raised.
+    visor: bool,
     reading_worn: Option<TrackedPromise<Result<gating::Worn>>>,
     /// The game's own characters, and which of them is being stood in.
     npcs: Vec<npcs::Npc>,
@@ -346,6 +348,7 @@ impl Default for CharacterBuilder {
             deformers: None,
             reading_deformers: None,
             worn_over: None,
+            visor: false,
             reading_worn: None,
             npcs: Vec::new(),
             reading_npcs: None,
@@ -686,6 +689,7 @@ impl CharacterBuilder {
         if let Some(Ok(model)) = &self.model {
             let (customize, hidden, shapes, stature, bust) = self.made();
             model.made(customize, hidden, shapes, stature, bust);
+            model.hinged(self.raised());
         }
     }
 
@@ -804,6 +808,16 @@ impl CharacterBuilder {
         (customize, hidden, shapes, stature, bust)
     }
 
+    /// How far the visor of the hat being worn has been raised, which is nothing at all where the
+    /// set states no gimmick or the box is unticked.
+    fn raised(&self) -> [f32; 3] {
+        let (outfit, _) = self.dressed();
+        match (self.visor, outfit[Slot::Head as usize], &self.worn_over) {
+            (true, Some(hat), Some(worn)) => worn.visor(hat.set),
+            _ => [0.0; 3],
+        }
+    }
+
     /// The seams the outfit covers, which draw nothing rather than through what is over them.
     /// Only a piece whose own model is on hand covers anything: where a slot falls back to the
     /// body what would be hidden is the very skin standing in for the piece, and a seam hidden
@@ -814,17 +828,20 @@ impl CharacterBuilder {
         };
         let (outfit, _) = self.dressed();
         let sets = self.sets.borrow();
-        Slot::ALL
-            .into_iter()
-            .filter_map(|slot| Some((slot, outfit[slot as usize]?)))
-            .filter(|(slot, gear)| {
-                sets.get(&(slot.adornment(), gear.set))
-                    .and_then(|held| held[*slot as usize].as_ref())
-                    .is_some_and(|path| self.held.contains_key(path))
-            })
-            .flat_map(|(slot, gear)| worn.covers(slot, gear.set))
-            .map(str::to_owned)
-            .collect()
+        let mut arrived = Outfit::default();
+        for slot in Slot::ALL {
+            let Some(gear) = outfit[slot as usize] else {
+                continue;
+            };
+            let held = sets
+                .get(&(slot.adornment(), gear.set))
+                .and_then(|found| found[slot as usize].as_ref())
+                .is_some_and(|path| self.held.contains_key(path));
+            if held {
+                arrived[slot as usize] = Some(gear);
+            }
+        }
+        worn.covers(&arrived).into_iter().map(str::to_owned).collect()
     }
 
     /// Where a menu has been left, which is where the creator opens it until it is picked from.
@@ -1119,12 +1136,23 @@ impl CharacterBuilder {
             },
         };
         let open = self.picking == Some(slot);
-        if ui
-            .selectable_label(open, format!("{}: {worn}", slot.name()))
-            .clicked()
-        {
-            self.picking = (!open).then_some(slot);
-        }
+        let visored = slot == Slot::Head
+            && outfit[at].is_some_and(|gear| {
+                self.worn_over
+                    .as_ref()
+                    .is_some_and(|worn| worn.visored(gear.set))
+            });
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(open, format!("{}: {worn}", slot.name()))
+                .clicked()
+            {
+                self.picking = (!open).then_some(slot);
+            }
+            if visored {
+                ui.checkbox(&mut self.visor, "Visor");
+            }
+        });
         if !open {
             return;
         }

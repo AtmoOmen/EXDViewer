@@ -3,7 +3,7 @@
 //! `shader_node <path.mdl>` walks the model's materials and prints the node each selects, once with
 //! the keys the file states and once with the keys the zone viewer sets over them.
 //!
-//! `shader_node <path.shpk> <PASS_NAME> [vs|ps]` prints the package's pass tally, its material
+//! `shader_node <path.shpk> <PASS_NAME> [vs|ps] [path.mtrl]` prints the package's pass tally, its material
 //! parameter offsets, the node the viewer would take, that shader's constant buffer layouts as its
 //! own reflection describes them, and the shader as HLSL.
 
@@ -274,7 +274,15 @@ fn main() {
         );
     }
 
-    let held = node(&package, &[], &KEYS).expect("node");
+    let keys = args
+        .next()
+        .and_then(|path| ironworks.file::<Material>(&path).ok());
+    let held = node(
+        &package,
+        keys.as_ref().map(Material::shader_keys).unwrap_or(&[]),
+        &KEYS,
+    )
+    .expect("node");
     println!("// node {:08x}: {}", held.id(), passes(held));
     let selected = held
         .passes()

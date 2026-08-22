@@ -2639,7 +2639,7 @@ impl Buffer {
             let (z, w) = (projection.z_axis.z, projection.w_axis.z);
             let texel = 1.0 / FOG_TABLE as f32;
             let scale = (1.0 - texel) / (held.far() - held.start).max(f32::EPSILON);
-            write(&mut out, 0, &[color.x, color.y, color.z, held.cap / adapted]);
+            write(&mut out, 0, &[color.x, color.y, color.z, held.cap]);
             // The color carries its own weight here and the set's again in the height buffer. The
             // two only ever multiply, so the file's is folded into the color and this stays one.
             write(&mut out, 1, &[glow.x, glow.y, glow.z, 1.0]);

@@ -9,7 +9,7 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Quat, Vec3};
-use ironworks::file::layer::{InstanceData, LayerGroup, LightKind, Transform};
+use ironworks::file::layer::{Glow, InstanceData, LayerGroup, LightKind, SceneGlow, Transform};
 use ironworks::file::{File, lcb, lgb::LayerGroupFile, lvb, sgb::SharedGroupFile};
 use ironworks::{
     Ironworks,
@@ -54,6 +54,7 @@ struct Placed {
     color: Vec3,
     intensity: f32,
     clip: Option<(Vec3, Vec3)>,
+    glow: Option<Glow>,
 }
 
 type Clips = HashMap<(u32, [u8; 4]), (Vec3, Vec3)>;
@@ -62,6 +63,7 @@ fn walk(
     ironworks: &Arc<Ironworks>,
     clips: &Clips,
     groups: &[LayerGroup],
+    glows: &[SceneGlow],
     transform: Mat4,
     key: (u32, [u8; 4]),
     depth: u8,
@@ -86,6 +88,7 @@ fn walk(
                     ironworks,
                     clips,
                     held.scene().layer_groups(),
+                    SceneGlow::of(held.scene()),
                     here,
                     key,
                     depth + 1,
@@ -110,6 +113,11 @@ fn walk(
                     color,
                     intensity: held.intensity(),
                     clip: clips.get(&key).copied(),
+                    glow: glows
+                        .iter()
+                        .find(|held| held.instances().contains(&instance.id()))
+                        .map(SceneGlow::light)
+                        .filter(|held| held.active() && held.tints()),
                 });
             }
             _ => {}
@@ -119,6 +127,13 @@ fn walk(
 
 fn lights(ironworks: &Arc<Ironworks>, level: &str) -> Vec<Placed> {
     let stem = level.rsplit('/').nth(1).unwrap_or_default();
+    let scene = ironworks
+        .file::<lvb::LevelFile>(&format!("{level}/{stem}.lvb"))
+        .ok();
+    let glows = scene
+        .as_ref()
+        .map(lvb::LevelFile::scene)
+        .map_or(&[][..], SceneGlow::of);
     let mut clips = Clips::new();
     if let Ok(bytes) = ironworks.file::<Vec<u8>>(&format!("{level}/{stem}.lcb"))
         && let Ok(held) = lcb::ClipBoxes::read(Cursor::new(bytes))
@@ -142,6 +157,7 @@ fn lights(ironworks: &Arc<Ironworks>, level: &str) -> Vec<Placed> {
             ironworks,
             &clips,
             std::slice::from_ref(group.group()),
+            glows,
             Mat4::IDENTITY,
             (0, [0; 4]),
             0,
@@ -226,6 +242,21 @@ fn main() {
             continue;
         }
         let color = light.color * light.intensity;
+        let glow = light.glow.map_or_else(
+            || "-".to_owned(),
+            |lane| {
+                let end = |held: ironworks::file::layer::Colour| {
+                    format!(
+                        "({},{},{})x{}",
+                        held.red(),
+                        held.green(),
+                        held.blue(),
+                        held.intensity()
+                    )
+                };
+                format!("{}..{} over {}", end(lane.from()), end(lane.to()), lane.period())
+            },
+        );
         let clip = light.clip.map_or_else(
             || "-".to_owned(),
             |(min, max)| {
@@ -237,7 +268,7 @@ fn main() {
         );
         println!(
             "({:9.3},{:9.3},{:9.3}) {:?} scale={:<7.4} range={:<7.4} atten={:<5.2} cone={:<7.3} \
-             spot={:<7.3} rgb=({:.5},{:.5},{:.5}) i={:.5} peak={:.5} box={clip}",
+             spot={:<7.3} rgb=({:.5},{:.5},{:.5}) i={:.5} peak={:.5} box={clip} glow={glow}",
             light.at.x,
             light.at.y,
             light.at.z,

@@ -2475,12 +2475,11 @@ impl Buffer {
         }
         if self.name == REFLECTION_PARAM {
             let held = scene.reflect;
-            let (width, height) = (size.0.max(1.0), size.1.max(1.0));
-            write(
-                &mut out,
-                0,
-                &[held.texel.x, held.texel.y, 1.0 / width, 1.0 / height],
-            );
+            // The step a blur takes between its taps, and under it the offset the chain's own vertex
+            // shader adds to every coordinate its passes sample with. Both are stated in the texel
+            // of the level being read rather than in the frame's.
+            let texel = held.texel;
+            write(&mut out, 0, &[texel.x * 2.0, texel.y * 2.0, texel.x, texel.y]);
             write(&mut out, 1, &REFLECTION_FADE);
             write(&mut out, 2, &[0.0, REFLECTION_POWER, 0.0, REFLECTION_ROUGHNESS]);
             // A whole number rather than the float that reads the same: the shaders take this lane

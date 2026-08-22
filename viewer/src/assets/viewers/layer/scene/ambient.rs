@@ -61,14 +61,17 @@ const FOG_BLEND_RATE: f32 = 7400.0;
 const FALLOFF_RATE: f32 = 20.0;
 const DENSITY_RATE: f32 = 100.0;
 
-/// The lanes of the ambient entry no file states, each read off a frame the game drew: what the sky
-/// harmonics come back up by, the scale and bias a sampled reflection takes against the term the
-/// frame picks, and which of the reflection array's cubes a place stands under.
 /// What every shader in the engine weighs a colour's channels by to take its brightness.
 const LUMA: Vec3 = Vec3::new(0.29891, 0.58661, 0.11448);
 
+/// The lanes of the ambient entry no file states: what the sky harmonics come back up by, and the
+/// scale and bias a sampled reflection takes against the term the frame picks, which every captured
+/// frame holds at these.
 const SKY_SCALE: f32 = 1.0;
 const REFLECTION: Vec3 = Vec3::X;
+
+/// Which of the reflection array's cubes a place stands under, which is the env map the
+/// `EnvLocation` it is bound to names. Only the array variant reads it, and a zone draws the single.
 const CAPTURE: f32 = 0.0;
 
 /// One channel's harmonics, as a file states them.

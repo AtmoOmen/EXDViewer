@@ -188,6 +188,11 @@ const REFLECT: usize = 31;
 /// of the same kind does not relink one of them on every lamp it draws.
 const LAMP: usize = 40;
 
+/// The same again for the run that lights a character's clipped fringe: it draws the same lamp
+/// programs over its own buffers, and sharing the opaque run's slots would relink one of them at
+/// every switch between the two.
+const SHEER_LAMP: usize = LAMP + 4 * program::ATTENUATION.len();
+
 /// One level of the pyramid the march walks, reduced off the level above it. A square of four texels
 /// becomes one, the nearest of them in the first channel and the furthest in the second, which is
 /// what the game's own compute shader leaves and the only reading the chain reads back.
@@ -2899,19 +2904,23 @@ impl Buffers {
             gl.front_face(glow::CCW);
         }
         let mut sorted = lamps.to_vec();
-        sorted.sort_by_key(|lamp| lamp.kind as u8);
+        sorted.sort_by_key(|lamp| (lamp.kind as u8, lamp.falloff));
         let mut standing = None;
         for lamp in &sorted {
             held.lamp = *lamp;
-            let (slot, program) = match lamp.kind {
-                program::LampKind::Spot if lighting.spot.is_some() => (3, lighting.spot.as_ref()),
-                program::LampKind::Line if lighting.line.is_some() => (6, lighting.line.as_ref()),
-                program::LampKind::Plane if lighting.plane.is_some() => {
-                    (7, lighting.plane.as_ref())
-                }
-                _ => (2, None),
+            let (kind, programs) = match lamp.kind {
+                program::LampKind::Spot => (1, lighting.spot.as_ref()),
+                program::LampKind::Line => (2, lighting.line.as_ref()),
+                program::LampKind::Plane => (3, lighting.plane.as_ref()),
+                program::LampKind::Point => (0, None),
             };
-            let program = program.unwrap_or(&lighting.point);
+            let (kind, programs) = match programs {
+                Some(held) => (kind, held),
+                None => (0, &lighting.point),
+            };
+            let falloff = lamp.falloff.min(programs.len() - 1);
+            let slot = SHEER_LAMP + kind * program::ATTENUATION.len() + falloff;
+            let program = &programs[falloff];
             match standing == Some(slot) {
                 true => self.again(gl, program, &held),
                 false => {

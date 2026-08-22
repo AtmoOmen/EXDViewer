@@ -54,6 +54,9 @@ const MOON: f32 = 0.000_872_664_7;
 /// its whole phase from the engine, and nothing in the set is a rate.
 const RATE: f32 = 1.6;
 
+/// The slot of the level file's general block holding how far the sun's shadows reach.
+const SHADOW_REACH: usize = 9;
+
 /// What the two fog rates are stated per, rather than per unit of distance, and what the near
 /// haze's own two are: twenty units of height and a hundredth of its density.
 const FOG_RATE: f32 = 1000.0;
@@ -198,6 +201,8 @@ pub struct Ambient {
     pub weather: usize,
     /// How far the sun's circle leans, which the scene's own level file states.
     pub tilt: f32,
+    /// How far down the view the sun's own depth maps reach, which that file states beside it.
+    pub reach: f32,
     /// How fast one sway runs, which no file states.
     pub rate: f32,
     /// How far up the frame the moon reaches, which no file states either.
@@ -211,6 +216,13 @@ impl Ambient {
         // The zone's own lean, where it names a scene. A place with none stands under the one most
         // of them state.
         let tilt = scene.map_or(program::TILT, |held| held.sun_tilt_degrees() as f32);
+        // Slot nine of the same block, which the cascades of five captures of three zones end at to
+        // the digit. Not named by the parse yet, so read raw.
+        let reach = scene
+            .and_then(|held| held.general().get(SHADOW_REACH).copied())
+            .map(f32::from_bits)
+            .filter(|held| held.is_finite() && *held > 0.0)
+            .unwrap_or(program::SHADOW_REACH);
         let environments = scene
             .map(|held| {
                 held.environments()
@@ -235,6 +247,7 @@ impl Ambient {
             track: 0,
             weather: 0,
             tilt,
+            reach,
             rate: RATE,
             moon: MOON,
             spaces: Vec::new(),
@@ -553,9 +566,10 @@ impl Ambient {
             true => held.sunlight + held.moonlight,
             false => Vec3::ONE,
         };
-        // Where the hour puts it, which is the same direction the sky and the clouds are drawn
-        // against. A capture holds it below the horizon at night, so it is not turned around there:
-        // what changes after dark is the color, which the environment states as the moon's.
+        // Where the hour puts the sky's own sun. The game lights and shadows from a direction of
+        // that same azimuth standing higher up, by an amount no file it ships states. A capture
+        // holds this one below the horizon at night, so it is not turned around there: what changes
+        // after dark is the color, which the environment states as the moon's.
         (program::sun(self.time, self.tilt), color)
     }
 
@@ -745,6 +759,7 @@ impl Ambient {
                 ("Key light", spell(held.sunlight + held.moonlight)),
                 ("Key direction", spell(program::sun(self.time, self.tilt))),
                 ("Sun tilt", format!("{:.0} deg", self.tilt)),
+                ("Shadow reach", format!("{:.0}", self.reach)),
                 (
                     "Sky",
                     match self.sky() {

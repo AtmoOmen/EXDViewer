@@ -1141,19 +1141,19 @@ pub fn sun(time: f32, tilt: f32) -> Vec3 {
 /// What a place with no level file of its own stands under, which is what most zones state.
 pub const TILT: f32 = 30.0;
 
-/// How far down the view the nearest of the sun's own depth maps reaches, and how much further each
-/// one past it goes. The game's own five stop at 400 units and each interval is twice the one
-/// before; three cover the same distance stepping by four.
-pub const SHADOW_REACH: f32 = 25.0;
+/// How far down the view the sun's own depth maps reach where no level file states it, and how much
+/// further each one goes than the one before. The game's own five step by two; three cover the same
+/// distance stepping by four.
+pub const SHADOW_REACH: f32 = 400.0;
 const SPLIT_STEP: f32 = 4.0;
 
 /// Depth maps the sun draws, stacked into one image. A pixel is read against the nearest whose own
 /// box still holds it.
 pub const SPLITS: usize = 3;
 
-/// How far down the view the split at `at` reaches.
-pub fn shadow_reach(at: usize) -> f32 {
-    SHADOW_REACH * SPLIT_STEP.powi(at as i32)
+/// How far down the view the split at `at` reaches, of the whole the sun's maps cover.
+pub fn shadow_reach(reach: f32, at: usize) -> f32 {
+    reach / SPLIT_STEP.powi((SPLITS - 1 - at) as i32)
 }
 
 /// How far a face is pushed away from the light before its depth is kept: a slope the map's own
@@ -1165,22 +1165,22 @@ const SHADOW_PUSH: f32 = 131.0;
 /// That flat push for the split at `at`. A step of the map spans the whole of the split's own box,
 /// so it is scaled down as the box grows and the push comes to the same distance in the world.
 pub fn shadow_push(at: usize) -> f32 {
-    SHADOW_PUSH * SHADOW_REACH / shadow_reach(at)
+    SHADOW_PUSH / SPLIT_STEP.powi(at as i32)
 }
 
 /// Where the sun stands to draw one split of the scene's depth, as a view and an orthographic
 /// projection about `focus`. The projection matches the one the frame is drawn with in handing back
 /// a nought-to-one depth, which is what the translator's own fixup leaves in the buffer.
-pub fn shadow_camera(light: Vec3, view: Mat4, projection: Mat4, at: usize) -> (Mat4, Mat4) {
+pub fn shadow_camera(light: Vec3, view: Mat4, projection: Mat4, reach: f32, at: usize) -> (Mat4, Mat4) {
     // Taken from the frame's own view rather than passed in, so the pass that draws the map and the
     // matrix that reads it cannot be given different boxes.
     let eye = view.inverse().w_axis.truncate();
     let ahead = -view.row(2).truncate().normalize_or(Vec3::Z);
     let near = match at {
         0 => 0.0,
-        at => shadow_reach(at - 1),
+        at => shadow_reach(reach, at - 1),
     };
-    let far = shadow_reach(at);
+    let far = shadow_reach(reach, at);
     // The sphere that holds the whole slice of the frame's own frustum this split covers. A box no
     // wider than the split is deep leaves the slice's far corners off the map, and a coordinate off
     // the edge of one band reads the band beside it rather than the split's own.
@@ -1414,8 +1414,10 @@ pub struct Scene {
     pub light: Vec3,
     /// The light a lamp pass is drawing.
     pub lamp: Lamp,
-    /// Which of the sun's depth maps the pass at hand draws or reads.
+    /// Which of the sun's depth maps the pass at hand draws or reads, and how far down the view the
+    /// whole set of them covers.
     pub split: usize,
+    pub reach: f32,
     pub diffuse: Vec3,
     pub specular: Vec3,
     /// What the composite lights a surface with where no light reaches it.
@@ -1555,6 +1557,7 @@ impl Default for Scene {
             light: Vec3::Y,
             lamp: Lamp::default(),
             split: 0,
+            reach: SHADOW_REACH,
             diffuse: Vec3::ONE,
             specular: Vec3::ONE,
             ambient: Ambient::default(),
@@ -2660,7 +2663,7 @@ impl Buffer {
         // rows nought and one answer the coordinate while row two answers the depth to compare, so
         // only those two take the half that turns a clip coordinate into a texture one.
         if self.name == DIRECTIONAL_SHADOW_PARAM {
-            let (sun, onto) = shadow_camera(scene.light, view, projection, scene.split);
+            let (sun, onto) = shadow_camera(scene.light, view, projection, scene.reach, scene.split);
             // The splits are stacked into one image, so the half that turns a clip coordinate into a
             // texture one also takes the second lane into this split's own band of it.
             let band = 1.0 / SPLITS as f32;
@@ -2682,11 +2685,11 @@ impl Buffer {
             let depth = |at: f32| (w / at.max(f32::EPSILON) - z).clamp(0.0, 1.0);
             let near = match scene.split {
                 0 => 0.0,
-                at => depth(shadow_reach(at - 1)),
+                at => depth(shadow_reach(scene.reach, at - 1)),
             };
             put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowDistance", vec![
                 near,
-                depth(shadow_reach(scene.split)),
+                depth(shadow_reach(scene.reach, scene.split)),
                 0.0,
                 0.0,
             ]);

@@ -422,6 +422,8 @@ struct Model {
     meshes: Vec<Vec<usize>>,
     /// Whether the wind may reach it, which its own header states.
     waving: bool,
+    /// Whether the sun's pass draws it, which its own header states as well.
+    casts: bool,
     /// Placements drawing this model.
     instances: usize,
     /// How far the nearest of them was at the last rebuild, which is the order models are asked for
@@ -1366,6 +1368,7 @@ impl Scene {
             drawn: [false; 3],
             meshes: Vec::new(),
             waving: false,
+            casts: true,
             instances: 0,
             nearest: f32::INFINITY,
             finest: 2,
@@ -1773,7 +1776,7 @@ impl Scene {
                 }
                 continue;
             };
-            let into = match placement.casts {
+            let into = match placement.casts && model.casts {
                 true => &mut placed,
                 false => &mut blocked,
             };
@@ -2261,6 +2264,7 @@ impl Scene {
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
         self.models[at].waving = model.waving();
+        self.models[at].casts = model.shadowing();
         self.renderer
             .lock()
             .unwrap()

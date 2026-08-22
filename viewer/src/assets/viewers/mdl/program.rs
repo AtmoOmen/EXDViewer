@@ -775,9 +775,9 @@ pub struct Instance {
     pub transform: Mat4,
     /// How much sky reaches it, which a zone states per instance in its `.svb`.
     pub sky_visibility: f32,
-    /// The colour its own material's emissive is taken at, and in `w` the strength. A scene cycles
-    /// this where one of its animation handlers names the instance.
-    pub emissive: Vec4,
+    /// The colour a scene cycles its material's emissive to and the strength it is taken at, where
+    /// one of the scene's animation handlers names the instance.
+    pub emissive: Option<Vec4>,
 }
 
 impl Default for Instance {
@@ -785,7 +785,7 @@ impl Default for Instance {
         Self {
             transform: Mat4::IDENTITY,
             sky_visibility: 1.0,
-            emissive: Vec4::ONE,
+            emissive: None,
         }
     }
 }
@@ -3241,13 +3241,17 @@ impl Buffer {
             let offset = (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU);
             put(at, "m_WavingAnimTime", &[scene.clock * scene.wind.rate + offset]);
             put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
-            // At the strength that leaves a surface emitting what its own material states. Left at
-            // nought the shading takes its non-emissive branch, and every glowing thing a zone
-            // places - a crystal naming an emissive colour of 2.89 among them - comes out dark.
-            // Nothing but a scene's own colour handler states a strength, so the rest come in at
-            // the identity.
-            put(at, "m_EmissivePower", &[instance.emissive.w]);
-            put(at, "m_EmissiveColor", &instance.emissive.to_array()[..3]);
+            // The blend is what carries the colour: the shading lerps from the material's own
+            // emissive toward this one by it, so a colour written with the blend at nought never
+            // reaches the frame. Left at nought the strength would take the non-emissive branch
+            // instead, and every glowing thing a zone places would come out dark.
+            let (color, power, blend) = match instance.emissive {
+                Some(held) => (held.truncate(), held.w, 1.0),
+                None => (Vec3::ZERO, 1.0, 0.0),
+            };
+            put(at, "m_EmissivePower", &[power]);
+            put(at, "m_EmissiveColor", &color.to_array());
+            put(at, "m_EmissiveBlend", &[blend]);
         }
     }
 }

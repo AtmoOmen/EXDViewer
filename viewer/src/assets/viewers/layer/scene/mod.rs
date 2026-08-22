@@ -32,7 +32,7 @@ use web_time::Instant;
 
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
-use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
+use glam::{Mat3, Mat4, Quat, Vec3};
 use half::f16;
 use ironworks::file::layer::{
     Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneGlow, SceneSpin,
@@ -1780,13 +1780,10 @@ impl Scene {
             into[placement.model][level].push(program::Instance {
                 transform: self.posed(&placement),
                 sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
-                emissive: match placement.glow {
-                    Some(lane) => {
-                        let (color, power) = cycled(lane, self.clock);
-                        color.extend(power)
-                    }
-                    None => Vec4::ONE,
-                },
+                emissive: placement.glow.map(|lane| {
+                    let (color, power) = cycled(lane, self.clock);
+                    color.extend(power)
+                }),
             });
         }
         self.casts = placed

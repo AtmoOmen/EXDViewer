@@ -88,6 +88,11 @@ async function main() {
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
     await cdp.send("Log.enable");
+    // The same counters the gate asserts, so a shot comes with the GL work behind it rather than
+    // leaving a draw that stopped happening to the eye.
+    await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
+        source: readFileSync(join(root, "smoke", "instrument.js"), "utf8"),
+    });
     await cdp.send("Emulation.setDeviceMetricsOverride", {
         width: WIDTH,
         height: HEIGHT,
@@ -167,7 +172,12 @@ async function main() {
             const shot = await cdp.send("Page.captureScreenshot", { format: "png" });
             const name = `${String(at).padStart(2, "0")}-${path.split("/").pop()}`;
             writeFileSync(join(outDir, `${name}.png`), Buffer.from(shot.data, "base64"));
-            console.log(`   ${name}.png`);
+            const state = {
+                gl: await cdp.eval("JSON.stringify(globalThis.__smoke ?? null)").catch(() => null),
+                frame: await cdp.eval("window.__frame ?? null").catch(() => null),
+            };
+            writeFileSync(join(outDir, `${name}.json`), JSON.stringify(state, null, 2));
+            console.log(`   ${name}.png  ${state.gl}`);
         }
     } finally {
         cdp.close();

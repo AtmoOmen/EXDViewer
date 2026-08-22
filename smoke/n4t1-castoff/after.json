@@ -1,0 +1,4 @@
+{
+  "gl": "{\"contexts\":1,\"samples\":4,\"antialias\":true,\"depthBits\":24,\"depth\":true,\"draws\":16837,\"instanced\":207391,\"blits\":65,\"links\":605,\"programs\":605,\"drawBuffers\":75255,\"renderer\":\"ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)\"}",
+  "frame": "{\"commit\":\"7cae5a7e60bc4db381f4ede138fed13fe8b8eb38\",\"clean\":false,\"built\":\"2026-08-21 19:47:51 -07:00\",\"level\":\"bg/ex3/01_nvt_n4/twn/n4t1/level/n4t1.lvb\",\"preset\":\"n4t1 dome\",\"eye\":[-2.5,95.0,-20.0],\"forward\":[-1.2462222e-7,-0.56464237,-0.8253357],\"fov\":60.16057,\"viewport\":[224.0,132.0,1034.375,844.0],\"time\":61200.0,\"weather\":1,\"exposure\":1.0,\"measured\":0.0,\"step\":5.3459,\"placed\":7552,\"drawn\":3040,\"casting\":2616,\"models\":\"240 of 906\",\"materials\":\"133 of 171\",\"passes\":\"shadow, sky, band, fog, reflection, vignette\"}"
+}

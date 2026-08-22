@@ -2952,17 +2952,29 @@ impl Scene {
                 ),
             };
             // The same depth pass as the light sees it. A package that answers no shadow subview
-            // casts none, which is what the flag on a placed instance says anyway.
-            let shadow = program::Program::build(
+            // casts none, which is what the flag on a placed instance says anyway. One that answers
+            // it and then fails to translate is a fault, and is reported rather than dropped.
+            let shadow = program::picks(
                 package,
-                bytes,
                 material,
                 &keys,
                 program::Pass::Depth,
                 program::SUB_VIEW_SHADOW_0,
-                0,
-                attachments,
-            );
+            )
+            .and_then(|_| {
+                program::Program::build(
+                    package,
+                    bytes,
+                    material,
+                    &keys,
+                    program::Pass::Depth,
+                    program::SUB_VIEW_SHADOW_0,
+                    0,
+                    attachments,
+                )
+                .inspect_err(|why| log::warn!("assets/layer: {name}: no shadow pass: {why}"))
+                .ok()
+            });
             // What it answers into the lit frame with, which only a blending surface has.
             // Water reads the lit frame back and shades itself from it, where anything else that
             // blends is lit where it stands and an overlay carries its own colour.
@@ -3001,7 +3013,7 @@ impl Scene {
                     attachments,
                     buffer,
                     depth: depth.ok().map(Arc::new),
-                    shadow: shadow.ok().map(Arc::new),
+                    shadow: shadow.map(Arc::new),
                     resolve,
                 },
             );
@@ -3456,6 +3468,7 @@ impl Scene {
             step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
+            casting: self.casts.iter().flatten().sum(),
             models: format!(
                 "{} of {}",
                 self.models

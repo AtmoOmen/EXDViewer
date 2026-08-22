@@ -116,7 +116,11 @@ const KEYS: [(u32, u32); 3] = [
     (APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON),
 ];
 
-/// Five parts in 255, inverted: what a light's reach solves out of.
+/// How large a box a light is drawn as where the zone states none for it.
+const REACH: f32 = 6.0;
+
+/// What a light's falloff is taken down to at the far edge of its reach, as a share of its
+/// brightest channel. The reciprocal, since the reach is worked out from it.
 const CUTOFF: f32 = 255.0 / 5.0;
 
 /// How fast a shared group's timeline runs. An animation pack states one span both in seconds and
@@ -773,9 +777,9 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
     (key.0, held)
 }
 
-/// How far a light carries, which no field states: the brightest channel and the power the record
-/// attenuates by solve it, and the light's own pass drops every pixel past it. The colour is the one
-/// the file states, not the one an animation cycles it to.
+/// How far a light carries. No field states it: the engine solves it out of the light's brightest
+/// channel and the power its own record attenuates by, and the light's pass drops every pixel past
+/// it. The colour is the one the file states, not the one an animation cycles it to.
 fn carry(color: Vec3, attenuation: f32) -> f32 {
     let peak = color.max_element().max(0.0);
     (CUTOFF * peak * peak).powf(1.0 / attenuation.max(1.0))
@@ -1795,13 +1799,12 @@ impl Scene {
         near.into_iter()
             .take(LAMPS)
             .map(|(_, light)| {
-                // Its whole reach where the zone cut nothing, which is what leaves the pass that
-                // clips a light against this with nothing to clip.
-                let (min, max) = self
-                    .clips
-                    .get(&light.key)
-                    .copied()
-                    .unwrap_or((Vec3::splat(-light.reach), Vec3::splat(light.reach)));
+                // A light the `.lcb` says nothing about is drawn as the box the zone would have to
+                // cut before its reach starts to matter.
+                let (min, max) = self.clips.get(&light.key).copied().unwrap_or((
+                    Vec3::splat(-REACH.min(light.reach)),
+                    Vec3::splat(REACH.min(light.reach)),
+                ));
                 program::Lamp {
                     placement: light.placement,
                     min,

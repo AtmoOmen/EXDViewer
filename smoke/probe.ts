@@ -28,6 +28,8 @@ const points = flag("click", "")
     .split(",")
     .filter((one) => one !== "")
     .map(Number);
+// Wheel steps to send before shooting. Positive walks the camera in, negative walks it out, which
+// is the axis a mip level moves along.
 const zoom = Number(flag("zoom", "0"));
 // How far to drag the viewport before shooting, as dx,dy in pixels. A flat mesh framed by its own
 // bounds is seen edge-on and covers nothing.
@@ -174,7 +176,7 @@ async function main() {
             await sleep(wait);
             const tag = `${String(at).padStart(2, "0")}-${name.replace(/\.mdl$/, "")}`;
             // Before the shaders are turned on, so the plain and shaded runs frame alike.
-            for (let at = 0; at < zoom; at++) {
+            for (let at = 0; at < Math.abs(zoom); at++) {
                 await cdp.send("Input.dispatchMouseEvent", {
                     type: "mouseMoved",
                     x: Math.round(WIDTH * 0.47),
@@ -187,7 +189,7 @@ async function main() {
                     x: Math.round(WIDTH * 0.47),
                     y: Math.round(HEIGHT * 0.55),
                     deltaX: 0,
-                    deltaY: -120,
+                    deltaY: zoom < 0 ? 120 : -120,
                 });
                 await sleep(400);
             }

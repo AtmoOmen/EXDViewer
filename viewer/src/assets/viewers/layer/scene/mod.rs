@@ -3641,6 +3641,7 @@ impl Scene {
                 depth: held.depth.clone(),
                 shadow: held.shadow.clone(),
                 resolve: held.resolve.clone(),
+                sheer: None,
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()

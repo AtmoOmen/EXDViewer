@@ -101,9 +101,10 @@ const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
 /// whole box: a face of it that the planes cut leaves a straight edge that moves with the camera.
 const LAMP_SPAN: f32 = 4.0;
 
-/// What the placed light is worth beside the sun. At one it is a second key rather than a fill, and
-/// a pale surface under two keys is lit to the top of what the frame holds, with no shading left.
-const LAMP_FILL: f32 = 0.3;
+/// What the placed light is worth beside the sun, stated as the color its pass squares. At one it is
+/// a second key rather than a fill, and a pale surface under two keys is lit to the top of what the
+/// frame holds, with no shading left.
+const LAMP_FILL: f32 = 0.55;
 
 /// A vertex as the shader reads it. `#[repr(C)]` with no padding, so a mesh uploads as its own
 /// slice.

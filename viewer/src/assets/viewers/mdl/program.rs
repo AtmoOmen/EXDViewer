@@ -818,6 +818,8 @@ pub struct Lamp {
     /// `ATTENUATION`. Its record states the power, and the shape it picks is the whole of how far
     /// the light carries into a room.
     pub falloff: usize,
+    /// The range its record states, which the falloff is divided by rather than reached to.
+    pub range: f32,
     pub color: Vec3,
     pub kind: LampKind,
     /// Which way the light throws, in world space. Its own space points it along positive z: that
@@ -839,6 +841,7 @@ impl Default for Lamp {
             max: Vec3::ONE,
             reach: 1.0,
             falloff: 0,
+            range: 1.0,
             color: Vec3::ONE,
             kind: LampKind::Point,
             direction: Vec3::Z,
@@ -3108,29 +3111,33 @@ impl Buffer {
             .to_array()
             .to_vec(),
         );
-        let color = match pass {
-            Pass::Lamp => lamp.color,
-            _ => scene.diffuse,
-        };
-        put(light, "m_DiffuseColor", color.to_array().to_vec());
+        // Both colors go in squared, as the clouds' own pair does: what the shader gathers is a
+        // light, and a frame the game drew states the square of every color a file holds, the sun's
+        // and each lamp's alike, to five digits.
+        let squared = |held: Vec3| (held * held).to_array().to_vec();
+        put(
+            light,
+            "m_DiffuseColor",
+            squared(match pass {
+                Pass::Lamp => lamp.color,
+                _ => scene.diffuse,
+            }),
+        );
         put(
             light,
             "m_SpecularColor",
-            match pass {
+            squared(match pass {
                 Pass::Lamp => lamp.color,
                 _ => scene.specular,
-            }
-            .to_array()
-            .to_vec(),
+            }),
         );
         // The two lighting packages read this buffer differently. A sun fades with the depth of the
         // pixel, and the fade is off: the scale is cubed and clamped, so a constant one leaves it
         // alone, and a frame the game drew states the same `(0, 0, 1, 0.05)` - the floor never bites
         // against a ramp already at one. A lamp reads `z` as what its squared distance is taken into
-        // the ramp by, which is its reach, and `w` as how far it stays at full strength before the
-        // inverse-distance term stops saturating: one metre, in every lamp of every frame the game
-        // drew. The two lanes below it are the cones a spot is cut between, and nothing else reads
-        // them.
+        // the ramp by, which is its reach, and `w` as what the falloff itself is divided by, which
+        // is the reciprocal of the range its record states. The two lanes below it are the cones a
+        // spot is cut between, and nothing else reads them.
         let reach = lamp.reach.max(0.001);
         let (inner, cone) = match pass {
             Pass::Lamp => (lamp.inner, lamp.cone),
@@ -3141,7 +3148,7 @@ impl Buffer {
             "m_Attenuation",
             match pass {
                 Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.05],
-                _ => vec![inner, cone, 1.0 / (reach * reach), 1.0],
+                _ => vec![inner, cone, 1.0 / (reach * reach), 1.0 / lamp.range],
             },
         );
         put(light, "m_LightFadeValueStatic", vec![1.0]);

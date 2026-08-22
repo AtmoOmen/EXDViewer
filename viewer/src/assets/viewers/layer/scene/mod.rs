@@ -422,6 +422,8 @@ struct Model {
     meshes: Vec<Vec<usize>>,
     /// Whether the wind may reach it, which its own header states.
     waving: bool,
+    /// Whether the sun's pass draws it, which its own header states as well.
+    casts: bool,
     /// Placements drawing this model.
     instances: usize,
     /// How far the nearest of them was at the last rebuild, which is the order models are asked for
@@ -521,6 +523,8 @@ struct Light {
     reach: f32,
     /// Which of its package's falloff variants shades it.
     falloff: usize,
+    /// The range its record states, which its falloff is divided by.
+    range: f32,
     center: Vec3,
     color: Vec3,
     kind: program::LampKind,
@@ -784,9 +788,9 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
 /// How far a light carries, which no field states: the brightest channel and the power the record
 /// attenuates by solve it, and the light's own pass drops every pixel past it. The colour is the one
 /// the file states, not the one an animation cycles it to.
-fn carry(color: Vec3, attenuation: f32) -> f32 {
+fn carry(color: Vec3, attenuation: f32, range: f32) -> f32 {
     let peak = color.max_element().max(0.0);
-    (CUTOFF * peak * peak).powf(1.0 / attenuation.max(1.0))
+    (CUTOFF * peak * peak / range).powf(1.0 / attenuation.max(1.0))
 }
 
 /// The variant of its own package a light is shaded by, which is that same power: the corpus states
@@ -1325,6 +1329,7 @@ impl Scene {
                                 _ => program::LampKind::Point,
                             };
                             let color = color * held.intensity();
+                            let range = light.range().max(0.001);
                             // Halved, since each angle is stated across the whole cone. Only a spot
                             // carries them, and the light's own package reads a different lane
                             // where its kind does not have a cone at all.
@@ -1335,7 +1340,8 @@ impl Scene {
                             self.lights.push(Light {
                                 placement: here,
                                 center: at,
-                                reach: carry(color, light.attenuation()),
+                                range,
+                                reach: carry(color, light.attenuation(), range),
                                 falloff: falloff(light.attenuation()),
                                 color,
                                 kind,
@@ -1366,6 +1372,7 @@ impl Scene {
             drawn: [false; 3],
             meshes: Vec::new(),
             waving: false,
+            casts: true,
             instances: 0,
             nearest: f32::INFINITY,
             finest: 2,
@@ -1773,7 +1780,7 @@ impl Scene {
                 }
                 continue;
             };
-            let into = match placement.casts {
+            let into = match placement.casts && model.casts {
                 true => &mut placed,
                 false => &mut blocked,
             };
@@ -1835,6 +1842,7 @@ impl Scene {
                     max,
                     reach: light.reach,
                     falloff: light.falloff,
+                    range: light.range,
                     color: match light.glow {
                         Some(lane) => {
                             let (color, power) = cycled(lane, self.clock);
@@ -2261,6 +2269,7 @@ impl Scene {
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
         self.models[at].waving = model.waving();
+        self.models[at].casts = model.shadowing();
         self.renderer
             .lock()
             .unwrap()

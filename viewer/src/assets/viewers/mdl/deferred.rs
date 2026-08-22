@@ -184,6 +184,10 @@ const VIGNETTE: usize = 30;
 /// march, the two halves of the blur, the resolve and the copy back.
 const REFLECT: usize = 31;
 
+/// One slot per kind of lamp and falloff power, so a frame holding both a linear and a cubic light
+/// of the same kind does not relink one of them on every lamp it draws.
+const LAMP: usize = 40;
+
 /// One level of the pyramid the march walks, reduced off the level above it. A square of four texels
 /// becomes one, the nearest of them in the first channel and the furthest in the second, which is
 /// what the game's own compute shader leaves and the only reading the chain reads back.
@@ -669,6 +673,9 @@ pub fn bury(gl: &glow::Context) {
     }
 }
 
+/// One lighting package translated at each falloff power it declares.
+pub type Falloffs = [std::sync::Arc<program::Program>; 3];
+
 /// The passes that light what the G-buffer holds and resolve it into a frame, translated out of the
 /// packages that hold them rather than out of the one a material names.
 ///
@@ -678,12 +685,14 @@ pub fn bury(gl: &glow::Context) {
 pub struct Lighting {
     pub position: std::sync::Arc<program::Program>,
     pub directional: std::sync::Arc<program::Program>,
-    pub point: std::sync::Arc<program::Program>,
+    /// One program per falloff power the package declares, in the order a light's own record names
+    /// them.
+    pub point: Falloffs,
     /// Absent until a zone's own spot package has arrived, and always where nothing places a spot.
-    pub spot: Option<std::sync::Arc<program::Program>>,
+    pub spot: Option<Falloffs>,
     /// The same for the two kinds a zone places besides those, each drawn over its own volume.
-    pub line: Option<std::sync::Arc<program::Program>>,
-    pub plane: Option<std::sync::Arc<program::Program>>,
+    pub line: Option<Falloffs>,
+    pub plane: Option<Falloffs>,
     /// The same for fur, which only a surface whose own record states a length has any of.
     pub fur: Option<std::sync::Arc<program::Program>>,
     /// What softens the light inside skin, which only a surface the type table marks has any of.
@@ -3364,20 +3373,24 @@ impl Buffers {
         // through one program: the first sets the pass up whole and the rest write the one buffer
         // that differs and draw. Every lamp adds to the same buffer, so the order costs nothing.
         let mut sorted = lamps.to_vec();
-        sorted.sort_by_key(|lamp| lamp.kind as u8);
+        sorted.sort_by_key(|lamp| (lamp.kind as u8, lamp.falloff));
         let mut held = scene.clone();
         let mut standing = None;
         for lamp in &sorted {
             held.lamp = *lamp;
-            let (slot, program) = match lamp.kind {
-                program::LampKind::Spot if lighting.spot.is_some() => (3, lighting.spot.as_ref()),
-                program::LampKind::Line if lighting.line.is_some() => (6, lighting.line.as_ref()),
-                program::LampKind::Plane if lighting.plane.is_some() => {
-                    (7, lighting.plane.as_ref())
-                }
-                _ => (2, None),
+            let (kind, programs) = match lamp.kind {
+                program::LampKind::Spot => (1, lighting.spot.as_ref()),
+                program::LampKind::Line => (2, lighting.line.as_ref()),
+                program::LampKind::Plane => (3, lighting.plane.as_ref()),
+                program::LampKind::Point => (0, None),
             };
-            let program = program.unwrap_or(&lighting.point);
+            let (kind, programs) = match programs {
+                Some(held) => (kind, held),
+                None => (0, &lighting.point),
+            };
+            let falloff = lamp.falloff.min(programs.len() - 1);
+            let slot = LAMP + kind * program::ATTENUATION.len() + falloff;
+            let program = &programs[falloff];
             match standing == Some(slot) {
                 true => self.again(gl, program, &held),
                 false => {

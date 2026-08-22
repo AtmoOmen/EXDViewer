@@ -415,6 +415,17 @@ pub const SHADOW_SOFT_3X3: u32 = 0x9915_3ff0;
 pub const TRANSFORM_PROJ: u32 = 0x0950_0613;
 pub const TRANSFORM_PROJ_PLANE_FAR: u32 = 0xd6e2_1545;
 
+/// What power a lamp's distance falls off by, which every lighting package declares and each placed
+/// light names for itself: its record's `attenuation` is one, two or three and picks the variant of
+/// the same index below.
+pub const APPLY_ATTENUATION: u32 = 0x53af_00ed;
+pub const ATTENUATION: [u32; 3] = [0x2795_eaa4, 0xe79a_9e9b, 0x4495_a6b1];
+
+/// Whether a lamp's pass drops the pixels standing outside the box its zone clipped it to, which it
+/// reads out of `m_ClipMin` and `m_ClipMax` in the same units those are stated in.
+pub const LIGHT_CLIP: u32 = 0x7db0_9695;
+pub const LIGHT_CLIP_ENABLE: u32 = 0x6f0e_2969;
+
 /// How wide the sun's own map is drawn, which is what a texel of it measures.
 pub const SHADOW_MAP: i32 = 2048;
 const CLIP_TO_WORLD: &str = "cC2W";
@@ -800,6 +811,10 @@ pub struct Lamp {
     /// How far the light carries, which is what its falloff is scaled by and where its own pass
     /// drops a pixel.
     pub reach: f32,
+    /// Which of its package's falloff variants the light is shaded by, as an index into
+    /// `ATTENUATION`. Its record states the power, and the shape it picks is the whole of how far
+    /// the light carries into a room.
+    pub falloff: usize,
     pub color: Vec3,
     pub kind: LampKind,
     /// Which way the light throws, in world space. Its own space points it along positive z: that
@@ -820,6 +835,7 @@ impl Default for Lamp {
             min: Vec3::splat(-1.0),
             max: Vec3::ONE,
             reach: 1.0,
+            falloff: 0,
             color: Vec3::ONE,
             kind: LampKind::Point,
             direction: Vec3::Z,

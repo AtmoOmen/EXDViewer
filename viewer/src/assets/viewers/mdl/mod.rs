@@ -2425,7 +2425,11 @@ impl Rendered {
             subsurface: None,
             position: held(program::VIEW_POSITION, program::Pass::Lighting)?,
             directional: held(program::DIRECTIONAL, program::Pass::Lighting)?,
-            point: held(program::POINT, program::Pass::Lamp)?,
+            // One studio light of this viewer's own, so the one falloff it stands at is enough.
+            point: std::array::from_fn({
+                let held = held(program::POINT, program::Pass::Lamp)?;
+                move |_| held.clone()
+            }),
             // A model stands under one studio light of this viewer's own, which is a point.
             spot: None,
             line: None,

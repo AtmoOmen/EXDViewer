@@ -518,6 +518,8 @@ struct Light {
     placement: Mat4,
     /// How far it carries, worked out from how bright it is rather than read.
     reach: f32,
+    /// Which of its package's falloff variants shades it.
+    falloff: usize,
     center: Vec3,
     color: Vec3,
     kind: program::LampKind,
@@ -781,6 +783,12 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
 fn carry(color: Vec3, attenuation: f32) -> f32 {
     let peak = color.max_element().max(0.0);
     (CUTOFF * peak * peak).powf(1.0 / attenuation.max(1.0))
+}
+
+/// The variant of its own package a light is shaded by, which is that same power: the corpus states
+/// one, two or three and each package holds a shader for each.
+fn falloff(attenuation: f32) -> usize {
+    (attenuation as usize).clamp(1, program::ATTENUATION.len()) - 1
 }
 
 /// The quad one auto-layer placement stands as, measured from its grid's own origin. The blade
@@ -1322,6 +1330,7 @@ impl Scene {
                                 placement: here,
                                 center: at,
                                 reach: carry(color, light.attenuation()),
+                                falloff: falloff(light.attenuation()),
                                 color,
                                 kind,
                                 direction: here.transform_vector3(Vec3::Z).normalize_or_zero(),
@@ -1801,6 +1810,7 @@ impl Scene {
                     min,
                     max,
                     reach: light.reach,
+                    falloff: light.falloff,
                     color: match light.glow {
                         Some(lane) => {
                             let (color, power) = cycled(lane, self.clock);
@@ -2574,6 +2584,27 @@ impl Scene {
             .map(Arc::new)
     }
 
+    /// A lighting package translated once at each falloff power a light can name, since a light
+    /// picks its own and every one of them is one shader of its own.
+    ///
+    /// Clipped, which is what keeps a light inside the volume its zone cut for it: the pass reads
+    /// the pixel it shades in the light's own space and drops it outside the box, and without that
+    /// a lamp in a room reaches its whole distance through the walls.
+    fn lamp(&self, path: &str, attachments: usize) -> Option<mdl::deferred::Falloffs> {
+        let [linear, quadratic, cubic] = program::ATTENUATION.map(|value| {
+            self.screen(
+                path,
+                program::Pass::Lamp,
+                attachments,
+                &[
+                    (program::APPLY_ATTENUATION, value),
+                    (program::LIGHT_CLIP, program::LIGHT_CLIP_ENABLE),
+                ],
+            )
+        });
+        Some([linear?, quadratic?, cubic?])
+    }
+
     /// One member of the post chain, translated where its file has arrived.
     fn effect(&self, path: &str, vertex: &str) -> Option<Arc<program::Program>> {
         let Some(Package::Ready(bytes)) = self.packages.get(path) else {
@@ -2678,7 +2709,7 @@ impl Scene {
             && let (Some(position), Some(directional), Some(point), Some(composite)) = (
                 self.screen(program::VIEW_POSITION, program::Pass::Lighting, attachments, &[]),
                 self.screen(program::DIRECTIONAL, program::Pass::Lighting, attachments, &[]),
-                self.screen(program::POINT, program::Pass::Lamp, attachments, &[]),
+                self.lamp(program::POINT, attachments),
                 self.screen(program::COMPOSITE, program::Pass::Composite, attachments, &[]),
             )
         {
@@ -2704,7 +2735,7 @@ impl Scene {
             && lighting.spot.is_none()
             && matches!(self.packages.get(program::SPOT), Some(Package::Ready(_)))
         {
-            let spot = self.screen(program::SPOT, program::Pass::Lamp, attachments, &[]);
+            let spot = self.lamp(program::SPOT, attachments);
             if spot.is_none() {
                 self.packages
                     .insert(program::SPOT.to_owned(), Package::Failed);
@@ -2728,7 +2759,7 @@ impl Scene {
             if !held || !matches!(self.packages.get(path), Some(Package::Ready(_))) {
                 continue;
             }
-            let built = self.screen(path, program::Pass::Lamp, attachments, &[]);
+            let built = self.lamp(path, attachments);
             if built.is_none() {
                 self.packages.insert(path.to_owned(), Package::Failed);
             }

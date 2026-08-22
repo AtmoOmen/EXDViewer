@@ -2,7 +2,7 @@ mod cutscenes;
 mod dag;
 mod derive;
 mod detail;
-mod graph;
+pub mod graph;
 mod index;
 mod play;
 pub mod script;

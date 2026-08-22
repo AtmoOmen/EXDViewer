@@ -1,5 +1,9 @@
 use std::ops::Range;
 
+/// Ordering sweeps over the ranks, alternating which side of an edge the barycenter reads. One is
+/// the forward pass on its own.
+const PASSES: usize = 3;
+
 /// The prerequisite graph over the quest list: longest-path ranks, weakly connected components and
 /// a layered layout, all computed once so a frame only culls.
 ///
@@ -111,10 +115,7 @@ impl Graph {
                 row_ids[*node as usize],
             )
         });
-        // The barycenter only orders each rank; placing nodes at it lets the ribbon drift sideways
-        // without bound, since every rank pushes its own nodes away from a collision one way.
-        let mut slot = vec![0u32; n];
-        let mut group: Vec<(f32, u32)> = Vec::new();
+        let mut ranks: Vec<(usize, usize)> = Vec::new();
         let mut at = 0;
         while at < order.len() {
             let key = |node: u32| (component[node as usize], rank[node as usize]);
@@ -122,22 +123,42 @@ impl Graph {
                 .iter()
                 .position(|node| key(*node) != key(order[at]))
                 .map_or(order.len(), |offset| at + offset);
-            group.clear();
-            group.extend(order[at..end].iter().map(|node| {
-                let prereqs = &prereq_items[csr(&prereq_starts, *node as usize)];
-                let mean = prereqs
-                    .iter()
-                    .map(|p| slot[*p as usize] as f32)
-                    .sum::<f32>()
-                    / prereqs.len().max(1) as f32;
-                (mean, *node)
-            }));
-            group.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-            for (at_slot, (_, node)) in group.iter().enumerate() {
-                slot[*node as usize] = at_slot as u32;
-                order[at + at_slot] = *node;
-            }
+            ranks.push((at, end));
             at = end;
+        }
+
+        // The barycenter only orders each rank; placing nodes at it lets the ribbon drift sideways
+        // without bound, since every rank pushes its own nodes away from a collision one way.
+        let mut slot = vec![0u32; n];
+        let mut group: Vec<(f32, u32)> = Vec::new();
+        for pass in 0..PASSES {
+            let back = pass % 2 == 1;
+            for window in 0..ranks.len() {
+                let (at, end) = ranks[match back {
+                    true => ranks.len() - 1 - window,
+                    false => window,
+                }];
+                group.clear();
+                group.extend(order[at..end].iter().map(|node| {
+                    let neighbours = match back {
+                        true => &dep_items[csr(&dep_starts, *node as usize)],
+                        false => &prereq_items[csr(&prereq_starts, *node as usize)],
+                    };
+                    // A node with nothing on the side being read stays where it stands, or every
+                    // one of them piles up against slot zero.
+                    let mean = match neighbours.is_empty() {
+                        true => slot[*node as usize] as f32,
+                        false => neighbours.iter().map(|held| slot[*held as usize] as f32).sum::<f32>()
+                            / neighbours.len() as f32,
+                    };
+                    (mean, *node)
+                }));
+                group.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+                for (at_slot, (_, node)) in group.iter().enumerate() {
+                    slot[*node as usize] = at_slot as u32;
+                    order[at + at_slot] = *node;
+                }
+            }
         }
 
         let mut comp_starts = vec![0u32; sizes.len() + 1];
@@ -165,6 +186,10 @@ impl Graph {
 
     pub fn len(&self) -> usize {
         self.rank.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rank.is_empty()
     }
 
     pub fn edge_count(&self) -> usize {

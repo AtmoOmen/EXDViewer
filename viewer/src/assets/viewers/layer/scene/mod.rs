@@ -197,6 +197,7 @@ enum Motion {
     Keyed {
         curves: Vec<(tmb::Channel, tmb::Curve)>,
         duration: f32,
+        looping: bool,
     },
     /// Transforms a timeline states outright with no curve to play them over, each holding from the
     /// time its command runs. Where the node stands before the first is where the file put it.
@@ -204,6 +205,7 @@ enum Motion {
         placement: Transform,
         steps: Vec<(f32, Mat4)>,
         duration: f32,
+        looping: bool,
     },
     /// A swing the scene repeats with no timeline to play it, on top of where the file placed it.
     Repeat {
@@ -251,6 +253,15 @@ fn cycled(lane: Glow, time: f32) -> (Vec3, f32) {
     )
 }
 
+/// How far into its span a timeline stands. One that does not loop plays through once and holds
+/// where it ended, which is what the file's own flag asks for.
+fn along(time: f32, span: f32, looping: bool) -> f32 {
+    match looping {
+        true => time.rem_euclid(span),
+        false => time.min(span),
+    }
+}
+
 /// How far along its swing a repeating lane stands, from nought at rest to one at full reach. A
 /// lane that wraps at nought starts over, which is what a whole turn wants; the rest swing back.
 fn phase(period: u32, delay: u32, wrap: u32, time: f32) -> f32 {
@@ -265,9 +276,13 @@ impl Motion {
     /// Where the node stands at a time.
     fn at(&self, time: f32) -> Mat4 {
         match self {
-            Self::Keyed { curves, duration } => {
+            Self::Keyed {
+                curves,
+                duration,
+                looping,
+            } => {
                 let span = duration.max(1.0);
-                let along = time.rem_euclid(span);
+                let along = along(time, span, *looping);
                 let mut turn = Vec3::ZERO;
                 let mut shift = Vec3::ZERO;
                 let mut size = Vec3::ONE;
@@ -303,8 +318,9 @@ impl Motion {
                 placement,
                 steps,
                 duration,
+                looping,
             } => {
-                let along = time.rem_euclid(duration.max(1.0));
+                let along = along(time, duration.max(1.0), *looping);
                 steps
                     .iter()
                     .rev()
@@ -1101,7 +1117,11 @@ impl Scene {
                 })
                 .unwrap_or(1.0);
             if !curves.is_empty() {
-                self.motions.push(Motion::Keyed { curves, duration });
+                self.motions.push(Motion::Keyed {
+                    curves,
+                    duration,
+                    looping: timeline.looping(),
+                });
                 return Some(self.motions.len() - 1);
             }
             if steps.is_empty() {
@@ -1112,6 +1132,7 @@ impl Scene {
                 placement,
                 steps,
                 duration,
+                looping: timeline.looping(),
             });
             return Some(self.motions.len() - 1);
         }

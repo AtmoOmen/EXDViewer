@@ -46,6 +46,7 @@ fn magic(node: &Node) -> String {
         Node::Scene(_) => "CTDS".to_owned(),
         Node::Participants(_) => "CTAL".to_owned(),
         Node::Groups(_) => "CTPA".to_owned(),
+        Node::Tracks(_) => "CTEX".to_owned(),
         Node::Timeline(_) => "CTTL".to_owned(),
         Node::Unknown(unknown) => String::from_utf8_lossy(&unknown.magic()).into_owned(),
     }
@@ -70,6 +71,14 @@ fn holds(node: &Node) -> String {
             groups
                 .iter()
                 .map(|group| group.records().len())
+                .sum::<usize>()
+        ),
+        Node::Tracks(tracks) => format!(
+            "{} runs, {} values",
+            tracks.len(),
+            tracks
+                .iter()
+                .map(|track| track.values().len())
                 .sum::<usize>()
         ),
         Node::Timeline(timeline) => format!("{} items", timeline.items().len()),

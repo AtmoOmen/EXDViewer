@@ -22,11 +22,6 @@ pub use super::deferred::{
     Dead, Exposure, Glare, LIT, Lighting, Occlusion, Reflection, Smoothing, bury, graveyard,
 };
 
-/// Where the two passes a semi-transparent surface draws through are linked, past every channel a
-/// draw of the opaque half is keyed by.
-const SHEER_BUFFER: usize = deferred::REFLECTED + 1;
-const SHEER_RESOLVE: usize = SHEER_BUFFER + 1;
-
 /// Attribute locations, in the order [`Vertex`] stores them.
 const ATTRIBUTES: [(u32, i32, i32); 4] = [(0, 3, 0), (1, 3, 12), (2, 4, 24), (3, 2, 56)];
 const COLOR: u32 = 4;
@@ -90,9 +85,6 @@ pub struct Shaded {
     /// the lighting left. A semitransparent package has only this: it writes no G-buffer at all,
     /// and what it blends over is the frame the composite already resolved.
     pub resolve: Option<Arc<program::Program>>,
-    /// The pair that draws what the buffer pass clipped away: the surface into a buffer of its own,
-    /// and what blends that over the frame the opaque half left.
-    pub sheer: Option<(Arc<program::Program>, Arc<program::Program>)>,
     /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
     pub table: Option<Arc<(Vec<u16>, usize, usize)>>,
     /// The textures the material binds, by the resource id the package knows each by.
@@ -755,7 +747,6 @@ impl Game {
             self.buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
             self.resolve(gl, painter, frame, meshes, &scene)?;
-            self.sheer(gl, painter, frame, meshes, lighting, &scene)?;
             // Over the frame the composite left and before anything spreads or grades it, which is
             // where the game runs it.
             if let Some(reflection) = frame.reflection.as_ref() {
@@ -894,125 +885,6 @@ impl Game {
         }
         unsafe { gl.disable(glow::BLEND) };
         Ok(())
-    }
-
-    /// The half of a surface the buffer pass clipped away, drawn through a buffer of its own.
-    ///
-    /// A material states one alpha to be drawn as opaque past, and the pass that keeps the rest
-    /// states another far under it; between the two stands the fringe of a strand of hair, which
-    /// the opaque half never draws. Minification averages a normal map's alpha toward its mean and
-    /// so widens that band, which is what thins a head of hair as the camera stands back from it.
-    ///
-    /// The surface fills a G-buffer of its own, the light is gathered again over that, and each
-    /// material blends itself into the frame against the depth that buffer settled: one fragment
-    /// reaches a pixel however many strands cover it.
-    fn sheer(
-        &mut self,
-        gl: &glow::Context,
-        painter: &egui_glow::Painter,
-        frame: &Frame,
-        meshes: &[Buffers],
-        lighting: &deferred::Lighting,
-        scene: &program::Scene,
-    ) -> Result<(), String> {
-        let held: Vec<(usize, Arc<program::Program>, Arc<program::Program>)> = frame
-            .surfaces
-            .iter()
-            .enumerate()
-            .filter(|(_, surface)| !surface.runs.is_empty())
-            .filter_map(|(at, surface)| {
-                let (buffer, resolve) = surface.shaded.as_ref()?.sheer.as_ref()?;
-                Some((at, buffer.clone(), resolve.clone()))
-            })
-            .collect();
-        if held.is_empty() {
-            return Ok(());
-        }
-        self.buffers.sheer(gl)?;
-        for (at, buffer, _) in &held {
-            let surface = &frame.surfaces[*at];
-            let Some(mesh) = meshes.get(*at) else {
-                continue;
-            };
-            let program = deferred::link(
-                gl,
-                &mut self.programs,
-                (surface.material, false, SHEER_BUFFER),
-                buffer,
-            )?;
-            unsafe {
-                gl.use_program(Some(program));
-                // Cut to what this buffer holds: the pass declares the fifth target the opaque one
-                // writes and leaves it at nought, and there is no channel here for it to land in.
-                let written: Vec<u32> = (0..buffer.targets.len().clamp(1, deferred::SHEER))
-                    .map(|slot| glow::COLOR_ATTACHMENT0 + slot as u32)
-                    .collect();
-                gl.draw_buffers(&written);
-                match surface.cull {
-                    true => {
-                        gl.enable(glow::CULL_FACE);
-                        gl.cull_face(glow::BACK);
-                        gl.front_face(glow::CCW);
-                    }
-                    false => gl.disable(glow::CULL_FACE),
-                }
-            }
-            self.bind(gl, painter, program, buffer, surface, *at, mesh, scene)?;
-        }
-
-        self.buffers
-            .relight(gl, lighting, scene, &[frame.scene.lamp])?;
-
-        let into = self.buffers.sheer_frame().ok_or("no transparency buffer")?;
-        let size = self.buffers.size();
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
-            gl.viewport(0, 0, size.0, size.1);
-            gl.color_mask(true, true, true, true);
-            gl.enable(glow::DEPTH_TEST);
-            gl.depth_func(glow::EQUAL);
-            gl.depth_mask(false);
-            gl.enable(glow::BLEND);
-            // The color by what the surface covers, and the frame's alpha left as it stands: that
-            // channel holds the share of a pixel the composite counted as glare, not an opacity,
-            // and a coverage written there blooms every strand the opaque half clipped away.
-            gl.blend_func_separate(
-                glow::SRC_ALPHA,
-                glow::ONE_MINUS_SRC_ALPHA,
-                glow::ZERO,
-                glow::ONE,
-            );
-        }
-        for (at, _, resolve) in &held {
-            let surface = &frame.surfaces[*at];
-            let Some(mesh) = meshes.get(*at) else {
-                continue;
-            };
-            let program = deferred::link(
-                gl,
-                &mut self.programs,
-                (surface.material, false, SHEER_RESOLVE),
-                resolve,
-            )?;
-            unsafe {
-                gl.use_program(Some(program));
-                match surface.cull {
-                    true => {
-                        gl.enable(glow::CULL_FACE);
-                        gl.cull_face(glow::BACK);
-                        gl.front_face(glow::CCW);
-                    }
-                    false => gl.disable(glow::CULL_FACE),
-                }
-            }
-            self.bind(gl, painter, program, resolve, surface, *at, mesh, scene)?;
-        }
-        unsafe {
-            gl.disable(glow::BLEND);
-            gl.disable(glow::CULL_FACE);
-        }
-        self.buffers.settle(gl)
     }
 
     /// What one draw of one material binds, and the geometry it covers. A texture the material has

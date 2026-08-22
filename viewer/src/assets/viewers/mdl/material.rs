@@ -73,7 +73,6 @@ pub struct Material {
     family: Family,
     textures: [Option<String>; 4],
     alpha_threshold: f32,
-    clip: f32,
     diffuse: [f32; 3],
     emissive: [f32; 3],
     normal_scale: f32,
@@ -156,7 +155,6 @@ impl Material {
 
         Ok(Self {
             held: material,
-            clip: declared,
             shader,
             family,
             textures,
@@ -209,12 +207,6 @@ impl Material {
 
     pub fn alpha_threshold(&self) -> f32 {
         self.alpha_threshold
-    }
-
-    /// What the material itself states to clip at, which is what the game's own passes read, before
-    /// the floor a draw without them puts under it.
-    pub fn clip(&self) -> f32 {
-        self.clip
     }
 
     pub fn diffuse(&self) -> [f32; 3] {

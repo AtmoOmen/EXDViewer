@@ -18,11 +18,6 @@ use ironworks::file::{mtrl, shcd, spm};
 use super::material::{Family, Material};
 
 /// The passes a model is drawn with.
-/// What the semi-transparent buffer pass clips at, which every character package states outright
-/// rather than reading off a material. A surface whose own clip stands under this has no band for
-/// that pass to draw.
-pub const SHEER_CLIP: f32 = 16.0 / 255.0;
-
 const PASS_G_OPAQUE: u32 = 0x03ac_862e;
 const PASS_G_SEMITRANSPARENCY: u32 = 0x6006_067f;
 const PASS_Z_OPAQUE: u32 = 0xe412_a2d4;
@@ -1425,9 +1420,6 @@ pub struct Scene {
     pub bloom: Bloom,
     /// What the member of the reflection chain at hand runs at.
     pub reflect: Reflect,
-    /// Whether the lighting at hand is reading the buffer a semi-transparent surface filled, which
-    /// packs its shader type in a channel of its own.
-    pub sheer: bool,
 }
 
 /// Which kernel a smoothing pass of the glare chain lays its taps out for. One walks a square of
@@ -1556,7 +1548,6 @@ impl Default for Scene {
             blur: Blur::Along(Vec2::ZERO),
             bloom: Bloom::default(),
             reflect: Reflect::default(),
-            sheer: false,
         }
     }
 }
@@ -3000,14 +2991,6 @@ impl Buffer {
         let [gain, floor] = REFLECTION_WEIGHT;
         put(common, "m_Misc", vec![held.specular, held.emissive, gain, floor]);
         put(common, "m_Misc2", vec![1.0, 0.0, 0.0, 0.0]);
-        // Which of the two G-buffers the lighting is reading. The opaque one carries the shader
-        // type in the first target's alpha and the transparent one in the second's first channel,
-        // and every lighting pass picks between them with this.
-        put(
-            "g_LightDrawParam",
-            "SemiTransparency",
-            vec![f32::from(u8::from(scene.sheer))],
-        );
         let screen = "g_ScreenParameter";
         put(screen, "m_BackBufferSize", vec![width, height]);
         put(screen, "m_ViewportSize", vec![width, height]);

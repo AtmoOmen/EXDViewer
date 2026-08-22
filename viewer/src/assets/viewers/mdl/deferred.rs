@@ -236,11 +236,6 @@ pub const REFLECTED: usize = LIT + 1;
 /// by a name every package that shades a surface gives the channel after it.
 const FUR_CHANNEL: usize = 2;
 
-/// How many targets a semi-transparent surface writes. Its pass declares the same five as the
-/// opaque one, but the last is a constant nought: the packing moves the tangent frame down into the
-/// fourth and leaves the fifth nothing to carry.
-pub const SHEER: usize = 4;
-
 /// The one structured buffer that is not a joint palette.
 pub const TYPES: &str = "g_ShaderTypeParameter";
 
@@ -427,9 +422,6 @@ enum Over {
     /// The skin blur, which walks the diffuse light around a pixel and writes the same buffer, so
     /// what it reads is a copy taken before it ran.
     Scattering(glow::Texture),
-    /// A lighting pass reading what a semi-transparent surface filled rather than the opaque
-    /// G-buffer, which is a packing and a depth of its own.
-    Sheering(Sheered),
     /// A pass of the glare chain, over a target of its own and against what the pass before it left.
     Glaring((i32, i32), Glared),
     /// The blur among them, drawn over the triangle that carries a coordinate of its own: the game's
@@ -529,29 +521,6 @@ const PRESENT_FRAGMENT: &str = include_str!("present.frag");
 /// GL objects with nothing left to draw them, waiting for a context to delete them under. A viewer
 /// is dropped between frames, where there is no context, so its objects outlive it by one callback.
 static GRAVEYARD: std::sync::OnceLock<std::sync::Mutex<Vec<Dead>>> = std::sync::OnceLock::new();
-
-/// The buffers a semi-transparent surface is drawn and lit through, kept apart from the opaque
-/// G-buffer: the passes past the composite still read that one, and this carries a packing of its
-/// own besides.
-struct Sheer {
-    frame: glow::Framebuffer,
-    color: Vec<glow::Texture>,
-    /// The frame's own depth copied in, so what stands in front of the surface hides it and what
-    /// this settles is never tested against by the passes that come after.
-    depth: glow::Texture,
-    position: (glow::Framebuffer, glow::Texture),
-    /// The lit frame over that depth, which is what the resolve blends into: it keeps the one
-    /// fragment this buffer holds and drops every other the same pixel is covered by.
-    over: glow::Framebuffer,
-}
-
-/// What one lighting pass reads out of those.
-#[derive(Clone, Copy)]
-struct Sheered {
-    color: [glow::Texture; SHEER],
-    depth: glow::Texture,
-    position: glow::Texture,
-}
 
 pub enum Dead {
     Layout(glow::VertexArray),
@@ -831,9 +800,6 @@ pub struct Buffers {
     /// What the composite left, kept apart from the frame a semitransparent pass writes: that pass
     /// reads the one and writes the other, and a texture cannot be both at once.
     resolved: Option<glow::Texture>,
-    /// What a semi-transparent surface fills, made the first time one is drawn: a frame with none in
-    /// it carries neither this nor the second lighting run that reads it.
-    sheer: Option<Sheer>,
     /// A framebuffer over the channel the fur pass softens, and that channel as the G-buffer left
     /// it: the pass walks a strand across its neighbours to answer for one pixel.
     fur: Option<(glow::Framebuffer, glow::Texture)>,
@@ -1152,14 +1118,6 @@ impl Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
-        if let Some(held) = self.sheer.take() {
-            dead.push(Dead::Frame(held.frame));
-            dead.extend(held.color.into_iter().map(Dead::Texture));
-            dead.push(Dead::Texture(held.depth));
-            dead.push(Dead::Frame(held.position.0));
-            dead.push(Dead::Texture(held.position.1));
-            dead.push(Dead::Frame(held.over));
-        }
         for (frame, textures) in [
             self.position
                 .take()
@@ -2729,227 +2687,6 @@ impl Buffers {
         }
     }
 
-    /// The buffers a semi-transparent surface is drawn and lit through, made the first time one is.
-    fn sheered(&mut self, gl: &glow::Context) -> Result<(), String> {
-        if self.sheer.is_some() {
-            return Ok(());
-        }
-        let size = self.size;
-        let lit = self.lit.ok_or("no lit frame")?.1;
-        let depth = unsafe {
-            let held = gl.create_texture()?;
-            gl.bind_texture(glow::TEXTURE_2D, Some(held));
-            gl.tex_image_2d(
-                glow::TEXTURE_2D,
-                0,
-                glow::DEPTH_COMPONENT24 as i32,
-                size.0,
-                size.1,
-                0,
-                glow::DEPTH_COMPONENT,
-                glow::UNSIGNED_INT,
-                glow::PixelUnpackData::Slice(None),
-            );
-            point(gl);
-            held
-        };
-        let color: Vec<glow::Texture> = (0..SHEER)
-            .map(|_| plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE))
-            .collect::<Result<_, _>>()?;
-        let position = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
-        self.sheer = Some(Sheer {
-            frame: frame_of(gl, &color, Some(depth))?,
-            color,
-            depth,
-            position: (frame_of(gl, &[position], None)?, position),
-            over: frame_of(gl, &[lit], Some(depth))?,
-        });
-        Ok(())
-    }
-
-    /// What one of its lighting passes reads.
-    fn sheering(&self) -> Result<Sheered, String> {
-        let held = self.sheer.as_ref().ok_or("no transparency buffer")?;
-        Ok(Sheered {
-            color: held
-                .color
-                .as_slice()
-                .try_into()
-                .map_err(|_| "the transparency buffer is short a channel")?,
-            depth: held.depth,
-            position: held.position.1,
-        })
-    }
-
-    /// Clears that buffer and stands the frame's own depth in it, so a surface behind what the
-    /// opaque passes drew is hidden by them and one in front of it settles a depth of its own.
-    pub fn sheer(&mut self, gl: &glow::Context) -> Result<(), String> {
-        self.sheered(gl)?;
-        let from = *self.frames.first().ok_or("no G-buffer")?;
-        let (width, height) = self.size;
-        let into = self.sheer.as_ref().ok_or("no transparency buffer")?.frame;
-        let attachments: Vec<u32> = (0..SHEER)
-            .map(|at| glow::COLOR_ATTACHMENT0 + at as u32)
-            .collect();
-        unsafe {
-            gl.disable(glow::SCISSOR_TEST);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
-            gl.draw_buffers(&attachments);
-            gl.viewport(0, 0, width, height);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.disable(glow::BLEND);
-            gl.color_mask(true, true, true, true);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(into));
-            gl.blit_framebuffer(
-                0,
-                0,
-                width,
-                height,
-                0,
-                0,
-                width,
-                height,
-                glow::DEPTH_BUFFER_BIT,
-                glow::NEAREST,
-            );
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
-            gl.enable(glow::DEPTH_TEST);
-            // Strictly nearer: a fragment standing where the opaque passes already drew is one this
-            // buffer has nothing to say about, and its own resolve drops it anyway.
-            gl.depth_func(glow::LESS);
-            gl.depth_mask(true);
-        }
-        Ok(())
-    }
-
-    /// The lit frame over the depth that buffer settled, which is what a semi-transparent surface
-    /// resolves into: tested against it, one fragment of the surface reaches a pixel however many
-    /// times its own geometry covers that pixel.
-    pub fn sheer_frame(&self) -> Option<glow::Framebuffer> {
-        self.sheer.as_ref().map(|held| held.over)
-    }
-
-    /// Lays the depth that buffer settled back over the frame's own, so a pixel a semi-transparent
-    /// surface reached and nothing else did counts as covered: what puts the frame up reads that
-    /// depth to tell the frame's own pixels from the widget's, and reads a halo into the rest.
-    pub fn settle(&self, gl: &glow::Context) -> Result<(), String> {
-        let into = *self.frames.first().ok_or("no G-buffer")?;
-        let from = self.sheer.as_ref().ok_or("no transparency buffer")?.frame;
-        let (width, height) = self.size;
-        unsafe {
-            gl.disable(glow::SCISSOR_TEST);
-            gl.depth_mask(true);
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(from));
-            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(into));
-            gl.blit_framebuffer(
-                0,
-                0,
-                width,
-                height,
-                0,
-                0,
-                width,
-                height,
-                glow::DEPTH_BUFFER_BIT,
-                glow::NEAREST,
-            );
-            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
-        }
-        Ok(())
-    }
-
-    /// The light a semi-transparent surface gathers, worked out again over the buffer it filled.
-    ///
-    /// After the composite rather than beside it: both halves of the frame gather their light into
-    /// the same two buffers, and the opaque composite has to have read its own before this clears
-    /// them. The type index moves channel between the two packings, which is what the pass picks
-    /// between by `g_LightDrawParam`.
-    pub fn relight(
-        &mut self,
-        gl: &glow::Context,
-        lighting: &Lighting,
-        scene: &program::Scene,
-        lamps: &[program::Lamp],
-    ) -> Result<(), String> {
-        let reads = self.sheering()?;
-        let position = self
-            .sheer
-            .as_ref()
-            .ok_or("no transparency buffer")?
-            .position
-            .0;
-        let (light, _) = self.light.ok_or("no light buffer")?;
-        let mut held = program::Scene {
-            sheer: true,
-            ..scene.clone()
-        };
-        unsafe {
-            gl.disable(glow::DEPTH_TEST);
-            gl.depth_mask(false);
-            gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
-        }
-        self.pass(
-            gl,
-            0,
-            &lighting.position,
-            position,
-            &held,
-            Over::Sheering(reads),
-        )?;
-        unsafe {
-            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(light));
-            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0, glow::COLOR_ATTACHMENT1]);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            gl.clear(glow::COLOR_BUFFER_BIT);
-            gl.enable(glow::BLEND);
-            gl.blend_func(glow::ONE, glow::ONE);
-        }
-        self.pass(
-            gl,
-            1,
-            &lighting.directional,
-            light,
-            &held,
-            Over::Sheering(reads),
-        )?;
-        unsafe {
-            gl.enable(glow::CULL_FACE);
-            gl.cull_face(glow::FRONT);
-            gl.front_face(glow::CCW);
-        }
-        let mut sorted = lamps.to_vec();
-        sorted.sort_by_key(|lamp| lamp.kind as u8);
-        let mut standing = None;
-        for lamp in &sorted {
-            held.lamp = *lamp;
-            let (slot, program) = match lamp.kind {
-                program::LampKind::Spot if lighting.spot.is_some() => (3, lighting.spot.as_ref()),
-                program::LampKind::Line if lighting.line.is_some() => (6, lighting.line.as_ref()),
-                program::LampKind::Plane if lighting.plane.is_some() => {
-                    (7, lighting.plane.as_ref())
-                }
-                _ => (2, None),
-            };
-            let program = program.unwrap_or(&lighting.point);
-            match standing == Some(slot) {
-                true => self.again(gl, program, &held),
-                false => {
-                    self.pass(gl, slot, program, light, &held, Over::Sheering(reads))?;
-                    standing = Some(slot);
-                }
-            }
-        }
-        unsafe {
-            gl.disable(glow::CULL_FACE);
-            gl.disable(glow::BLEND);
-        }
-        Ok(())
-    }
-
     /// The pair that bends a frame toward what a screen holds and puts it up, built the first time
     /// something draws it.
     fn presenter(&mut self, gl: &glow::Context) -> Result<glow::Program, String> {
@@ -3430,20 +3167,6 @@ impl Buffers {
                         format!("the exposure chain reads {}, which nothing fills", texture.name)
                     })?,
                     Over::Scattering(held) if texture.id == LIGHT_DIFFUSE => held,
-                    // The frame an anisotropic surface is lit by is written one target lower in the
-                    // transparent packing than in the opaque one, and nothing in the chain reads
-                    // the target it moved past.
-                    Over::Sheering(reads) => {
-                        match GBUFFER.iter().position(|held| *held == texture.id) {
-                            Some(at) => reads.color[at.min(SHEER - 1)],
-                            None => match texture.id {
-                                DEPTH | DEPTH_PLANE => reads.depth,
-                                NORMAL_PLANE => reads.color[NORMAL_CHANNEL],
-                                VIEW_POSITION => reads.position,
-                                _ => self.engine(gl, texture.id)?,
-                            },
-                        }
-                    }
                     Over::Blurring(_, held) if texture.id == INPUT => held,
                     Over::Glaring(_, held) => match texture.name.as_str() {
                         program::POST_INPUT => held.input,
@@ -3739,14 +3462,6 @@ impl Drop for Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
-        if let Some(held) = self.sheer.take() {
-            dead.push(Dead::Frame(held.frame));
-            dead.extend(held.color.into_iter().map(Dead::Texture));
-            dead.push(Dead::Texture(held.depth));
-            dead.push(Dead::Frame(held.position.0));
-            dead.push(Dead::Texture(held.position.1));
-            dead.push(Dead::Frame(held.over));
-        }
         for (frame, textures) in [
             self.position
                 .take()

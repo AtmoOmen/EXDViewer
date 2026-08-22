@@ -258,9 +258,6 @@ struct Passes {
     /// What the material resolves itself into the frame with, drawn as its own geometry after the
     /// lighting. A package with no buffer pass has only the semitransparent one.
     resolve: Option<Arc<program::Program>>,
-    /// The pair that draws what the buffer pass clipped away: the surface into a buffer of its own,
-    /// and what resolves that over the frame the opaque half left.
-    sheer: Option<(Arc<program::Program>, Arc<program::Program>)>,
 }
 
 /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
@@ -1435,7 +1432,6 @@ impl Rendered {
                         .iter()
                         .chain(&passes.depth)
                         .chain(&passes.resolve)
-                        .chain(passes.sheer.iter().flat_map(|(g, over)| [g, over]))
                         .flat_map(|pass| &pass.textures)
                         .any(|texture| texture.id == *id && texture.kind != program::Kind::Plane)
                 })
@@ -2024,7 +2020,6 @@ impl Rendered {
                         // The model viewer lights one object against nothing, so it casts no shadow.
                         shadow: None,
                         resolve: passes.resolve.clone(),
-                        sheer: passes.sheer.clone(),
                         table: tables.get(&mesh.material).cloned(),
                         textures: material
                             .bound()
@@ -2575,16 +2570,6 @@ impl Rendered {
                 // pass leaves them where the file put them: every later test against it fails.
                 if pass == program::Pass::Buffer {
                     passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
-                    // Only where the material states a clip the semi-transparent pass's own reaches
-                    // under. Below that the two passes cover the same fragments, and the resolve
-                    // drops every one the opaque half already drew.
-                    if material.clip() > program::SHEER_CLIP {
-                        passes.sheer = build(program::Pass::Blended, 0)
-                            .and_then(|held| {
-                                Ok((Arc::new(held), Arc::new(build(program::Pass::CompositeBlended, 0)?)))
-                            })
-                            .ok();
-                    }
                 }
             }
             // A package carrying a composite of its own resolves itself with it. The screen-wide

@@ -338,8 +338,12 @@ impl Index {
         self.fields.by_name.get(name).copied()
     }
 
-    /// The `Cutscene` and `BGM` rows a quest's script parameters name, in slot order.
-    pub fn assets(&self, node: u32) -> Vec<(derive::Param, u32)> {
+    /// The `Cutscene` and `BGM` rows a quest's script parameters name, each with the instruction
+    /// naming it, which is what the script reads them by.
+    ///
+    /// The rewatchable entries come from `CompleteJournal` rather than an instruction, so they
+    /// carry an empty name.
+    pub fn assets(&self, node: u32) -> Vec<(String, derive::Param, u32)> {
         let Some(row) = self.row(node) else {
             return Vec::new();
         };
@@ -358,14 +362,14 @@ impl Index {
                         .at(&format!("QuestParams[{slot}].ScriptArg"))
                         .ok()?,
                 );
-                Some((param, arg))
+                Some((instruction, param, arg))
             })
             .chain(
                 self.rewatchable
                     .get(&self.quest(node).row_id)
                     .into_iter()
                     .flatten()
-                    .map(|row| (derive::Param::Cutscene, *row)),
+                    .map(|row| (String::new(), derive::Param::Cutscene, *row)),
             )
             .collect()
     }

@@ -250,6 +250,19 @@ impl Expr {
     }
 }
 
+/// An expression as source, on one line: a function literal inside one keeps its body, joined by
+/// spaces rather than broken across lines.
+impl std::fmt::Display for Expr {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut out = String::new();
+        let mut lines = Vec::new();
+        self.write_bare(&mut out, 0, &mut lines);
+        lines.push(out);
+        let joined: Vec<&str> = lines.iter().map(|line| line.trim()).collect();
+        formatter.write_str(joined.join(" ").trim())
+    }
+}
+
 fn next(level: Level) -> Level {
     match level {
         Level::Or => Level::And,

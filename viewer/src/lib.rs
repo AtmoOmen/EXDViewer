@@ -35,7 +35,7 @@ mod goto;
 mod icons;
 mod music;
 mod pr_window;
-mod quests;
+pub mod quests;
 mod report;
 mod router;
 mod schema;

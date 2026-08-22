@@ -320,6 +320,47 @@ fn main() {
                 println!("  variant {variant}: mask {mask:#012b} shows {}", shown.join(" "));
             }
         }
+        "visor" => {
+            let bytes: Vec<u8> = ironworks
+                .file("chara/xls/equipmentparameter/gimmickparameter.gmp")
+                .unwrap();
+            let file = ironworks::file::gmp::GimmickParameter::read(Cursor::new(bytes)).unwrap();
+            let count: u16 = arguments
+                .get(1)
+                .and_then(|held| held.parse().ok())
+                .unwrap_or(1200);
+            println!("set,animated,rot_a,rot_b,rot_c,nib_a,nib_b,bones");
+            for id in 1..count {
+                let held = file.set(id);
+                if !held.enabled() {
+                    continue;
+                }
+                let path = format!("chara/equipment/e{id:04}/model/c0101e{id:04}_met.mdl");
+                let named: Vec<String> = match ironworks.file::<Vec<u8>>(&path) {
+                    Ok(bytes) => ModelContainer::read(Cursor::new(bytes))
+                        .ok()
+                        .and_then(|container| {
+                            container
+                                .model(ironworks::file::mdl::Lod::High)
+                                .bone_names()
+                                .ok()
+                        })
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|name| name.starts_with("j_ex_met_v"))
+                        .collect(),
+                    Err(_) => Vec::new(),
+                };
+                let [a, b, c] = held.rotation();
+                println!(
+                    "{id},{},{a},{b},{c},{},{},{}",
+                    u8::from(held.animated()),
+                    held.unknown_a(),
+                    held.unknown_b(),
+                    named.join(" ")
+                );
+            }
+        }
         "raw" => {
             let bytes: Vec<u8> = ironworks.file(EQP).unwrap();
             let control = u64::from_le_bytes(bytes[..8].try_into().unwrap());

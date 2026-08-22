@@ -620,9 +620,12 @@ impl Renderer {
         Ok(())
     }
 
-    /// Every surface that lights itself, drawn over the frame the composite left. Water and the
-    /// glass a zone places fill the G-buffer through a semitransparent pass and answer into the lit
-    /// frame here, against the depth their own buffer pass settled.
+    /// Every surface that lights itself, drawn twice: into a buffer of its own and then over the
+    /// frame the composite left.
+    ///
+    /// The fill stands apart from the G-buffer because what these surfaces read back is the scene
+    /// behind them: the frame the composite left, the view position, and the depth between the two.
+    /// The G-buffer holds none of that the moment one of them writes into it.
     fn blended(
         &mut self,
         gl: &glow::Context,
@@ -630,20 +633,35 @@ impl Renderer {
         frame: &Frame,
         scene: &program::Scene,
         offsets: &[(i32, i32, i32)],
+        lighting: &Lighting,
     ) -> Result<(), String> {
-        let wanted = frame.batches.iter().any(|batch| {
-            batch
-                .surfaces
-                .iter()
-                .any(|surface| surface.shaded.as_ref().is_some_and(|held| held.resolve.is_some()))
-        });
-        if !wanted {
+        let (mut fills, mut resolves) = (false, false);
+        for shaded in frame
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.surfaces)
+            .filter_map(|surface| surface.shaded.as_ref())
+        {
+            fills |= filled(shaded).is_some();
+            resolves |= shaded.resolve.is_some();
+        }
+        if !fills && !resolves {
             return Ok(());
         }
-        let into = self.buffers.frame().ok_or("no lit frame")?;
-        let instances = self.instances.ok_or("no instance buffer")?;
-        let stand_in = self.buffers.stand_in(gl)?;
         let size = self.buffers.size();
+        if fills {
+            self.buffers.sheer(gl)?;
+            unsafe {
+                gl.viewport(0, 0, size.0, size.1);
+                gl.color_mask(true, true, true, true);
+            }
+            self.leg(gl, painter, frame, scene, offsets, true)?;
+            self.buffers.relight(gl, lighting, scene, &frame.lamps)?;
+        }
+        // The reflection chain took its own copy before it ran and laid its answer back over the
+        // frame afterward, so what stands behind a surface here is neither of those two.
+        self.buffers.keep(gl)?;
+        let into = self.buffers.frame().ok_or("no lit frame")?;
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
@@ -652,6 +670,29 @@ impl Renderer {
             gl.enable(glow::DEPTH_TEST);
             gl.depth_mask(false);
         }
+        self.leg(gl, painter, frame, scene, offsets, false)?;
+        unsafe {
+            gl.depth_func(glow::LESS);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+        }
+        Ok(())
+    }
+
+    /// One leg of that: the buffer each of them fills for itself, or what each answers into the
+    /// frame with.
+    fn leg(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        scene: &program::Scene,
+        offsets: &[(i32, i32, i32)],
+        filling: bool,
+    ) -> Result<(), String> {
+        let instances = self.instances.ok_or("no instance buffer")?;
+        let stand_in = self.buffers.stand_in(gl)?;
+        let size = self.buffers.size();
         for (batch, (offset, windows, window)) in frame.batches.iter().zip(offsets) {
             let meshes: Vec<i32> = match self
                 .models
@@ -669,27 +710,35 @@ impl Renderer {
                 let Some(shaded) = &surface.shaded else {
                     continue;
                 };
-                let Some(held) = shaded.resolve.as_ref() else {
+                let held = match filling {
+                    true => filled(shaded),
+                    false => shaded.resolve.as_ref(),
+                };
+                let Some(held) = held else {
                     continue;
                 };
-                let program =
-                    deferred::link(
+                let program = deferred::link(
                     gl,
                     &mut self.programs,
-                    (surface.material, surface.waving, false, LIT),
+                    (
+                        surface.material,
+                        surface.waving,
+                        false,
+                        match filling {
+                            true => 0,
+                            false => LIT,
+                        },
+                    ),
                     held,
                 )?;
-                // A surface that filled the G-buffer is tested against exactly what its own buffer
-                // pass settled, so one layered over itself keeps the fragment that pass kept. An
-                // overlay filled none of it and is tested against the scene in front of it: a shaft
-                // of light adds what it carries, a slab of fog blends in by its own alpha.
-                let (test, blend) = match held.pass {
-                    program::Pass::Shaft => (glow::LESS, Some((glow::ONE, glow::ONE))),
-                    program::Pass::Layer => (
-                        glow::LESS,
-                        Some((glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA)),
-                    ),
-                    _ => (glow::EQUAL, None),
+                // Each is tested against the depth the opaque passes settled rather than against a
+                // fill of its own, which stands in a buffer beside them: a shaft of light adds what
+                // it carries and everything else blends in by its own coverage. The frame's alpha
+                // is left as it stands, since that channel holds the share of a pixel the composite
+                // counted as glare rather than an opacity.
+                let blend = match held.pass {
+                    program::Pass::Shaft => (glow::ONE, glow::ONE),
+                    _ => (glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
                 };
                 // What the fragment's own coordinate is turned back into the game's convention by.
                 // Left at nought a pass reading it addresses every buffer at a negative row, and
@@ -700,13 +749,21 @@ impl Renderer {
                     if let Some(location) = viewport {
                         gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
                     }
-                    gl.depth_func(test);
-                    match blend {
-                        Some((source, into)) => {
-                            gl.enable(glow::BLEND);
-                            gl.blend_func(source, into);
+                    gl.depth_func(glow::LESS);
+                    match filling {
+                        // Cut to what this buffer holds, which is one channel short of the
+                        // opaque one.
+                        true => {
+                            let written = deferred::written(held);
+                            gl.draw_buffers(&written[..written.len().min(deferred::SHEER)]);
+                            gl.depth_mask(true);
+                            gl.disable(glow::BLEND);
                         }
-                        None => gl.disable(glow::BLEND),
+                        false => {
+                            gl.depth_mask(false);
+                            gl.enable(glow::BLEND);
+                            gl.blend_func_separate(blend.0, blend.1, glow::ZERO, glow::ONE);
+                        }
                     }
                     match surface.cull {
                         true => {
@@ -819,11 +876,6 @@ impl Renderer {
                     }
                 }
             }
-        }
-        unsafe {
-            gl.depth_func(glow::LESS);
-            gl.disable(glow::BLEND);
-            gl.disable(glow::DEPTH_TEST);
         }
         Ok(())
     }
@@ -959,8 +1011,13 @@ impl Renderer {
                             true => shaded.depth.as_ref(),
                             false => shaded.buffer.get(page),
                         };
-                        let Some(held) = held.filter(|held| depth || !held.targets.is_empty())
-                        else {
+                        // A surface with no opaque pass fills a buffer of its own, after the
+                        // lighting rather than here.
+                        let Some(held) = held.filter(|held| {
+                            depth
+                                || (!held.targets.is_empty()
+                                    && held.pass != program::Pass::Blended)
+                        }) else {
                             continue;
                         };
                         let program = deferred::link(
@@ -1172,7 +1229,7 @@ impl Renderer {
                 }
                 // After both, which is what it fades the far distance toward, and before the
                 // exposure, which measures the frame the fog leaves rather than the one under it.
-                self.blended(gl, painter, frame, &scene, &offsets)?;
+                self.blended(gl, painter, frame, &scene, &offsets, lighting)?;
                 if let Some(haze) = frame.haze.as_ref() {
                     self.buffers.fog(gl, haze, &scene)?;
                 }
@@ -1245,6 +1302,15 @@ impl Drop for Renderer {
                 ),
         );
     }
+}
+
+/// The buffer a surface fills for itself, where its package has no opaque pass and fills one
+/// through a semitransparent pass instead.
+fn filled(shaded: &Shaded) -> Option<&Arc<program::Program>> {
+    shaded
+        .buffer
+        .first()
+        .filter(|held| held.pass == program::Pass::Blended)
 }
 
 /// The next offset a uniform buffer will let a window start on.

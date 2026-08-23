@@ -831,25 +831,6 @@ pub struct Drawn {
     pub def: usize,
 }
 
-/// The longest life a particle spawned from `emitter`, or from an emitter it spawns, can carry.
-fn reach(emitters: &[Emitter], particles: &[Particle], emitter: usize, depth: u8) -> f32 {
-    let Some(depth) = depth.checked_sub(1) else {
-        return 0.0;
-    };
-    let def = &emitters[emitter];
-    let direct = def
-        .particles
-        .iter()
-        .filter_map(|spawn| particles[spawn.target].life)
-        .fold(0.0f32, f32::max);
-    let nested = def
-        .emitters
-        .iter()
-        .map(|spawn| reach(emitters, particles, spawn.target, depth))
-        .fold(0.0f32, f32::max);
-    direct.max(nested)
-}
-
 pub struct Effect {
     emitters: Vec<Emitter>,
     particles: Vec<Particle>,
@@ -876,16 +857,14 @@ impl Effect {
             .collect();
         let runs = runs(file);
 
-        // An effect ends when the last emitter has stopped and the last particle it left has
-        // expired. Where either never does, the loop is the viewer's to pick.
+        // A timeline item's own end is where the effect it placed is done, not a lower bound a
+        // particle's own life can run past: an `EdTm` an artist tunes to the effect's length would
+        // otherwise need every particle's life hand-matched to it as well. A particle with no life
+        // of its own still runs to whatever that end comes out to, via `length` below.
         let bounded = runs.iter().all(|run| run.until != i32::MAX)
             && particles.iter().all(|particle| particle.life.is_some());
         let length = match bounded {
-            true => runs
-                .iter()
-                .map(|run| run.until + reach(&emitters, &particles, run.emitter, DEPTH) as i32)
-                .max()
-                .unwrap_or_default(),
+            true => runs.iter().map(|run| run.until).max().unwrap_or_default(),
             false => LOOP,
         }
         .clamp(1, LONGEST);

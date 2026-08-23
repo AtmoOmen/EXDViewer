@@ -1848,54 +1848,11 @@ mod tests {
     }
 
     #[test]
-    fn length_pairs_each_runs_tail_with_the_particle_it_actually_spawns() {
-        let spawn = |target: i32| {
-            [
-                block("bEnb", &integer(1)),
-                block("TgtB", &integer(target)),
-                block("CrCn", &integer(1)),
-            ]
-            .concat()
-        };
-        let emitter = |target: i32| {
-            nest(
-                "Emit",
-                &[
-                    block("PrCn", &integer(1)),
-                    block("ItPr", &spawn(target)),
-                    life(-1.0),
-                    curve("CrC", 0, 0, &scalars(&[(0, 1, 1.0)])),
-                    curve("CrI", 0, 0, &scalars(&[(0, 1, 1.0)])),
-                ],
-            )
-        };
-        let item = |until: i32, emitter: i32| {
-            [
-                block("bEna", &integer(1)),
-                block("StTm", &integer(0)),
-                block("EdTm", &integer(until)),
-                block("EmNo", &integer(emitter)),
-            ]
-            .concat()
-        };
+    fn length_is_the_latest_timeline_item_ends_not_a_particles_own_life_past_it() {
+        let effect = &playing(&[life(50.0)], (0, 10)).effect;
 
-        let effect = &read(&[
-            nest(
-                "TmLn",
-                &[
-                    block("TICn", &integer(2)),
-                    block("Item", &[item(10, 0), item(1, 1)].concat()),
-                ],
-            ),
-            emitter(0),
-            emitter(1),
-            nest("Ptcl", &[life(5.0)]),
-            nest("Ptcl", &[life(50.0)]),
-        ])
-        .effect;
-
-        // Run 1 ends almost at once (until 1) but its own particle lives 50 frames past that;
-        // pairing it with run 0's short-lived particle instead would cut the effect off early.
-        assert_eq!(effect.length, 51);
+        // The particle outlives the item that spawned it by 40 frames; the item's own end is
+        // where the effect is done, not a floor its longest-lived particle can push past.
+        assert_eq!(effect.length, 10);
     }
 }

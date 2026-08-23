@@ -208,6 +208,7 @@ pub struct Frame {
     pub skybox: Option<Arc<program::Program>>,
     pub sunlight: Option<Arc<program::Program>>,
     pub moonlight: Option<Arc<program::Program>>,
+    pub starlight: Option<Arc<program::Program>>,
     /// The one that fades what is far away toward the weather's own fog, and then toward that sky.
     pub haze: Option<Arc<program::Program>>,
     /// The two draws that put clouds over that sky, the horizon band first.
@@ -241,6 +242,8 @@ pub struct Renderer {
     supplied: Vec<(u32, Layered)>,
     /// The two cloud textures the weather names, the same way.
     overcast: Vec<(usize, String, Layered)>,
+    /// The star field's own three, waiting for a context.
+    starlit: Vec<(usize, Layered)>,
     /// The textures the zone's own materials name that egui cannot hold, under the paths naming
     /// them.
     stacks: Vec<(Arc<str>, Layered)>,
@@ -268,6 +271,7 @@ impl Renderer {
             sown: Vec::new(),
             supplied: Vec::new(),
             overcast: Vec::new(),
+            starlit: Vec::new(),
             stacks: Vec::new(),
             types: None,
             programs: BTreeMap::new(),
@@ -333,6 +337,11 @@ impl Renderer {
         self.overcast.push((at, path, held));
     }
 
+    /// One of the star field's three textures, under the index its draw knows it by.
+    pub fn queue_starlit(&mut self, at: usize, held: Layered) {
+        self.starlit.push((at, held));
+    }
+
     pub fn queue_types(&mut self, values: Vec<u32>) {
         self.types = Some(values);
     }
@@ -387,6 +396,11 @@ impl Renderer {
         for (at, path, held) in std::mem::take(&mut self.overcast) {
             if let Err(why) = self.buffers.overcast(gl, at, &path, &held) {
                 log::error!("assets/layer: {path}: {why}");
+            }
+        }
+        for (at, held) in std::mem::take(&mut self.starlit) {
+            if let Err(why) = self.buffers.starlit(gl, at, &held) {
+                log::error!("assets/layer: star texture {at}: {why}");
             }
         }
         for (path, held) in std::mem::take(&mut self.stacks) {
@@ -1204,6 +1218,13 @@ impl Renderer {
                 }
                 if let Some(held) = frame.moonlight.as_ref() {
                     self.buffers.moon(gl, held, &scene)?;
+                }
+                if let Some(held) = frame.starlight.as_ref() {
+                    let dome = program::Scene {
+                        model: program::Star::placement(scene.view.inverse().w_axis.truncate()),
+                        ..scene.clone()
+                    };
+                    self.buffers.stars(gl, held, &dome)?;
                 }
                 // Over the sky and under everything the frame covered, the sheet first so that the
                 // band stands in front of it where the two meet at the horizon.

@@ -247,6 +247,86 @@ pub fn cloudside_texture(id: u16) -> String {
     format!("bgcommon/nature/cloud/texture/cloudside_{id:03}.tex")
 }
 
+/// The night star field's tier 0: a dome the viewer builds itself (see `dome` in `deferred.rs`)
+/// rather than a model or a mesh a file holds, and there is no `star.shpk` either - both stages are
+/// standalone `.shcd`. The Dawntrail graphics update renamed these from `StarVS0`/`StarPS0`, so only
+/// the `_gu` spelling resolves against the live data.
+pub const STAR_VERTEX: &str = "shader/sm5/shcd/starvs0_gu.shcd";
+pub const STAR_PIXEL: &str = "shader/sm5/shcd/starps0_gu.shcd";
+
+/// The three textures tier 0 reads: per-point colour, the Milky Way band (read squared, this
+/// engine's usual sqrt-encoded-colour convention), and a scrolling twinkle mask.
+pub const STAR_COLOR: &str = "bgcommon/nature/star/texture/star0.tex";
+pub const STAR_BAND: &str = "bgcommon/nature/star/texture/star1.tex";
+pub const STAR_TWINKLE: &str = "bgcommon/nature/star/texture/star2.tex";
+
+/// `cWorldMatrix`'s own rotation at hour 3, read off two independently captured night frames of the
+/// same zone and byte-identical between them; the translation matches the eye exactly in both.
+///
+/// It does turn with the time of day: a third capture (Ultima Thule, hour 7) carries a genuinely
+/// different rotation, and the transform between the two is not a rotation about a shared axis -
+/// its own axis, worked out from the two matrices, is nowhere near vertical. Two hours are not
+/// enough to fit whatever the real rule is (a plain turn about a fixed axis is ruled out, not
+/// confirmed), so rather than invent one this stays the single measured snapshot: the dome renders
+/// correctly at hour 3 and holds a plausible but not time-correct orientation at every other hour.
+#[allow(clippy::approx_constant)]
+const STAR_ROTATION: [[f32; 3]; 3] = [
+    [-0.707_107, 0.0, 0.707_107],
+    [-0.704_416, 0.087_156, -0.704_416],
+    [-0.061_628, -0.996_195, -0.061_628],
+];
+
+/// `cParam[0].xyz`, constant across three independently captured frames of two different zones.
+/// `.w` is a scrolling twinkle phase that differs between every capture with no second reading of
+/// the same zone to take a rate off, so it is left at nought here.
+const STAR_PARAM_0: [f32; 3] = [0.000_554, 0.000_985, 1.418_846];
+
+/// `cParam[2].x`: the horizon fade's own scale, `saturate(x * dot(cWorldMatrix.row1, position) + 1)`.
+/// Constant at 10 across two frames of x6f1 - but a third capture, Ultima Thule, reads 0 here
+/// instead, which a fixed engine constant cannot: this is very likely envb-sourced too, off a field
+/// this project has not placed. Kept at x6f1's own reading, which is right for that zone and wrong
+/// for at least Ultima Thule's own, where the term evaluates to `saturate(0 + 1) = 1` everywhere -
+/// no fade at all, which is plausible for a zone with no real horizon.
+const STAR_HORIZON: f32 = 10.0;
+
+/// `cParam[3]`, read by neither shader tier 0 runs and not even constant across zones (Ultima Thule
+/// carries a different `.xy` at the same slot), so nothing here is worth shipping as data.
+const STAR_PARAM_3: [f32; 4] = [0.0; 4];
+
+/// `cParam[4].xy`: the scale `sSky` is sampled at off the screen coordinate tier 0's own vertex
+/// shader hands down. Measured as the identity in both captures.
+const STAR_SKY_SCALE: [f32; 2] = [1.0, 1.0];
+
+/// What the environment's starfield set states at the weather and time the frame stands at: the
+/// scales tiers 0-2 take their point mask, Milky Way band and horizon fade by, and the flat alpha
+/// tier 0 blends at.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct Star {
+    /// `a_intensity`. Unread by tier 0; both instanced tiers multiply it into their own horizon
+    /// fade.
+    pub horizon: f32,
+    /// `b_intensity`, which scales the twinkling point mask.
+    pub point: f32,
+    /// `c_intensity`, which scales the Milky Way band.
+    pub band: f32,
+    /// `unknown`, tier 0's flat output alpha.
+    pub alpha: f32,
+}
+
+impl Star {
+    /// The dome's own transform: the measured rotation, recentred on the eye every frame the way
+    /// the moon, the sun and both cloud meshes are.
+    pub fn placement(eye: Vec3) -> Mat4 {
+        let rows = STAR_ROTATION;
+        Mat4::from_cols(
+            Vec4::new(rows[0][0], rows[1][0], rows[2][0], 0.0),
+            Vec4::new(rows[0][1], rows[1][1], rows[2][1], 0.0),
+            Vec4::new(rows[0][2], rows[1][2], rows[2][2], 0.0),
+            eye.extend(1.0),
+        )
+    }
+}
+
 /// The zone's own grass, which the engine draws off geometry it bakes per grid rather than off any
 /// model, and binds with no material naming it.
 pub const GRASS: &str = "shader/sm5/shpk/grass.shpk";
@@ -1452,6 +1532,7 @@ pub struct Scene {
     pub cloud: Cloud,
     /// What the overlays a zone places carry, where its environment states a set for them.
     pub shaft: Shaft,
+    pub star: Star,
     /// The colours the character was made with.
     pub customize: Customize,
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
@@ -1589,6 +1670,7 @@ impl Default for Scene {
             fog: Fog::default(),
             cloud: Cloud::default(),
             shaft: Shaft::default(),
+            star: Star::default(),
             customize: Customize::default(),
             clock: 0.0,
             wind: Wind::default(),
@@ -1944,6 +2026,132 @@ impl Program {
         let (vs, ps) = pair(&package, &[], &[], pass.id(), technique, subview)
             .ok_or("the cloud package holds no such technique")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
+    }
+
+    /// Translates the star field's tier 0: two standalone `.shcd`, one apiece, over the dome the
+    /// engine has nowhere named in a file. Not `assemble`, which wants a package's own node table to
+    /// pick a pair out of, and not `sampling`, which stands the fragment over a full-screen triangle
+    /// rather than a real mesh: this reads both blobs' own reflection directly and keeps the
+    /// attribute list `sampling` has no reason to build.
+    pub fn stars(vertex: &[u8], fragment: &[u8]) -> Result<Self, String> {
+        let stage = |bytes: &[u8]| -> Result<(dxbc::shex::Program, hlsl::Names, Vec<u8>), String> {
+            let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
+            let blob = bytes
+                .get(code.blob_offset()..code.blob_offset() + code.blob_size())
+                .ok_or("the shader's bytecode runs past the file")?;
+            let program = shex(blob).ok_or("no shader in the blob")?;
+            let mut names = hlsl::Names::default();
+            for (resources, into) in [
+                (code.textures(), &mut names.textures),
+                (code.samplers(), &mut names.samplers),
+            ] {
+                for resource in resources {
+                    if let Some(name) = code.name(resource) {
+                        into.insert(resource.slot(), name.to_owned());
+                    }
+                }
+            }
+            for resource in code.constants() {
+                if let Some(name) = code.name(resource) {
+                    names
+                        .constants
+                        .insert(resource.slot(), hlsl::Buffer::new(name.to_owned(), Vec::new()));
+                }
+            }
+            signatures(blob, &mut names);
+            Ok((program, names, blob.to_vec()))
+        };
+        let (vertex, vs_names, vs_blob) = stage(vertex)?;
+        let (fragment, ps_names, ps_blob) = stage(fragment)?;
+
+        let mut described = HashMap::new();
+        layouts(&vs_blob, &mut described);
+        layouts(&ps_blob, &mut described);
+
+        let mut extents = hlsl::glsl::extents(&vertex, &vs_names);
+        for (name, registers) in hlsl::glsl::extents(&fragment, &ps_names) {
+            let held = extents.entry(name).or_insert(0);
+            *held = (*held).max(registers);
+        }
+        let outputs: Vec<u32> = ps_names
+            .outputs
+            .keys()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+
+        let mut attributes: Vec<Attribute> = vs_names
+            .inputs
+            .iter()
+            .filter_map(|(register, entry)| {
+                Some(Attribute {
+                    location: *register,
+                    field: field(&entry.name)?,
+                    components: match entry.kind.as_str() {
+                        held if held.starts_with("uint") => Components::Unsigned,
+                        held if held.starts_with("int") => Components::Signed,
+                        _ => Components::Float,
+                    },
+                })
+            })
+            .collect();
+        attributes.sort_by_key(|held| held.location);
+
+        let mut textures: Vec<Texture> = Vec::new();
+        for (program, names) in [(&vertex, &vs_names), (&fragment, &ps_names)] {
+            let declared = hlsl::glsl::declarations(program);
+            for (slot, _, name) in hlsl::glsl::textures(program, names) {
+                if textures.iter().all(|held| held.name != name) {
+                    textures.push(Texture {
+                        id: u32::from(slot),
+                        name,
+                        kind: kind(declared.get(&slot).copied().unwrap_or_default()),
+                    });
+                }
+            }
+        }
+
+        let mut structured: Vec<Structured> = Vec::new();
+        let mut buffers: Vec<Buffer> = Vec::new();
+        for (program, names) in [(&vertex, &vs_names), (&fragment, &ps_names)] {
+            for (name, stride) in hlsl::glsl::buffers(program, names) {
+                if structured.iter().all(|held| held.name != name) {
+                    structured.push(Structured { name, stride: stride as usize });
+                }
+            }
+            for (name, registers) in hlsl::glsl::extents(program, names) {
+                if buffers.iter().any(|held| held.name == name) {
+                    continue;
+                }
+                buffers.push(Buffer {
+                    members: described.get(&name).cloned().unwrap_or_default(),
+                    name,
+                    registers,
+                    fixed: None,
+                });
+            }
+        }
+
+        let vs_options = hlsl::glsl::Options { targets: Vec::new(), extents: extents.clone() };
+        let ps_options = hlsl::glsl::Options { targets: outputs.clone(), extents };
+
+        Ok(Self {
+            vertex: hlsl::glsl(&vertex, &vs_names, hlsl::Reading::Plain, &vs_options)
+                .lines
+                .join("\n"),
+            fragment: hlsl::glsl(&fragment, &ps_names, hlsl::Reading::Plain, &ps_options)
+                .lines
+                .join("\n"),
+            attributes,
+            textures,
+            buffers,
+            structured,
+            names: outputs.iter().map(|at| format!("SV_Target{at}")).collect(),
+            targets: outputs.clone(),
+            outputs,
+            pass: Pass::Composite,
+        })
     }
 
     /// Translates one of the two readings the zone's grass is drawn with. The default node writes
@@ -2588,6 +2796,36 @@ impl Buffer {
             // falls on the screen: the same rectangle the quad was stood over.
             write(&mut out, 4, &[disc.z, -disc.w, disc.x, disc.y]);
             write(&mut out, 5, &[0.0; 4]);
+            return out;
+        }
+        if self.name == "cWorldMatrix" {
+            write_rows(&mut out, &rows(model, 3));
+            return out;
+        }
+        if self.name == "cWorldViewProjMatrix" {
+            write_rows(&mut out, &rows(projection * view * model, 4));
+            return out;
+        }
+        if self.name == "cParam" && self.members.is_empty() {
+            let held = scene.star;
+            write(&mut out, 0, &[STAR_PARAM_0[0], STAR_PARAM_0[1], STAR_PARAM_0[2], 0.0]);
+            write(&mut out, 1, &[held.horizon, held.point, held.band, held.alpha]);
+            write(&mut out, 2, &[STAR_HORIZON, 0.0, 0.0, 0.0]);
+            write(&mut out, 3, &STAR_PARAM_3);
+            write(&mut out, 4, &[STAR_SKY_SCALE[0], STAR_SKY_SCALE[1], 0.0, 0.0]);
+            return out;
+        }
+        // The star shaders declare this as one bare 64-byte member rather than the four fields
+        // every other package's own reflection names, so a fill by name reaches nothing here: the
+        // same four fields, written positionally instead.
+        if self.name == "g_CommonParameter" && self.members.is_empty() {
+            let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+            write(&mut out, 0, &[1.0 / width, -1.0 / height, 0.0, 1.0]);
+            write(&mut out, 1, &[2.0 / width, -2.0 / height, -1.0, 1.0]);
+            let bloom = scene.bloom;
+            let [gain, floor] = REFLECTION_WEIGHT;
+            write(&mut out, 2, &[bloom.specular, bloom.emissive, gain, floor]);
+            write(&mut out, 3, &[encode, 0.0, 0.0, 0.0]);
             return out;
         }
         if matches!(pass, Pass::CloudBand | Pass::CloudSheet)

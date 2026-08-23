@@ -850,23 +850,21 @@ impl Effect {
             .iter()
             .map(|particle| Particle::read(particle, file.models().len(), &lights))
             .collect();
-        let emitters = file
+        let emitters: Vec<Emitter> = file
             .emitters()
             .iter()
             .map(|emitter| Emitter::read(emitter, particles.len(), file.emitters().len()))
             .collect();
         let runs = runs(file);
 
-        // An effect ends when the last emitter has stopped and the last particle it left has
-        // expired. Where either never does, the loop is the viewer's to pick.
+        // A timeline item's own end is where the effect it placed is done, not a lower bound a
+        // particle's own life can run past: an `EdTm` an artist tunes to the effect's length would
+        // otherwise need every particle's life hand-matched to it as well. A particle with no life
+        // of its own still runs to whatever that end comes out to, via `length` below.
         let bounded = runs.iter().all(|run| run.until != i32::MAX)
             && particles.iter().all(|particle| particle.life.is_some());
-        let tail = particles
-            .iter()
-            .filter_map(|particle| particle.life)
-            .fold(0.0f32, f32::max) as i32;
         let length = match bounded {
-            true => runs.iter().map(|run| run.until).max().unwrap_or_default() + tail,
+            true => runs.iter().map(|run| run.until).max().unwrap_or_default(),
             false => LOOP,
         }
         .clamp(1, LONGEST);

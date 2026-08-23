@@ -45,10 +45,16 @@ const WETNESS: u32 = 8;
 const TONE_MAPPING: u32 = 9;
 const VERTICAL_FOG: u32 = 13;
 
-/// How far up the frame the moon's disc reaches. The one draw that states it holds a disc two and a
-/// half pixels across, and that draw covered no pixels at all, so this opens where it did and is a
-/// control rather than a reading.
-const MOON: f32 = 0.000_872_664_7;
+/// How far up the frame the moon's disc reaches, as a fraction of its height. A frame's own field of
+/// view is not divided back out of it, so a wider one draws the disc small.
+const MOON: f32 = 0.050_346;
+
+/// Where the day panel opens: full, the same phase the moon's disc used to hold with no day of
+/// its own to read.
+const FULL: f32 = 17.0;
+
+/// What the disc's own alpha falls off by where a weather states no starfield set.
+const MOON_FADE: f32 = 0.4;
 
 /// How many radians of phase a sway runs a second. The wind set does not state it: the shader takes
 /// its whole phase from the engine, and nothing in the set is a rate.
@@ -207,6 +213,9 @@ pub struct Ambient {
     pub rate: f32,
     /// How far up the frame the moon reaches, which no file states either.
     pub moon: f32,
+    /// The moon's own day, `1..=32`, which no file states either: a date to stand the panel at
+    /// rather than anything the hour derives.
+    pub day: f32,
     /// The places inside the zone that light themselves, as the walk found them.
     pub spaces: Vec<Space>,
 }
@@ -250,6 +259,7 @@ impl Ambient {
             reach,
             rate: RATE,
             moon: MOON,
+            day: FULL,
             spaces: Vec::new(),
         }
     }
@@ -456,7 +466,18 @@ impl Ambient {
         let Some((color, alpha)) = colour(held, "moon_color") else {
             return Vec4::ZERO;
         };
-        color.extend(alpha)
+        // A place stating no color for its moon draws none at all. The disc writes over the sky
+        // rather than blending into it, so a black one would cut a hole in the stars.
+        match color.max_element() > 0.0 {
+            true => color.extend(alpha),
+            false => Vec4::ZERO,
+        }
+    }
+
+    /// How far the alpha falls off across the disc, which the starfield set states beside the
+    /// moon's own color.
+    pub fn moon_fade(&self) -> f32 {
+        self.keyframes(STARFIELD).map_or(MOON_FADE, |held| scalar(held, "unknown", MOON_FADE))
     }
 
     /// What the point-star, Milky Way and instanced draws are run with, and nothing where the
@@ -714,6 +735,18 @@ impl Ambient {
         );
         changed |= ui
             .add(egui::Slider::new(&mut self.time, 0.0..=DAY).show_value(false))
+            .changed();
+
+        ui.label(
+            RichText::new(format!(
+                "Day {}  {}",
+                self.day.round() as u32,
+                program::moon_phase_name(self.day)
+            ))
+            .weak(),
+        );
+        changed |= ui
+            .add(egui::Slider::new(&mut self.day, 1.0..=32.0).step_by(1.0).show_value(false))
             .changed();
 
         let weathers = self.weathers();

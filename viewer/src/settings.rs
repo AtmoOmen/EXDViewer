@@ -254,8 +254,9 @@ pub const SCHEMA_EDITOR_VISIBLE: DKey<bool> = DKey::new("schema-editor-visible",
 pub const SCHEMA_EDITOR_WORD_WRAP: DKey<bool> = DKey::new("schema-editor-word-wrap", false);
 pub const SCHEMA_EDITOR_ERRORS_SHOWN: DKey<bool> = DKey::new("schema-editor-errors-shown", false);
 /// An effect counts in frames without saying how fast they run, so the rate reading them as time is
-/// the viewer's to pick.
-pub const AVFX_FRAME_RATE: DKey<f32> = DKey::new("avfx-frame-rate", 60.0);
+/// the viewer's to pick. 30 matches the tick rate the same authoring pipeline's `.pap`/`.tmb`
+/// timelines carry.
+pub const AVFX_FRAME_RATE: DKey<f32> = DKey::new("avfx-frame-rate", 30.0);
 
 pub const COLOR_THEME: FKey<ColorTheme, ThemePreference> = FKey::new_with_preflight(
     "color-theme",

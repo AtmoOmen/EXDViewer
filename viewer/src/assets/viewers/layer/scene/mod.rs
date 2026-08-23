@@ -3496,6 +3496,8 @@ impl Scene {
                         .map_or_else(|| program::Sky::default().depth, |(_, _, depth)| depth),
                     moon: self.ambient.moon,
                     moonlight: self.ambient.moonlight(),
+                    moon_fade: self.ambient.moon_fade(),
+                    day: self.ambient.day,
                 },
                 ..Default::default()
             },

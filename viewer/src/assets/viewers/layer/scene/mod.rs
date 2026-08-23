@@ -708,6 +708,12 @@ pub struct Scene {
     clouds: [Option<Arc<program::Program>>; 2],
     cloud_files: [Aside; 2],
     cloud_wanted: [Option<u16>; 2],
+    /// The night star field's tier 0, its own two `.shcd` translated into one program, and its three
+    /// textures: fixed paths rather than ones the weather names, so unlike the cloud files these are
+    /// only ever asked for once.
+    starlight: Option<Arc<program::Program>>,
+    star_files: [Aside; 3],
+    star_wanted: bool,
     sky_volume: Option<(u32, (f32, f32), f32)>,
     /// The sky the volume was fetched for, so moving the picker fetches the next one.
     sky_wanted: Option<u16>,
@@ -971,6 +977,9 @@ impl Scene {
             clouds: [None, None],
             cloud_files: [Aside::Done, Aside::Done],
             cloud_wanted: [None, None],
+            starlight: None,
+            star_files: [Aside::Done, Aside::Done, Aside::Done],
+            star_wanted: false,
             sky_volume: None,
             sky_wanted: None,
             sky_file: Aside::Done,
@@ -1893,9 +1902,20 @@ impl Scene {
                 };
             }
         }
+        // The star field's three textures, fixed paths asked for once the zone's own weather ever
+        // states a starfield set: unlike the sky and cloud files, nothing here ever moves them on.
+        if !self.star_wanted && self.ambient.starfield().is_some() {
+            self.star_wanted = true;
+            self.star_files = [
+                Aside::Wanted(program::STAR_COLOR.to_owned()),
+                Aside::Wanted(program::STAR_BAND.to_owned()),
+                Aside::Wanted(program::STAR_TWINKLE.to_owned()),
+            ];
+        }
         for held in [&mut self.clip, &mut self.sky, &mut self.sky_file]
             .into_iter()
             .chain(&mut self.cloud_files)
+            .chain(&mut self.star_files)
             .chain(self.engine.values_mut())
         {
             *held = match std::mem::replace(held, Aside::Done) {
@@ -1938,6 +1958,12 @@ impl Scene {
             .engine
             .iter_mut()
             .filter_map(|(id, held)| taken(held).map(|(path, bytes)| (*id, path, bytes)))
+            .collect();
+        let starlit: Vec<(usize, String, Vec<u8>)> = self
+            .star_files
+            .iter_mut()
+            .enumerate()
+            .filter_map(|(at, held)| taken(held).map(|(path, bytes)| (at, path, bytes)))
             .collect();
 
         if let Some((path, bytes)) = clip {
@@ -1996,6 +2022,13 @@ impl Scene {
             // one texel of it covers a good deal of sky.
             match mdl::layered(&bytes, &path, glow::LINEAR) {
                 Ok(held) => self.renderer.lock().unwrap().queue_overcast(at, path, held),
+                Err(why) => log::error!("assets/layer: {path}: {why}"),
+            }
+        }
+        for (at, path, bytes) in starlit {
+            // Wrapped rather than clamped: every one of them is sampled well past a single tile.
+            match mdl::layered(&bytes, &path, glow::LINEAR) {
+                Ok(held) => self.renderer.lock().unwrap().queue_starlit(at, held),
                 Err(why) => log::error!("assets/layer: {path}: {why}"),
             }
         }
@@ -2359,6 +2392,10 @@ impl Scene {
         }
         if self.ambient.clouds().is_some() {
             wanted.push(program::CLOUD.to_owned());
+        }
+        if self.ambient.starfield().is_some() {
+            wanted.push(program::STAR_VERTEX.to_owned());
+            wanted.push(program::STAR_PIXEL.to_owned());
         }
         if matches!(self.grass, Grass::Placing(_)) {
             wanted.push(program::GRASS.to_owned());
@@ -2860,6 +2897,17 @@ impl Scene {
                     .map(Arc::new);
             }
         }
+        if self.starlight.is_none()
+            && let (Some(Package::Ready(vertex)), Some(Package::Ready(fragment))) = (
+                self.packages.get(program::STAR_VERTEX),
+                self.packages.get(program::STAR_PIXEL),
+            )
+        {
+            self.starlight = program::Program::stars(vertex, fragment)
+                .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::STAR_VERTEX))
+                .ok()
+                .map(Arc::new);
+        }
         if self.sward.is_none()
             && let Some(Package::Ready(bytes)) = self.packages.get(program::GRASS)
         {
@@ -3263,6 +3311,7 @@ impl Scene {
             (held.sky, "sky"),
             (held.sun, "sun"),
             (held.moon, "moon"),
+            (held.stars, "stars"),
             (held.clouds[0], "band"),
             (held.clouds[1], "sheet"),
             (held.fog, "fog"),
@@ -3429,6 +3478,7 @@ impl Scene {
                     .clouds()
                     .map_or_else(program::Cloud::default, |held| held.scene),
                 shaft: self.ambient.shafts().unwrap_or_default(),
+                star: self.ambient.starfield().unwrap_or_default(),
                 bloom: self.ambient.bloom().unwrap_or_default(),
                 look: self.look,
                 clock: self.clock / TICKS,
@@ -3457,6 +3507,7 @@ impl Scene {
             skybox: self.skybox.clone(),
             sunlight: self.sunlight.clone(),
             moonlight: self.moonlight.clone(),
+            starlight: self.starlight.clone(),
             haze: self.haze.clone(),
             clouds: self.clouds.clone(),
             glare: self.glare.clone(),

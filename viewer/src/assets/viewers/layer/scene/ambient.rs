@@ -480,6 +480,19 @@ impl Ambient {
         self.keyframes(STARFIELD).map_or(MOON_FADE, |held| scalar(held, "unknown", MOON_FADE))
     }
 
+    /// What the point-star, Milky Way and instanced draws are run with, and nothing where the
+    /// weather states no starfield set at all. `unknown` is tier 0's own flat output alpha, so a
+    /// weather that states nought there is one the game draws nothing of.
+    pub fn starfield(&self) -> Option<program::Star> {
+        let held = self.keyframes(STARFIELD)?;
+        Some(program::Star {
+            horizon: scalar(held, "a_intensity", 0.0),
+            point: scalar(held, "b_intensity", 0.0),
+            band: scalar(held, "c_intensity", 0.0),
+            alpha: scalar(held, "unknown", 0.0),
+        })
+    }
+
     /// What a leaf is swayed by, and nothing where the weather states no wind set. The set names two
     /// layers, each a heading and a strength; the shader's buffer holds one heading, so the two sum.
     ///

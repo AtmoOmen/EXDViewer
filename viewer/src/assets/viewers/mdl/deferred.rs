@@ -184,6 +184,11 @@ const VIGNETTE: usize = 30;
 /// march, the two halves of the blur, the resolve and the copy back.
 const REFLECT: usize = 31;
 
+/// The night star field's tier 0. Held well clear of the slots above rather than threaded into that
+/// range, since several of their own upper bounds are sized off the frame or the lamp count rather
+/// than fixed.
+const STAR: usize = 70;
+
 /// One slot per kind of lamp and falloff power, so a frame holding both a linear and a cubic light
 /// of the same kind does not relink one of them on every lamp it draws.
 const LAMP: usize = 40;
@@ -410,6 +415,65 @@ fn strip(columns: usize, rows: usize) -> Vec<u16> {
     out
 }
 
+/// The night star field's own dome: 6 face patches of a 17x17 grid, 1734 vertices over 9216
+/// indices, byte-identical in count to the game's own draw. Position and the twinkle mask's baked
+/// randomness (`TEXCOORD1.zw`) are read out of `STAR_MESH` below rather than generated: every
+/// formula this project tried for the position (gnomonic, and bilinear slerp between each patch's
+/// four measured corners) came within a few percent of the captured vertices and no closer, and a
+/// mesh that merely looks spherical is not what was asked for. The grid's own texture coordinates
+/// (`TEXCOORD0` and `TEXCOORD1.xy`) are a plain, verified function of a vertex's place in its patch
+/// and are computed here instead of shipped.
+const STAR_FACES: usize = 6;
+const STAR_GRID: usize = 17;
+/// Per vertex: `POSITION.xyz`, then `TEXCOORD1.zw`, each an `f16` the capture's own buffer held.
+const STAR_MESH: &[u8] = include_bytes!("stars.bin");
+/// Position (3) + `TEXCOORD0` (4) + `TEXCOORD1` (4).
+const STAR_STRIDE: i32 = 44;
+
+fn dome() -> (Vec<f32>, Vec<u16>) {
+    let half = |at: usize| -> f32 {
+        let bits = u16::from_le_bytes([STAR_MESH[at * 2], STAR_MESH[at * 2 + 1]]);
+        f32::from(half::f16::from_bits(bits))
+    };
+    let mut vertices = Vec::with_capacity(STAR_FACES * STAR_GRID * STAR_GRID * 11);
+    let mut indices = Vec::with_capacity(STAR_FACES * (STAR_GRID - 1) * (STAR_GRID - 1) * 6);
+    for panel in 0..STAR_FACES {
+        for slow in 0..STAR_GRID {
+            for fast in 0..STAR_GRID {
+                let vertex = panel * STAR_GRID * STAR_GRID + slow * STAR_GRID + fast;
+                let base = vertex * 5;
+                let (x, y, z) = (half(base), half(base + 1), half(base + 2));
+                let (noise_z, noise_w) = (half(base + 3), half(base + 4));
+                let u = slow as f32 * 0.5;
+                let v = (STAR_GRID - 1 - fast) as f32 * 0.5;
+                vertices.extend([
+                    x,
+                    y,
+                    z,
+                    u,
+                    v,
+                    u * 4.0,
+                    v * 4.0,
+                    u / 4.0,
+                    v / 2.0 + 0.5,
+                    noise_z,
+                    noise_w,
+                ]);
+            }
+        }
+        let start = (panel * STAR_GRID * STAR_GRID) as u16;
+        let at = |slow: usize, fast: usize| start + (slow * STAR_GRID + fast) as u16;
+        for slow in 0..STAR_GRID - 1 {
+            for fast in 0..STAR_GRID - 1 {
+                let (a, b) = (at(slow, fast), at(slow, fast + 1));
+                let (c, d) = (at(slow + 1, fast), at(slow + 1, fast + 1));
+                indices.extend([a, b, c, b, d, c]);
+            }
+        }
+    }
+    (vertices, indices)
+}
+
 const VOLUME_FACES: [u16; 36] = [
     0, 2, 1, 0, 3, 2, // back
     4, 5, 6, 4, 6, 7, // front
@@ -444,6 +508,8 @@ enum Over {
     Clouding(Clouded),
     /// The moon, over the disc it stands on and against the sky it blends into.
     Mooning(Mooned),
+    /// The star dome, over its own mesh and against the sky it blends into and is occluded by.
+    Starring(Starred),
     /// The skin blur, which walks the diffuse light around a pixel and writes the same buffer, so
     /// what it reads is a copy taken before it ran.
     Scattering(glow::Texture),
@@ -509,6 +575,7 @@ pub struct Drawn {
     pub reflection: bool,
     pub sun: bool,
     pub moon: bool,
+    pub stars: bool,
     pub fog: bool,
     pub vignette: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
@@ -530,6 +597,18 @@ struct Fogged {
 #[derive(Clone, Copy)]
 struct Mooned {
     disc: glam::Vec4,
+    sky: glow::Texture,
+}
+
+/// The star dome's own mesh, and the four textures it reads: per-point colour, the Milky Way band,
+/// a scrolling twinkle mask, and the sky it blends into and is occluded against.
+#[derive(Clone, Copy)]
+struct Starred {
+    layout: glow::VertexArray,
+    indices: i32,
+    color: glow::Texture,
+    band: glow::Texture,
+    twinkle: glow::Texture,
     sky: glow::Texture,
 }
 
@@ -934,6 +1013,11 @@ pub struct Buffers {
     strips: [Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>; 2],
     /// The texture each draws, under the file it came from so a weather that has not moved keeps it.
     sheets: [Option<(String, glow::Texture)>; 2],
+    /// The star field's own dome, built once since it depends on nothing a frame carries.
+    dome: Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>,
+    /// Its three textures: colour, band, twinkle. Fixed paths rather than weather-named, so unlike
+    /// the cloud sheets there is nothing to check against a stale one.
+    star_textures: [Option<glow::Texture>; 3],
     resolvers: BTreeMap<usize, Linked>,
     present: Option<glow::Program>,
     /// One uniform buffer per binding slot, and how many bytes the last fill of it came to.
@@ -1943,6 +2027,104 @@ impl Buffers {
         };
         let held = upload_strip(gl, &vertices, &indices)?;
         self.strips[at] = Some(held);
+        Ok(held)
+    }
+
+    /// The night star field's tier 0, over the sky and against it: the shader discards any pixel it
+    /// would not carry a full stop brighter than the sky already reads there, so this needs the sky
+    /// plane standing before it draws. Nothing where a texture has not arrived, or the weather's own
+    /// starfield set states no alpha at all - the gate `moon` also opens on.
+    ///
+    /// No blend: the captured pipeline draws this with `blendEnable` off, so a surviving fragment
+    /// replaces the sky pixel outright rather than mixing over it, and the discard is what keeps
+    /// that from carving holes in it.
+    pub fn stars(
+        &mut self,
+        gl: &glow::Context,
+        held: &std::sync::Arc<program::Program>,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let Some((_, sky)) = self.overhead else {
+            return Ok(());
+        };
+        let [color, band, twinkle] = self.star_textures;
+        let (Some(color), Some(band), Some(twinkle)) = (color, band, twinkle) else {
+            return Ok(());
+        };
+        if scene.star.alpha <= 0.0 {
+            return Ok(());
+        }
+        let (layout, _, _, indices) = self.star_mesh(gl)?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_func(glow::LEQUAL);
+            gl.depth_range_f32(1.0, 1.0);
+            gl.depth_mask(false);
+        }
+        let drawn = self.pass(
+            gl,
+            STAR,
+            held,
+            lit,
+            scene,
+            Over::Starring(Starred { layout, indices, color, band, twinkle, sky }),
+        );
+        unsafe {
+            gl.depth_range_f32(0.0, 1.0);
+            gl.disable(glow::DEPTH_TEST);
+        }
+        self.drawn.stars = drawn.is_ok();
+        drawn
+    }
+
+    /// One of the star field's three textures, uploaded the first time it arrives. Wrapped rather
+    /// than clamped: every one of them is sampled well past a single tile.
+    pub fn starlit(&mut self, gl: &glow::Context, at: usize, held: &Layered) -> Result<(), String> {
+        if self.star_textures[at].is_some() {
+            return Ok(());
+        }
+        unsafe {
+            let texture = gl.create_texture()?;
+            gl.bind_texture(glow::TEXTURE_2D, Some(texture));
+            gl.tex_image_2d(
+                glow::TEXTURE_2D,
+                0,
+                glow::RGBA8 as i32,
+                held.size.0,
+                held.size.1,
+                0,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelUnpackData::Slice(Some(&held.pixels)),
+            );
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                (glow::TEXTURE_WRAP_S, glow::REPEAT),
+                (glow::TEXTURE_WRAP_T, glow::REPEAT),
+            ] {
+                gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+            }
+            self.star_textures[at] = Some(texture);
+        }
+        Ok(())
+    }
+
+    /// The star dome on the card, built the first time it is drawn.
+    fn star_mesh(
+        &mut self,
+        gl: &glow::Context,
+    ) -> Result<(glow::VertexArray, glow::Buffer, glow::Buffer, i32), String> {
+        if let Some(held) = self.dome {
+            return Ok(held);
+        }
+        let (vertices, indices) = dome();
+        let held = upload_dome(gl, &vertices, &indices)?;
+        self.dome = Some(held);
         Ok(held)
     }
 
@@ -3376,6 +3558,7 @@ impl Buffers {
         };
         let layout = match over {
             Over::Clouding(held) => held.layout,
+            Over::Starring(held) => held.layout,
             Over::Blurring(..) | Over::Reflecting(..) => self.sampled(gl)?,
             Over::Volume => {
                 let held = match self.volume {
@@ -3465,6 +3648,13 @@ impl Buffers {
                     // Both meshes read one sampler under the same name, so which sheet is bound is
                     // the draw's to say rather than the resource id's.
                     Over::Clouding(held) => held.texture,
+                    Over::Starring(held) => match texture.name.as_str() {
+                        "sSampler0" => held.color,
+                        "sSampler1" => held.band,
+                        "sSampler2" => held.twinkle,
+                        program::SKY_SAMPLER => held.sky,
+                        _ => self.engine(gl, texture.id)?,
+                    },
                     _ => self.engine(gl, texture.id)?,
                 },
                 kind => self.absent(gl, kind, texture.id)?,
@@ -3511,6 +3701,9 @@ impl Buffers {
                 ),
                 Over::Clouding(held) => {
                     gl.draw_elements(glow::TRIANGLE_STRIP, held.indices, glow::UNSIGNED_SHORT, 0)
+                }
+                Over::Starring(held) => {
+                    gl.draw_elements(glow::TRIANGLES, held.indices, glow::UNSIGNED_SHORT, 0)
                 }
                 _ => gl.draw_arrays(glow::TRIANGLES, 0, 3),
             }
@@ -4136,6 +4329,38 @@ fn upload_strip(
     }
 }
 
+fn upload_dome(
+    gl: &glow::Context,
+    vertices: &[f32],
+    indices: &[u16],
+) -> Result<(glow::VertexArray, glow::Buffer, glow::Buffer, i32), String> {
+    unsafe {
+        let layout = gl.create_vertex_array()?;
+        gl.bind_vertex_array(Some(layout));
+        let held = gl.create_buffer()?;
+        gl.bind_buffer(glow::ARRAY_BUFFER, Some(held));
+        gl.buffer_data_u8_slice(
+            glow::ARRAY_BUFFER,
+            bytemuck::cast_slice(vertices),
+            glow::STATIC_DRAW,
+        );
+        for (location, lanes, offset) in [(0, 3, 0), (1, 4, 12), (2, 4, 28)] {
+            gl.enable_vertex_attrib_array(location);
+            gl.vertex_attrib_pointer_f32(location, lanes, glow::FLOAT, false, STAR_STRIDE, offset);
+        }
+        let faces = gl.create_buffer()?;
+        gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(faces));
+        gl.buffer_data_u8_slice(
+            glow::ELEMENT_ARRAY_BUFFER,
+            bytemuck::cast_slice(indices),
+            glow::STATIC_DRAW,
+        );
+        gl.bind_vertex_array(None);
+        gl.bind_buffer(glow::ARRAY_BUFFER, None);
+        Ok((layout, held, faces, indices.len() as i32))
+    }
+}
+
 fn upload_volume(
     gl: &glow::Context,
 ) -> Result<(glow::VertexArray, glow::Buffer, glow::Buffer), String> {
@@ -4265,7 +4490,7 @@ pub fn build_pair(
 
 #[cfg(test)]
 mod test {
-    use super::{BAND, SHEET, band, sheet, strip};
+    use super::{BAND, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
 
     /// Both meshes and both strips, against what the buffers a capture of the running game bound
     /// hold. The engine builds these rather than reading them out of a file, so the counts and the
@@ -4306,5 +4531,37 @@ mod test {
         // The turn goes down a row at the column the band stopped on, which stands on the axis, so
         // the triangle that turns between them has no area.
         assert_eq!(strip(BAND.0, BAND.1)[48..52], [24, 49, 74, 48]);
+    }
+
+    /// The star dome against the capture's own vertex and index buffers: 1734 vertices over 9216
+    /// indices, six self-contained panels, and the first vertex and a panel's own centre exactly as
+    /// the capture held them.
+    #[test]
+    fn the_star_dome_comes_out_as_the_capture_held_it() {
+        let (vertices, indices) = dome();
+        assert_eq!(vertices.len(), STAR_FACES * STAR_GRID * STAR_GRID * 11);
+        assert_eq!(indices.len(), STAR_FACES * (STAR_GRID - 1) * (STAR_GRID - 1) * 6);
+        assert_eq!(vertices.len(), 1734 * 11);
+        assert_eq!(indices.len(), 9216);
+
+        let vertex = |at: usize| &vertices[at * 11..at * 11 + 11];
+        let v0 = vertex(0);
+        assert_eq!(v0[0..3], [0.577_148_44, 0.0, 0.816_406_25]);
+        assert_eq!(v0[3..7], [0.0, 8.0, 0.0, 32.0]);
+        assert_eq!(v0[7..9], [0.0, 4.5]);
+
+        // A face's own centre, an axis-aligned unit vector.
+        let mid = vertex(8 * STAR_GRID + 8);
+        assert_eq!(mid[0..3], [1.0, 0.0, 0.0]);
+        assert_eq!(mid[3..7], [4.0, 4.0, 16.0, 16.0]);
+
+        // Each panel's own 289 vertices and 1536 indices, self-contained the way the capture held
+        // them: no index of one panel ever names a vertex of another.
+        for panel in 0..STAR_FACES {
+            let held = &indices[panel * 1536..(panel + 1) * 1536];
+            let lo = *held.iter().min().unwrap() as usize;
+            let hi = *held.iter().max().unwrap() as usize;
+            assert_eq!((lo, hi), (panel * 289, panel * 289 + 288));
+        }
     }
 }

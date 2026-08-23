@@ -32,11 +32,12 @@ const LONGEST: i32 = 3600;
 /// Frames a fit is taken over.
 const FITTED: i32 = 300;
 
-/// The Euler order the rest of the browser reads these files under: about X first, then Y, then Z.
+/// The Euler order `apricot_powder.shpk` builds a particle's basis under: about Z first, then X,
+/// then Y.
 fn rotation(angles: Vec3) -> Quat {
-    Quat::from_rotation_z(angles.z)
-        * Quat::from_rotation_y(angles.y)
+    Quat::from_rotation_y(angles.y)
         * Quat::from_rotation_x(angles.x)
+        * Quat::from_rotation_z(angles.z)
 }
 
 fn integer(blocks: &[Block], name: &str) -> Option<i32> {

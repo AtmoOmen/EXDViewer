@@ -20,6 +20,12 @@ fn dump_container(raw: &[u8], start: usize, end: usize, out: &str) {
         return;
     };
     let exact = &blob[container.offset_in_file..][..container.total_size as usize];
+    eprintln!(
+        "{out}: blob {} B, DXBC at +{}, total_size {}",
+        blob.len(),
+        container.offset_in_file,
+        container.total_size
+    );
     std::fs::write(out, exact).unwrap();
 }
 

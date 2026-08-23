@@ -207,19 +207,28 @@ void main() {
 }
 ";
 
-/// The face the moon turns and the terminator it is cut by, read out of the one draw a real frame
-/// makes of this pass. That frame's moon was full: the terminator these state leaves the whole disc
-/// lit, so the phase the shader can draw has never been exercised.
+/// `cMoonParam[0]`: `.xy` rolls the quad's own uv into `sMoon`'s, and it varies with the camera - a
+/// second, independently captured frame disagrees with the first and no rule for it has been found,
+/// so this is an approximation rather than a reading. `.zw` is the axis the terminator below is
+/// measured against, and both frames hold it here: since the disc's own depth term this reaches is
+/// never negative, the terminator this shader can compute only ever lands fully lit or fully dark,
+/// never a phase.
 const MOON_FACE: [f32; 4] = [0.591_309_67, 0.806_444_6, 0.0, 1.0];
+
+/// The terminator's slope and offset, which hold to the same figures across two independently
+/// captured frames: this shader's phase is not merely unexercised, it is pinned full by the engine
+/// itself.
 const MOON_TERMINATOR: [f32; 4] = [999_999.0, 0.999_999, 1.0, 1.0];
 
 /// What the weather's stated moon color is taken down by before it tints the disc, and its stated
-/// alpha before it weighs the blend. Both hold to eight figures across every channel of the one
-/// frame that states them, and neither is explained by anything else in that frame.
+/// alpha before it weighs the blend. Read off the one frame that states them; a second, independently
+/// captured frame carries different figures for both, so these are approximations and not a rule.
 const MOON_TINT: f32 = 5.0 / 6.0;
 const MOON_WEIGHT: f32 = 0.19;
 
-/// How far the alpha falls off across the disc.
+/// How far the alpha falls off across the disc. Matches the starfield set's own `unknown` field
+/// exactly in one frame and not in another, so this stays a fixed approximation rather than a
+/// reading.
 const MOON_FADE: f32 = 0.4;
 
 /// The clouds, which the engine draws over two meshes it builds itself: a band around the horizon

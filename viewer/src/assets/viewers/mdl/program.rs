@@ -207,29 +207,58 @@ void main() {
 }
 ";
 
-/// `cMoonParam[0]`: `.xy` rolls the quad's own uv into `sMoon`'s, and it varies with the camera - a
-/// second, independently captured frame disagrees with the first and no rule for it has been found,
-/// so this is an approximation rather than a reading. `.zw` is the axis the terminator below is
-/// measured against, and both frames hold it here: since the disc's own depth term this reaches is
-/// never negative, the terminator this shader can compute only ever lands fully lit or fully dark,
-/// never a phase.
-const MOON_FACE: [f32; 4] = [0.591_309_67, 0.806_444_6, 0.0, 1.0];
+/// `cMoonParam[0].xy`: rolls the quad's own uv into `sMoon`'s. It is the same turn `sun` takes
+/// below, before the zone's own tilt splits it into up and flat.
+pub fn moon_roll(time: f32) -> Vec2 {
+    let (sin, cos) = turned(time).sin_cos();
+    Vec2::new(cos, sin)
+}
 
-/// The terminator's slope and offset, which hold to the same figures across two independently
-/// captured frames: this shader's phase is not merely unexercised, it is pinned full by the engine
-/// itself.
-const MOON_TERMINATOR: [f32; 4] = [999_999.0, 0.999_999, 1.0, 1.0];
+/// How far a day stands from new toward full, `1..=32`: nought at `1`, one at `17`, and back down
+/// to nought by `32`. What `cMoonParam[1].w` states outright.
+pub fn moon_phase(day: f32) -> f32 {
+    1.0 - (day - 17.0).abs() / 16.0
+}
+
+/// `cMoonParam[0].zw`: the terminator's own axis, swept through a half turn as the phase runs from
+/// new to full.
+pub fn moon_terminator(phase: f32) -> Vec2 {
+    let theta = (180.0 * phase).to_radians();
+    Vec2::new(theta.sin(), -theta.cos())
+}
+
+/// `cMoonParam[1].xy`: the slope and offset the pixel shader folds its own `saturate(cos * slope +
+/// offset)` shading through, tied by `offset = 1 - 1/slope`. A full or new moon squares the
+/// terminator's own plane to the viewer, wanting the edge razored to the visible limb rather than
+/// softened, which is what sends the slope toward infinity there.
+fn moon_softness(phase: f32) -> (f32, f32) {
+    let slope = ((1.0 + phase) / (1.0 - phase).max(1e-6)).min(999_999.0);
+    (slope, 1.0 - 1.0 / slope)
+}
+
+/// The eight phases Eorzea's calendar names a day under, four days wide apiece.
+const MOON_PHASE_NAME: [&str; 8] = [
+    "New Moon",
+    "Waxing Crescent",
+    "Waxing Half Moon",
+    "Waxing Gibbous",
+    "Full Moon",
+    "Waning Gibbous",
+    "Waning Half Moon",
+    "Waning Crescent",
+];
+
+/// What a day, `1..=32`, is called under that calendar.
+pub fn moon_phase_name(day: f32) -> &'static str {
+    let at = ((day - 1.0) / 4.0).floor().clamp(0.0, (MOON_PHASE_NAME.len() - 1) as f32);
+    MOON_PHASE_NAME[at as usize]
+}
 
 /// What the weather's stated moon color is taken down by before it tints the disc, and its stated
 /// alpha before it weighs the blend. Read off the one frame that states them; a second, independently
 /// captured frame carries different figures for both, so these are approximations and not a rule.
 const MOON_TINT: f32 = 5.0 / 6.0;
 const MOON_WEIGHT: f32 = 0.19;
-
-/// How far the alpha falls off across the disc. Matches the starfield set's own `unknown` field
-/// exactly in one frame and not in another, so this stays a fixed approximation rather than a
-/// reading.
-const MOON_FADE: f32 = 0.4;
 
 /// The clouds, which the engine draws over two meshes it builds itself: a band around the horizon
 /// and a sheet overhead. One package holds both, under a technique apiece.
@@ -1098,6 +1127,12 @@ pub struct Sky {
     pub moon: f32,
     /// What the weather states its moon looks like, and how much of it the hour lets through.
     pub moonlight: Vec4,
+    /// How far the disc's own alpha falls off toward its edge, which the weather's starfield set
+    /// states beside the moon's color.
+    pub moon_fade: f32,
+    /// The moon's own day, `1..=32`, which no file states either: a date rather than anything the
+    /// hour or the weather derives.
+    pub day: f32,
 }
 
 /// Where the sun stands, in the coordinates its own pass reads a pixel by. Nothing where it is
@@ -1145,9 +1180,15 @@ pub fn moon(time: f32, tilt: f32) -> Vec3 {
 /// The circle it runs on leans, and by how much the **zone** states in its own level file. Five
 /// captures of four zones, each exact to four decimal places against what the file holds.
 pub fn sun(time: f32, tilt: f32) -> Vec3 {
-    let turned = (time / 3600.0 - 6.0) * std::f32::consts::FRAC_PI_2 / 6.0;
+    let turned = turned(time);
     let (flat, up) = tilt.to_radians().sin_cos();
     Vec3::new(turned.cos(), turned.sin() * up, turned.sin() * flat)
+}
+
+/// The hour's own turn, before a zone's tilt splits it into up and flat. `moon_roll` reads the
+/// same turn straight, with no tilt to split it.
+fn turned(time: f32) -> f32 {
+    (time / 3600.0 - 6.0) * std::f32::consts::FRAC_PI_2 / 6.0
 }
 
 /// What a place with no level file of its own stands under, which is what most zones state.
@@ -1309,6 +1350,8 @@ impl Default for Sky {
             depth: 24.0,
             moon: 0.000_872_664_7,
             moonlight: Vec4::ZERO,
+            moon_fade: 0.4,
+            day: 17.0,
         }
     }
 }
@@ -2580,9 +2623,13 @@ impl Buffer {
                 return out;
             };
             let color = held.moonlight.truncate() * MOON_TINT;
-            write(&mut out, 0, &MOON_FACE);
-            write(&mut out, 1, &MOON_TERMINATOR);
-            write(&mut out, 2, &[color.x, color.y, color.z, MOON_FADE]);
+            let roll = moon_roll(held.time);
+            let phase = moon_phase(held.day);
+            let axis = moon_terminator(phase);
+            let (slope, offset) = moon_softness(phase);
+            write(&mut out, 0, &[roll.x, roll.y, axis.x, axis.y]);
+            write(&mut out, 1, &[slope, offset, 1.0, phase]);
+            write(&mut out, 2, &[color.x, color.y, color.z, held.moon_fade]);
             write(&mut out, 3, &[0.0, 0.0, 0.0, held.moonlight.w * MOON_WEIGHT]);
             // What the frame behind the disc is read at, which is where each of its own fragments
             // falls on the screen: the same rectangle the quad was stood over.
@@ -3601,7 +3648,8 @@ mod test {
     use super::{
         ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
         JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, Pass, Scene, Sky, Volume, ambient, decal_field,
-        encode, instance_fields, joints, selector, shader_types, sun,
+        encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
+        selector, shader_types, sun,
     };
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -3841,6 +3889,46 @@ mod test {
             filled[2],
             filled[3]
         );
+    }
+
+    /// Against the two days a capture of the running game held `cMoonParam` for: a waning crescent
+    /// and a full moon, both at the same hour.
+    #[test]
+    fn a_days_phase_matches_what_the_game_held_for_it() {
+        let crescent = moon_phase(30.0);
+        assert!((crescent - 0.1875).abs() < 1e-6);
+        let axis = moon_terminator(crescent);
+        assert!((axis.x - 0.555_570).abs() < 1e-5);
+        assert!((axis.y - -0.831_470).abs() < 1e-5);
+
+        let full = moon_phase(17.0);
+        assert!((full - 1.0).abs() < 1e-6);
+        let axis = moon_terminator(full);
+        assert!(axis.x.abs() < 1e-6);
+        assert!((axis.y - 1.0).abs() < 1e-6);
+    }
+
+    /// `moon_softness` is a closed form, not a fit: it agrees with what the game held for the
+    /// crescent to five significant figures and misses in the sixth, which this tolerance records
+    /// rather than hides.
+    #[test]
+    fn a_days_softness_is_close_to_what_the_game_held_for_it() {
+        let (slope, offset) = moon_softness(moon_phase(30.0));
+        assert!((slope - 1.461_532).abs() < 1e-5);
+        assert!((offset - 0.315_787).abs() < 1e-5);
+
+        let (slope, offset) = moon_softness(moon_phase(17.0));
+        assert_eq!(slope, 999_999.0);
+        assert!((offset - 0.999_999).abs() < 1e-6);
+    }
+
+    /// Two frames a day apart at the same hour hold `cMoonParam[0].xy` identically; this is the
+    /// turn that explains why.
+    #[test]
+    fn moon_roll_matches_what_the_game_held_at_the_hour() {
+        let roll = moon_roll(3.0 * 3600.0);
+        assert!((roll.x - 0.707_107).abs() < 1e-5);
+        assert!((roll.y - -0.707_107).abs() < 1e-5);
     }
 
     /// The composite reads entry `n` at registers `12 * n + 4` through `12 * n + 15`, and its header

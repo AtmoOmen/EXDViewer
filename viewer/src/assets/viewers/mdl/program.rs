@@ -800,6 +800,9 @@ pub enum Pass {
     Shaft,
     /// A slab of fog a zone places, blended into that same frame.
     Layer,
+    /// The night star dome, standalone shcd like the cloud passes, whose own `cParam` shares a name
+    /// with a posteffect pass's.
+    Star,
 }
 
 impl Pass {
@@ -809,7 +812,7 @@ impl Pass {
             Self::Buffer => PASS_G_OPAQUE,
             Self::Blended => PASS_G_SEMITRANSPARENCY,
             Self::Lighting | Self::Lamp => PASS_LIGHTING_OPAQUE,
-            Self::Fur | Self::CloudBand | Self::CloudSheet => PASS_7,
+            Self::Fur | Self::CloudBand | Self::CloudSheet | Self::Star => PASS_7,
             Self::Composite => PASS_COMPOSITE_OPAQUE,
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
             Self::BlendedLighting => PASS_LIGHTING_SEMITRANSPARENCY,
@@ -2193,7 +2196,7 @@ impl Program {
             names: outputs.iter().map(|at| format!("SV_Target{at}")).collect(),
             targets: outputs.clone(),
             outputs,
-            pass: Pass::Composite,
+            pass: Pass::Star,
         })
     }
 
@@ -2853,7 +2856,9 @@ impl Buffer {
             write_rows(&mut out, &rows(projection * view * model, 4));
             return out;
         }
-        if self.name == "cParam" && self.members.is_empty() {
+        // A posteffect pass reflects its own quad-sampling buffer under the same bare name, so the
+        // pass tells the two apart rather than the members being empty for both.
+        if matches!(pass, Pass::Star) && self.name == "cParam" {
             let held = scene.star;
             write(&mut out, 0, &[STAR_PARAM_0[0], STAR_PARAM_0[1], STAR_PARAM_0[2], 0.0]);
             write(&mut out, 1, &[held.horizon, held.point, held.band, held.alpha]);

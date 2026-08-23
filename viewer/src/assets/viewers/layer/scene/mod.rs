@@ -3311,6 +3311,7 @@ impl Scene {
             (held.sky, "sky"),
             (held.sun, "sun"),
             (held.moon, "moon"),
+            (held.stars, "stars"),
             (held.clouds[0], "band"),
             (held.clouds[1], "sheet"),
             (held.fog, "fog"),

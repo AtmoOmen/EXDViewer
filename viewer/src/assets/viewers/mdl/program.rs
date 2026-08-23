@@ -1348,7 +1348,7 @@ impl Default for Sky {
             tilt: TILT,
             size: (8.0, 32.0),
             depth: 24.0,
-            moon: 0.000_872_664_7,
+            moon: 0.050_346,
             moonlight: Vec4::ZERO,
             moon_fade: 0.4,
             day: 17.0,

@@ -45,10 +45,9 @@ const WETNESS: u32 = 8;
 const TONE_MAPPING: u32 = 9;
 const VERTICAL_FOG: u32 = 13;
 
-/// How far up the frame the moon's disc reaches. The one draw that states it holds a disc two and a
-/// half pixels across, and that draw covered no pixels at all, so this opens where it did and is a
-/// control rather than a reading.
-const MOON: f32 = 0.000_872_664_7;
+/// How far up the frame the moon's disc reaches, as a fraction of its height. A frame's own field of
+/// view is not divided back out of it, so a wider one draws the disc small.
+const MOON: f32 = 0.050_346;
 
 /// Where the day panel opens: full, the same phase the moon's disc used to hold with no day of
 /// its own to read.

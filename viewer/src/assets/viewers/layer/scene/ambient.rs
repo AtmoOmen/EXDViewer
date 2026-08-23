@@ -466,7 +466,12 @@ impl Ambient {
         let Some((color, alpha)) = colour(held, "moon_color") else {
             return Vec4::ZERO;
         };
-        color.extend(alpha)
+        // A place stating no color for its moon draws none at all. The disc writes over the sky
+        // rather than blending into it, so a black one would cut a hole in the stars.
+        match color.max_element() > 0.0 {
+            true => color.extend(alpha),
+            false => Vec4::ZERO,
+        }
     }
 
     /// How far the alpha falls off across the disc, which the starfield set states beside the

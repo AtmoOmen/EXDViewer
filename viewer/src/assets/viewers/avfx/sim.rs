@@ -831,6 +831,25 @@ pub struct Drawn {
     pub def: usize,
 }
 
+/// The longest life a particle spawned from `emitter`, or from an emitter it spawns, can carry.
+fn reach(emitters: &[Emitter], particles: &[Particle], emitter: usize, depth: u8) -> f32 {
+    let Some(depth) = depth.checked_sub(1) else {
+        return 0.0;
+    };
+    let def = &emitters[emitter];
+    let direct = def
+        .particles
+        .iter()
+        .filter_map(|spawn| particles[spawn.target].life)
+        .fold(0.0f32, f32::max);
+    let nested = def
+        .emitters
+        .iter()
+        .map(|spawn| reach(emitters, particles, spawn.target, depth))
+        .fold(0.0f32, f32::max);
+    direct.max(nested)
+}
+
 pub struct Effect {
     emitters: Vec<Emitter>,
     particles: Vec<Particle>,
@@ -850,7 +869,7 @@ impl Effect {
             .iter()
             .map(|particle| Particle::read(particle, file.models().len(), &lights))
             .collect();
-        let emitters = file
+        let emitters: Vec<Emitter> = file
             .emitters()
             .iter()
             .map(|emitter| Emitter::read(emitter, particles.len(), file.emitters().len()))
@@ -861,12 +880,12 @@ impl Effect {
         // expired. Where either never does, the loop is the viewer's to pick.
         let bounded = runs.iter().all(|run| run.until != i32::MAX)
             && particles.iter().all(|particle| particle.life.is_some());
-        let tail = particles
-            .iter()
-            .filter_map(|particle| particle.life)
-            .fold(0.0f32, f32::max) as i32;
         let length = match bounded {
-            true => runs.iter().map(|run| run.until).max().unwrap_or_default() + tail,
+            true => runs
+                .iter()
+                .map(|run| run.until + reach(&emitters, &particles, run.emitter, DEPTH) as i32)
+                .max()
+                .unwrap_or_default(),
             false => LOOP,
         }
         .clamp(1, LONGEST);

@@ -286,7 +286,9 @@ const NEUTRAL: [(u32, [u8; 4]); 4] = [
 const UNOCCLUDED: [u8; 4] = [255, 255, 255, 0];
 
 /// What the composite takes a reflection against before a place has said what its sky looks like.
-const UNREFLECTED: [u8; 4] = [128, 128, 128, 0];
+/// Black, not grey: the composite squares this texel and divides by the alpha it was gathered at,
+/// so any nonzero colour here survives an alpha of nought.
+const UNREFLECTED: [u8; 4] = [0, 0, 0, 0];
 
 /// Texels a face of the reflection cube takes. The sky it is built from is three harmonic rows,
 /// which carry nothing finer than this.

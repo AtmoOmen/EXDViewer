@@ -1846,4 +1846,13 @@ mod tests {
         let effect = &playing(&[life(-1.0), nest("TC1", &[block("TLst", &[1])])], (0, 0)).effect;
         assert_eq!(at(effect, 0)[0].texture, Some(1));
     }
+
+    #[test]
+    fn length_is_the_latest_timeline_item_ends_not_a_particles_own_life_past_it() {
+        let effect = &playing(&[life(50.0)], (0, 10)).effect;
+
+        // The particle outlives the item that spawned it by 40 frames; the item's own end is
+        // where the effect is done, not a floor its longest-lived particle can push past.
+        assert_eq!(effect.length, 10);
+    }
 }

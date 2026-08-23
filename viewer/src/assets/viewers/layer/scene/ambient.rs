@@ -566,11 +566,16 @@ impl Ambient {
             true => held.sunlight + held.moonlight,
             false => Vec3::ONE,
         };
-        // Where the hour puts the sky's own sun. The game lights and shadows from a direction of
-        // that same azimuth standing higher up, by an amount no file it ships states. A capture
-        // holds this one below the horizon at night, so it is not turned around there: what changes
-        // after dark is the color, which the environment states as the moon's.
-        (program::sun(self.time, self.tilt), color)
+        // Whichever of the two stands above the horizon. After dark a capture puts the key at the
+        // moon's azimuth rather than the sun's, so it does turn around. Both are read higher up
+        // than the body they follow, by an amount no shipped file states and no rule fits across
+        // zones, which is why only the side is taken here and not the lift.
+        let sun = program::sun(self.time, self.tilt);
+        let toward = match sun.y >= 0.0 {
+            true => sun,
+            false => program::moon(self.time, self.tilt),
+        };
+        (toward, color)
     }
 
     /// The ambient buffer as the files decide it.

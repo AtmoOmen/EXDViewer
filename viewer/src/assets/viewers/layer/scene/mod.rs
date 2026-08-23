@@ -484,13 +484,15 @@ impl Blobs {
 
 /// The draws a zone makes of a surface, which is what a package is read for. A shader outside these
 /// is never translated, so its bytecode is never asked for.
-const DRAWS: [(program::Pass, u32); 6] = [
+const DRAWS: [(program::Pass, u32); 8] = [
     (program::Pass::Buffer, program::SUB_VIEW_MAIN),
     (program::Pass::Blended, program::SUB_VIEW_MAIN),
     (program::Pass::Depth, program::SUB_VIEW_MAIN),
     (program::Pass::Depth, program::SUB_VIEW_SHADOW_0),
     (program::Pass::Water, program::SUB_VIEW_MAIN),
     (program::Pass::BlendedLighting, program::SUB_VIEW_MAIN),
+    (program::Pass::Shaft, program::SUB_VIEW_MAIN),
+    (program::Pass::Layer, program::SUB_VIEW_MAIN),
 ];
 
 /// Whether a package is one of the surfaces that blend themselves into the frame.

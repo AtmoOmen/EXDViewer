@@ -1814,6 +1814,34 @@ mod tests {
     }
 
     #[test]
+    fn a_single_axis_turn_does_not_care_about_order() {
+        let turn = nest("Rot", &[curve("Z", 0, 0, &scalars(&[(0, 1, 0.77)]))]);
+        let effect = &playing(&[life(-1.0), turn], (0, 0)).effect;
+        let turn = glam::Quat::from_array(at(effect, 0)[0].turn);
+        assert!(turn.abs_diff_eq(glam::Quat::from_rotation_z(0.77), 1e-6));
+    }
+
+    /// About more than one axis, a particle's turn composes the way `apricot_powder.shpk` builds it
+    /// from `TEXCOORD.xyz`: Y outermost, then X, then Z.
+    #[test]
+    fn a_multi_axis_turn_composes_the_way_the_shader_does() {
+        let turn = nest(
+            "Rot",
+            &[
+                curve("X", 0, 0, &scalars(&[(0, 1, 0.4)])),
+                curve("Y", 0, 0, &scalars(&[(0, 1, 0.9)])),
+                curve("Z", 0, 0, &scalars(&[(0, 1, 1.3)])),
+            ],
+        );
+        let effect = &playing(&[life(-1.0), turn], (0, 0)).effect;
+        let turn = glam::Quat::from_array(at(effect, 0)[0].turn);
+        let expect = glam::Quat::from_rotation_y(0.9)
+            * glam::Quat::from_rotation_x(0.4)
+            * glam::Quat::from_rotation_z(1.3);
+        assert!(turn.abs_diff_eq(expect, 1e-6));
+    }
+
+    #[test]
     fn a_particle_samples_the_texture_its_first_layer_names() {
         let effect = &playing(&[life(-1.0), nest("TC1", &[block("TLst", &[1])])], (0, 0)).effect;
         assert_eq!(at(effect, 0)[0].texture, Some(1));

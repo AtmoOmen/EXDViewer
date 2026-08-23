@@ -762,7 +762,7 @@ impl Ambient {
                 ("Sunlight", spell(held.sunlight)),
                 ("Moonlight", spell(held.moonlight)),
                 ("Key light", spell(held.sunlight + held.moonlight)),
-                ("Key direction", spell(program::sun(self.time, self.tilt))),
+                ("Key direction", spell(self.light().0)),
                 ("Sun tilt", format!("{:.0} deg", self.tilt)),
                 ("Shadow reach", format!("{:.0}", self.reach)),
                 (

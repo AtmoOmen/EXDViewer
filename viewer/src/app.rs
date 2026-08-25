@@ -61,9 +61,14 @@ use crate::{
         CodeTheme, CollapsibleSidePanel, ColorTheme, ConvertiblePromise, FuzzyMatcher, IconManager,
         Side, TrackedPromise, empty_view, install_tex_loader, opt_slider, shortcut, tick_promises,
     },
+    zones,
 };
 
 const SHEETS_FILTER_ID: &str = "sheets_filter";
+
+/// A panel keeps whatever width its widest row has ever asked for, so an unbounded one grows for
+/// good the first time a long sheet name scrolls through.
+const SHEET_LIST_WIDTH: f32 = 320.0;
 
 type CachedSheetEntry = (
     Language, // language
@@ -199,6 +204,7 @@ enum Tab {
     Assets,
     Icons,
     Music,
+    Zones,
     Quests,
     Character,
 }
@@ -211,6 +217,8 @@ impl Tab {
             Tab::Icons
         } else if path.starts_with("/music") {
             Tab::Music
+        } else if path.starts_with("/zones") {
+            Tab::Zones
         } else if path.starts_with("/quests") {
             Tab::Quests
         } else if path.starts_with("/character") {
@@ -226,6 +234,7 @@ impl Tab {
             Tab::Assets => "Assets",
             Tab::Icons => "Icons",
             Tab::Music => "Music",
+            Tab::Zones => "Zones",
             Tab::Quests => "Quests",
             Tab::Character => "Character",
         }
@@ -253,6 +262,7 @@ pub struct App {
     music: music::MusicPlayer,
     assets: assets::AssetBrowser,
     icons: icons::IconBrowser,
+    zones: zones::ZoneBrowser,
     quests: quests::QuestBrowser,
     character: character::CharacterBuilder,
     last_system_theme: Option<egui::Theme>,
@@ -306,6 +316,13 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
         App::on_music_track,
         App::draw_music,
         App::title_music,
+    )?;
+    builder.add_route("/zones", App::on_zones, App::draw_zones, App::title_zones)?;
+    builder.add_route(
+        "/zones/{*path}",
+        App::on_zone_path,
+        App::draw_zones,
+        App::title_zones,
     )?;
     builder.add_route(
         "/quests",
@@ -364,6 +381,16 @@ impl App {
             .name_of(id)
             .unwrap_or(Tab::Music.title())
             .to_string()
+    }
+
+    fn title_zones(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        let Some(path) = params.get("path") else {
+            return Tab::Zones.title().to_string();
+        };
+        self.zones
+            .name_of(path)
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::utils::file_name(path).to_string())
     }
 
     fn title_quests(&self, _path: &Path, params: &Params<'_, '_>) -> String {
@@ -499,6 +526,7 @@ impl App {
             Tab::Assets => self.assets.open_palette(),
             Tab::Icons => self.icons.open_palette(),
             Tab::Music => self.music.open_palette(),
+            Tab::Zones => self.zones.open_palette(),
             Tab::Quests => self.quests.open_palette(),
             Tab::Character => {}
         }
@@ -545,6 +573,7 @@ impl App {
                             Tab::Assets => "Find Asset…",
                             Tab::Icons => "Find Icon…",
                             Tab::Music => "Find Track…",
+                            Tab::Zones => "Find Zone…",
                             Tab::Quests => "Find Quest…",
                             // Nothing to find: everything the tab offers is already on screen.
                             Tab::Character => return,
@@ -752,21 +781,24 @@ impl App {
                         }
                     });
 
+                    let tabs = [
+                        (Tab::Sheets, "/sheet"),
+                        (Tab::Assets, "/assets"),
+                        (Tab::Icons, "/icons"),
+                        (Tab::Music, "/music"),
+                        (Tab::Zones, "/zones"),
+                        (Tab::Quests, "/quests"),
+                        (Tab::Character, "/character"),
+                    ];
                     let seg = egui::vec2(72.0, ui.spacing().interact_size.y);
-                    let switcher_w = 5.0 * seg.x + 4.0 * ui.spacing().item_spacing.x;
+                    let switcher_w = tabs.len() as f32 * seg.x
+                        + (tabs.len() - 1) as f32 * ui.spacing().item_spacing.x;
                     let target_left = bar_left + bar_width / 2.0 - switcher_w / 2.0;
                     let space = target_left - ui.cursor().left();
                     if space > 0.0 {
                         ui.add_space(space);
                     }
-                    for (target, route) in [
-                        (Tab::Sheets, "/sheet"),
-                        (Tab::Assets, "/assets"),
-                        (Tab::Icons, "/icons"),
-                        (Tab::Music, "/music"),
-                        (Tab::Quests, "/quests"),
-                        (Tab::Character, "/character"),
-                    ] {
+                    for (target, route) in tabs {
                         if ui
                             .add_sized(seg, Button::selectable(tab == target, target.title()))
                             .clicked()
@@ -882,184 +914,188 @@ impl App {
             Some(egui::Id::new(SHEETS_FILTER_ID)),
         );
         let mut nav = std::mem::take(&mut self.sheet_nav);
-        CollapsibleSidePanel::new("sheet_list", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
+        CollapsibleSidePanel::new("sheet_list", Side::Left)
+            .max_width(SHEET_LIST_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
 
-            Panel::top("sheet_list_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("Sheets"));
+                Panel::top("sheet_list_header").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("Sheets"));
+                        });
                     });
-                });
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                    let mut sheets_filter = SHEETS_FILTER.get(ctx);
-                    let resp = ui
-                        .add_enabled(!sheets_filter.is_empty(), Button::new("↩"))
-                        .on_hover_text("Clear");
-                    if resp.clicked() {
-                        sheets_filter.clear();
-                        SHEETS_FILTER.set(ctx, sheets_filter.clone());
-                    }
+                    ui.add_space(4.0);
+                    ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
+                        let mut sheets_filter = SHEETS_FILTER.get(ctx);
+                        let resp = ui
+                            .add_enabled(!sheets_filter.is_empty(), Button::new("↩"))
+                            .on_hover_text("Clear");
+                        if resp.clicked() {
+                            sheets_filter.clear();
+                            SHEETS_FILTER.set(ctx, sheets_filter.clone());
+                        }
 
-                    let mut misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
-                    if ui
-                        .toggle_value(&mut misc_sheets_shown, "🗄")
-                        .on_hover_text("Show Miscellaneous Sheets")
-                        .changed()
-                    {
-                        MISC_SHEETS_SHOWN.set(ctx, misc_sheets_shown);
-                    }
-
-                    if !matches!(pr_changed, PrChangedState::NotPr) {
-                        let mut changed_only = PR_CHANGED_ONLY.get(ctx);
-                        let hover = match &pr_changed {
-                            PrChangedState::Ready(_) => "Filter unchanged sheets",
-                            PrChangedState::Pending => "Filter unchanged sheets (loading…)",
-                            PrChangedState::Failed => "Filter unchanged sheets (failed to load)",
-                            PrChangedState::NotPr => unreachable!(),
-                        };
+                        let mut misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
                         if ui
-                            .toggle_value(&mut changed_only, "±")
-                            .on_hover_text(hover)
+                            .toggle_value(&mut misc_sheets_shown, "🗄")
+                            .on_hover_text("Show Miscellaneous Sheets")
                             .changed()
                         {
-                            PR_CHANGED_ONLY.set(ctx, changed_only);
+                            MISC_SHEETS_SHOWN.set(ctx, misc_sheets_shown);
                         }
-                    }
 
-                    if ui
-                        .add_sized(
-                            Vec2::new(ui.available_width(), 0.0),
-                            TextEdit::singleline(&mut sheets_filter)
-                                .id(egui::Id::new(SHEETS_FILTER_ID))
-                                .hint_text("Filter"),
-                        )
-                        .changed()
-                    {
-                        SHEETS_FILTER.set(ctx, sheets_filter);
-                    }
-                });
-                ui.add_space(4.0);
-            });
-
-            let modified_schemas = self.get_modified_schemas();
-            if !modified_schemas.is_empty() {
-                let count = modified_schemas.len();
-                let modified_tooltip = modified_schemas.iter().map(|(name, _)| name).join("\n");
-                drop(modified_schemas);
-                let save_label = if count > 1 { "Save All" } else { "Save" };
-
-                Panel::bottom("sheet_list_status").show(ui, |ui| {
-                    let can_pr = pr_window::github_source(ctx).is_some();
-                    ui.vertical_centered(|ui| {
-                        ui.label(format!(
-                            "{count} modified schema{}",
-                            if count > 1 { "s" } else { "" }
-                        ))
-                        .on_hover_text(modified_tooltip);
-                    });
-
-                    let mut save = false;
-                    let mut open_pr = false;
-                    if can_pr {
-                        ui.columns_const(|[c1, c2]| {
-                            c1.vertical_centered_justified(|ui| {
-                                if ui.button("Create PR").clicked() {
-                                    open_pr = true;
+                        if !matches!(pr_changed, PrChangedState::NotPr) {
+                            let mut changed_only = PR_CHANGED_ONLY.get(ctx);
+                            let hover = match &pr_changed {
+                                PrChangedState::Ready(_) => "Filter unchanged sheets",
+                                PrChangedState::Pending => "Filter unchanged sheets (loading…)",
+                                PrChangedState::Failed => {
+                                    "Filter unchanged sheets (failed to load)"
                                 }
+                                PrChangedState::NotPr => unreachable!(),
+                            };
+                            if ui
+                                .toggle_value(&mut changed_only, "±")
+                                .on_hover_text(hover)
+                                .changed()
+                            {
+                                PR_CHANGED_ONLY.set(ctx, changed_only);
+                            }
+                        }
+
+                        if ui
+                            .add_sized(
+                                Vec2::new(ui.available_width(), 0.0),
+                                TextEdit::singleline(&mut sheets_filter)
+                                    .id(egui::Id::new(SHEETS_FILTER_ID))
+                                    .hint_text("Filter"),
+                            )
+                            .changed()
+                        {
+                            SHEETS_FILTER.set(ctx, sheets_filter);
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+
+                let modified_schemas = self.get_modified_schemas();
+                if !modified_schemas.is_empty() {
+                    let count = modified_schemas.len();
+                    let modified_tooltip = modified_schemas.iter().map(|(name, _)| name).join("\n");
+                    drop(modified_schemas);
+                    let save_label = if count > 1 { "Save All" } else { "Save" };
+
+                    Panel::bottom("sheet_list_status").show(ui, |ui| {
+                        let can_pr = pr_window::github_source(ctx).is_some();
+                        ui.vertical_centered(|ui| {
+                            ui.label(format!(
+                                "{count} modified schema{}",
+                                if count > 1 { "s" } else { "" }
+                            ))
+                            .on_hover_text(modified_tooltip);
+                        });
+
+                        let mut save = false;
+                        let mut open_pr = false;
+                        if can_pr {
+                            ui.columns_const(|[c1, c2]| {
+                                c1.vertical_centered_justified(|ui| {
+                                    if ui.button("Create PR").clicked() {
+                                        open_pr = true;
+                                    }
+                                });
+                                c2.vertical_centered_justified(|ui| {
+                                    if ui.button(save_label).clicked() {
+                                        save = true;
+                                    }
+                                });
                             });
-                            c2.vertical_centered_justified(|ui| {
+                        } else {
+                            ui.vertical_centered_justified(|ui| {
                                 if ui.button(save_label).clicked() {
                                     save = true;
                                 }
                             });
-                        });
-                    } else {
-                        ui.vertical_centered_justified(|ui| {
-                            if ui.button(save_label).clicked() {
-                                save = true;
-                            }
-                        });
-                    }
-                    if save {
-                        self.command_save_all_schemas();
-                    }
-                    if open_pr {
-                        self.command_open_pr();
-                    }
-                });
-            }
-
-            let sheets_filter = SHEETS_FILTER.get(ctx);
-            let misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
-            let backend = self.backend.clone().unwrap();
-            let sheets = self
-                .sheet_filter_data
-                .get_or_insert((sheets_filter.clone(), misc_sheets_shown), || {
-                    let sheets = backend
-                        .excel()
-                        .get_entries()
-                        .iter()
-                        .filter(|(_, id)| misc_sheets_shown || **id >= 0)
-                        .sorted_by_key(|(sheet, _)| *sheet)
-                        .map(|(s, &id)| (s.clone(), id));
-                    let sheets = self.sheet_matcher.match_list_indirect(
-                        (!sheets_filter.is_empty()).then_some(&sheets_filter),
-                        sheets,
-                        |s| &s.0,
-                    );
-                    Rc::new(sheets)
-                })
-                .clone();
-
-            let sheets = match &pr_changed {
-                PrChangedState::Ready(changed) if PR_CHANGED_ONLY.get(ctx) => Rc::new(
-                    sheets
-                        .iter()
-                        .filter(|(name, _)| changed.contains(name))
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ),
-                _ => sheets,
-            };
-
-            egui::CentralPanel::default().show(ui, |ui| {
-                let row_height = ui.text_style_height(&egui::TextStyle::Button);
-                let mut opened = nav.apply(sheets.len()).map(|at| sheets[at].0.clone());
-                let mut area = ScrollArea::both().auto_shrink(false);
-                if let Some(offset) = nav.scroll(ui, row_height, sheets.len()) {
-                    area = area.vertical_scroll_offset(offset);
-                }
-                let output = area.show_rows(ui, row_height, sheets.len(), |ui, range| {
-                    ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                        let current_sheet = SELECTED_SHEET.get(ctx);
-                        for (at, (sheet, id)) in sheets[range.clone()].iter().enumerate() {
-                            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                            let resp = Button::selectable(
-                                current_sheet.as_ref() == Some(sheet),
-                                sheet.as_str(),
-                            )
-                            .ui(ui)
-                            .on_hover_text(format!("{sheet}\nId: {id}"));
-                            nav.mark(ui, range.start + at, resp.rect);
-                            if resp.clicked() {
-                                opened = Some(sheet.clone());
-                            }
+                        }
+                        if save {
+                            self.command_save_all_schemas();
+                        }
+                        if open_pr {
+                            self.command_open_pr();
                         }
                     });
-                });
-                nav.seen(&output);
-                if let Some(sheet) = opened {
-                    SELECTED_SHEET.set(ctx, Some(sheet.clone()));
-                    self.navigate(format!("/sheet/{sheet}"));
                 }
+
+                let sheets_filter = SHEETS_FILTER.get(ctx);
+                let misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
+                let backend = self.backend.clone().unwrap();
+                let sheets = self
+                    .sheet_filter_data
+                    .get_or_insert((sheets_filter.clone(), misc_sheets_shown), || {
+                        let sheets = backend
+                            .excel()
+                            .get_entries()
+                            .iter()
+                            .filter(|(_, id)| misc_sheets_shown || **id >= 0)
+                            .sorted_by_key(|(sheet, _)| *sheet)
+                            .map(|(s, &id)| (s.clone(), id));
+                        let sheets = self.sheet_matcher.match_list_indirect(
+                            (!sheets_filter.is_empty()).then_some(&sheets_filter),
+                            sheets,
+                            |s| &s.0,
+                        );
+                        Rc::new(sheets)
+                    })
+                    .clone();
+
+                let sheets = match &pr_changed {
+                    PrChangedState::Ready(changed) if PR_CHANGED_ONLY.get(ctx) => Rc::new(
+                        sheets
+                            .iter()
+                            .filter(|(name, _)| changed.contains(name))
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => sheets,
+                };
+
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let row_height = ui.text_style_height(&egui::TextStyle::Button);
+                    let mut opened = nav.apply(sheets.len()).map(|at| sheets[at].0.clone());
+                    let mut area = ScrollArea::both().auto_shrink(false);
+                    if let Some(offset) = nav.scroll(ui, row_height, sheets.len()) {
+                        area = area.vertical_scroll_offset(offset);
+                    }
+                    let output = area.show_rows(ui, row_height, sheets.len(), |ui, range| {
+                        ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
+                            let current_sheet = SELECTED_SHEET.get(ctx);
+                            for (at, (sheet, id)) in sheets[range.clone()].iter().enumerate() {
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                                let resp = Button::selectable(
+                                    current_sheet.as_ref() == Some(sheet),
+                                    sheet.as_str(),
+                                )
+                                .ui(ui)
+                                .on_hover_text(format!("{sheet}\nId: {id}"));
+                                nav.mark(ui, range.start + at, resp.rect);
+                                if resp.clicked() {
+                                    opened = Some(sheet.clone());
+                                }
+                            }
+                        });
+                    });
+                    nav.seen(&output);
+                    if let Some(sheet) = opened {
+                        SELECTED_SHEET.set(ctx, Some(sheet.clone()));
+                        self.navigate(format!("/sheet/{sheet}"));
+                    }
+                });
             });
-        });
         self.sheet_nav = nav;
     }
 
@@ -1441,6 +1477,7 @@ impl App {
             self.assets.reset();
             self.icons.reset();
             self.music.reset();
+            self.zones.reset();
             self.quests.reset();
             self.character.reset();
             CURRENT_SHEET_LANGUAGES.remove(ui.ctx());
@@ -1661,6 +1698,39 @@ impl App {
         }
     }
 
+    fn on_zones(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        self.zones
+            .selected()
+            .map(|zone_path| format!("/zones/{zone_path}").into())
+    }
+
+    fn on_zone_path(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        params: &Params<'_, '_>,
+    ) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        let Some(zone_path) = params.get("path") else {
+            return Some("/zones".into());
+        };
+        self.zones.request(zone_path.to_string());
+        None
+    }
+
+    fn draw_zones(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(zone_path) = self.zones.ui(ui, &backend)
+        {
+            self.navigate(format!("/zones/{zone_path}"));
+        }
+    }
+
     fn on_quests(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
         if let Some(redirect) = self.ensure_backend(path) {
             return Some(redirect);
@@ -1863,6 +1933,7 @@ impl App {
             music: music::MusicPlayer::default(),
             assets: assets::AssetBrowser::default(),
             icons: icons::IconBrowser::default(),
+            zones: zones::ZoneBrowser::default(),
             quests: quests::QuestBrowser::default(),
             character: character::CharacterBuilder::default(),
             last_system_theme: None,

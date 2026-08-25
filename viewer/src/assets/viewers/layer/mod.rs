@@ -948,6 +948,12 @@ pub fn ui(
 }
 
 impl Rendered {
+    /// Lands a fresh view on the placed scene rather than the raw tree, for a host built
+    /// specifically to show it.
+    pub fn show_scene(&self) {
+        self.placed.set(true);
+    }
+
     fn open(&self, ui: &egui::Ui) -> HashSet<usize> {
         ui.data(|data| data.get_temp(self.state).unwrap_or_default())
     }

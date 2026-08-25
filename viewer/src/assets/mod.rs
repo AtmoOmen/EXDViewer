@@ -1946,7 +1946,7 @@ const EXTENSIONS: &[(&str, &str, Viewer)] = &[
     ("mtrl", "Material", Viewer::Material),
     ("shpk", "Shader package", Viewer::Shpk),
     ("shcd", "Shader code", Viewer::Shcd),
-    ("scd", "Sound container", Viewer::Raw),
+    ("scd", "Sound container", Viewer::Scd),
     ("ggd", "Grass grid data", Viewer::Ggd),
     ("gzd", "Grass zone data", Viewer::Gzd),
     ("pcb", "Player collision binary", Viewer::Pcb),

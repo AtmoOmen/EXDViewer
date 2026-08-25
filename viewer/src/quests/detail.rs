@@ -419,9 +419,9 @@ fn fields(
 
 /// Rows the game leaves at zero or empty are slots the quest does not use.
 ///
-/// `BeastReputationValue` also uses `0xFFFF`: the game only reads it when `BeastTribe` is set, and
-/// even then only to cap the rank's own required reputation, never to raise it, so it is never a
-/// number worth showing.
+/// `BeastReputationValue` also uses `0xFFFF`: the game reads it only when `BeastTribe` is set, and
+/// only to cap the rank's own required reputation downward, so `0xFFFF` means "no cap" rather than
+/// a required amount.
 fn blank(name: &str, row: ExcelRow<'_>, column: &SheetColumnDefinition) -> bool {
     if column.kind() == ironworks::file::exh::ColumnKind::String {
         return row

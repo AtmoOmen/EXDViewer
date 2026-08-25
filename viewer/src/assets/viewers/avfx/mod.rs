@@ -1157,7 +1157,7 @@ impl Rendered {
                     ui.add_space(4.0);
                 }
                 if let Some(path) = &row.asset
-                    && link(ui, path, path)
+                    && link(ui, file_name(path), path)
                 {
                     *follow = Some(path.clone());
                 }

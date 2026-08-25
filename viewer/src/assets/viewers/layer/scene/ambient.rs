@@ -925,7 +925,7 @@ impl Ambient {
                     ui.label(RichText::new(label).weak());
                     match &path {
                         Some(path) => {
-                            if link(ui, path, path) {
+                            if link(ui, crate::utils::file_name(path), path) {
                                 *follow = Some(path.clone());
                             }
                         }

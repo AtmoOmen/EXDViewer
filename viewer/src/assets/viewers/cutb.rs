@@ -196,7 +196,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
                     // string, so the spacing between them has to go for it to land under its header.
                     ui.spacing_mut().item_spacing.x = 0.0;
                     ui.label(RichText::new(head).monospace());
-                    if link(ui, path, path) {
+                    if link(ui, crate::utils::file_name(path), path) {
                         follow = Some(path.clone());
                     }
                 });

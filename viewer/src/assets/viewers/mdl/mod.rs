@@ -449,6 +449,9 @@ pub struct Rendered {
     debug: Cell<gpu::Debug>,
     /// Whether to draw with the game's own shaders rather than with this viewer's approximation.
     shaded: Cell<bool>,
+    /// Why the game's own shaders last failed to build, if they did: turns `shaded` back off so the
+    /// model still draws with the plain pass instead of going blank, and names what failed.
+    shade_failure: RefCell<Option<String>>,
     /// Seconds the viewer has been open, which is what water and foliage move against.
     clock: Cell<f32>,
     /// Which G-buffer channel the game's own shaders put on screen, starting at the frame their
@@ -515,6 +518,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         resident: Cell::new(0),
         debug: Cell::new(gpu::Debug::None),
         shaded: Cell::new(true),
+        shade_failure: Default::default(),
         clock: Cell::new(0.0),
         target: Cell::new(gpu::LIT),
     })
@@ -1133,6 +1137,9 @@ const VIEWS: [(gpu::Debug, &str); 9] = [
 ];
 
 pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
+    if let Some(why) = model.level.borrow().gpu.lock().unwrap().take_shader_failure() {
+        model.fail_shading(why);
+    }
     ui.horizontal_wrapped(|ui| {
         // A character is shown as the game draws it, so the row that takes it apart is not offered:
         // the shaders are already on and there is nothing to switch them to.
@@ -1144,7 +1151,12 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                 .on_hover_text("Draw with the package the material names, into its own G-buffer")
                 .clicked()
         {
-            model.shaded.set(!shaded);
+            let now = !shaded;
+            model.shaded.set(now);
+            // A deliberate retry, so it gets its own fresh answer instead of the last one.
+            if now {
+                model.shade_failure.borrow_mut().take();
+            }
         }
         match shaded {
             true if inspecting => {
@@ -1221,6 +1233,13 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
+        }
+        if let Some(why) = model.shade_failure.borrow().as_ref() {
+            ui.label(
+                RichText::new("⚠ game shaders would not build, showing the plain pass")
+                    .color(Color32::LIGHT_RED),
+            )
+            .on_hover_text(why.as_str());
         }
     });
 
@@ -2407,6 +2426,14 @@ impl Rendered {
         Some(built)
     }
 
+    /// Turns shading back off the moment it fails to build, so the model still draws with the plain
+    /// pass instead of going blank. Keeps the first reason; flipping "Game shaders" back on is what
+    /// clears it for a fresh attempt.
+    fn fail_shading(&self, why: String) {
+        self.shade_failure.borrow_mut().get_or_insert(why);
+        self.shaded.set(false);
+    }
+
     /// The passes that light the G-buffer, translated once their packages have arrived. They are the
     /// same whatever is being drawn, so they are built once and kept.
     fn lighting(&self, attachments: usize) -> Option<Arc<gpu::Lighting>> {
@@ -2421,7 +2448,10 @@ impl Rendered {
                 return None;
             };
             program::Program::screen(bytes, pass, attachments, &[])
-                .inspect_err(|why| log::warn!("assets/mdl: {path}: {why}"))
+                .inspect_err(|why| {
+                    log::warn!("assets/mdl: {path}: {why}");
+                    self.fail_shading(format!("{path}: {why}"));
+                })
                 .ok()
                 .map(Arc::new)
         };
@@ -2545,6 +2575,7 @@ impl Rendered {
                     }
                     Err(why) => {
                         log::error!("assets/mdl: {name}: {why}");
+                        self.fail_shading(format!("{name}: {why}"));
                         continue;
                     }
                 }
@@ -2608,6 +2639,7 @@ impl Rendered {
             };
             if let Err(why) = &held {
                 log::warn!("assets/mdl: {}: {why}", material.package());
+                self.fail_shading(format!("{}: {why}", material.package()));
             }
             translated.insert(index, Translated { attachments, held });
             if let Some((values, columns, rows)) =

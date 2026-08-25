@@ -393,7 +393,7 @@ fn fields(
         let Ok((_, column)) = index.table.get_column_by_offset(at) else {
             continue;
         };
-        if blank(row, column) {
+        if blank(&name, row, column) {
             continue;
         }
         let Ok(cell) = index.table.cell_by_offset(row, at) else {
@@ -404,7 +404,8 @@ fn fields(
             ui.add_sized(
                 [ui.available_width() * 0.45, ui.spacing().interact_size.y],
                 Label::new(RichText::new(&name).weak()),
-            );
+            )
+            .on_hover_text(&name);
             if let CellResponse::Link((sheet, (row_id, subrow))) = cell.show(ui).inner {
                 action = Some(Action::Navigate(match subrow {
                     Some(subrow) => format!("/sheet/{sheet}#R{row_id}.{subrow}"),
@@ -417,14 +418,22 @@ fn fields(
 }
 
 /// Rows the game leaves at zero or empty are slots the quest does not use.
-fn blank(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> bool {
+///
+/// `BeastReputationValue` also uses `0xFFFF`: the game reads it only when `BeastTribe` is set, and
+/// only to cap the rank's own required reputation downward, so `0xFFFF` means "no cap" rather than
+/// a required amount.
+fn blank(name: &str, row: ExcelRow<'_>, column: &SheetColumnDefinition) -> bool {
     if column.kind() == ironworks::file::exh::ColumnKind::String {
         return row
             .read_string(u32::from(column.offset()))
             .is_ok_and(|value| value.as_bytes().is_empty());
     }
-    crate::sheet::read_integer::<i64>(row, u32::from(column.offset()), column.kind())
-        .is_ok_and(|value| value == 0)
+    let Ok(value) =
+        crate::sheet::read_integer::<i64>(row, u32::from(column.offset()), column.kind())
+    else {
+        return false;
+    };
+    value == 0 || (name == "BeastReputationValue" && value == 0xFFFF)
 }
 
 fn quest_list(ui: &mut egui::Ui, index: &Index, nodes: &[u32]) -> Option<Action> {
@@ -445,20 +454,26 @@ fn quest_list(ui: &mut egui::Ui, index: &Index, nodes: &[u32]) -> Option<Action>
     action
 }
 
-fn asset_link(ui: &mut egui::Ui, path: &str) -> Option<Action> {
+/// A path link showing the file's own name, with the full path on hover, matching the convention
+/// for reference-path links elsewhere in the app.
+pub fn path_link(ui: &mut egui::Ui, path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
     let response = ui
         .add(
             Label::new(
-                RichText::new(path)
+                RichText::new(name)
                     .color(ui.visuals().hyperlink_color)
                     .small(),
             )
             .sense(Sense::click()),
         )
+        .on_hover_text(path)
         .on_hover_cursor(egui::CursorIcon::PointingHand);
-    response
-        .clicked()
-        .then(|| Action::Navigate(format!("/assets/{path}")))
+    response.clicked()
+}
+
+fn asset_link(ui: &mut egui::Ui, path: &str) -> Option<Action> {
+    path_link(ui, path).then(|| Action::Navigate(format!("/assets/{path}")))
 }
 
 /// Dialogue leans on more payload kinds than most sheets, so a player-name macro reads as a gap in

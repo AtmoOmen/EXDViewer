@@ -548,16 +548,13 @@ impl QuestBrowser {
                     let entry = &held.entries[*at as usize];
                     ui.horizontal(|ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                        if ui
-                            .add(
-                                Label::new(
-                                    RichText::new(&entry.path).color(ui.visuals().hyperlink_color),
-                                )
-                                .sense(egui::Sense::click()),
-                            )
-                            .on_hover_cursor(egui::CursorIcon::PointingHand)
-                            .clicked()
-                        {
+                        let clicked = ui
+                            .scope(|ui| {
+                                ui.set_max_width(ui.available_width() * 0.4);
+                                detail::path_link(ui, &entry.path)
+                            })
+                            .inner;
+                        if clicked {
                             action = Some(Action::Navigate(format!("/assets/{}", entry.path)));
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -565,7 +562,15 @@ impl QuestBrowser {
                                 ui.label(RichText::new("no known owner").weak().small());
                                 return;
                             }
-                            for owner in entry.owners.iter().rev() {
+                            let shown = entry.owners.len().min(3);
+                            if entry.owners.len() > shown {
+                                ui.label(
+                                    RichText::new(format!("+{}", entry.owners.len() - shown))
+                                        .weak()
+                                        .small(),
+                                );
+                            }
+                            for owner in entry.owners.iter().rev().take(shown) {
                                 if let Some(picked) = owner_label(ui, index, *owner) {
                                     action = Some(picked);
                                 }
@@ -782,7 +787,7 @@ fn owner_label(ui: &mut egui::Ui, index: &Index, owner: cutscenes::Owner) -> Opt
                 )
                 .sense(egui::Sense::click()),
             )
-            .on_hover_text(&quest.id)
+            .on_hover_text(format!("{}\n{}", quest.name, quest.id))
             .on_hover_cursor(egui::CursorIcon::PointingHand);
         return response.clicked().then_some(Action::Select(row_id));
     }

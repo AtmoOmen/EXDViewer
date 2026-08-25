@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use egui::{
-    Align, Button, CentralPanel, Color32, Label, Layout, RichText, ScrollArea, Sense,
+    Align, Button, CentralPanel, Color32, Layout, RichText, ScrollArea, Sense,
     containers::panel::Panel,
 };
 
@@ -199,7 +199,7 @@ impl Player {
             ui.ctx().request_repaint();
         }
 
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if ui.button("⏮").on_hover_text("Back to the start").clicked() {
                 self.rewind();
             }
@@ -235,18 +235,16 @@ impl Player {
                 self.rewind();
             }
 
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.spacing_mut().slider_width = 120.0;
-                ui.add(
-                    egui::Slider::new(&mut self.hold, 0.5..=10.0)
-                        .suffix(" s")
-                        .text("line"),
-                )
-                .on_hover_text(
-                    "How long a line holds. Nothing in the files states one: in game a line waits \
-                     for the player.",
-                );
-            });
+            ui.spacing_mut().slider_width = 120.0;
+            ui.add(
+                egui::Slider::new(&mut self.hold, 0.5..=10.0)
+                    .suffix(" s")
+                    .text("line"),
+            )
+            .on_hover_text(
+                "How long a line holds. Nothing in the files states one: in game a line waits \
+                 for the player.",
+            );
         });
     }
 
@@ -372,14 +370,7 @@ fn asset(ui: &mut egui::Ui, detail: &Detail, param: &str) -> Option<Action> {
             .on_hover_text("No script parameter of this quest names a file for this");
         return None;
     };
-    let response = ui
-        .add(
-            Label::new(RichText::new(path).color(ui.visuals().hyperlink_color))
-                .sense(Sense::click()),
-        )
-        .on_hover_text(param)
-        .on_hover_cursor(egui::CursorIcon::PointingHand);
-    response
-        .clicked()
-        .then(|| Action::Navigate(format!("/assets/{path}")))
+    let clicked = super::detail::path_link(ui, path);
+    ui.label(RichText::new(param).weak().small());
+    clicked.then(|| Action::Navigate(format!("/assets/{path}")))
 }

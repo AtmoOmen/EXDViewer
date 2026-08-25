@@ -47,6 +47,7 @@ pub mod stopwatch;
 pub mod utils;
 #[cfg(target_arch = "wasm32")]
 pub mod worker;
+mod zones;
 
 pub use app::App;
 use shadow_rs::shadow;

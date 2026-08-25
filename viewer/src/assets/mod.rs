@@ -1655,6 +1655,11 @@ impl AssetBrowser {
                                         self.goto = Some("/sheet".to_string());
                                     }
                                 }
+                                Kind::Level => {
+                                    if ui.button("Open the Zones tab").clicked() {
+                                        self.goto = Some(format!("/zones/{path}"));
+                                    }
+                                }
                                 Kind::Other => {}
                             }
                         })
@@ -1908,11 +1913,12 @@ impl AssetBrowser {
     }
 }
 
-/// Whether a file is reachable from the Sheets tab, which is the only thing its extension decides
-/// here. What it holds is [`EXTENSIONS`].
+/// Whether a file is reachable from the Sheets or Zones tab, which is the only thing its extension
+/// decides here. What it holds is [`EXTENSIONS`].
 enum Kind {
     Sheet,
     SheetList,
+    Level,
     Other,
 }
 
@@ -1921,6 +1927,7 @@ impl Kind {
         match path.rsplit('.').next().unwrap_or_default() {
             "exd" | "exh" => Kind::Sheet,
             "exl" => Kind::SheetList,
+            "lvb" => Kind::Level,
             _ => Kind::Other,
         }
     }

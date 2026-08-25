@@ -50,6 +50,10 @@ const GAP: f32 = 4.0;
 const PIECE: f32 = 24.0;
 const SHOWN: usize = 10;
 
+/// How wide the picker panel may grow. A panel takes the width its widest row asks for and keeps
+/// it, so a piece name long enough to run on would otherwise take the view beside it for good.
+const PANEL_WIDTH: f32 = 380.0;
+
 /// Which customisation each of the creator's menus drives, as `Customize` numbers them. Every one
 /// of these is measured from `CharaMakeType` rather than named by any file.
 const FACE: u32 = 5;
@@ -1146,17 +1150,18 @@ impl CharacterBuilder {
                     .as_ref()
                     .is_some_and(|worn| worn.visored(gear.set))
             });
-        ui.horizontal(|ui| {
-            if ui
-                .selectable_label(open, format!("{}: {worn}", slot.name()))
-                .clicked()
-            {
-                self.picking = (!open).then_some(slot);
-            }
-            if visored {
-                ui.checkbox(&mut self.visor, "Visor");
-            }
-        });
+        // Wrapped rather than run on: a name long enough to run past the panel's own width would
+        // otherwise take it and the view beside it with it. On its own line rather than beside the
+        // visor box, since a wrapped button's height is not known until it is laid out.
+        let button = egui::Button::selectable(open, format!("{}: {worn}", slot.name()))
+            .wrap()
+            .min_size(egui::vec2(ui.available_width(), 0.0));
+        if ui.add(button).clicked() {
+            self.picking = (!open).then_some(slot);
+        }
+        if visored {
+            ui.checkbox(&mut self.visor, "Visor");
+        }
         if !open {
             return;
         }
@@ -1628,6 +1633,7 @@ impl CharacterBuilder {
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend, icons: &IconManager) {
         let listing = self.listing.clone();
         let picked = CollapsibleSidePanel::new("character_pick", Side::Left)
+            .max_width(PANEL_WIDTH)
             .show(ui, |ui, is_open| {
                 let mut picked = None;
                 if !is_open {

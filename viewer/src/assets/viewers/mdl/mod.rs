@@ -29,7 +29,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
-use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
+use egui::{Color32, Label, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Vec3};
 use ironworks::file::{
     File,
@@ -1304,16 +1304,19 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
              surface answers with where nothing captured an environment for it",
         );
         ui.add_enabled_ui(look.reflect, |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "{}-{} units  x{}  rough<{}  {} levels",
-                    program::REFLECTION_FADE[0],
-                    program::REFLECTION_FADE[1],
-                    program::REFLECTION_POWER,
-                    program::REFLECTION_ROUGHNESS,
-                    program::REFLECTION_LEVELS,
-                ))
-                .weak(),
+            ui.add(
+                Label::new(
+                    RichText::new(format!(
+                        "{}-{} units  x{}  rough<{}  {} levels",
+                        program::REFLECTION_FADE[0],
+                        program::REFLECTION_FADE[1],
+                        program::REFLECTION_POWER,
+                        program::REFLECTION_ROUGHNESS,
+                        program::REFLECTION_LEVELS,
+                    ))
+                    .weak(),
+                )
+                .wrap(),
             )
             .on_hover_text(
                 "What the chain runs with, read whole off a frame the game drew: how far a \

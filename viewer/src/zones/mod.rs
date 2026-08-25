@@ -79,6 +79,14 @@ struct Row {
     available: bool,
 }
 
+pub enum Action {
+    /// A zone was picked from the list or the palette; reflect it in the URL.
+    Select(String),
+    /// The placed scene or its tree followed a link to a file the zone itself is not, which the
+    /// Assets tab knows how to open.
+    Navigate(String),
+}
+
 pub struct ZoneBrowser {
     index: Index,
     avail: Avail,
@@ -157,7 +165,7 @@ impl ZoneBrowser {
         self.palette = Some(Palette::new("Find Zone…", "Filter", self.search.clone()));
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<Action> {
         self.poll(backend, LANGUAGE.get(ui.ctx()));
         if self.rows_stale {
             self.rebuild_rows();
@@ -170,8 +178,11 @@ impl ZoneBrowser {
             .claim(ui.ctx(), listed, Some(egui::Id::new(FILTER_ID)));
 
         let clicked = self.side_panel(ui);
-        self.main_panel(ui, backend);
-        picked.or(clicked)
+        let followed = self.main_panel(ui, backend);
+        picked
+            .or(clicked)
+            .map(Action::Select)
+            .or_else(|| followed.map(Action::Navigate))
     }
 
     fn draw_palette(&mut self, ctx: &egui::Context) -> Option<String> {
@@ -455,7 +466,7 @@ impl ZoneBrowser {
         }
     }
 
-    fn main_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) {
+    fn main_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
         let mut follow = None;
 
         if let Some(opened) = &self.opened
@@ -537,9 +548,7 @@ impl ZoneBrowser {
             }
         });
 
-        if let Some(target) = follow {
-            self.pending = Some(target);
-        }
+        follow
     }
 }
 

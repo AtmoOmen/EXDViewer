@@ -1725,9 +1725,14 @@ impl App {
 
     fn draw_zones(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
         if let Some(backend) = self.backend.clone()
-            && let Some(zone_path) = self.zones.ui(ui, &backend)
+            && let Some(action) = self.zones.ui(ui, &backend)
         {
-            self.navigate(format!("/zones/{zone_path}"));
+            match action {
+                zones::Action::Select(zone_path) => self.navigate(format!("/zones/{zone_path}")),
+                zones::Action::Navigate(asset_path) => {
+                    self.navigate(format!("/assets/{asset_path}"))
+                }
+            }
         }
     }
 

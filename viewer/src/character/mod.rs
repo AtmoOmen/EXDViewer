@@ -841,7 +841,11 @@ impl CharacterBuilder {
                 arrived[slot as usize] = Some(gear);
             }
         }
-        worn.covers(&arrived).into_iter().map(str::to_owned).collect()
+        worn
+            .covers(&arrived, self.race)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Where a menu has been left, which is where the creator opens it until it is picked from.
@@ -962,7 +966,7 @@ impl CharacterBuilder {
         }
         let (outfit, hidden) = self.dressed();
         let hair = match (outfit[Slot::Head as usize], &self.worn_over) {
-            (Some(hat), Some(worn)) => worn.keeps_hair(hat.set),
+            (Some(hat), Some(worn)) => worn.keeps_hair(hat.set, self.race),
             _ => true,
         };
         let mut found: Vec<_> = held(&self.faces, self.face)

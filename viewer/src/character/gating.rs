@@ -28,6 +28,10 @@ const KNEE_PAD: &str = "atr_lpd";
 const CUFF: &str = "atr_arm";
 const SHAFT: &str = "atr_leg";
 const GORGET: &str = "atr_inr";
+/// A hair model's own parts, hidden by a head set's hair-hiding kind rather than by a seam.
+const HAIR_KAM: &str = "atr_kam";
+const HAIR_BAK: &str = "atr_bak";
+const HAIR_STA: &str = "atr_sta";
 
 /// The files, read once and asked about a set at a time.
 pub struct Worn(eqp::EquipmentParameter, gmp::GimmickParameter);
@@ -121,7 +125,7 @@ impl Worn {
     /// A sleeve and a cuff, or a hem and a boot shaft, both claim the same stretch. Which of them
     /// gives up its own seam is the reach each states rather than either one always winning, so
     /// the pair is read together and a piece still on its way states nothing.
-    pub fn covers(&self, outfit: &Outfit) -> BTreeSet<&'static str> {
+    pub fn covers(&self, outfit: &Outfit, race: u32) -> BTreeSet<&'static str> {
         // Smallclothes have no entry of their own, entry nought being the file's own control word,
         // and reach over nothing: taking the next set's leaves a bare leg with its knee cut out.
         let stated = |slot: Slot| {
@@ -196,12 +200,56 @@ impl Worn {
         {
             found.insert(NECK);
         }
+        if let Some(head) = head.as_ref().map(eqp::Set::head)
+            && let Hair::Trimmed(names) = Self::hair(&head, race)
+        {
+            found.extend(names.iter().copied());
+        }
         found
     }
 
-    /// Whether a hat leaves the hair on. A head set that states nothing leaves it drawn.
-    pub fn keeps_hair(&self, set: u16) -> bool {
-        let head = self.0.set(set).head();
-        !head.enabled() || !head.hide_hair() || head.show_hair_override()
+    /// Whether a hat leaves the hair on at all.
+    pub fn keeps_hair(&self, set: u16, race: u32) -> bool {
+        !matches!(Self::hair(&self.0.set(set).head(), race), Hair::Hidden)
     }
+
+    /// What a head set does to the hair under it. `hide_scalp`, `hide_hair` and
+    /// `show_hair_override` are `ironworks`' names for bits 1..3 of the file's own head word, but
+    /// the client reads the three together as one number rather than as three flags of their own.
+    fn hair(head: &eqp::Head, race: u32) -> Hair {
+        if !head.enabled() {
+            return Hair::Shown;
+        }
+        // A hat that does not itself say it fits a Hrothgar or a Viera leaves their hair alone
+        // rather than applying a kind measured off other races' heads.
+        let exempt = match race {
+            7 => !head.show_on_hrothgar(),
+            8 => !head.show_on_viera(),
+            _ => false,
+        };
+        if exempt {
+            return Hair::Shown;
+        }
+        let kind = u8::from(head.hide_scalp())
+            | u8::from(head.hide_hair()) << 1
+            | u8::from(head.show_hair_override()) << 2;
+        match (kind, race) {
+            (1, _) => Hair::Trimmed(&[HAIR_KAM]),
+            // A Miqo'te keeps its hair where every other race loses it outright, trimmed instead
+            // of the ear tuft the hair model carries under the same name as the kam it also loses.
+            (2 | 4, 4) => Hair::Trimmed(&[HAIR_KAM, HAIR_STA]),
+            (2 | 4, _) | (3, _) => Hair::Hidden,
+            (5, 7 | 8) => Hair::Shown,
+            (5, _) => Hair::Trimmed(&[HAIR_KAM]),
+            (6, _) => Hair::Trimmed(&[HAIR_KAM, HAIR_BAK]),
+            _ => Hair::Shown,
+        }
+    }
+}
+
+/// What a head set does to the hair under it.
+enum Hair {
+    Shown,
+    Hidden,
+    Trimmed(&'static [&'static str]),
 }

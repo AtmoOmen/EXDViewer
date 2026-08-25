@@ -845,8 +845,7 @@ impl CharacterBuilder {
                 arrived[slot as usize] = Some(gear);
             }
         }
-        worn
-            .covers(&arrived, self.race)
+        worn.covers(&arrived, self.race)
             .into_iter()
             .map(str::to_owned)
             .collect()

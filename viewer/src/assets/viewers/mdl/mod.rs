@@ -1836,10 +1836,8 @@ impl Rendered {
             };
             *texture = match result {
                 Ok(decoded) => {
-                    let size = [
-                        decoded.image.width() as usize,
-                        decoded.image.height() as usize,
-                    ];
+                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
+                    let size = [held.width() as usize, held.height() as usize];
                     self.resident
                         .set(self.resident.get() + size[0] * size[1] * 4);
                     // Taken as premultiplied, which is the one path that copies the bytes through
@@ -1848,7 +1846,7 @@ impl Rendered {
                     // three channels scaled away by the unmultiplied path.
                     let image = egui::ColorImage::from_rgba_premultiplied(
                         size,
-                        decoded.image.as_flat_samples().as_slice(),
+                        held.as_flat_samples().as_slice(),
                     );
                     // Model UVs tile, and a texture bound to a surface is minified far more often
                     // than it is magnified, so this is the one place the browser wants mipmaps and

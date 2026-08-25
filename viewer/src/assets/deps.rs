@@ -297,12 +297,9 @@ fn poll<'a, T>(
 /// One channel of a decoded texture, as white pixels carrying it as their alpha. Drawn tinted, so
 /// glyphs read against either theme rather than being whatever color the channel happened to be.
 fn ink(ctx: &egui::Context, path: &str, decoded: &DecodedTexture, channel: usize) -> TextureHandle {
-    let dimensions = [
-        decoded.image.width() as usize,
-        decoded.image.height() as usize,
-    ];
-    let pixels = decoded
-        .image
+    let image = crate::utils::tex_loader::fit(ctx, &decoded.image);
+    let dimensions = [image.width() as usize, image.height() as usize];
+    let pixels = image
         .pixels()
         .map(|pixel| Color32::from_white_alpha(pixel.0[channel]))
         .collect();
@@ -316,13 +313,11 @@ fn ink(ctx: &egui::Context, path: &str, decoded: &DecodedTexture, channel: usize
 /// Hand decoded pixels to the renderer. The debug label carries the decoded size as well as the
 /// path, since the same texture is held at one size for a thumbnail and another for cropping.
 fn upload(ctx: &egui::Context, path: &str, decoded: &DecodedTexture) -> TextureHandle {
-    let dimensions = [
-        decoded.image.width() as usize,
-        decoded.image.height() as usize,
-    ];
+    let image = crate::utils::tex_loader::fit(ctx, &decoded.image);
+    let dimensions = [image.width() as usize, image.height() as usize];
     ctx.load_texture(
         format!("dep:{}x{}:{path}", dimensions[0], dimensions[1]),
-        egui::ColorImage::from_rgba_unmultiplied(dimensions, decoded.image.as_raw()),
+        egui::ColorImage::from_rgba_unmultiplied(dimensions, image.as_raw()),
         egui::TextureOptions::LINEAR,
     )
 }

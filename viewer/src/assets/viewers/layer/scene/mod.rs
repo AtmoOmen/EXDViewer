@@ -3270,10 +3270,8 @@ impl Scene {
             };
             *texture = match result {
                 Ok(decoded) => {
-                    let size = [
-                        decoded.image.width() as usize,
-                        decoded.image.height() as usize,
-                    ];
+                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
+                    let size = [held.width() as usize, held.height() as usize];
                     taken += size[0] * size[1] * 4;
                     // Premultiplied is the one path that copies the bytes through untouched, and a
                     // diffuse map's alpha is opacity rather than something the other channels
@@ -3282,7 +3280,7 @@ impl Scene {
                         format!("scene:{path}"),
                         egui::ColorImage::from_rgba_premultiplied(
                             size,
-                            decoded.image.as_flat_samples().as_slice(),
+                            held.as_flat_samples().as_slice(),
                         ),
                         TextureOptions {
                             magnification: egui::TextureFilter::Linear,

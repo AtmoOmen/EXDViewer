@@ -835,15 +835,13 @@ impl Rendered {
             };
             *texture = match result {
                 Ok(decoded) => {
-                    let size = [
-                        decoded.image.width() as usize,
-                        decoded.image.height() as usize,
-                    ];
+                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
+                    let size = [held.width() as usize, held.height() as usize];
                     self.resident
                         .set(self.resident.get() + size[0] * size[1] * 4);
                     let image = egui::ColorImage::from_rgba_premultiplied(
                         size,
-                        decoded.image.as_flat_samples().as_slice(),
+                        held.as_flat_samples().as_slice(),
                     );
                     Texture::Ready(ui.ctx().load_texture(
                         format!("avfx:{path}"),

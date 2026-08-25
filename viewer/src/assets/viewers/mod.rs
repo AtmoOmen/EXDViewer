@@ -1054,9 +1054,15 @@ pub(super) fn upload(
     let mut rgba = image.to_rgba8();
     channels.apply(&mut rgba);
     let size = [rgba.width() as usize, rgba.height() as usize];
+    // Sized from the source rather than from what was uploaded, so a texture the renderer made us
+    // scale down still draws at the dimensions the file states.
+    let held = crate::utils::tex_loader::fit(ctx, &rgba);
     let texture = ctx.load_texture(
         format!("asset:{path}"),
-        egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_flat_samples().as_slice()),
+        egui::ColorImage::from_rgba_unmultiplied(
+            [held.width() as usize, held.height() as usize],
+            held.as_flat_samples().as_slice(),
+        ),
         // Nearest keeps a zoomed-in mipmap readable as actual texels rather than a blur.
         egui::TextureOptions::NEAREST,
     );

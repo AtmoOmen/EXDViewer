@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use image::{DynamicImage, ImageBuffer, ImageFormat};
+use image::{DynamicImage, ImageBuffer, ImageFormat, RgbaImage};
 use image_dds::Surface;
 use ironworks::{Error, Ironworks};
 use ironworks::{Resource, file::tex};
 use itertools::Itertools;
+use std::borrow::Cow;
 use std::io::Cursor;
 
 // https://github.com/ackwell/boilmaster/blob/3d180aae4a3b5719324f5a16d22b392e4859ac07/crates/bm_asset/src/texture.rs
@@ -132,6 +133,24 @@ pub fn decode_stack(texture: &tex::Texture, level: u8, path: &str) -> Result<Dyn
 pub fn grid_layout(layers: u16) -> (u16, u16) {
     let columns = (f64::from(layers).sqrt().ceil() as u16).max(1);
     (columns, layers.div_ceil(columns).max(1))
+}
+
+/// Scaled down to what the renderer states it can hold. Both egui and its glow painter assert on an
+/// oversized image rather than refusing it, so an upload past the limit takes the whole app down.
+pub fn fit<'a>(ctx: &egui::Context, image: &'a RgbaImage) -> Cow<'a, RgbaImage> {
+    let most = ctx.input(|input| input.max_texture_side) as u32;
+    let (width, height) = image.dimensions();
+    if width.max(height) <= most {
+        return Cow::Borrowed(image);
+    }
+    let scale = f64::from(most) / f64::from(width.max(height));
+    let side = |of: u32| ((f64::from(of) * scale) as u32).clamp(1, most);
+    Cow::Owned(image::imageops::resize(
+        image,
+        side(width),
+        side(height),
+        image::imageops::FilterType::Triangle,
+    ))
 }
 
 /// Layers decode as a tall single-column stack (see [`read_texture_bc`]), which can reach a height

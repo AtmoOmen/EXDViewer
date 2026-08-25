@@ -158,7 +158,10 @@ impl Rendered {
 
     /// Advances a pending decode to playback, and notices when playback has run its course.
     fn poll(&self) {
-        let taken = match std::mem::replace(&mut *self.state.borrow_mut(), PlayState::Idle) {
+        // A match scrutinee keeps its temporaries alive for the whole match, so the borrow this
+        // takes has to end before the arms below can borrow `state` again themselves.
+        let previous = std::mem::replace(&mut *self.state.borrow_mut(), PlayState::Idle);
+        let taken = match previous {
             PlayState::Decoding(index, promise) => match promise.try_take() {
                 Ok(result) => Some((index, result)),
                 Err(promise) => {

@@ -1,0 +1,218 @@
+//! `.scd` sound containers: the audio streams a bank holds, playable where the codec is one
+//! ironworks can decode.
+
+use std::cell::RefCell;
+use std::io::Cursor;
+use std::time::Duration;
+
+use anyhow::Result;
+use egui::{Color32, RichText, ScrollArea};
+use ironworks::file::File;
+use ironworks::file::scd::{Codec, SoundContainer};
+
+use super::{Preview, facts, headers, section};
+use crate::assets::Bytes;
+use crate::audio::{self, Player};
+use crate::utils::TrackedPromise;
+
+enum PlayState {
+    Idle,
+    Decoding(usize, TrackedPromise<Result<audio::Decoded>>),
+    Playing(usize),
+}
+
+/// A sound container, decoded and ready to draw.
+pub struct Rendered {
+    identity: Vec<(&'static str, String)>,
+    container: SoundContainer,
+    player: RefCell<Option<Player>>,
+    state: RefCell<PlayState>,
+    error: RefCell<Option<String>>,
+}
+
+pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
+    let container = SoundContainer::read(Cursor::new(bytes.to_vec()))?;
+
+    let identity = vec![
+        ("Sounds", container.sound_count().to_string()),
+        ("Tracks", container.track_count().to_string()),
+        ("Streams", container.entries().len().to_string()),
+    ];
+
+    log::info!("assets/scd: {path} {} streams", container.entries().len());
+
+    Ok(Preview::Scd(Box::new(Rendered {
+        identity,
+        container,
+        player: RefCell::new(None),
+        state: RefCell::new(PlayState::Idle),
+        error: RefCell::new(None),
+    })))
+}
+
+const COLUMNS: usize = 8;
+const HEADERS: [&str; COLUMNS] = ["", "#", "Codec", "Ch", "Rate", "Bytes", "Loop", "Markers"];
+
+pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
+    file.poll();
+    if !matches!(&*file.state.borrow(), PlayState::Idle) {
+        ui.ctx().request_repaint_after(Duration::from_millis(200));
+    }
+
+    section(ui, "Streams");
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        egui::Grid::new("scd_entries")
+            .num_columns(COLUMNS)
+            .striped(true)
+            .show(ui, |ui| {
+                headers(ui, &HEADERS);
+                for index in 0..file.container.entries().len() {
+                    file.row(ui, index);
+                }
+            });
+    });
+
+    if let Some(error) = file.error.borrow().as_deref() {
+        ui.add_space(8.0);
+        ui.colored_label(Color32::RED, error);
+    }
+}
+
+impl Rendered {
+    pub fn details_ui(&self, ui: &mut egui::Ui) {
+        ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| facts(ui, "scd_identity", &self.identity));
+    }
+
+    fn row(&self, ui: &mut egui::Ui, index: usize) {
+        let entry = &self.container.entries()[index];
+        let state = self.state.borrow();
+        let playing = matches!(&*state, PlayState::Playing(playing) if *playing == index);
+        let decoding = matches!(&*state, PlayState::Decoding(decoding, _) if *decoding == index);
+        drop(state);
+
+        let playable = matches!(entry.format(), Codec::OggVorbis | Codec::Hca);
+        let glyph = match (playing, decoding) {
+            (true, _) => "⏹",
+            (_, true) => "…",
+            _ => "▶",
+        };
+        if ui.add_enabled(playable, egui::Button::new(glyph)).clicked() {
+            self.toggle(index);
+        }
+        ui.label(index.to_string());
+        ui.label(codec_name(entry.format()));
+        ui.label(entry.channel_count().to_string());
+        ui.label(format!("{} Hz", entry.sample_rate()));
+        ui.label(Bytes(entry.data().len()).to_string());
+        if entry.loop_end() > 0 {
+            ui.label(format!("{}..{}", entry.loop_start(), entry.loop_end()));
+        } else {
+            ui.label(RichText::new("-").weak());
+        }
+        if entry.markers().is_empty() {
+            ui.label(RichText::new("-").weak());
+        } else {
+            ui.label(entry.markers().len().to_string());
+        }
+        ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+        ui.end_row();
+    }
+
+    fn toggle(&self, index: usize) {
+        let already = matches!(
+            &*self.state.borrow(),
+            PlayState::Playing(playing) | PlayState::Decoding(playing, _) if *playing == index
+        );
+        *self.error.borrow_mut() = None;
+        let mut player = self.player.borrow_mut();
+        if let Some(player) = player.as_mut() {
+            player.stop();
+        }
+        if already {
+            drop(player);
+            *self.state.borrow_mut() = PlayState::Idle;
+            return;
+        }
+        // The audio backend has to be created (and, on the web, its context resumed) inside the
+        // click itself; a browser only grants that from a real user gesture.
+        if player.is_none() {
+            match Player::new() {
+                Ok(new_player) => *player = Some(new_player),
+                Err(error) => {
+                    *self.error.borrow_mut() = Some(error.to_string());
+                    return;
+                }
+            }
+        }
+        player.as_ref().unwrap().unlock();
+        drop(player);
+
+        let Some(entry) = self.container.entries().get(index).cloned() else {
+            return;
+        };
+        let promise = TrackedPromise::spawn_local(async move { audio::decode(&entry) });
+        *self.state.borrow_mut() = PlayState::Decoding(index, promise);
+    }
+
+    /// Advances a pending decode to playback, and notices when playback has run its course.
+    fn poll(&self) {
+        let taken = match std::mem::replace(&mut *self.state.borrow_mut(), PlayState::Idle) {
+            PlayState::Decoding(index, promise) => match promise.try_take() {
+                Ok(result) => Some((index, result)),
+                Err(promise) => {
+                    *self.state.borrow_mut() = PlayState::Decoding(index, promise);
+                    None
+                }
+            },
+            other => {
+                *self.state.borrow_mut() = other;
+                None
+            }
+        };
+
+        if let Some((index, result)) = taken {
+            match result {
+                // `toggle` already created the player before spawning this decode.
+                Ok(decoded) => {
+                    if let Some(player) = self.player.borrow_mut().as_mut() {
+                        match player.play(decoded) {
+                            Ok(()) => *self.state.borrow_mut() = PlayState::Playing(index),
+                            Err(error) => *self.error.borrow_mut() = Some(error.to_string()),
+                        }
+                    }
+                }
+                Err(error) => *self.error.borrow_mut() = Some(error.to_string()),
+            }
+        }
+
+        let mut state = self.state.borrow_mut();
+        if matches!(&*state, PlayState::Playing(_))
+            && !self.player.borrow().as_ref().is_some_and(Player::is_playing)
+        {
+            *state = PlayState::Idle;
+        }
+    }
+}
+
+impl Drop for Rendered {
+    fn drop(&mut self) {
+        if let Some(player) = self.player.get_mut() {
+            player.stop();
+        }
+    }
+}
+
+fn codec_name(codec: Codec) -> &'static str {
+    match codec {
+        Codec::OggVorbis => "Ogg Vorbis",
+        Codec::Hca => "HCA",
+        Codec::Mp3 => "MP3",
+        Codec::MsAdpcm => "MS ADPCM",
+        Codec::Atrac9 => "ATRAC9",
+        Codec::Pcm => "PCM",
+        Codec::Empty => "Empty",
+        Codec::Unknown(_) => "Unknown",
+    }
+}

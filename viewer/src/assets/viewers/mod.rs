@@ -37,6 +37,7 @@ pub mod pcb;
 pub mod phyb;
 pub mod placed;
 pub mod png;
+pub mod scd;
 mod shader;
 pub mod shcd;
 pub mod shpk;
@@ -374,6 +375,8 @@ pub enum Preview {
     Dic(Box<dic::Rendered>),
     /// A parsed cutscene.
     Cutb(Box<cutb::Rendered>),
+    /// A parsed sound container.
+    Scd(Box<scd::Rendered>),
     /// Nothing to render; an empty message means the type simply has no viewer.
     Failed(String),
 }
@@ -437,6 +440,7 @@ impl Preview {
             Viewer::Ggd => grass::grid(path, bytes),
             Viewer::Dic => dic::decode(path, bytes),
             Viewer::Cutb => cutb::decode(path, bytes),
+            Viewer::Scd => scd::decode(path, bytes),
             Viewer::Raw => return Self::Failed(String::new()),
         };
         result.unwrap_or_else(|e| Self::Failed(e.to_string()))
@@ -497,6 +501,7 @@ impl Preview {
             Self::Dic(dictionary) => dic::ui(ui, dictionary),
             Self::Cutb(cutscene) => follow = cutb::ui(ui, cutscene),
             Self::Stm(templates) => stm::ui(ui, templates, deps, backend),
+            Self::Scd(container) => scd::ui(ui, container),
             Self::Failed(e) if e.is_empty() => {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("No viewer for this file type. Use Raw bytes.").weak());
@@ -599,7 +604,8 @@ impl Preview {
             | Self::GrassZone(_)
             | Self::GrassGrid(_)
             | Self::Dic(_)
-            | Self::Cutb(_) => true,
+            | Self::Cutb(_)
+            | Self::Scd(_) => true,
             _ => false,
         }
     }
@@ -754,6 +760,10 @@ impl Preview {
             cutscene.details_ui(ui);
             return None;
         }
+        if let Self::Scd(container) = self {
+            container.details_ui(ui);
+            return None;
+        }
         if let Self::GrassZone(zone) = self {
             zone.details_ui(ui);
             return None;
@@ -894,6 +904,7 @@ pub enum Viewer {
     Ggd,
     Dic,
     Cutb,
+    Scd,
     Text,
     Raw,
 }
@@ -901,7 +912,7 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 47] = [
+    pub const RENDERED: [Self; 48] = [
         Self::Texture,
         Self::Image,
         Self::Material,
@@ -948,6 +959,7 @@ impl Viewer {
         Self::Ggd,
         Self::Dic,
         Self::Cutb,
+        Self::Scd,
         Self::Text,
     ];
 
@@ -999,6 +1011,7 @@ impl Viewer {
             Self::Ggd => "Grass grid",
             Self::Dic => "Word dictionary",
             Self::Cutb => "Cutscene",
+            Self::Scd => "Sound",
             Self::Text => "Text",
             Self::Raw => "Bytes",
         }

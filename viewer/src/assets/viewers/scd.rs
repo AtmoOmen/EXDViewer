@@ -21,11 +21,18 @@ enum PlayState {
     Playing(usize),
 }
 
+thread_local! {
+    // One audio backend for every sound container the Assets tab opens, not one per file: on the
+    // web a `Player` owns an `AudioContext` and wasm-bindgen closures tied to it, and tearing one
+    // down right as another spins up (switching files while a track plays) raced its `onended`
+    // handler and threw "closure invoked recursively or after being dropped".
+    static PLAYER: RefCell<Option<Player>> = const { RefCell::new(None) };
+}
+
 /// A sound container, decoded and ready to draw.
 pub struct Rendered {
     identity: Vec<(&'static str, String)>,
     container: SoundContainer,
-    player: RefCell<Option<Player>>,
     state: RefCell<PlayState>,
     error: RefCell<Option<String>>,
 }
@@ -44,7 +51,6 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     Ok(Preview::Scd(Box::new(Rendered {
         identity,
         container,
-        player: RefCell::new(None),
         state: RefCell::new(PlayState::Idle),
         error: RefCell::new(None),
     })))
@@ -126,28 +132,28 @@ impl Rendered {
             PlayState::Playing(playing) | PlayState::Decoding(playing, _) if *playing == index
         );
         *self.error.borrow_mut() = None;
-        let mut player = self.player.borrow_mut();
-        if let Some(player) = player.as_mut() {
-            player.stop();
-        }
+        PLAYER.with_borrow_mut(|player| {
+            if let Some(player) = player.as_mut() {
+                player.stop();
+            }
+        });
         if already {
-            drop(player);
             *self.state.borrow_mut() = PlayState::Idle;
             return;
         }
         // The audio backend has to be created (and, on the web, its context resumed) inside the
         // click itself; a browser only grants that from a real user gesture.
-        if player.is_none() {
-            match Player::new() {
-                Ok(new_player) => *player = Some(new_player),
-                Err(error) => {
-                    *self.error.borrow_mut() = Some(error.to_string());
-                    return;
-                }
+        let unlocked: Result<()> = PLAYER.with_borrow_mut(|player| {
+            if player.is_none() {
+                *player = Some(Player::new()?);
             }
+            player.as_ref().unwrap().unlock();
+            Ok(())
+        });
+        if let Err(error) = unlocked {
+            *self.error.borrow_mut() = Some(error.to_string());
+            return;
         }
-        player.as_ref().unwrap().unlock();
-        drop(player);
 
         let Some(entry) = self.container.entries().get(index).cloned() else {
             return;
@@ -179,11 +185,13 @@ impl Rendered {
             match result {
                 // `toggle` already created the player before spawning this decode.
                 Ok(decoded) => {
-                    if let Some(player) = self.player.borrow_mut().as_mut() {
-                        match player.play(decoded) {
-                            Ok(()) => *self.state.borrow_mut() = PlayState::Playing(index),
-                            Err(error) => *self.error.borrow_mut() = Some(error.to_string()),
-                        }
+                    let played = PLAYER.with_borrow_mut(|player| {
+                        player.as_mut().map(|player| player.play(decoded))
+                    });
+                    match played {
+                        Some(Ok(())) => *self.state.borrow_mut() = PlayState::Playing(index),
+                        Some(Err(error)) => *self.error.borrow_mut() = Some(error.to_string()),
+                        None => {}
                     }
                 }
                 Err(error) => *self.error.borrow_mut() = Some(error.to_string()),
@@ -191,9 +199,8 @@ impl Rendered {
         }
 
         let mut state = self.state.borrow_mut();
-        if matches!(&*state, PlayState::Playing(_))
-            && !self.player.borrow().as_ref().is_some_and(Player::is_playing)
-        {
+        let still_playing = PLAYER.with_borrow(|player| player.as_ref().is_some_and(Player::is_playing));
+        if matches!(&*state, PlayState::Playing(_)) && !still_playing {
             *state = PlayState::Idle;
         }
     }
@@ -201,9 +208,11 @@ impl Rendered {
 
 impl Drop for Rendered {
     fn drop(&mut self) {
-        if let Some(player) = self.player.get_mut() {
-            player.stop();
-        }
+        PLAYER.with_borrow_mut(|player| {
+            if let Some(player) = player.as_mut() {
+                player.stop();
+            }
+        });
     }
 }
 

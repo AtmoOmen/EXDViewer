@@ -60,6 +60,11 @@ use mdl::program;
 /// Vertical field of view.
 const FOV: f32 = 55.0_f32.to_radians();
 
+/// How wide a details grid is let grow before its value column wraps. The details side panel caps
+/// itself at `DETAILS_WIDTH`, but a grid sizes to whatever its widest row ever measured, so left
+/// unbounded a row like the wind or shadow summary drags the whole panel wider than that cap.
+const DETAILS_ROW_WIDTH: f32 = 340.0;
+
 /// How deep a shared group may hold another. Files reach four; the cap guards against a cycle
 /// rather than limiting anything real.
 const DEPTH: u8 = 8;
@@ -3998,172 +4003,175 @@ impl Scene {
                 .iter()
                 .filter(|model| matches!(model.state, State::Ready))
                 .count();
-            facts(
-                ui,
-                "scene_counts",
-                &[
-                    ("Placed", self.placements.len().to_string()),
-                    ("Drawn", drawn.to_string()),
-                    ("Waiting on a model", self.absent.to_string()),
-                    ("Models", format!("{ready} of {}", self.models.len())),
-                    ("Groups to read", self.waiting.len().to_string()),
-                    (
-                        "Materials",
-                        format!(
-                            "{} of {}",
-                            self.translated.keys().filter(|(_, waving)| !waving).count(),
-                            self.materials.len()
-                        ),
-                    ),
-                    (
-                        "Lights",
-                        format!("{} of {}", self.lamps().len(), self.lights.len()),
-                    ),
-                    ("Wind", {
-                        let count = self.models.iter().filter(|model| model.waving).count();
-                        let plural = match count {
-                            1 => "",
-                            _ => "s",
-                        };
-                        match self.ambient.wind() {
-                            Some(held) => format!(
-                                "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} model{plural}",
-                                self.clock / TICKS,
-                                held.reach,
-                                held.heading.x.atan2(held.heading.z).to_degrees(),
-                                held.rate,
-                            ),
-                            None => format!("no wind set stated, {count} model{plural}"),
-                        }
-                    }),
-                    (
-                        "Exposure",
-                        match self.exposure.is_some() {
-                            true => {
-                                let held = self.renderer.lock().unwrap();
-                                format!(
-                                    "{:.3} from a frame measuring {:.3}, written at {:.3}",
-                                    held.exposed(),
-                                    held.measured(),
-                                    program::encode(held.exposed())
-                                )
-                            }
-                            false => "not run".to_owned(),
-                        },
-                    ),
-                    // Which of the passes past the lighting ran. A weather that names no clouds
-                    // draws none, and so does a draw that quietly went wrong; only the graph knows
-                    // which of the two a frame without any is.
-                    // How much of the sky reaches each part, which the zone's own `.svb` states by
-                    // the same key an `.lcb` reaches a light by. A part it does not name stands in
-                    // full sky, so a file that matches nothing looks exactly like no file at all.
-                    // A zone with no grass of its own and a grass file that would not read look the
-                    // same from the outside, and so does a grid nothing has asked for yet.
-                    ("Grass", match &self.grass {
-                        Grass::Wanted(_) => "waiting on the zone's own file".to_owned(),
-                        Grass::Fetching(_, _) => "reading the zone's own file".to_owned(),
-                        Grass::Done => "none".to_owned(),
-                        Grass::Placing(held) => {
-                            let read = held.grids.iter().filter(|grid| grid.taken).count();
+            ui.scope(|ui| {
+                ui.set_max_width(DETAILS_ROW_WIDTH);
+                facts(
+                    ui,
+                    "scene_counts",
+                    &[
+                        ("Placed", self.placements.len().to_string()),
+                        ("Drawn", drawn.to_string()),
+                        ("Waiting on a model", self.absent.to_string()),
+                        ("Models", format!("{ready} of {}", self.models.len())),
+                        ("Groups to read", self.waiting.len().to_string()),
+                        (
+                            "Materials",
                             format!(
-                                "{read} of {} grids, {} models, {} placed, {} of {} blades drawn",
-                                held.grids.len(),
-                                held.models.len(),
-                                self.layers.get(held.layer).map_or(0, |held| held.placements),
-                                self.standing,
-                                self.blades,
-                            )
-                        }
-                    }),
-                    (
-                        "Sky visibility",
-                        format!(
-                            "{} of {} placed",
-                            self.placements
-                                .iter()
-                                .filter(|held| self.visibility.contains_key(&held.key))
-                                .count(),
-                            self.placements.len()
+                                "{} of {}",
+                                self.translated.keys().filter(|(_, waving)| !waving).count(),
+                                self.materials.len()
+                            ),
                         ),
-                    ),
-                    ("Blended materials", {
-                        let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
-                        for (at, (_, slot)) in self.materials.iter().enumerate() {
-                            let Slot::Ready(material) = slot else { continue };
-                            let name = material.package();
-                            if !wet_name(&name) {
-                                continue;
-                            }
-                            let held = tally.entry(name).or_default();
-                            held.0 += 1;
-                            match self.translated.get(&(at, false)) {
-                                Some(one) if one.resolve.is_some() => held.1 += 1,
-                                Some(_) => held.2 += 1,
-                                None => {}
-                            }
-                        }
-                        match tally.is_empty() {
-                            true => "none named".to_owned(),
-                            false => tally
-                                .iter()
-                                .map(|(name, (all, wet, dry))| {
-                                    format!("{name} {all}: {wet} blended, {dry} opaque")
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n"),
-                        }
-                    }),
-                    (
-                        "Blended surfaces",
-                        format!(
-                            "{} of {} translated",
-                            self.translated
-                                .iter()
-                                .filter(|((_, waving), held)| !waving && held.resolve.is_some())
-                                .count(),
-                            self.translated.keys().filter(|(_, waving)| !waving).count()
+                        (
+                            "Lights",
+                            format!("{} of {}", self.lamps().len(), self.lights.len()),
                         ),
-                    ),
-                    (
-                        "Shadow pass",
-                        match (
-                            self.packages.get(program::SHADOW),
-                            self.lighting.as_ref().map(|held| held.shadow.is_some()),
-                        ) {
-                            (Some(Package::Ready(_)), Some(true)) => {
-                                let reaches: Vec<String> = (0..program::SPLITS)
-                                    .map(|at| {
-                                        format!("{:.0}", program::shadow_reach(self.ambient.reach, at))
-                                    })
-                                    .collect();
+                        ("Wind", {
+                            let count = self.models.iter().filter(|model| model.waving).count();
+                            let plural = match count {
+                                1 => "",
+                                _ => "s",
+                            };
+                            match self.ambient.wind() {
+                                Some(held) => format!(
+                                    "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} model{plural}",
+                                    self.clock / TICKS,
+                                    held.reach,
+                                    held.heading.x.atan2(held.heading.z).to_degrees(),
+                                    held.rate,
+                                ),
+                                None => format!("no wind set stated, {count} model{plural}"),
+                            }
+                        }),
+                        (
+                            "Exposure",
+                            match self.exposure.is_some() {
+                                true => {
+                                    let held = self.renderer.lock().unwrap();
+                                    format!(
+                                        "{:.3} from a frame measuring {:.3}, written at {:.3}",
+                                        held.exposed(),
+                                        held.measured(),
+                                        program::encode(held.exposed())
+                                    )
+                                }
+                                false => "not run".to_owned(),
+                            },
+                        ),
+                        // Which of the passes past the lighting ran. A weather that names no clouds
+                        // draws none, and so does a draw that quietly went wrong; only the graph knows
+                        // which of the two a frame without any is.
+                        // How much of the sky reaches each part, which the zone's own `.svb` states by
+                        // the same key an `.lcb` reaches a light by. A part it does not name stands in
+                        // full sky, so a file that matches nothing looks exactly like no file at all.
+                        // A zone with no grass of its own and a grass file that would not read look the
+                        // same from the outside, and so does a grid nothing has asked for yet.
+                        ("Grass", match &self.grass {
+                            Grass::Wanted(_) => "waiting on the zone's own file".to_owned(),
+                            Grass::Fetching(_, _) => "reading the zone's own file".to_owned(),
+                            Grass::Done => "none".to_owned(),
+                            Grass::Placing(held) => {
+                                let read = held.grids.iter().filter(|grid| grid.taken).count();
                                 format!(
-                                    "translated, {} splits reaching {} (the game draws 5)",
-                                    program::SPLITS,
-                                    reaches.join(", ")
+                                    "{read} of {} grids, {} models, {} placed, {} of {} blades drawn",
+                                    held.grids.len(),
+                                    held.models.len(),
+                                    self.layers.get(held.layer).map_or(0, |held| held.placements),
+                                    self.standing,
+                                    self.blades,
                                 )
                             }
-                            (Some(Package::Ready(_)), _) => "arrived, not translated".to_owned(),
-                            (Some(Package::Failed), _) => "failed".to_owned(),
-                            (Some(Package::Fetching(_)), _) => "fetching".to_owned(),
-                            (Some(Package::Wanted), _) => "wanted".to_owned(),
-                            (None, _) => "never asked for".to_owned(),
-                        },
-                    ),
-                    ("Passes", self.passes()),
-                    (
-                        "Textures",
-                        format!(
-                            "{}, {}, {} with slices",
-                            self.textures.len(),
-                            crate::assets::Bytes(self.resident),
-                            self.stacked
-                                .values()
-                                .filter(|held| matches!(held, Stack::Ready))
-                                .count(),
+                        }),
+                        (
+                            "Sky visibility",
+                            format!(
+                                "{} of {} placed",
+                                self.placements
+                                    .iter()
+                                    .filter(|held| self.visibility.contains_key(&held.key))
+                                    .count(),
+                                self.placements.len()
+                            ),
                         ),
-                    ),
-                ],
-            );
+                        ("Blended materials", {
+                            let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
+                            for (at, (_, slot)) in self.materials.iter().enumerate() {
+                                let Slot::Ready(material) = slot else { continue };
+                                let name = material.package();
+                                if !wet_name(&name) {
+                                    continue;
+                                }
+                                let held = tally.entry(name).or_default();
+                                held.0 += 1;
+                                match self.translated.get(&(at, false)) {
+                                    Some(one) if one.resolve.is_some() => held.1 += 1,
+                                    Some(_) => held.2 += 1,
+                                    None => {}
+                                }
+                            }
+                            match tally.is_empty() {
+                                true => "none named".to_owned(),
+                                false => tally
+                                    .iter()
+                                    .map(|(name, (all, wet, dry))| {
+                                        format!("{name} {all}: {wet} blended, {dry} opaque")
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            }
+                        }),
+                        (
+                            "Blended surfaces",
+                            format!(
+                                "{} of {} translated",
+                                self.translated
+                                    .iter()
+                                    .filter(|((_, waving), held)| !waving && held.resolve.is_some())
+                                    .count(),
+                                self.translated.keys().filter(|(_, waving)| !waving).count()
+                            ),
+                        ),
+                        (
+                            "Shadow pass",
+                            match (
+                                self.packages.get(program::SHADOW),
+                                self.lighting.as_ref().map(|held| held.shadow.is_some()),
+                            ) {
+                                (Some(Package::Ready(_)), Some(true)) => {
+                                    let reaches: Vec<String> = (0..program::SPLITS)
+                                        .map(|at| {
+                                            format!("{:.0}", program::shadow_reach(self.ambient.reach, at))
+                                        })
+                                        .collect();
+                                    format!(
+                                        "translated, {} splits reaching {} (the game draws 5)",
+                                        program::SPLITS,
+                                        reaches.join(", ")
+                                    )
+                                }
+                                (Some(Package::Ready(_)), _) => "arrived, not translated".to_owned(),
+                                (Some(Package::Failed), _) => "failed".to_owned(),
+                                (Some(Package::Fetching(_)), _) => "fetching".to_owned(),
+                                (Some(Package::Wanted), _) => "wanted".to_owned(),
+                                (None, _) => "never asked for".to_owned(),
+                            },
+                        ),
+                        ("Passes", self.passes()),
+                        (
+                            "Textures",
+                            format!(
+                                "{}, {}, {} with slices",
+                                self.textures.len(),
+                                crate::assets::Bytes(self.resident),
+                                self.stacked
+                                    .values()
+                                    .filter(|held| matches!(held, Stack::Ready))
+                                    .count(),
+                            ),
+                        ),
+                    ],
+                );
+            });
 
             self.chosen_ui(ui, follow);
 

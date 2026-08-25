@@ -917,32 +917,35 @@ impl Ambient {
                 ),
             ));
         }
-        egui::Grid::new("scene_environment_files")
-            .num_columns(2)
-            .striped(true)
-            .show(ui, |ui| {
-                for (label, state, path) in files {
-                    ui.label(RichText::new(label).weak());
-                    match &path {
-                        Some(path) => {
-                            if link(ui, path, path) {
-                                *follow = Some(path.clone());
+        ui.scope(|ui| {
+            ui.set_max_width(super::DETAILS_ROW_WIDTH);
+            egui::Grid::new("scene_environment_files")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    for (label, state, path) in files {
+                        ui.label(RichText::new(label).weak());
+                        match &path {
+                            Some(path) => {
+                                if link(ui, path, path) {
+                                    *follow = Some(path.clone());
+                                }
+                            }
+                            None => {
+                                ui.add(egui::Label::new(RichText::new(state).monospace()).wrap());
                             }
                         }
-                        None => {
-                            ui.add(egui::Label::new(RichText::new(state).monospace()).wrap());
-                        }
+                        ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                        ui.end_row();
                     }
-                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
-                    ui.end_row();
-                }
-                for (label, value) in &rows {
-                    ui.label(RichText::new(*label).weak());
-                    ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
-                    ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
-                    ui.end_row();
-                }
-            });
+                    for (label, value) in &rows {
+                        ui.label(RichText::new(*label).weak());
+                        ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
+                        ui.allocate_space(egui::vec2(ui.available_width(), 0.0));
+                        ui.end_row();
+                    }
+                });
+        });
         changed
     }
 }

@@ -151,6 +151,11 @@ fn error_slot(ui: &egui::Ui) -> egui::Id {
 /// only ever returns `Some` on the frame a choice was picked, and it returns `None` if there is
 /// nothing to export.
 ///
+/// `min_size` matches the opener to controls drawn beside it with `add_sized`: `egui::Button` only
+/// takes its height from ambient style (`interact_size.y`), never its width, so lining the two up
+/// needs an explicit size here too. `Vec2::ZERO` leaves the button auto-sized, as every caller but
+/// one wants.
+///
 /// A failed export shows here too, as a warning glyph with the reason on hover, so it is not only
 /// `log::error!` that hears about it.
 pub fn menu<'a>(
@@ -159,6 +164,7 @@ pub fn menu<'a>(
     hover: Option<&str>,
     busy: bool,
     mut choices: Vec<Choice<'a>>,
+    min_size: egui::Vec2,
 ) -> Option<TrackedPromise<()>> {
     if choices.is_empty() {
         return None;
@@ -171,7 +177,10 @@ pub fn menu<'a>(
     ui.add_enabled_ui(!busy, |ui| {
         if choices.len() == 1 {
             let choice = choices.pop().expect("checked len() == 1 above");
-            let mut response = ui.add_enabled(choice.enabled, egui::Button::new(&choice.label));
+            let mut response = ui.add_enabled(
+                choice.enabled,
+                egui::Button::new(&choice.label).min_size(min_size),
+            );
             if let Some(text) = choice.hover.as_deref().or(hover) {
                 response = response.on_hover_text(text);
             }
@@ -182,7 +191,10 @@ pub fn menu<'a>(
                 spawned = Some(start(choice, ui.ctx().clone(), error_id));
             }
         } else {
-            let opened = ui.menu_button(button, |ui| {
+            let (response, _inner) = egui::containers::menu::MenuButton::from_button(
+                egui::Button::new(button.into()).min_size(min_size),
+            )
+            .ui(ui, |ui| {
                 for choice in choices {
                     let (enabled, item_hover, disabled_hover) = (
                         choice.enabled,
@@ -204,7 +216,7 @@ pub fn menu<'a>(
                 }
             });
             if let Some(text) = hover {
-                opened.response.on_hover_text(text);
+                response.on_hover_text(text);
             }
         }
     });

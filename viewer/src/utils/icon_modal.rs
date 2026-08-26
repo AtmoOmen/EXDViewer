@@ -94,7 +94,7 @@ pub fn icon_modal(
                 }
                 let choices =
                     icon_export_choices(ui.ctx(), excel, files, icon_id, path, loaded_source);
-                let promise = export::menu(ui, "Export", None, busy, choices);
+                let promise = export::menu(ui, "Export", None, busy, choices, egui::Vec2::ZERO);
                 if promise.is_some() {
                     *export = promise;
                 }

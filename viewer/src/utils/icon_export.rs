@@ -152,7 +152,7 @@ pub fn icon_context_menu(
             ui.close();
         }
         let choices = icon_export_choices(ui.ctx(), excel, files, icon_id, path, source);
-        let promise = export::menu(ui, "Export", None, false, choices);
+        let promise = export::menu(ui, "Export", None, false, choices, egui::Vec2::ZERO);
         if let Some(promise) = promise {
             icons.spawn_action(promise);
         }

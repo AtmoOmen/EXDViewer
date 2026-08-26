@@ -826,6 +826,7 @@ impl MusicPlayer {
                             .title("Export WAV Audio")
                             .filter("WAV", &["wav"]),
                         ],
+                        vec2(40.0, 34.0),
                     );
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {

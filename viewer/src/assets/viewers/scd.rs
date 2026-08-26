@@ -96,6 +96,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
                     .title("Export Audio")
                     .hover("Every channel the entry holds, undownmixed"),
                 ],
+                egui::Vec2::ZERO,
             );
             if promise.is_some() {
                 *file.export.borrow_mut() = promise;

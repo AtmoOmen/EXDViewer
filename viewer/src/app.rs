@@ -1385,6 +1385,7 @@ impl App {
                                     .hover("Links export as raw values")
                                     .filter("CSV", &["csv"]),
                                 ],
+                                egui::Vec2::ZERO,
                             );
                             if promise.is_some() {
                                 self.export_promise = promise;

@@ -4273,7 +4273,7 @@ impl Scene {
                     }
                 };
                 let promise =
-                    export::menu(ui, "Export preset", None, self.saving.is_some(), choices);
+                    export::menu(ui, "Export preset", None, self.saving.is_some(), choices, egui::Vec2::ZERO);
                 if promise.is_some() {
                     self.saving = promise;
                 }

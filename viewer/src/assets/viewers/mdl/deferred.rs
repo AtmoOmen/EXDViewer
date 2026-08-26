@@ -4469,7 +4469,15 @@ pub fn build_pair(
                     gl.delete_shader(shader);
                 }
                 gl.delete_program(program);
-                return Err(why);
+                let name = match stage {
+                    glow::VERTEX_SHADER => "vertex",
+                    _ => "fragment",
+                };
+                // Some implementations reject a shader with no diagnostic at all.
+                return Err(match why.trim().is_empty() {
+                    true => format!("{name} shader would not compile"),
+                    false => format!("{name}: {why}"),
+                });
             }
             gl.attach_shader(program, shader);
             built.push(shader);
@@ -4482,7 +4490,10 @@ pub fn build_pair(
         if !gl.get_program_link_status(program) {
             let why = gl.get_program_info_log(program);
             gl.delete_program(program);
-            return Err(why);
+            return Err(match why.trim().is_empty() {
+                true => "program would not link".to_owned(),
+                false => why,
+            });
         }
         Ok(program)
     }

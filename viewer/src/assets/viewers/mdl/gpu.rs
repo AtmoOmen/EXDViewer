@@ -292,7 +292,13 @@ impl Model {
     }
 
     pub fn failure(&self) -> Option<&str> {
-        self.failure.as_deref().or(self.game.failure.as_deref())
+        self.failure.as_deref()
+    }
+
+    /// The game shader pipeline's own failure, taken rather than borrowed: leaving it would relink
+    /// and refail the same program every frame once the caller stops routing surfaces its way.
+    pub fn take_shader_failure(&mut self) -> Option<String> {
+        self.game.failure.take()
     }
 
     /// How much of the G-buffer one pass can write. Four until a frame has asked the context, since

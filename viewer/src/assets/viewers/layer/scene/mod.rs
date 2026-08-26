@@ -32,7 +32,7 @@ use web_time::Instant;
 
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use half::f16;
 use ironworks::file::layer::{
     Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneGlow, SceneSpin,
@@ -573,12 +573,46 @@ struct Light {
     glow: Option<Glow>,
 }
 
-/// A placed `.avfx` glow: where it stands, and which file names it.
+/// A placed `.avfx` glow: where it stands, which file names it, and the placement's own settings
+/// on top of what the file itself draws.
 struct Vfx {
     placement: Mat4,
     path: String,
     layer: usize,
     key: (u32, [u8; 4]),
+    /// Multiplies every particle's color. White at `alpha == 0`: a zeroed colour is the tool's
+    /// "not set" rather than "tint to black".
+    tint: Vec4,
+    /// Distances over which the effect ramps from invisible to full opacity. The far pair
+    /// (`fade_far`) is not applied: its own ordering does not hold widely enough across placed
+    /// instances to read a fade curve out of it, so a far cutoff is left undrawn rather than guessed.
+    fade_near: [f32; 2],
+}
+
+/// Linear ramp from invisible at `near[0]` to full opacity at `near[1]`, or always visible where
+/// the pair does not open a real range.
+fn near_fade(distance: f32, near: [f32; 2]) -> f32 {
+    let [start, end] = near;
+    match end > start {
+        true => ((distance - start) / (end - start)).clamp(0.0, 1.0),
+        false => 1.0,
+    }
+}
+
+/// The placement's colour override, or white where it is unset. `alpha == 0` is the corpus's only
+/// state (every placed `Vfx` leaves it there), so it is read as the sentinel rather than as
+/// transparent black.
+fn vfx_tint(colour: Colour) -> Vec4 {
+    if colour.alpha() == 0 {
+        return Vec4::ONE;
+    }
+    let scale = colour.intensity();
+    Vec4::new(
+        colour.red() as f32 / 255.0 * scale,
+        colour.green() as f32 / 255.0 * scale,
+        colour.blue() as f32 / 255.0 * scale,
+        colour.alpha() as f32 / 255.0,
+    )
 }
 
 enum EffectState {
@@ -1436,12 +1470,18 @@ impl Scene {
                                 glow,
                             });
                         }
-                        InstanceData::Vfx(vfx) if !vfx.asset_path().is_empty() => {
+                        // A placement with auto_play unset only ever runs off a script trigger this
+                        // viewer has no notion of, so it would never be seen this way in game either.
+                        InstanceData::Vfx(vfx)
+                            if !vfx.asset_path().is_empty() && vfx.auto_play() =>
+                        {
                             self.effects.push(Vfx {
                                 placement: here,
                                 path: vfx.asset_path().clone(),
                                 layer: at,
                                 key: reach(key, depth, instance.id()),
+                                tint: vfx_tint(vfx.colour()),
+                                fade_near: vfx.fade_near(),
                             });
                         }
                         _ => {}
@@ -1980,9 +2020,11 @@ impl Scene {
                     let (scale, rotation, translation) =
                         vfx.placement.to_scale_rotation_translation();
                     let scale = scale.abs().max_element().max(0.001);
+                    let fade = near_fade(eye.distance(translation), vfx.fade_near);
+                    let tint = vfx.tint * Vec4::new(1.0, 1.0, 1.0, fade);
                     drawn.extend(
                         base.iter()
-                            .map(|held| held.placed(rotation, translation, scale)),
+                            .map(|held| held.placed(rotation, translation, scale, tint)),
                     );
                 }
                 let batches = avfx::batches(parsed, drawn, &bound, view, eye, right, up);

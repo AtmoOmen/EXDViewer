@@ -860,9 +860,9 @@ impl Animation {
     /// Only the pickers are offered until a motion is picked: with none the model stands where its
     /// own file put it, and there is nothing to play.
     pub fn ui(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| self.row(ui));
+        ui.horizontal_wrapped(|ui| self.row(ui));
         if let Some(mounted) = &self.mounted {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Mount").strong());
                 mounted.row(ui);
             });

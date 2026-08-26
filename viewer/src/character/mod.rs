@@ -13,6 +13,7 @@ mod menus;
 mod mounts;
 mod npcs;
 mod palette;
+mod stains;
 
 use std::cell::{Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -273,6 +274,17 @@ pub struct CharacterBuilder {
     /// The colours the creator offers, read once.
     made: Option<palette::Made>,
     reading_made: Option<TrackedPromise<Result<palette::Made>>>,
+    /// The dyes the game names, read once.
+    dyes: Vec<stains::Stain>,
+    reading_dyes: Option<TrackedPromise<Result<Vec<stains::Stain>>>>,
+    /// The staining templates a dye's values come from, read once.
+    dye_templates: Option<Rc<mdl::DyeTemplates>>,
+    reading_dye_templates: Option<TrackedPromise<Result<mdl::DyeTemplates>>>,
+    /// What has been picked to stain each slot with, one id per channel a modern item can carry.
+    /// Zero is the unstained slot, matching a `.stm` template's own numbering.
+    stains: [[Option<u8>; 2]; 10],
+    /// Which slot's dye picker is open, and which of its two channels.
+    dyeing: Option<(Slot, u8)>,
     /// What each body differs from the one it is built on by, which is both what says where a
     /// borrowed model comes from and what shapes it onto the body wearing it.
     deformers: Option<Rc<mdl::Deformers>>,
@@ -306,6 +318,9 @@ pub struct CharacterBuilder {
     sets: RefCell<BTreeMap<(bool, u16), Models>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<(String, u16)>,
+    /// The stains each entry of `worn` is dressed in, in the same order: `[None; 2]` for the face,
+    /// hair, tail and mount entries `wearing` adds itself, and the picked slot's own for the rest.
+    worn_stains: Vec<[Option<u8>; 2]>,
     /// Whether the last fetch for `worn` failed, so the same equipment is asked for again rather
     /// than left stuck: `worn` alone can't tell a landed dress from a failed one.
     worn_failed: bool,
@@ -352,6 +367,12 @@ impl Default for CharacterBuilder {
             choices: BTreeMap::new(),
             made: None,
             reading_made: None,
+            dyes: Vec::new(),
+            reading_dyes: None,
+            dye_templates: None,
+            reading_dye_templates: None,
+            stains: [[None; 2]; 10],
+            dyeing: None,
             deformers: None,
             reading_deformers: None,
             worn_over: None,
@@ -374,6 +395,7 @@ impl Default for CharacterBuilder {
             mounts_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
+            worn_stains: Vec::new(),
             worn_failed: false,
             shaped: RefCell::new(BTreeMap::new()),
             held: Files::new(),
@@ -392,6 +414,10 @@ impl CharacterBuilder {
         self.reading_pieces = None;
         self.made = None;
         self.reading_made = None;
+        self.dyes.clear();
+        self.reading_dyes = None;
+        self.dye_templates = None;
+        self.reading_dye_templates = None;
         self.deformers = None;
         self.reading_deformers = None;
         self.worn_over = None;
@@ -418,6 +444,7 @@ impl CharacterBuilder {
         self.sets.borrow_mut().clear();
         self.shaped.borrow_mut().clear();
         self.worn.clear();
+        self.worn_stains.clear();
         self.worn_failed = false;
         self.held.clear();
         self.fetching.clear();
@@ -454,6 +481,14 @@ impl CharacterBuilder {
         let colors = backend.clone();
         self.reading_made = Some(TrackedPromise::spawn_local(async move {
             palette::Made::read(&colors).await
+        }));
+        let dyed = backend.clone();
+        self.reading_dyes = Some(TrackedPromise::spawn_local(async move {
+            stains::read(&dyed, language).await
+        }));
+        let templates = backend.clone();
+        self.reading_dye_templates = Some(TrackedPromise::spawn_local(async move {
+            mdl::DyeTemplates::read(&templates).await
         }));
         let shaped = backend.files().clone();
         self.reading_deformers = Some(TrackedPromise::spawn_local(async move {
@@ -539,6 +574,20 @@ impl CharacterBuilder {
                 Ok(Ok(read)) => self.made = Some(read),
                 Ok(Err(why)) => log::warn!("character: no colours to pick from: {why}"),
                 Err(promise) => self.reading_made = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_dyes.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.dyes = read,
+                Ok(Err(why)) => log::warn!("character: no dyes to pick from: {why}"),
+                Err(promise) => self.reading_dyes = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_dye_templates.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.dye_templates = Some(Rc::new(read)),
+                Ok(Err(why)) => log::warn!("character: no staining templates to dye with: {why}"),
+                Err(promise) => self.reading_dye_templates = Some(promise),
             }
         }
         if let Some(promise) = self.reading_deformers.take() {
@@ -651,7 +700,17 @@ impl CharacterBuilder {
             }
         }
 
-        let wanted = self.wearing(&listing, &deformers);
+        let full = self.wearing(&listing, &deformers);
+        let wanted: Vec<(String, u16)> = full
+            .iter()
+            .map(|(path, variant, _)| (path.clone(), *variant))
+            .collect();
+        // Kept apart from `wanted` and updated every frame the dressed-comparison passes over: a
+        // dye pick does not touch the model's own files, and gating it the same way would ask the
+        // whole level to rebuild for a color that only the resolve pass reads.
+        if !full.is_empty() {
+            self.worn_stains = full.iter().map(|(_, _, stains)| *stains).collect();
+        }
         if (wanted != self.worn || self.worn_failed) && !wanted.is_empty() {
             self.worn = wanted;
             self.worn_failed = false;
@@ -703,6 +762,7 @@ impl CharacterBuilder {
             let (customize, hidden, shapes, stature, bust) = self.made();
             model.made(customize, hidden, shapes, stature, bust);
             model.hinged(self.raised());
+            model.dye(self.dye_templates.clone(), self.worn_stains.clone());
         }
     }
 
@@ -972,7 +1032,11 @@ impl CharacterBuilder {
     ///
     /// The face leads, since the first file is what names the skeleton the rest are posed on and a
     /// piece of equipment worn by a race that has no model of its own is filed under another's code.
-    fn wearing(&self, listing: &Listing, deformers: &mdl::Deformers) -> Vec<(String, u16)> {
+    fn wearing(
+        &self,
+        listing: &Listing,
+        deformers: &mdl::Deformers,
+    ) -> Vec<(String, u16, [Option<u8>; 2])> {
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -988,13 +1052,13 @@ impl CharacterBuilder {
                 false => Vec::new(),
             })
             .chain(held(&self.tails, self.tail()))
-            .map(|path| (path, 0))
+            .map(|path| (path, 0, [None, None]))
             .collect();
         for slot in Slot::ALL {
             let worn = outfit[slot as usize].and_then(|gear| {
                 self.worn_as(listing, deformers, slot.adornment(), gear.set)[slot as usize]
                     .clone()
-                    .map(|path| (path, gear.variant))
+                    .map(|path| (path, gear.variant, self.stains[slot as usize]))
             });
             match worn {
                 // An adornment is the only thing its slot ever draws, so a piece worn over it
@@ -1005,10 +1069,14 @@ impl CharacterBuilder {
                 // and the hair are what draw one.
                 None if hidden[slot as usize] => {}
                 None if !self.bared(&outfit, slot) => {}
-                None => found.extend(part(&self.body, slot).map(|path| (path, 0))),
+                None => found.extend(part(&self.body, slot).map(|path| (path, 0, [None, None]))),
             }
         }
-        found.extend(self.ridden(listing));
+        found.extend(
+            self.ridden(listing)
+                .into_iter()
+                .map(|(path, variant)| (path, variant, [None, None])),
+        );
         found
     }
 

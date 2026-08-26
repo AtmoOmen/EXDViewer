@@ -46,9 +46,14 @@ impl Templates {
     }
 }
 
-/// Where diffuse, specular and emissive sit in the extended row layout every shader addresses.
-/// Unchanged by the legacy crossover: only halves 3 and 7 swap meaning between the layouts.
-const COLORS: [(mtrl::DyeField, fn(&stm::DyePack) -> [f32; 3], [usize; 3]); 3] = [
+/// A dyeable field, how to read a stain's value for it, and where that lands in the extended row
+/// layout every shader addresses.
+type ColorField = (mtrl::DyeField, fn(&stm::DyePack) -> [f32; 3], [usize; 3]);
+type ScalarField = (mtrl::DyeField, fn(&stm::DyePack) -> f32, usize);
+
+/// Where diffuse, specular and emissive sit. Unchanged by the legacy crossover: only halves 3 and 7
+/// swap meaning between the layouts.
+const COLORS: [ColorField; 3] = [
     (mtrl::DyeField::Diffuse, |pack| pack.diffuse, [0, 1, 2]),
     (mtrl::DyeField::Specular, |pack| pack.specular, [4, 5, 6]),
     (mtrl::DyeField::Emissive, |pack| pack.emissive, [8, 9, 10]),
@@ -56,7 +61,7 @@ const COLORS: [(mtrl::DyeField, fn(&stm::DyePack) -> [f32; 3], [usize; 3]); 3] =
 
 /// The scalars a modern, nine-scalar template carries, which only an extended table's dye row can
 /// name: a legacy row's five bits reach no further than [`mtrl::DyeField::Metalness`].
-const SCALARS: [(mtrl::DyeField, fn(&stm::DyePack) -> f32, usize); 7] = [
+const SCALARS: [ScalarField; 7] = [
     (mtrl::DyeField::Roughness, |pack| pack.roughness, 16),
     (mtrl::DyeField::SheenRate, |pack| pack.sheen_rate, 12),
     (mtrl::DyeField::SheenTint, |pack| pack.sheen_tint, 13),

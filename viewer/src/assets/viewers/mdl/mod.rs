@@ -273,6 +273,8 @@ struct Passes {
 
 /// The color table in the game's own layout: its halfs, the texels a row takes, and the rows.
 type Table = Arc<(Vec<u16>, usize, usize)>;
+/// A material's last-applied stains, and the table they were dyed into.
+type Dyed = (Table, [Option<u8>; 2]);
 
 /// One detail level's geometry, and everything the browser says about it.
 struct Level {
@@ -440,7 +442,7 @@ pub struct Rendered {
     /// dyed itself into for them: recomputed only where the stains a piece carries change, so a frame
     /// with nothing newly picked costs a lookup rather than a rebuild.
     stains: RefCell<Vec<[Option<u8>; 2]>>,
-    dyed: RefCell<BTreeMap<usize, ([Option<u8>; 2], Table)>>,
+    dyed: RefCell<BTreeMap<usize, Dyed>>,
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
@@ -2935,7 +2937,7 @@ impl Rendered {
         if stains == [None, None] {
             return base.clone();
         }
-        if let Some((held, table)) = self.dyed.borrow().get(&mesh.material)
+        if let Some((table, held)) = self.dyed.borrow().get(&mesh.material)
             && *held == stains
         {
             return table.clone();
@@ -2949,7 +2951,7 @@ impl Rendered {
             .unwrap_or_else(|| base.clone());
         self.dyed
             .borrow_mut()
-            .insert(mesh.material, (stains, built.clone()));
+            .insert(mesh.material, (built.clone(), stains));
         built
     }
 

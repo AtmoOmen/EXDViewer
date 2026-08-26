@@ -56,6 +56,8 @@ pub struct SheetTable {
     row_sizes: Vec<f32>,
 
     modal_image: Option<u32>,
+    /// A copy-to-clipboard or PNG export fetch in flight for `modal_image`'s icon.
+    modal_export: Option<TrackedPromise<()>>,
 
     clicked_cell: Option<CellResponse>,
 
@@ -94,6 +96,7 @@ impl SheetTable {
             subrow_lookup,
             row_sizes: Vec::new(),
             modal_image: None,
+            modal_export: None,
             clicked_cell: None,
             filtered_rows,
             unfiltered_row_offsets,
@@ -164,10 +167,11 @@ impl SheetTable {
             let path = get_icon_path(global.backend().icons(), icon_id, true, global.language());
             let icon = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
                 log::debug!("Hires icon not found in cache: {icon_id}");
+                let excel = excel.clone();
                 let path = path.clone();
                 TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
             });
-            if icon_modal(ui.ctx(), icon_id, icon) {
+            if icon_modal(ui.ctx(), icon_id, icon, &mut self.modal_export, excel, &path) {
                 self.modal_image = None;
             }
         }

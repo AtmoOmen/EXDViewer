@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use egui::{
-    CentralPanel, Color32, Popup, PopupCloseBehavior, RectAlign, RichText, ScrollArea, TextEdit,
+    CentralPanel, Color32, Popup, RectAlign, RichText, ScrollArea, TextEdit,
     containers::panel::Panel,
 };
 use glam::Vec3;
@@ -1359,9 +1359,10 @@ impl CharacterBuilder {
             return;
         }
         let mut picked = None;
+        // `from_response` alone is always open, closed only by dropping the swatch or a cell's
+        // click below setting `self.dyeing` to `None`: nothing here closes it on an outside click.
         Popup::from_response(&response)
             .align(RectAlign::BOTTOM_START)
-            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
                 ui.set_max_width(9.0 * (SWATCH + 4.0));
                 ScrollArea::vertical().max_height(10.0 * (SWATCH + 4.0)).show(ui, |ui| {

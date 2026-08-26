@@ -1,3 +1,9 @@
-shots/
-last-run.json
-native-shots/
+# Capture output. Only the harness sources belong in git.
+*
+!*/
+!.gitignore
+!README.md
+!*.ts
+!*.sh
+!*.js
+!*.py

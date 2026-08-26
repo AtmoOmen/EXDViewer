@@ -557,7 +557,7 @@ impl Renderer {
             let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
             unsafe {
                 gl.viewport(0, split as i32 * size, size, size);
-                gl.polygon_offset(program::SHADOW_SLOPE, program::shadow_push(split));
+                gl.polygon_offset(program::SHADOW_SLOPE, program::shadow_push(scene.reach, split));
             }
             for (batch, (offset, windows, window)) in frame.batches.iter().zip(&offsets) {
                 let meshes: Vec<i32> = match self

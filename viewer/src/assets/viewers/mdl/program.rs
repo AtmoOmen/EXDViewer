@@ -1285,31 +1285,49 @@ fn turned(time: f32) -> f32 {
 /// What a place with no level file of its own stands under, which is what most zones state.
 pub const TILT: f32 = 30.0;
 
-/// How far down the view the sun's own depth maps reach where no level file states it, and how much
-/// further each one goes than the one before. The game's own five step by two; three cover the same
-/// distance stepping by four.
+/// How far down the view the sun's own depth maps reach where no level file states it.
 pub const SHADOW_REACH: f32 = 400.0;
-const SPLIT_STEP: f32 = 4.0;
 
 /// Depth maps the sun draws, stacked into one image. A pixel is read against the nearest whose own
 /// box still holds it.
-pub const SPLITS: usize = 3;
+pub const SPLITS: usize = 5;
 
-/// How far down the view the split at `at` reaches, of the whole the sun's maps cover.
+/// How far down the view the split at `at` reaches, of the whole the sun's maps cover. The game
+/// hands each split a share of the whole in the ratio one, two, four and so on doubling, which
+/// against the total of all of them is what makes the box after the first always twice the one
+/// before.
 pub fn shadow_reach(reach: f32, at: usize) -> f32 {
-    reach / SPLIT_STEP.powi((SPLITS - 1 - at) as i32)
+    let whole = (1u32 << SPLITS) - 1;
+    let share = (1u32 << (at + 1)) - 1;
+    reach * share as f32 / whole as f32
+}
+
+/// Where the map's own near clip sits ahead of the first split, and how far back a split's own box
+/// reaches into the one before it, so a pixel near the seam is never left with only one to sample.
+pub const SHADOW_NEAR: f32 = 0.1;
+pub const SHADOW_OVERLAP: f32 = 3.0;
+
+/// Where the split at `at`'s own box starts: the split before its own far bound, or the map's own
+/// near clip for the first, pulled back by the overlap.
+pub fn shadow_near(reach: f32, at: usize) -> f32 {
+    let before = match at {
+        0 => SHADOW_NEAR,
+        at => shadow_reach(reach, at - 1),
+    };
+    before - SHADOW_OVERLAP
 }
 
 /// How far a face is pushed away from the light before its depth is kept: a slope the map's own
-/// step is multiplied by, and a flat push in those same steps. This is what keeps a surface off its
-/// own shadow, since the pass rasterises both of a surface's sides.
+/// step is multiplied by, and a flat push. This is what keeps a surface off its own shadow, since
+/// the pass rasterises both of a surface's sides.
 pub const SHADOW_SLOPE: f32 = 2.0;
-const SHADOW_PUSH: f32 = 131.0;
+const SHADOW_PUSH: f32 = 3275.0;
 
-/// That flat push for the split at `at`. A step of the map spans the whole of the split's own box,
-/// so it is scaled down as the box grows and the push comes to the same distance in the world.
-pub fn shadow_push(at: usize) -> f32 {
-    SHADOW_PUSH / SPLIT_STEP.powi(at as i32)
+/// That flat push for the split at `at`. A step of the map spans more of the world as the split's
+/// own box grows, so this is scaled down with it and the push comes to the same distance in the
+/// world whichever split it lands in.
+pub fn shadow_push(reach: f32, at: usize) -> f32 {
+    SHADOW_PUSH / shadow_reach(reach, at)
 }
 
 /// Where the sun stands to draw one split of the scene's depth, as a view and an orthographic
@@ -1320,10 +1338,7 @@ pub fn shadow_camera(light: Vec3, view: Mat4, projection: Mat4, reach: f32, at: 
     // matrix that reads it cannot be given different boxes.
     let eye = view.inverse().w_axis.truncate();
     let ahead = -view.row(2).truncate().normalize_or(Vec3::Z);
-    let near = match at {
-        0 => 0.0,
-        at => shadow_reach(reach, at - 1),
-    };
+    let near = shadow_near(reach, at);
     let far = shadow_reach(reach, at);
     // The sphere that holds the whole slice of the frame's own frustum this split covers. A box no
     // wider than the split is deep leaves the slice's far corners off the map, and a coordinate off
@@ -3002,12 +3017,8 @@ impl Buffer {
             // still covers it.
             let (z, w) = (projection.z_axis.z, projection.w_axis.z);
             let depth = |at: f32| (w / at.max(f32::EPSILON) - z).clamp(0.0, 1.0);
-            let near = match scene.split {
-                0 => 0.0,
-                at => depth(shadow_reach(scene.reach, at - 1)),
-            };
             put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowDistance", vec![
-                near,
+                depth(shadow_near(scene.reach, scene.split)),
                 depth(shadow_reach(scene.reach, scene.split)),
                 0.0,
                 0.0,

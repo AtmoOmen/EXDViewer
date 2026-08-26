@@ -92,7 +92,7 @@ pub fn integer(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> u32 {
         .unwrap_or(0)
 }
 
-fn text(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> String {
+pub fn text(row: ExcelRow<'_>, column: &SheetColumnDefinition) -> String {
     row.read_string(u32::from(column.offset()))
         .ok()
         .and_then(|value| value.format().try_to_compact_string().ok())

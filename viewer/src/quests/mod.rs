@@ -5,6 +5,7 @@ mod detail;
 pub mod graph;
 mod index;
 mod play;
+mod rewards;
 pub mod script;
 mod tree;
 

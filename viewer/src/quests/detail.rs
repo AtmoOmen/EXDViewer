@@ -15,6 +15,7 @@ use crate::{
         Load,
         derive::{self, Param},
         index::Index,
+        rewards::{self, Catalog},
         script::{self, Script},
     },
     settings::EVALUATE_STRINGS,
@@ -72,54 +73,9 @@ const FLOW: &[&str] = &[
     "HideInScenarioGuide",
 ];
 
-/// `Reward[i]` resolves through `ItemRewardType`, so it is a link to an item, a class-job reward or
-/// a beast-tribe bonus depending on the row.
-fn reward_fields() -> Vec<String> {
-    let mut names: Vec<String> = [
-        "GilReward",
-        "ExpFactor",
-        "CurrencyReward",
-        "CurrencyRewardCount",
-    ]
-    .iter()
-    .map(|name| (*name).to_string())
-    .collect();
-    for i in 0..7 {
-        names.push(format!("Reward[{i}]"));
-        names.push(format!("ItemCountReward[{i}]"));
-        names.push(format!("RewardStain[{i}]"));
-    }
-    for i in 0..5 {
-        names.push(format!("OptionalItemReward[{i}]"));
-        names.push(format!("OptionalItemCountReward[{i}]"));
-        names.push(format!("OptionalItemStainReward[{i}]"));
-        names.push(format!("OptionalItemIsHQReward[{i}]"));
-    }
-    for i in 0..3 {
-        names.push(format!("ItemCatalyst[{i}]"));
-        names.push(format!("ItemCountCatalyst[{i}]"));
-    }
-    names.extend(
-        [
-            "EmoteReward",
-            "ActionReward",
-            "GeneralActionReward[0]",
-            "GeneralActionReward[1]",
-            "SystemReward[0]",
-            "SystemReward[1]",
-            "GCTypeReward",
-            "OtherReward",
-            "QuestRewardOtherDisplay",
-            "Tomestone",
-            "TomestoneReward",
-            "TomestoneCountReward",
-            "ReputationReward",
-        ]
-        .iter()
-        .map(|name| (*name).to_string()),
-    );
-    names
-}
+/// `SystemReward` and `GCTypeReward` name no sheet EXDSchema or the corpus can confirm, so they fall
+/// back to the raw-field renderer rather than a resolved one.
+const UNRESOLVED_REWARDS: &[&str] = &["GCTypeReward", "SystemReward[0]", "SystemReward[1]"];
 
 /// One line of a quest's dialogue, by the row key the script names it with.
 pub struct Line {
@@ -166,6 +122,9 @@ pub struct Detail {
     dialogue: Load<Dialogue>,
     links: Load<Links>,
     script: Load<Script>,
+    /// The reward catalog is keyed by language, not by quest, so it survives a selection change.
+    catalog: Load<Catalog>,
+    catalog_for: Option<Language>,
 }
 
 pub enum Action {
@@ -201,9 +160,18 @@ impl Detail {
             let path = derive::script_path(quest.row_id, &quest.id);
             self.script = Load::spawn(async move { script::read(&files.read(&path).await?) });
         }
+        if self.catalog_for != Some(language) {
+            self.catalog_for = Some(language);
+            self.catalog = Load::Idle;
+        }
+        if matches!(self.catalog, Load::Idle) {
+            let backend = backend.clone();
+            self.catalog = Load::spawn(async move { Catalog::load(backend, language).await });
+        }
         self.dialogue.poll();
         self.links.poll();
         self.script.poll();
+        self.catalog.poll();
     }
 
     /// The quest's dialogue, its assets and its scenes, each once the read finishes.
@@ -264,7 +232,24 @@ impl Detail {
             fields(ui, index, row, FLOW.iter().map(|n| (*n).to_string()))
         }));
         action = action.or(section(ui, "Rewards", true, |ui| {
-            fields(ui, index, row, reward_fields().into_iter())
+            let mut action = match &self.catalog {
+                Load::Ready(catalog) => rewards::ui(ui, index, row, catalog),
+                Load::Failed(error) => {
+                    ui.colored_label(Color32::RED, error.clone());
+                    None
+                }
+                Load::Idle | Load::Loading(_) => {
+                    ui.spinner();
+                    None
+                }
+            };
+            action = action.or(fields(
+                ui,
+                index,
+                row,
+                UNRESOLVED_REWARDS.iter().map(|n| (*n).to_string()),
+            ));
+            action
         }));
 
         action = action.or(self.relations(ui, index, node));

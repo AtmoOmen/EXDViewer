@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -121,6 +123,70 @@ impl Player {
         self.sink
             .as_ref()
             .is_some_and(|sink| !sink.empty() && !sink.is_paused())
+    }
+}
+
+/// Several looping voices sharing one output device, each with its own gain, for a scene playing
+/// more than one ambient sound at once.
+pub struct Mixer<K> {
+    device: MixerDeviceSink,
+    voices: HashMap<K, (rodio::Player, f32)>,
+    master: f32,
+}
+
+impl<K: Eq + Hash> Mixer<K> {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            device: DeviceSinkBuilder::open_default_sink()?,
+            voices: HashMap::new(),
+            master: 1.0,
+        })
+    }
+
+    /// No-op on native; the web backend needs this called from inside a user gesture instead.
+    pub fn unlock(&self) {}
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.master = volume;
+        for (sink, gain) in self.voices.values() {
+            sink.set_volume(gain * self.master);
+        }
+    }
+
+    pub fn is_playing(&self, key: &K) -> bool {
+        self.voices.contains_key(key)
+    }
+
+    pub fn playing(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// Starts `key` looping, unless it already is.
+    pub fn play(&mut self, key: K, audio: Arc<Decoded>, gain: f32) -> Result<()> {
+        if self.voices.contains_key(&key) {
+            return Ok(());
+        }
+        let sink = rodio::Player::connect_new(self.device.mixer());
+        sink.set_volume(gain * self.master);
+        sink.append(LoopingSource::new(audio, 0, Arc::new(AtomicU64::new(0))));
+        self.voices.insert(key, (sink, gain));
+        Ok(())
+    }
+
+    pub fn set_gain(&mut self, key: &K, gain: f32) {
+        if let Some((sink, held)) = self.voices.get_mut(key) {
+            *held = gain;
+            sink.set_volume(gain * self.master);
+        }
+    }
+
+    /// Stops whatever `keep` does not hold true for.
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.voices.retain(|key, _| keep(key));
+    }
+
+    pub fn stop_all(&mut self) {
+        self.voices.clear();
     }
 }
 

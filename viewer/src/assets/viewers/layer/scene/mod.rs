@@ -18,6 +18,7 @@ mod ambient;
 mod gpu;
 mod preset;
 mod report;
+mod sound;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
@@ -32,7 +33,7 @@ use web_time::Instant;
 
 use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
-use glam::{Mat3, Mat4, Quat, Vec3};
+use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use half::f16;
 use ironworks::file::layer::{
     Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneGlow, SceneSpin,
@@ -573,12 +574,45 @@ struct Light {
     glow: Option<Glow>,
 }
 
-/// A placed `.avfx` glow: where it stands, and which file names it.
+/// A placed `.avfx` glow: where it stands, which file names it, and the placement's own settings
+/// on top of what the file itself draws.
 struct Vfx {
     placement: Mat4,
     path: String,
     layer: usize,
     key: (u32, [u8; 4]),
+    /// Multiplies every particle's color. White at `alpha == 0`: a zeroed colour is the tool's
+    /// "not set" rather than "tint to black".
+    tint: Vec4,
+    /// Distances over which the effect ramps from invisible to full opacity. The far pair
+    /// (`fade_far`) is not applied: its own ordering does not hold widely enough across placed
+    /// instances to read a fade curve out of it, so a far cutoff is left undrawn rather than guessed.
+    fade_near: [f32; 2],
+}
+
+/// Linear ramp from invisible at `near[0]` to full opacity at `near[1]`, or always visible where
+/// the pair does not open a real range.
+fn near_fade(distance: f32, near: [f32; 2]) -> f32 {
+    let [start, end] = near;
+    match end > start {
+        true => ((distance - start) / (end - start)).clamp(0.0, 1.0),
+        false => 1.0,
+    }
+}
+
+/// The placement's colour override, or white where it is unset: `alpha == 0` is read as the
+/// sentinel rather than as transparent black.
+fn vfx_tint(colour: Colour) -> Vec4 {
+    if colour.alpha() == 0 {
+        return Vec4::ONE;
+    }
+    let scale = colour.intensity();
+    Vec4::new(
+        colour.red() as f32 / 255.0 * scale,
+        colour.green() as f32 / 255.0 * scale,
+        colour.blue() as f32 / 255.0 * scale,
+        colour.alpha() as f32 / 255.0,
+    )
 }
 
 enum EffectState {
@@ -784,6 +818,7 @@ pub struct Scene {
     effects: Vec<Vfx>,
     effect_files: Vec<Effect>,
     effect_at: HashMap<String, usize>,
+    sound: sound::SoundStage,
     /// The two apricot packages every effect is drawn with, fetched once for the whole scene.
     effect_shape: Option<avfx::Package>,
     effect_model: Option<avfx::Package>,
@@ -1056,6 +1091,7 @@ impl Scene {
             effect_shape: None,
             effect_model: None,
             effect_packages: Arc::new(avfx::gpu::Packages::default()),
+            sound: sound::SoundStage::default(),
             clips: HashMap::new(),
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
@@ -1436,13 +1472,26 @@ impl Scene {
                                 glow,
                             });
                         }
-                        InstanceData::Vfx(vfx) if !vfx.asset_path().is_empty() => {
+                        // A placement with auto_play unset only ever runs off a script trigger this
+                        // viewer has no notion of, so it would never be seen this way in game either.
+                        InstanceData::Vfx(vfx)
+                            if !vfx.asset_path().is_empty() && vfx.auto_play() =>
+                        {
                             self.effects.push(Vfx {
                                 placement: here,
                                 path: vfx.asset_path().clone(),
                                 layer: at,
                                 key: reach(key, depth, instance.id()),
+                                tint: vfx_tint(vfx.colour()),
+                                fade_near: vfx.fade_near(),
                             });
+                        }
+                        InstanceData::Sound(placed_sound) => {
+                            self.sound.collect(
+                                placed_sound,
+                                here.transform_point3(Vec3::ZERO),
+                                reach(key, depth, instance.id()),
+                            );
                         }
                         _ => {}
                     }
@@ -1980,9 +2029,11 @@ impl Scene {
                     let (scale, rotation, translation) =
                         vfx.placement.to_scale_rotation_translation();
                     let scale = scale.abs().max_element().max(0.001);
+                    let fade = near_fade(eye.distance(translation), vfx.fade_near);
+                    let tint = vfx.tint * Vec4::new(1.0, 1.0, 1.0, fade);
                     drawn.extend(
                         base.iter()
-                            .map(|held| held.placed(rotation, translation, scale)),
+                            .map(|held| held.placed(rotation, translation, scale, tint)),
                     );
                 }
                 let batches = avfx::batches(parsed, drawn, &bound, view, eye, right, up);
@@ -2297,6 +2348,7 @@ impl Scene {
         self.load_asides(backend);
         self.load_effects(backend);
         self.load_effect_packages(backend);
+        self.sound.poll(backend, self.camera.position);
         self.ambient.poll(backend);
         self.expand(backend, until);
         if self.fitted == 0 && !self.placements.is_empty() {
@@ -4282,6 +4334,34 @@ impl Scene {
                     "How many tiles a second the night sky's point mask scrolls by. Read off the \
                      game's own per-frame update rather than fitted",
                 );
+
+            ui.add_space(8.0);
+            ui.separator();
+            let mut sound_on = self.sound.enabled();
+            if ui.checkbox(&mut sound_on, "Play in-zone sound").changed() {
+                match sound_on {
+                    true => self.sound.enable(),
+                    false => self.sound.disable(),
+                }
+            }
+            ui.add_enabled_ui(sound_on, |ui| {
+                ui.label(RichText::new("Sound volume").weak());
+                let mut volume = self.sound.volume();
+                if ui.add(egui::Slider::new(&mut volume, 0.0..=1.0)).changed() {
+                    self.sound.set_volume(volume);
+                }
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} placed, {} playing",
+                    self.sound.placed(),
+                    self.sound.playing()
+                ))
+                .weak(),
+            );
+            if let Some(error) = self.sound.error() {
+                ui.colored_label(Color32::RED, error);
+            }
 
             ui.add_space(8.0);
             ui.separator();

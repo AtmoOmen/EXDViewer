@@ -1,5 +1,8 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, prelude::BASE64_STANDARD};
@@ -522,4 +525,130 @@ fn bind_anchor(context: &AudioContext, anchor: &HtmlAudioElement) -> Vec<Closure
 
 fn js(context: &'static str) -> impl Fn(JsValue) -> anyhow::Error {
     move |error| anyhow!("{context}: {error:?}")
+}
+
+/// Several looping voices sharing one context and one master gain, for a scene playing more than
+/// one ambient sound at once.
+pub struct Mixer<K> {
+    context: AudioContext,
+    master: GainNode,
+    voices: HashMap<K, Voice>,
+}
+
+struct Voice {
+    source: AudioBufferSourceNode,
+    gain: GainNode,
+}
+
+impl<K: Eq + Hash> Mixer<K> {
+    pub fn new() -> Result<Self> {
+        let context = AudioContext::new().map_err(js("AudioContext"))?;
+        let master = context.create_gain().map_err(js("create_gain"))?;
+        master
+            .connect_with_audio_node(&context.destination())
+            .map_err(js("connect master"))?;
+        Ok(Self {
+            context,
+            master,
+            voices: HashMap::new(),
+        })
+    }
+
+    /// Resumes the context; browsers only grant that from inside a real user gesture.
+    pub fn unlock(&self) {
+        let _ = self.context.resume();
+    }
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.master.gain().set_value(volume);
+    }
+
+    pub fn is_playing(&self, key: &K) -> bool {
+        self.voices.contains_key(key)
+    }
+
+    pub fn playing(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// Starts `key` looping, unless it already is.
+    pub fn play(&mut self, key: K, audio: Arc<Decoded>, gain: f32) -> Result<()> {
+        if self.voices.contains_key(&key) {
+            return Ok(());
+        }
+        let channels = audio.channels as usize;
+        let frames = audio.samples.len() / channels.max(1);
+        let buffer = self
+            .context
+            .create_buffer(
+                audio.channels as u32,
+                frames as u32,
+                audio.sample_rate as f32,
+            )
+            .map_err(js("create_buffer"))?;
+        let mut channel = vec![0f32; frames];
+        for ch in 0..channels {
+            for (frame, slot) in channel.iter_mut().enumerate() {
+                *slot = audio.samples[frame * channels + ch];
+            }
+            buffer
+                .copy_to_channel(&channel, ch as i32)
+                .map_err(js("copy_to_channel"))?;
+        }
+
+        let node_gain = self.context.create_gain().map_err(js("create_gain"))?;
+        node_gain.gain().set_value(gain);
+        node_gain
+            .connect_with_audio_node(&self.master)
+            .map_err(js("connect voice"))?;
+
+        let source = self
+            .context
+            .create_buffer_source()
+            .map_err(js("create_buffer_source"))?;
+        source.set_buffer(Some(&buffer));
+        let rate = f64::from(audio.sample_rate);
+        if let Some((start, end)) = audio.loop_start.zip(audio.loop_end) {
+            source.set_loop(true);
+            source.set_loop_start(f64::from(start) / rate);
+            source.set_loop_end(f64::from(end) / rate);
+        } else {
+            source.set_loop(true);
+        }
+        source
+            .connect_with_audio_node(&node_gain)
+            .map_err(js("connect source"))?;
+        source.start().map_err(js("start"))?;
+
+        self.voices.insert(
+            key,
+            Voice {
+                source,
+                gain: node_gain,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn set_gain(&mut self, key: &K, gain: f32) {
+        if let Some(voice) = self.voices.get_mut(key) {
+            voice.gain.gain().set_value(gain);
+        }
+    }
+
+    /// Stops whatever `keep` does not hold true for.
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.voices.retain(|key, voice| match keep(key) {
+            true => true,
+            false => {
+                #[allow(deprecated)]
+                let _ = voice.source.stop();
+                false
+            }
+        });
+    }
+
+    pub fn stop_all(&mut self) {
+        self.retain(|_| false);
+    }
 }

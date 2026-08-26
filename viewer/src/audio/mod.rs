@@ -7,9 +7,9 @@ pub use decode::{Decoded, decode, decode_data, encode_wav, export_native, export
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::Player;
+pub use native::{Mixer, Player};
 
 #[cfg(target_arch = "wasm32")]
 mod web;
 #[cfg(target_arch = "wasm32")]
-pub use web::Player;
+pub use web::{Mixer, Player};

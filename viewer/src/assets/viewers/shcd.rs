@@ -9,6 +9,7 @@ use ironworks::file::shcd::{self, Stage};
 use super::shader::{self, Naming, ResourceRow, Shader, code};
 use super::{Preview, facts, section};
 use crate::assets::Bytes;
+use crate::utils::export;
 
 /// A shader, decoded and ready to draw.
 pub struct Rendered {
@@ -103,6 +104,21 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, bytes: &[u8]) {
         &file.naming,
         bytes,
     );
+}
+
+/// Beyond the raw file: the one shader's two readings. A `.shcd` never runs more than one, so
+/// there is nothing to zip and no pass to merge, unlike its `.shpk` sibling.
+pub fn export_choices<'a>(file: &'a Rendered, bytes: &'a [u8]) -> Vec<export::Choice<'a>> {
+    [(true, "hlsl", "HLSL"), (false, "asm", "Assembly")]
+        .into_iter()
+        .map(|(hlsl_reading, extension, label)| {
+            export::Choice::bytes(label, format!("shader.{extension}"), move || {
+                let (lines, _) = code::text(&file.shader, &file.naming, bytes, hlsl_reading)
+                    .ok_or_else(|| anyhow::anyhow!("no shader program in this blob"))?;
+                Ok(lines.join("\n").into_bytes())
+            })
+        })
+        .collect()
 }
 
 impl Rendered {

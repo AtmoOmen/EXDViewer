@@ -156,3 +156,46 @@ impl Rendered {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    /// A real quest script, run manually against the local install (`cargo test -p viewer --lib
+    /// -- --ignored luab::tests --nocapture`): what the "As Lua" choice would write is handed to
+    /// the system's own Lua, since a decompiler is only as good as what actually parses.
+    #[test]
+    #[ignore = "reads the real local FFXIV install and shells out to lua5.1"]
+    fn the_lua_choice_parses_under_the_real_interpreter() {
+        use ironworks::sqpack::{Install, SqPack};
+        use std::io::Read;
+
+        let path = "game_script/quest/044/AktKmg115_04464.luab";
+        let pack = SqPack::new(Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"));
+        let mut stream = pack.file(path).expect("the quest script is in the local install");
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+
+        let preview = super::decode(path, &bytes).expect("a real quest script decodes");
+        let super::Preview::Luab(rendered) = preview else {
+            panic!("decode() of a .luab did not return Preview::Luab");
+        };
+        let lua = rendered.source.join("\n");
+        println!("{} lines of Lua, {} statements", rendered.source.len(), rendered.statements);
+
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
+        let out = std::path::Path::new(&dir).join("luab_export_check.lua");
+        std::fs::File::create(&out).unwrap().write_all(lua.as_bytes()).unwrap();
+
+        let check = std::process::Command::new("luac5.1")
+            .arg("-p")
+            .arg(&out)
+            .output()
+            .expect("luac5.1 must be on PATH to run this check");
+        assert!(
+            check.status.success(),
+            "luac5.1 rejected the exported source:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+    }
+}

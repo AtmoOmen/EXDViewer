@@ -988,6 +988,10 @@ pub struct Buffers {
     /// an hour that has not moved keeps it.
     haze: Option<(glow::Texture, program::Fog)>,
     size: (i32, i32),
+    /// Whether `attach()` finished the graph it started: only true once every fallible allocation
+    /// in it has succeeded, so a failure partway cannot make its reuse guard think a half-built
+    /// graph is done.
+    built: bool,
     /// What the context allows, which is what decides how much of the G-buffer one pass can write.
     attachments: usize,
     types: Option<glow::Texture>,
@@ -1240,9 +1244,12 @@ impl Buffers {
     /// hang off one, and what a page cannot hold is written by a reading of its own.
     pub fn attach(&mut self, gl: &glow::Context, size: (i32, i32)) -> Result<(), String> {
         self.limit(gl);
-        if !self.frames.is_empty() && self.size == size {
+        if self.built && self.size == size {
             return Ok(());
         }
+        // Cleared up front, not just on failure: a `?` anywhere below must leave this false, since
+        // a half-built graph is what the guard above exists to keep out.
+        self.built = false;
         let mut dead = graveyard().lock().unwrap();
         dead.extend(self.color.drain(..).map(Dead::Texture));
         dead.extend(self.depth.take().map(Dead::Texture));
@@ -1530,6 +1537,7 @@ impl Buffers {
             smooth(gl, overhead);
             self.overhead = Some((frame_of(gl, &[overhead], None)?, overhead));
         }
+        self.built = true;
         Ok(())
     }
 

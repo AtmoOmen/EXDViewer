@@ -373,14 +373,12 @@ pub fn hold(held: Preset) {
     PENDING.with(|slot| *slot.borrow_mut() = Some(held));
 }
 
-/// The preset a scene was opened for, where it was opened for one.
+/// The preset a scene was opened for, where it was opened for one. Left in place for a scene
+/// opened for somewhere else, since that scene is not the one it was held for.
 pub fn taken(level: &str) -> Option<Preset> {
     PENDING.with(|slot| {
-        let held = slot.borrow_mut().take()?;
-        match held.level == level {
-            true => Some(held),
-            false => None,
-        }
+        let matches = slot.borrow().as_ref().is_some_and(|held| held.level == level);
+        matches.then(|| slot.borrow_mut().take()).flatten()
     })
 }
 

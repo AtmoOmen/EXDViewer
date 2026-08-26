@@ -180,10 +180,14 @@ impl ZoneBrowser {
 
         let clicked = self.side_panel(ui);
         let followed = self.main_panel(ui, backend);
-        picked
-            .or(clicked)
-            .map(Action::Select)
-            .or_else(|| followed.map(Action::Navigate))
+        picked.or(clicked).map(Action::Select).or_else(|| {
+            followed.map(|path| match path.ends_with(".lvb") {
+                // A preset naming another zone follows as a whole level, which belongs in this tab
+                // rather than the Assets tab an ordinary file link opens.
+                true => Action::Select(path),
+                false => Action::Navigate(path),
+            })
+        })
     }
 
     fn draw_palette(&mut self, ctx: &egui::Context) -> Option<String> {
@@ -311,15 +315,7 @@ impl ZoneBrowser {
     }
 
     fn friendly(&self, zone: &Zone) -> String {
-        if zone.place_name != 0
-            && let Some(name) = self.names.get(&zone.place_name)
-        {
-            return name.clone();
-        }
-        if !zone.name.is_empty() {
-            return zone.name.clone();
-        }
-        zone.path.clone()
+        friendly_name(zone, &self.names).unwrap_or_else(|| zone.path.clone())
     }
 
     fn rebuild_rows(&mut self) {
@@ -612,6 +608,33 @@ async fn load_names(excel: CachedProvider, language: Language) -> Result<HashMap
         }
     }
     Ok(names)
+}
+
+/// A zone's own name, where it has one: `PlaceName` first, then the internal short code. `None`
+/// where a row states neither, rather than falling back to its path.
+fn friendly_name(zone: &Zone, names: &HashMap<u32, String>) -> Option<String> {
+    if zone.place_name != 0
+        && let Some(name) = names.get(&zone.place_name)
+    {
+        return Some(name.clone());
+    }
+    (!zone.name.is_empty()).then(|| zone.name.clone())
+}
+
+/// The friendly name every zone resolves to, by the `.lvb` it opens: what the Assets tab's
+/// companion button reuses rather than reading `TerritoryType` and `PlaceName` itself. A zone with
+/// neither a place name nor an internal one is left out, so the caller falls back to its own idea
+/// of what to show.
+pub async fn resolve_names(
+    excel: CachedProvider,
+    language: Language,
+) -> Result<HashMap<String, String>> {
+    let zones = load_index(excel.clone()).await?;
+    let names = load_names(excel, language).await?;
+    Ok(zones
+        .iter()
+        .filter_map(|zone| Some((zone.path.clone(), friendly_name(zone, &names)?)))
+        .collect())
 }
 
 async fn check_availability(

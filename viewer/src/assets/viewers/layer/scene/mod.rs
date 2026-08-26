@@ -1074,6 +1074,12 @@ impl Scene {
             ),
         }
         scene.fit();
+        // A preset held for this path was left by an import that had to open it first, and would
+        // otherwise sit unapplied: nothing else ever stands the view where it says.
+        if let Some(held) = scene.preset.take() {
+            scene.stand_where(&held);
+            scene.preset = Some(held);
+        }
         scene
     }
 
@@ -3852,6 +3858,9 @@ impl Scene {
         {
             log::warn!("assets/layer: this zone states no weather {id}");
         }
+        // Counts as fitted, so `poll`'s first-placements auto-frame does not undo this once the
+        // zone's own content streams in.
+        self.fitted = self.fitted.max(1);
         self.dirty = true;
     }
 
@@ -3939,15 +3948,15 @@ impl Scene {
                         Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
                     }
                 }
+                let held = preset::Preset::of(
+                    &self.path,
+                    self.camera.position,
+                    self.camera.forward(),
+                    self.fov,
+                    self.ambient.weather_id(),
+                    self.ambient.time,
+                );
                 if ui.button("Export preset").clicked() {
-                    let held = preset::Preset::of(
-                        &self.path,
-                        self.camera.position,
-                        self.camera.forward(),
-                        self.fov,
-                        self.ambient.weather_id(),
-                        self.ambient.time,
-                    );
                     match held.write() {
                         Ok(text) => {
                             let name = format!("TE_{}.json", held.name);
@@ -3963,6 +3972,14 @@ impl Scene {
                                 }
                             }));
                         }
+                        Err(why) => log::error!("assets/layer: {why}"),
+                    }
+                }
+                // The same shape the plugin hands over its own clipboard, so a paste elsewhere
+                // reads it back.
+                if ui.button("Copy preset").clicked() {
+                    match held.share() {
+                        Ok(text) => ui.ctx().copy_text(text),
                         Err(why) => log::error!("assets/layer: {why}"),
                     }
                 }

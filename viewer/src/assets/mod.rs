@@ -1655,9 +1655,15 @@ impl AssetBrowser {
                                         self.goto = Some("/sheet".to_string());
                                     }
                                 }
-                                Kind::Level => {
-                                    if ui.button("Open the Zones tab").clicked() {
-                                        self.goto = Some(format!("/zones/{path}"));
+                                Kind::Level(lvb) => {
+                                    let label = match lvb == path {
+                                        true => "Open the Zones tab".to_owned(),
+                                        false => {
+                                            format!("Open “{}” in Zones", crate::utils::file_name(&lvb))
+                                        }
+                                    };
+                                    if ui.button(label).clicked() {
+                                        self.goto = Some(format!("/zones/{lvb}"));
                                     }
                                 }
                                 Kind::Other => {}
@@ -1918,7 +1924,8 @@ impl AssetBrowser {
 enum Kind {
     Sheet,
     SheetList,
-    Level,
+    /// The `.lvb` to open in the Zones tab: the file itself, or the one a companion resolves to.
+    Level(String),
     Other,
 }
 
@@ -1927,10 +1934,23 @@ impl Kind {
         match path.rsplit('.').next().unwrap_or_default() {
             "exd" | "exh" => Kind::Sheet,
             "exl" => Kind::SheetList,
-            "lvb" => Kind::Level,
+            "lvb" => Kind::Level(path.to_owned()),
+            "lgb" | "svb" | "lcb" | "uwb" => match owning_level(path) {
+                Some(lvb) => Kind::Level(lvb),
+                None => Kind::Other,
+            },
             _ => Kind::Other,
         }
     }
+}
+
+/// The `.lvb` a companion file sits beside: `lgb`, `svb`, `lcb` and `uwb` all live only under a
+/// zone's own `level/` directory, at a path shaped `<zone>/level/<anything>`, and the level itself
+/// is always `<zone>/level/<zone>.lvb`.
+fn owning_level(path: &str) -> Option<String> {
+    let (prefix, _) = path.rsplit_once("/level/")?;
+    let zone = prefix.rsplit('/').next()?;
+    Some(format!("{prefix}/level/{zone}.lvb"))
 }
 
 /// Every extension the path list carries, with what it holds. Also the menu the search box offers,
@@ -2052,6 +2072,23 @@ mod tests {
                 want,
                 "resolving {path}"
             );
+        }
+    }
+
+    #[test]
+    fn resolves_a_companion_to_its_level() {
+        for (path, want) in [
+            (
+                "bg/ffxiv/sea_s1/twn/s1t1/level/bg.lgb",
+                Some("bg/ffxiv/sea_s1/twn/s1t1/level/s1t1.lvb"),
+            ),
+            (
+                "bg/ffxiv/sea_s1/twn/s1t1/level/s1t1.uwb",
+                Some("bg/ffxiv/sea_s1/twn/s1t1/level/s1t1.lvb"),
+            ),
+            ("bgcommon/env/global/ffxiv_genv/genv_s1t1.envb", None),
+        ] {
+            assert_eq!(owning_level(path).as_deref(), want, "resolving {path}");
         }
     }
 

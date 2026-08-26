@@ -27,6 +27,7 @@ use crate::utils::{
 };
 
 const FILTER_ID: &str = "music_filter";
+const LIST_WIDTH: f32 = 340.0;
 
 #[derive(Deserialize, Default)]
 struct SongInfo {
@@ -527,55 +528,57 @@ impl MusicPlayer {
     fn side_panel(&mut self, ui: &mut egui::Ui) -> Option<u32> {
         let mut clicked = None;
         let mut nav = std::mem::take(&mut self.nav);
-        CollapsibleSidePanel::new("music_list", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
-            Panel::top("music_list_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "music_list", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("Tracks"));
-                    });
-                });
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui
-                        .add_enabled(!self.search.is_empty(), Button::new("↩"))
-                        .on_hover_text("Clear")
-                        .clicked()
-                    {
-                        self.search.clear();
-                    }
-                    let unavailable = self.rows.iter().filter(|row| !row.available).count();
-                    if unavailable > 0 {
-                        ui.toggle_value(&mut self.show_unavailable, "🚫")
-                            .on_hover_text(format!("Show {unavailable} unavailable"));
-                    }
-                    ui.add_sized(
-                        Vec2::new(ui.available_width(), 0.0),
-                        TextEdit::singleline(&mut self.search)
-                            .id(egui::Id::new(FILTER_ID))
-                            .hint_text("Filter"),
-                    );
-                });
-                ui.add_space(4.0);
-            });
-
-            CentralPanel::default().show(ui, |ui| match &self.index {
-                Index::Idle | Index::Loading(_) => {
+        CollapsibleSidePanel::new("music_list", Side::Left)
+            .max_width(LIST_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
+                Panel::top("music_list_header").show(ui, |ui| {
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Loading BGM list…");
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "music_list", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("Tracks"));
+                        });
                     });
-                }
-                Index::Failed(error) => {
-                    ui.colored_label(Color32::RED, format!("Failed to load BGM list: {error}"));
-                }
-                Index::Loaded(_) => clicked = self.draw_rows(ui, &mut nav),
+                    ui.add_space(4.0);
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if ui
+                            .add_enabled(!self.search.is_empty(), Button::new("↩"))
+                            .on_hover_text("Clear")
+                            .clicked()
+                        {
+                            self.search.clear();
+                        }
+                        let unavailable = self.rows.iter().filter(|row| !row.available).count();
+                        if unavailable > 0 {
+                            ui.toggle_value(&mut self.show_unavailable, "🚫")
+                                .on_hover_text(format!("Show {unavailable} unavailable"));
+                        }
+                        ui.add_sized(
+                            Vec2::new(ui.available_width(), 0.0),
+                            TextEdit::singleline(&mut self.search)
+                                .id(egui::Id::new(FILTER_ID))
+                                .hint_text("Filter"),
+                        );
+                    });
+                    ui.add_space(4.0);
+                });
+
+                CentralPanel::default().show(ui, |ui| match &self.index {
+                    Index::Idle | Index::Loading(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Loading BGM list…");
+                        });
+                    }
+                    Index::Failed(error) => {
+                        ui.colored_label(Color32::RED, format!("Failed to load BGM list: {error}"));
+                    }
+                    Index::Loaded(_) => clicked = self.draw_rows(ui, &mut nav),
+                });
             });
-        });
         self.nav = nav;
         clicked
     }

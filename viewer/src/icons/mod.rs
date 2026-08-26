@@ -26,6 +26,7 @@ use crate::{
 use refs::{IconRefs, Progress, Use};
 
 const ZOOM_STEPS: [f32; 6] = [32.0, 40.0, 48.0, 64.0, 80.0, 96.0];
+const TREE_WIDTH: f32 = 320.0;
 /// How many cells the grid adds each time the scroll reaches the end.
 const PAGE: usize = 360;
 /// How many decoded icons the grid will let egui hold before it starts giving them back.
@@ -310,39 +311,41 @@ impl IconBrowser {
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) {
-        CollapsibleSidePanel::new("icon_tree", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
-            Panel::top("icon_tree_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "icon_tree", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("Icons"));
+        CollapsibleSidePanel::new("icon_tree", Side::Left)
+            .max_width(TREE_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
+                Panel::top("icon_tree_header").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "icon_tree", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("Icons"));
+                        });
                     });
+                    ui.add_space(4.0);
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if ui
+                            .add_enabled(!self.search.is_empty(), Button::new("↩"))
+                            .on_hover_text("Clear")
+                            .clicked()
+                        {
+                            self.search.clear();
+                        }
+                        ui.toggle_value(&mut self.order_by_count, "🔢")
+                            .on_hover_text("Order by count");
+                        ui.add_sized(
+                            Vec2::new(ui.available_width(), 0.0),
+                            TextEdit::singleline(&mut self.search).hint_text("Search categories"),
+                        );
+                    });
+                    ui.add_space(4.0);
                 });
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui
-                        .add_enabled(!self.search.is_empty(), Button::new("↩"))
-                        .on_hover_text("Clear")
-                        .clicked()
-                    {
-                        self.search.clear();
-                    }
-                    ui.toggle_value(&mut self.order_by_count, "🔢")
-                        .on_hover_text("Order by count");
-                    ui.add_sized(
-                        Vec2::new(ui.available_width(), 0.0),
-                        TextEdit::singleline(&mut self.search).hint_text("Search categories"),
-                    );
-                });
-                ui.add_space(4.0);
-            });
 
-            CentralPanel::default().show(ui, |ui| self.draw_categories(ui, backend));
-        });
+                CentralPanel::default().show(ui, |ui| self.draw_categories(ui, backend));
+            });
     }
 
     fn draw_categories(&mut self, ui: &mut egui::Ui, backend: &Backend) {

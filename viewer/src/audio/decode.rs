@@ -21,11 +21,46 @@ pub struct Decoded {
 
 /// Decode a BGM sound entry to interleaved PCM.
 pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
-    match entry.format() {
+    let mut decoded = match entry.format() {
         Codec::OggVorbis => decode_ogg(entry.data()),
         Codec::Hca => decode_hca(entry.data()),
         other => Err(anyhow!("unsupported audio codec {other:?}")),
+    }?;
+    downmix_to_stereo(&mut decoded);
+    Ok(decoded)
+}
+
+const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// Fold anything wider than stereo down using the ITU-R BS.775 weights: front channels at unity,
+/// center and surrounds at -3 dB, LFE dropped. Channel order is WAVE (FL,FR[,FC,LFE],RL,RR), so
+/// quad and 5.1 are handled by name; other counts keep the front pair. Compacted in place: the
+/// write cursor (stride 2) never catches up to the read cursor (stride N >= 4).
+fn downmix_to_stereo(decoded: &mut Decoded) {
+    let channels = decoded.channels as usize;
+    if channels <= 2 {
+        return;
     }
+    let frames = decoded.samples.len() / channels;
+    let samples = &mut decoded.samples;
+    for i in 0..frames {
+        let base = i * channels;
+        let (l, r) = match channels {
+            4 => (
+                samples[base] + SQRT_HALF * samples[base + 2],
+                samples[base + 1] + SQRT_HALF * samples[base + 3],
+            ),
+            6 => (
+                samples[base] + SQRT_HALF * (samples[base + 2] + samples[base + 4]),
+                samples[base + 1] + SQRT_HALF * (samples[base + 2] + samples[base + 5]),
+            ),
+            _ => (samples[base], samples[base + 1]),
+        };
+        samples[2 * i] = l.clamp(-1.0, 1.0);
+        samples[2 * i + 1] = r.clamp(-1.0, 1.0);
+    }
+    samples.truncate(frames * 2);
+    decoded.channels = 2;
 }
 
 /// OggVorbis via symphonia. Loop points come from the `LoopStart`/`LoopEnd` Vorbis comments,

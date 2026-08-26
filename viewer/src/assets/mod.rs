@@ -46,6 +46,8 @@ const MAX_RESULTS: usize = 500;
 const EXISTS_DELAY: Duration = Duration::from_millis(250);
 /// Width the extension menu is held to.
 const EXTENSION_MENU_WIDTH: f32 = 50.0;
+/// Widest the tree panel may stand.
+const TREE_WIDTH: f32 = 360.0;
 /// Widest the details panel beside a preview may stand.
 pub(crate) const DETAILS_WIDTH: f32 = 400.0;
 const SEARCH_ID: &str = "asset_search";
@@ -1087,108 +1089,110 @@ impl AssetBrowser {
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
         let mut clicked = None;
         let mut nav = std::mem::take(&mut self.nav);
-        CollapsibleSidePanel::new("asset_tree", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
-            Panel::top("asset_tree_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("Assets"));
+        CollapsibleSidePanel::new("asset_tree", Side::Left)
+            .max_width(TREE_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
+                Panel::top("asset_tree_header").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("Assets"));
+                        });
                     });
-                });
-                ui.add_space(4.0);
-                let mut restart = false;
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui
-                        .add_enabled(!self.search.is_empty(), Button::new("↩"))
-                        .on_hover_text("Clear")
-                        .clicked()
-                    {
-                        self.search.clear();
-                        restart = true;
-                    }
-                    ui.toggle_value(&mut self.grouped, "🌳")
-                        .on_hover_text("View as Tree");
-                    let mode = self.mode;
-                    ui.menu_button(mode.emoji(), |ui| {
-                        for option in SearchMode::ALL {
-                            if ui
-                                .selectable_label(mode == option, option.emoji())
-                                .on_hover_text(option.label())
-                                .clicked()
-                            {
-                                self.mode = option;
-                                restart = true;
-                                ui.close();
-                            }
+                    ui.add_space(4.0);
+                    let mut restart = false;
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if ui
+                            .add_enabled(!self.search.is_empty(), Button::new("↩"))
+                            .on_hover_text("Clear")
+                            .clicked()
+                        {
+                            self.search.clear();
+                            restart = true;
                         }
-                    })
-                    .response
-                    .on_hover_text(format!("Search mode: {}", mode.label()));
-                    let picked = parse_query(&self.search).suffix;
-                    ui.menu_button("📄", |ui| {
-                        ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            // Three-letter names leave a menu too narrow to aim at, and too narrow
-                            // for the scroll bar to sit clear of them.
-                            ui.set_min_width(EXTENSION_MENU_WIDTH);
-                            for (extension, what, _) in EXTENSIONS {
-                                let on = picked.trim_start_matches('.') == *extension;
+                        ui.toggle_value(&mut self.grouped, "🌳")
+                            .on_hover_text("View as Tree");
+                        let mode = self.mode;
+                        ui.menu_button(mode.emoji(), |ui| {
+                            for option in SearchMode::ALL {
                                 if ui
-                                    .selectable_label(on, *extension)
-                                    .on_hover_text(*what)
+                                    .selectable_label(mode == option, option.emoji())
+                                    .on_hover_text(option.label())
                                     .clicked()
                                 {
-                                    self.search = set_extension(&self.search, extension);
+                                    self.mode = option;
                                     restart = true;
                                     ui.close();
                                 }
                             }
-                        });
-                    })
-                    .response
-                    .on_hover_text("Filter by extension");
-                    restart |= ui
-                        .add_sized(
-                            Vec2::new(ui.available_width(), 0.0),
-                            TextEdit::singleline(&mut self.search)
-                                .id(egui::Id::new(SEARCH_ID))
-                                .hint_text("Search paths"),
-                        )
-                        .on_hover_text(
-                            "ext:stm for one extension, or include a / to match a fuzzy query \
+                        })
+                        .response
+                        .on_hover_text(format!("Search mode: {}", mode.label()));
+                        let picked = parse_query(&self.search).suffix;
+                        ui.menu_button("📄", |ui| {
+                            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                // Three-letter names leave a menu too narrow to aim at, and too narrow
+                                // for the scroll bar to sit clear of them.
+                                ui.set_min_width(EXTENSION_MENU_WIDTH);
+                                for (extension, what, _) in EXTENSIONS {
+                                    let on = picked.trim_start_matches('.') == *extension;
+                                    if ui
+                                        .selectable_label(on, *extension)
+                                        .on_hover_text(*what)
+                                        .clicked()
+                                    {
+                                        self.search = set_extension(&self.search, extension);
+                                        restart = true;
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("Filter by extension");
+                        restart |= ui
+                            .add_sized(
+                                Vec2::new(ui.available_width(), 0.0),
+                                TextEdit::singleline(&mut self.search)
+                                    .id(egui::Id::new(SEARCH_ID))
+                                    .hint_text("Search paths"),
+                            )
+                            .on_hover_text(
+                                "ext:stm for one extension, or include a / to match a fuzzy query \
                              against the path itself",
-                        )
-                        .changed();
-                });
-                if restart {
-                    self.scan = None;
-                }
-                ui.add_space(4.0);
-            });
-
-            CentralPanel::default().show(ui, |ui| match &mut self.state {
-                Load::Idle | Load::Loading(_) => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Loading path list…");
+                            )
+                            .changed();
                     });
-                }
-                Load::Failed(error) => {
-                    ui.colored_label(Color32::RED, error.clone());
-                }
-                Load::Ready(_) => {
-                    clicked = if self.search.is_empty() {
+                    if restart {
                         self.scan = None;
-                        self.draw_tree(ui)
-                    } else {
-                        self.draw_search(ui, backend, &mut nav)
-                    };
-                }
+                    }
+                    ui.add_space(4.0);
+                });
+
+                CentralPanel::default().show(ui, |ui| match &mut self.state {
+                    Load::Idle | Load::Loading(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Loading path list…");
+                        });
+                    }
+                    Load::Failed(error) => {
+                        ui.colored_label(Color32::RED, error.clone());
+                    }
+                    Load::Ready(_) => {
+                        clicked = if self.search.is_empty() {
+                            self.scan = None;
+                            self.draw_tree(ui)
+                        } else {
+                            self.draw_search(ui, backend, &mut nav)
+                        };
+                    }
+                });
             });
-        });
         self.nav = nav;
         clicked
     }

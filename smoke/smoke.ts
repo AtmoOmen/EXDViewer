@@ -29,8 +29,8 @@ function flag(name: string, fallback: string): string {
 
 const MODEL = flag("model", "bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl");
 const SCENE = flag("scene", "bg/ex1/01_roc_r2/dun/r2d1/level/bg.lgb");
-// A level names the layer groups a zone is built from and the environment it stands under, and it
-// opens through the same tabs an lgb does.
+// A level names the layer groups a zone is built from and the environment it stands under. It
+// opens through the Zones tab, which places it as soon as it decodes rather than behind a click.
 const LEVEL = flag("level", "bg/ex1/01_roc_r2/dun/r2d1/level/r2d1.lvb");
 
 // How long a scene is left drawing before it is shot. The default is enough to have loaded
@@ -147,7 +147,9 @@ let decoded = 0;
 function record(where: string, source: string, level: string, text: string) {
     const message: Message = { where: phase, source, level, text };
     if (/assets\/avfx:/.test(text)) noted.push(message);
-    if (/assets\/preview: /.test(text)) decoded += 1;
+    // The Zones tab decodes a level straight through the layer viewer rather than through the
+    // Assets tab's preview wrapper, so it logs under its own line instead of "assets/preview:".
+    if (/assets\/(preview: |layer: )/.test(text)) decoded += 1;
     if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
         muted.push(message);
         return;
@@ -566,10 +568,10 @@ async function main() {
         console.log("   the preview frame came back the same");
 
         phase = "scene";
-        report.scene = await walk(cdp, origin, SCENE, "04-scene");
+        report.scene = await walk(cdp, origin, SCENE, "04-scene", "assets");
 
         phase = "level";
-        report.level = await walk(cdp, origin, LEVEL, "05-level");
+        report.level = await walk(cdp, origin, LEVEL, "05-level", "zones");
 
         await effects();
     } finally {
@@ -585,12 +587,13 @@ async function main() {
     }
 }
 
-/// A layer file opened, switched to its 3D tab, and left drawing long enough to have loaded
-/// something. The same walk serves an lgb and the lvb naming it.
-async function walk(cdp: Cdp, origin: string, path: string, name: string) {
+/// A layer file opened and left drawing long enough to have loaded something. An lgb opens in the
+/// Assets tab and needs its 3D tab clicked; the lvb naming it opens in the Zones tab, which places
+/// the scene itself rather than showing it behind a tree/scene toggle.
+async function walk(cdp: Cdp, origin: string, path: string, name: string, route: string) {
     console.log(`\n== ${phase}: ${path}`);
     const opened = decoded;
-    await cdp.send("Page.navigate", { url: `${origin}/assets/${path}` });
+    await cdp.send("Page.navigate", { url: `${origin}/${route}/${path}` });
     await waitFor(`${path} to be titled`, 180_000, async () => {
         const title = await cdp.eval<string>("document.title").catch(() => "");
         return title.includes(path.split("/").pop()!);
@@ -598,7 +601,9 @@ async function walk(cdp: Cdp, origin: string, path: string, name: string) {
     await waitFor(`${path} to be decoded`, 180_000, async () => decoded > opened);
     await sleep(3000);
     const before = await counters(cdp);
-    await click(cdp, SCENE_TAB.x, SCENE_TAB.y);
+    if (route === "assets") {
+        await click(cdp, SCENE_TAB.x, SCENE_TAB.y);
+    }
     await waitFor("the scene to draw its instances", 300_000, async () => {
         const c = await counters(cdp).catch(() => ({}) as any);
         return (c.instanced ?? 0) > before.instanced;

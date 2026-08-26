@@ -54,8 +54,9 @@ It then walks the paths that broke:
 3. Sweeps the channel row, covering `SV_Target`, `SV_Target1..4` and `Lit`.
 4. Clicks **Game shaders** off again and compares the preview frame against the one taken before
    any of that, which is what catches the deferred path leaving GL state behind.
-5. Opens a `.lgb`, clicks its **Scene** tab, and waits for instanced draws.
-6. Does the same for the `.lvb` naming that zone, which reaches the environment panel's own files.
+5. Opens a `.lgb` in the Assets tab, clicks its **Scene** tab, and waits for instanced draws.
+6. Opens the `.lvb` naming that zone in the Zones tab, which places the scene itself rather than
+   showing it behind a tab click, and reaches the environment panel's own files.
 7. Opens each `.avfx` in turn, dropping local storage behind the navigation since eframe writes
    egui's panel widths into it, and clicks its playback slider at two points of its own timeline,
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.

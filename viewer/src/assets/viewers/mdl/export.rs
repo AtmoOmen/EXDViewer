@@ -56,6 +56,9 @@ struct MaterialInfo {
     cull: bool,
     textures: [Option<String>; 4],
     table: Option<Vec<f32>>,
+    diffuse_color: [f32; 3],
+    emissive_color: [f32; 3],
+    normal_scale: f32,
 }
 
 struct Skeleton {
@@ -266,6 +269,9 @@ fn material_info(path: &str, material: &Material) -> MaterialInfo {
         textures: [Role::Normal, Role::Index, Role::Mask, Role::Diffuse]
             .map(|role| material.texture(role).cloned()),
         table: material.table().map(<[f32]>::to_vec),
+        diffuse_color: material.diffuse(),
+        emissive_color: material.emissive(),
+        normal_scale: material.normal_scale(),
     }
 }
 
@@ -604,6 +610,9 @@ fn shade_texel(
     {
         opacity *= f32::from(diffuse[3]) / 255.0;
     }
+
+    let albedo = std::array::from_fn(|i| albedo[i] * material.diffuse_color[i]);
+    let emissive = std::array::from_fn(|i| emissive[i] + material.emissive_color[i]);
 
     Shaded {
         albedo,
@@ -1012,6 +1021,9 @@ fn material_json(info: &MaterialInfo, baked: &BakedMaterial, writer: &mut Writer
             if let Some(normal) = normal {
                 let index = writer.texture(&tex_png(normal));
                 material["normalTexture"] = json!({ "index": index });
+                if info.normal_scale != 1.0 {
+                    material["normalTexture"]["scale"] = json!(info.normal_scale);
+                }
             }
         }
     }
@@ -1056,14 +1068,14 @@ fn write_glb(document: &Value, bin: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Fetches every texture a scene's materials name at full resolution, bakes them and writes the
-/// result. The only part of the export that touches the network, so it is what runs after
+/// Fetches every texture a scene's materials name, no larger than the bake ever keeps, and writes
+/// the result. The only part of the export that touches the network, so it is what runs after
 /// `gather` has already taken everything else it needs off the model, letting the caller hold no
 /// reference to it across the wait.
 pub(super) async fn finish(scene: Scene, files: &dyn FileProvider) -> Result<Vec<u8>> {
     let mut images = BTreeMap::new();
     for path in texture_paths(&scene) {
-        match files.read_texture(&path, None).await {
+        match files.read_texture(&path, Some(MAX_TEXTURE_DIM as u16)).await {
             Ok(decoded) => {
                 images.insert(path, DynamicImage::ImageRgba8(decoded.image));
             }

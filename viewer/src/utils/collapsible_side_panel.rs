@@ -24,6 +24,7 @@ pub struct CollapsibleSidePanel {
     id: Id,
     side: Side,
     collapsed_width: Option<f32>,
+    min_width: Option<f32>,
     max_width: Option<f32>,
 }
 
@@ -33,12 +34,20 @@ impl CollapsibleSidePanel {
             id: id.into(),
             side,
             collapsed_width: None,
+            min_width: None,
             max_width: None,
         }
     }
 
     pub fn collapsed_width(mut self, width: f32) -> Self {
         self.collapsed_width = Some(width);
+        self
+    }
+
+    /// How narrow the user can drag the panel. Content must actually fit at this width - a row
+    /// that can't shrink past its own natural size pins the panel there regardless of this.
+    pub fn min_width(mut self, width: f32) -> Self {
+        self.min_width = Some(width);
         self
     }
 
@@ -63,10 +72,13 @@ impl CollapsibleSidePanel {
             .resizable(false)
             .exact_size(self.collapsed_width.unwrap_or_default());
 
-        let expanded_panel = match self.max_width {
-            Some(width) => self.side.panel(self.id).max_size(width),
-            None => self.side.panel(self.id),
-        };
+        let mut expanded_panel = self.side.panel(self.id);
+        if let Some(width) = self.min_width {
+            expanded_panel = expanded_panel.min_size(width);
+        }
+        if let Some(width) = self.max_width {
+            expanded_panel = expanded_panel.max_size(width);
+        }
 
         if openness != 0.0 || self.collapsed_width.is_some() {
             let mut is_expanded = is_expanded;

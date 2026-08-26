@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -77,7 +78,7 @@ struct StreamInfo {
 
 enum Stage {
     Downloading(TrackedPromise<Result<(SoundContainer, usize)>>),
-    Decoding(StreamInfo, TrackedPromise<Result<Decoded>>),
+    Decoding(StreamInfo, TrackedPromise<Result<(Decoded, Arc<[u8]>)>>),
 }
 
 struct Loading {
@@ -104,6 +105,7 @@ struct NowPlaying {
     sample_rate: u32,
     loop_range_secs: Option<(f64, f64)>,
     info: StreamInfo,
+    stream: Arc<[u8]>,
 }
 
 struct TrackRow {
@@ -134,6 +136,7 @@ pub struct MusicPlayer {
     nav: ListNav,
     scrub: Option<f64>,
     viz: Vec<f32>,
+    export_promise: Option<TrackedPromise<()>>,
 }
 
 impl Default for MusicPlayer {
@@ -159,6 +162,7 @@ impl Default for MusicPlayer {
             nav: ListNav::default(),
             scrub: None,
             viz: Vec::new(),
+            export_promise: None,
         }
     }
 }
@@ -169,6 +173,13 @@ enum Cmd {
     Seek(f64),
     Volume(f32),
     ToggleVisualizer,
+    Export(ExportFormat),
+}
+
+#[derive(Clone, Copy)]
+enum ExportFormat {
+    Original,
+    Wav,
 }
 
 impl MusicPlayer {
@@ -372,7 +383,8 @@ impl MusicPlayer {
                             .entries()
                             .first()
                             .ok_or_else(|| anyhow!("no audio streams"))?;
-                        audio::decode(entry)
+                        let stream: Arc<[u8]> = Arc::from(entry.data().as_slice());
+                        Ok((audio::decode(entry)?, stream))
                     });
                     self.loading = Some(Loading {
                         row_id,
@@ -384,7 +396,7 @@ impl MusicPlayer {
                 Err(error) => log::error!("BGM download failed: {error}"),
             },
             Stage::Decoding(info, promise) => match promise.block_and_take() {
-                Ok(decoded) => self.start(row_id, name, path, info, decoded),
+                Ok((decoded, stream)) => self.start(row_id, name, path, info, decoded, stream),
                 Err(error) => log::error!("BGM decode failed: {error}"),
             },
         }
@@ -431,6 +443,7 @@ impl MusicPlayer {
         path: String,
         info: StreamInfo,
         decoded: Decoded,
+        stream: Arc<[u8]>,
     ) {
         if !self.ensure_player() {
             return;
@@ -447,6 +460,7 @@ impl MusicPlayer {
                 .zip(decoded.loop_end)
                 .map(|(start, end)| (f64::from(start) / rate, f64::from(end) / rate)),
             info,
+            stream,
         };
         let player = self.player.as_mut().unwrap();
         player.set_volume(self.volume);
@@ -668,8 +682,10 @@ impl MusicPlayer {
     }
 
     fn draw_player(&mut self, ui: &mut egui::Ui) {
+        self.export_promise
+            .take_if(|promise| promise.try_get().is_some());
         let now = self.now_playing.as_ref().unwrap();
-        let (name, path, loop_range, channels, sample_rate, info, row_id) = (
+        let (name, path, loop_range, channels, sample_rate, info, row_id, stream) = (
             now.name.clone(),
             now.path.clone(),
             now.loop_range_secs,
@@ -677,6 +693,7 @@ impl MusicPlayer {
             now.sample_rate,
             now.info,
             now.row_id,
+            now.stream.clone(),
         );
         let locations = self
             .songs
@@ -691,6 +708,7 @@ impl MusicPlayer {
         let bar_position = self.scrub.unwrap_or(position);
         let mut volume = self.volume;
         let show_viz = self.show_visualizer;
+        let exporting = self.export_promise.is_some();
 
         let mut spectrum = [0u8; 4096];
         if show_viz && let Some(player) = &self.player {
@@ -764,6 +782,21 @@ impl MusicPlayer {
                     {
                         cmd = Some(Cmd::ToggleVisualizer);
                     }
+                    if exporting {
+                        ui.spinner();
+                    }
+                    ui.add_enabled_ui(!exporting, |ui| {
+                        ui.menu_button("Export", |ui| {
+                            if ui.button("Original file").clicked() {
+                                cmd = Some(Cmd::Export(ExportFormat::Original));
+                                ui.close();
+                            }
+                            if ui.button("WAV").clicked() {
+                                cmd = Some(Cmd::Export(ExportFormat::Wav));
+                                ui.close();
+                            }
+                        });
+                    });
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().slider_width = 150.0;
@@ -814,8 +847,48 @@ impl MusicPlayer {
                 }
             }
             Some(Cmd::ToggleVisualizer) => self.show_visualizer = !self.show_visualizer,
+            Some(Cmd::Export(format)) => self.export(name, info.codec, stream, format),
             None => {}
         }
+    }
+
+    /// The original stream is the entry's own bytes untouched; WAV re-decodes them so an export
+    /// always carries the same stereo the player produced, even for a multichannel source.
+    fn export(&mut self, name: String, codec: Codec, stream: Arc<[u8]>, format: ExportFormat) {
+        let (extension, title) = match format {
+            ExportFormat::Original => (codec_extension(codec), "Export Original Audio"),
+            ExportFormat::Wav => ("wav", "Export WAV Audio"),
+        };
+        let file_name = format!("{}.{extension}", safe_file_name(&name));
+        self.export_promise = Some(TrackedPromise::spawn_local(async move {
+            let data = match format {
+                ExportFormat::Original => stream.to_vec(),
+                ExportFormat::Wav => {
+                    let encoded = audio::decode_data(codec, &stream)
+                        .and_then(|decoded| audio::encode_wav(&decoded));
+                    match encoded {
+                        Ok(data) => data,
+                        Err(error) => {
+                            log::error!("BGM WAV encode failed: {error}");
+                            return;
+                        }
+                    }
+                }
+            };
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title(title)
+                .set_file_name(file_name)
+                .add_filter(extension.to_ascii_uppercase(), &[extension])
+                .save_file()
+                .await
+            {
+                if let Err(error) = file.write(&data).await {
+                    log::error!("BGM export failed: {error}");
+                } else {
+                    log::info!("BGM exported successfully");
+                }
+            }
+        }));
     }
 
     fn viz_bars(&mut self, spectrum: &[u8], sample_rate: u32, playing: bool) -> Vec<f32> {
@@ -926,6 +999,36 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::Pcm => "PCM",
         Codec::Empty => "Empty",
         Codec::Unknown(_) => "Unknown",
+    }
+}
+
+/// Ogg and Hca are the only codecs `audio::decode` ever hands back a `NowPlaying` for, so
+/// anything else here is unreachable; the fallback stays honest rather than naming a container
+/// the raw entry bytes do not actually have.
+fn codec_extension(codec: Codec) -> &'static str {
+    match codec {
+        Codec::OggVorbis => "ogg",
+        Codec::Hca => "hca",
+        _ => "bin",
+    }
+}
+
+fn safe_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|character| {
+            if "<>:\"/\\|?*".contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        "music".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -1042,6 +1145,7 @@ mod tests {
                     file_size: 0,
                     stream_size: 0,
                 },
+                stream: Arc::from(&[][..]),
             }),
             ..Default::default()
         };

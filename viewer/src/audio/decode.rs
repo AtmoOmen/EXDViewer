@@ -21,13 +21,66 @@ pub struct Decoded {
 
 /// Decode a BGM sound entry to interleaved PCM.
 pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
-    let mut decoded = match entry.format() {
-        Codec::OggVorbis => decode_ogg(entry.data()),
-        Codec::Hca => decode_hca(entry.data()),
+    decode_data(entry.format(), entry.data())
+}
+
+/// Decode raw codec bytes directly, for re-decoding a stream already held in memory.
+pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
+    let mut decoded = match codec {
+        Codec::OggVorbis => decode_ogg(data),
+        Codec::Hca => decode_hca(data),
         other => Err(anyhow!("unsupported audio codec {other:?}")),
     }?;
     downmix_to_stereo(&mut decoded);
     Ok(decoded)
+}
+
+/// Encode decoded PCM as a 16-bit PCM WAV file.
+pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
+    let channels = u32::from(audio.channels);
+    let data_size = audio
+        .samples
+        .len()
+        .checked_mul(2)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| anyhow!("PCM data too large for WAV"))?;
+    let riff_size = data_size
+        .checked_add(36)
+        .ok_or_else(|| anyhow!("PCM data too large for WAV"))?;
+    let byte_rate = audio
+        .sample_rate
+        .checked_mul(channels)
+        .and_then(|rate| rate.checked_mul(2))
+        .ok_or_else(|| anyhow!("WAV byte rate overflows"))?;
+    let block_align = audio
+        .channels
+        .checked_mul(2)
+        .ok_or_else(|| anyhow!("WAV block alignment overflows"))?;
+
+    let mut wav = Vec::with_capacity(44 + data_size as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_size.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&audio.channels.to_le_bytes());
+    wav.extend_from_slice(&audio.sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    for &sample in &audio.samples {
+        // A full-scale negative sample maps to the true i16::MIN rather than clipping a step
+        // short of it, since the positive and negative ranges of i16 are not symmetric.
+        let pcm = if sample <= -1.0 {
+            i16::MIN
+        } else {
+            (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+        };
+        wav.extend_from_slice(&pcm.to_le_bytes());
+    }
+    Ok(wav)
 }
 
 const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;

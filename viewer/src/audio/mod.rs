@@ -2,7 +2,7 @@
 //! backend is platform-specific (rodio natively, Web Audio on wasm).
 
 mod decode;
-pub use decode::{Decoded, decode};
+pub use decode::{Decoded, decode, decode_data, encode_wav};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;

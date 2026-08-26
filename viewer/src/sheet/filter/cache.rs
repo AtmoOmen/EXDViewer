@@ -335,4 +335,21 @@ mod tests {
 
         assert_ne!(bare_compiled, case_insensitive_compiled);
     }
+
+    #[test]
+    fn regex_literal_and_quoted_pattern_do_not_collide() {
+        let cache = make_cache(&["Name"]);
+        let options = MatchOptions {
+            case_insensitive: false,
+            use_display_field: false,
+        };
+
+        let literal = FilterInput::Complex(ComplexFilter::from_str("Name /= /foo/").unwrap());
+        let quoted = FilterInput::Complex(ComplexFilter::from_str(r#"Name /= "/foo/""#).unwrap());
+
+        let literal_compiled = cache.compile(&literal, options).unwrap();
+        let quoted_compiled = cache.compile(&quoted, options).unwrap();
+
+        assert_ne!(literal_compiled, quoted_compiled);
+    }
 }

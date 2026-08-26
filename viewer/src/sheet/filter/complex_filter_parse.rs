@@ -254,7 +254,7 @@ fn parse_regex_value(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
             let s = parse_string_value(inner)?;
             let regex =
                 Regex::new(&s).map_err(|e| format!("Failed to compile regex from string: {e}"))?;
-            Ok(RegexWrapper::new(regex, s))
+            Ok(RegexWrapper::new(regex, String::new()))
         }
         _ => unreachable!("Unexpected rule in regex_value: {:?}", inner.as_rule()),
     }
@@ -302,7 +302,6 @@ fn parse_bare_string(pair: Pair<'_, Rule>) -> &'_ str {
 
 fn parse_regex(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
     assert_eq!(pair.as_rule(), Rule::regex);
-    let source = pair.as_str().to_string();
     let (slash, str_value, flags) = pair.into_inner().collect_tuple().ok_or_else(|| {
         "Expected exactly three tokens inside regex (slash, string_value, flags)".to_string()
     })?;
@@ -345,7 +344,7 @@ fn parse_regex(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
     let regex = regex_builder
         .build()
         .map_err(|e| format!("Failed to build regex: {e}"))?;
-    Ok(RegexWrapper::new(regex, source))
+    Ok(RegexWrapper::new(regex, flags_str.to_string()))
 }
 
 fn parse_number(pair: Pair<'_, Rule>) -> Result<i128, String> {

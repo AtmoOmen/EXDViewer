@@ -433,8 +433,8 @@ mod real_scd {
         assert_eq!(wav.len(), 16);
 
         for (entry, (_, wav_bytes)) in entries.iter().filter(|e| e.format() != Codec::Empty).zip(&wav) {
-            // A full parse, not just a byte offset: proves the exported file is a WAV any reader
-            // accepts, not merely a header shaped like one.
+            // A full parse rather than a byte offset: proves the exported file is a WAV any
+            // reader accepts, not merely a header shaped like one.
             let mut reader = hound::WavReader::new(Cursor::new(wav_bytes.as_slice())).unwrap();
             let spec = reader.spec();
             assert_eq!(

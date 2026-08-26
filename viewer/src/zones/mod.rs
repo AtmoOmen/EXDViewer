@@ -180,10 +180,14 @@ impl ZoneBrowser {
 
         let clicked = self.side_panel(ui);
         let followed = self.main_panel(ui, backend);
-        picked
-            .or(clicked)
-            .map(Action::Select)
-            .or_else(|| followed.map(Action::Navigate))
+        picked.or(clicked).map(Action::Select).or_else(|| {
+            followed.map(|path| match path.ends_with(".lvb") {
+                // A preset naming another zone follows as a whole level, which belongs in this tab
+                // rather than the Assets tab an ordinary file link opens.
+                true => Action::Select(path),
+                false => Action::Navigate(path),
+            })
+        })
     }
 
     fn draw_palette(&mut self, ctx: &egui::Context) -> Option<String> {

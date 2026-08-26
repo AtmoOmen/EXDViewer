@@ -267,15 +267,14 @@ struct MergeTarget {
     count: usize,
 }
 
-/// Where the shader list's two chip rows currently name exactly one stage and one pass with more
-/// than one shader behind it. A single-shader "merge" is degenerate (the All-shaders choices
-/// already cover it correctly) and `shadermerge`'s own struct synthesis can drop an implicit
-/// output register in that case, so it is excluded here rather than offered and shown to fail.
+/// Where the shader list's two chip rows currently name exactly one stage and one pass with a
+/// shader behind it. A pass the chosen stage does not run has nothing to merge, and
+/// `shadermerge::pass` would only answer `NoSuchGroup`.
 fn merge_target(ctx: &egui::Context, package: &Rendered) -> Option<MergeTarget> {
     let (chip_stage, chip_pass, _) =
         ctx.data(|data| data.get_temp::<(usize, usize, usize)>(package.state))?;
     let count = list::mergeable(package, chip_stage, chip_pass).ok()?;
-    if count < 2 {
+    if count == 0 {
         return None;
     }
     let (stage_name, ..) = package.stages.get(chip_stage.checked_sub(1)?)?;
@@ -440,15 +439,12 @@ mod tests {
         );
     }
 
-    /// The Pixel/`PASS_G_SEMITRANSPARENCY` pass in this package is exactly this case:
-    /// `shadermerge::pass` emits `output.SV_Depth.x = ...` while its own synthesized `Output`
-    /// struct declares only `SV_TARGET`, so `dxc` rejects it even though the same shader compiles
-    /// clean through the plain per-shader export. The menu must never offer a single-shader merge,
-    /// since the All-shaders choices already cover it and `merge_target` cannot tell this case from
-    /// one `shadermerge` handles correctly.
+    /// The Pixel/`PASS_G_SEMITRANSPARENCY` pass in this package writes depth from a single shader.
+    /// `shadermerge::pass` now names the depth output the same way its merged program declares it,
+    /// so the menu offers the Merged pair here too.
     #[test]
     #[ignore = "reads the real local FFXIV install"]
-    fn export_choices_omit_the_merged_pair_for_a_single_shader_target() {
+    fn export_choices_gain_the_merged_pair_for_a_single_shader_target() {
         let (path, bytes) = createviewposition();
         let preview = super::decode(&path, &bytes).expect("a real .shpk decodes");
         let super::Preview::Shpk(package) = preview else {
@@ -463,8 +459,64 @@ mod tests {
         let named = super::export_choices(&package, &bytes, &ctx);
         assert_eq!(
             named.len(),
-            2,
-            "a single-shader target stays at the two All-shaders choices, no Merged pair"
+            4,
+            "a single-shader target gets the Merged pair too, same as any other"
+        );
+    }
+
+    /// The Pixel/`PASS_G_SEMITRANSPARENCY` pass merges a single shader that writes depth.
+    /// `dxc` accepting the source is not enough on its own (a struct field with no write, or a
+    /// write with no field, both compile): the merged source has to declare `SV_Depth` and assign
+    /// it, not just one of the two.
+    #[test]
+    #[ignore = "reads the real local FFXIV install and shells out to dxc"]
+    fn the_single_shader_depth_merge_compiles_and_writes_depth() {
+        use ironworks::file::shpk;
+
+        let (path, bytes) = createviewposition();
+        let preview = super::decode(&path, &bytes).expect("a real .shpk decodes");
+        let super::Preview::Shpk(package) = preview else {
+            panic!("decode() of a .shpk did not return Preview::Shpk");
+        };
+
+        let (stage_chip, pass_chip) = find_combo(&package, |count| count == 1)
+            .expect("createviewposition.shpk has a stage and pass with exactly one shader");
+        let stage_name = package.stages[stage_chip - 1].0;
+        let stage_index = match stage_name {
+            "Vertex" => 0,
+            "Pixel" => 1,
+            "Hull" => 2,
+            "Domain" => 3,
+            "Geometry" => 4,
+            other => panic!("no shadermerge stage index for {other}"),
+        };
+        let pass_id = package.keys.passes[pass_chip - 1].id;
+
+        let raw = shpk::ShaderPackage::parse(&bytes).expect("the raw package parses");
+        let merged = shadermerge::pass(&raw, &bytes, stage_index, pass_id)
+            .unwrap_or_else(|error| panic!("shadermerge::pass failed: {error:?}"));
+        let source = merged.lines.join("\n");
+        assert!(
+            source.contains("SV_Depth : SV_Depth"),
+            "the merged struct must declare a depth field:\n{source}"
+        );
+        assert!(
+            source.contains("output.SV_Depth"),
+            "the merged body must assign it:\n{source}"
+        );
+
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
+        let out = std::path::Path::new(&dir).join("shpk_export_check_depth_merged.hlsl");
+        std::fs::write(&out, &source).unwrap();
+        let check = std::process::Command::new("dxc")
+            .args(["-T", "ps_6_0", "-E", "main", "-Fo", "/dev/null"])
+            .arg(&out)
+            .output()
+            .expect("dxc must be on PATH to run this check");
+        assert!(
+            check.status.success(),
+            "dxc rejected the merged depth source:\n{}",
+            String::from_utf8_lossy(&check.stderr)
         );
     }
 

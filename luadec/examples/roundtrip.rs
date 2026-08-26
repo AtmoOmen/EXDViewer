@@ -9,6 +9,7 @@
 //! `luac` has to be a Lua 5.1 one that reads the 32-bit chunks the game ships. On a 64-bit host that
 //! means `sizeof(size_t)` patched to four in `lundump.c` and `ldump.c`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -114,7 +115,39 @@ impl Tally {
 ///
 /// A function closing over an upvalue cannot stand on its own, and one the reading did not resolve
 /// whole has nothing to check, so in both cases what is inside it is tried instead.
-fn check(luac: &str, work: &Path, held: &Function, main: bool, tally: &mut Tally) {
+/// Where two functions' instructions first disagree, as a reason to group by.
+fn diverges(read: &Function, held: &Function) -> String {
+    if read.code().len() != held.code().len() {
+        return format!(
+            "{} instructions read, {} in the original",
+            read.code().len(),
+            held.code().len()
+        );
+    }
+    match read
+        .code()
+        .iter()
+        .zip(held.code())
+        .position(|(read, held)| read.opcode() != held.opcode())
+    {
+        Some(at) => format!(
+            "instruction {at}: read {:?}, original {:?}",
+            read.code()[at].opcode(),
+            held.code()[at].opcode()
+        ),
+        // Same opcodes throughout: an operand (register, constant index) differs instead.
+        None => "same opcodes, different operands".to_owned(),
+    }
+}
+
+fn check(
+    luac: &str,
+    work: &Path,
+    held: &Function,
+    main: bool,
+    tally: &mut Tally,
+    signatures: &mut BTreeMap<String, usize>,
+) {
     let source = luadec::source(held).filter(|_| main || held.upvalues() == 0);
     if let Some(source) = source {
         let text = match main {
@@ -162,9 +195,12 @@ fn check(luac: &str, work: &Path, held: &Function, main: bool, tally: &mut Tally
         }) {
             tally.shaped += 1;
         }
+        if let Some(read) = read {
+            *signatures.entry(diverges(read, held)).or_default() += 1;
+        }
     }
     for nested in held.functions() {
-        check(luac, work, nested, false, tally);
+        check(luac, work, nested, false, tally, signatures);
     }
 }
 
@@ -185,6 +221,7 @@ fn main() {
     let files = chunks(&root);
     let mut total = Tally::default();
     let mut whole = 0usize;
+    let mut signatures = BTreeMap::<String, usize>::new();
     for (at, file) in files.iter().enumerate() {
         let Ok(bytes) = std::fs::read(file) else {
             continue;
@@ -196,10 +233,10 @@ fn main() {
         match luadec::units(&chunk) {
             Some(units) => {
                 for unit in units {
-                    check(&luac, &work, unit, true, &mut tally);
+                    check(&luac, &work, unit, true, &mut tally, &mut signatures);
                 }
             }
-            None => check(&luac, &work, chunk.main(), true, &mut tally),
+            None => check(&luac, &work, chunk.main(), true, &mut tally, &mut signatures),
         }
         if tally.offered > 0 && tally.matched == tally.offered {
             whole += 1;
@@ -219,4 +256,11 @@ fn main() {
         total.differed, total.shaped
     );
     println!("  did not compile  {}", total.rejected);
+
+    let mut ordered: Vec<_> = signatures.into_iter().collect();
+    ordered.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+    println!("\nwhere a differing function first disagrees:");
+    for (signature, count) in ordered {
+        println!("  {count:>7}  {signature}");
+    }
 }

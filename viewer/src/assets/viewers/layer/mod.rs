@@ -204,6 +204,9 @@ pub struct Rendered {
     /// than with the file.
     placed: Cell<bool>,
     scene: RefCell<Option<scene::Scene>>,
+    /// Whether the scene view is offered at all. A `.lvb` opens with it off, since the Assets tab
+    /// no longer places one; `show_scene` turns it on for the Zones tab, which does.
+    scene_enabled: Cell<bool>,
 }
 
 fn axes(values: [f32; 3]) -> String {
@@ -713,6 +716,7 @@ fn tally(groups: &[LayerGroup]) -> Vec<(String, usize)> {
 }
 
 fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Source) -> Rendered {
+    let scene_enabled = !matches!(source, Source::Level(_));
     let rows = rows(source.groups());
     let kinds = tally(source.groups());
     let instances = kinds.iter().map(|(_, count)| count).sum::<usize>();
@@ -750,6 +754,7 @@ fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Sourc
         state: egui::Id::new(path).with("layer_tree"),
         placed: Cell::new(false),
         scene: RefCell::new(None),
+        scene_enabled: Cell::new(scene_enabled),
     }
 }
 
@@ -759,17 +764,19 @@ pub fn ui(
     deps: &mut Deps,
     backend: &Backend,
 ) -> Option<String> {
-    ui.horizontal(|ui| {
-        for (placed, label) in [(false, "Tree"), (true, "Scene")] {
-            if ui
-                .selectable_label(file.placed.get() == placed, label)
-                .clicked()
-            {
-                file.placed.set(placed);
+    if file.scene_enabled.get() {
+        ui.horizontal(|ui| {
+            for (placed, label) in [(false, "Tree"), (true, "Scene")] {
+                if ui
+                    .selectable_label(file.placed.get() == placed, label)
+                    .clicked()
+                {
+                    file.placed.set(placed);
+                }
             }
-        }
-    });
-    ui.add_space(4.0);
+        });
+        ui.add_space(4.0);
+    }
     if file.placed.get() {
         let mut held = file.scene.borrow_mut();
         scene::ui(
@@ -949,8 +956,9 @@ pub fn ui(
 
 impl Rendered {
     /// Lands a fresh view on the placed scene rather than the raw tree, for a host built
-    /// specifically to show it.
+    /// specifically to show it. Also what turns the scene view on in the first place for a `.lvb`.
     pub fn show_scene(&self) {
+        self.scene_enabled.set(true);
         self.placed.set(true);
     }
 

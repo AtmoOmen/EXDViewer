@@ -309,6 +309,17 @@ impl Model {
         self.game.buffers.attachments()
     }
 
+    /// What the context answered, once it has.
+    pub fn attachments_learned(&self) -> Option<usize> {
+        self.game.buffers.attachments_learned()
+    }
+
+    /// Carries that answer over to a `Model` built fresh, so it draws its first frame at the real
+    /// count rather than the four a context is merely promised.
+    pub fn seed_attachments(&mut self, learned: usize) {
+        self.game.buffers.seed_attachments(learned);
+    }
+
     /// Hands a material's color table over for the next draw to upload.
     pub fn queue_table(&mut self, material: usize, values: Vec<f32>) {
         self.queued.push((material, values));

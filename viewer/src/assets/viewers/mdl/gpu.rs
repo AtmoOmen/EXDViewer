@@ -836,7 +836,10 @@ impl Game {
             if held.is_empty() {
                 continue;
             }
-            let into = self.buffers.frame().ok_or("no lit frame")?;
+            // Tested against a copy of the depth rather than the depth itself: water reads the
+            // depth back, and the live one is the framebuffer's own attachment.
+            self.buffers.cut(gl)?;
+            let into = self.buffers.bare().ok_or("no lit frame")?;
             let size = self.buffers.size();
             unsafe {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
@@ -968,7 +971,10 @@ impl Game {
         self.buffers
             .relight(gl, lighting, scene, &[frame.scene.lamp])?;
 
-        let into = self.buffers.frame().ok_or("no lit frame")?;
+        // Tested against a copy of the depth rather than the depth itself: a surface here also
+        // samples it, and the live one is the framebuffer's own attachment.
+        self.buffers.cut(gl)?;
+        let into = self.buffers.bare().ok_or("no lit frame")?;
         let size = self.buffers.size();
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));

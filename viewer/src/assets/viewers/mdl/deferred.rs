@@ -2889,10 +2889,37 @@ impl Buffers {
         drawn
     }
 
-    /// The framebuffer the composite resolved into, which is what a pass drawn over the frame
-    /// writes.
-    pub fn frame(&self) -> Option<glow::Framebuffer> {
-        self.lit.map(|(frame, _)| frame)
+    /// The framebuffer the composite resolved into, standing on a copy of the depth rather than
+    /// the depth itself: what a pass drawn over the frame writes, when that pass also samples the
+    /// scene depth, since a texture cannot be attached to the framebuffer it is bound to sample
+    /// from.
+    pub fn bare(&self) -> Option<glow::Framebuffer> {
+        self.bare
+    }
+
+    /// Refreshes that copy from what the frame currently holds.
+    pub fn cut(&self, gl: &glow::Context) -> Result<(), String> {
+        let (frame, _) = self.lit.ok_or("no lit frame")?;
+        let into = self.bare.ok_or("no lit frame")?;
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(frame));
+            gl.bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(into));
+            let (width, height) = self.size;
+            gl.blit_framebuffer(
+                0,
+                0,
+                width,
+                height,
+                0,
+                0,
+                width,
+                height,
+                glow::DEPTH_BUFFER_BIT,
+                glow::NEAREST,
+            );
+        }
+        Ok(())
     }
 
     /// Clears one page of the G-buffer and points the draw buffers at every attachment it has.

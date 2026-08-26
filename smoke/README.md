@@ -19,8 +19,9 @@ angle a model happens to open at, and takes each effect a whole turn in eighths 
 which is what a quad lying in a world plane has to lose its coverage across; `--views` walks the
 preview path's own debug row. Every run writes `smoke/last-run.json`.
 
-A full run opens **nine effects** after the scene and takes around twenty minutes. Each one is a
-fresh page, so each one pulls the two apricot packages again, and they are 20 and 40 MiB.
+A full run opens **nine effects** after the scene and took four to five minutes across five runs
+measured 2026-08-26, warm CDN cache; a cold one pulling the two apricot packages fresh on each of
+the nine pages (20 and 40 MiB) can run well past that.
 
 A red run here is not a broken harness; read the deduped list it prints, and check it against
 "Known red" below before assuming you caused it.
@@ -85,13 +86,41 @@ coverage counters are what catch a model that failed to load.
 ## Known red
 
 **`Feedback loop formed between Framebuffer and active Texture`, in the scene and level phases.**
-Measured on an unmodified tree with no edits: 374 occurrences at `20fc1c2c`, 512 at `90ff3ced`,
-firing on the scene phase's first draw. The model phase is clean in both runs, so it lives in the
-shared G-buffer machinery rather than in any one viewer. A texture is being sampled while still
-attached to the bound framebuffer, which is undefined behaviour. Not yet diagnosed.
+RESOLVED. `blended()`'s resolve leg (`viewer/src/assets/viewers/layer/scene/gpu.rs`) drew into
+`self.lit`, whose depth attachment is the live G-buffer depth, while at least one blended surface
+in `bg/ex1/01_roc_r2/dun/r2d1` also samples that same texture as `DEPTH`/`DEPTH_PLANE` through
+`engine()`. `self.lit` already had a sibling for exactly this, `self.bare`, a framebuffer over the
+same color texture but a copy of the depth (`cutoff`) rather than the depth itself, already used by
+`fog()` and `shade()`; `blended()` was never wired to it. Found by wrapping WebGL2 to name every
+texture and framebuffer bound at the moment `gl.getError()` came back non-zero after a draw, which
+named the offending framebuffer's `DEPTH_ATTACHMENT` as the exact texture bound at unit 0. Measured
+at 376x on this tree with `smoke/run.sh`'s own counting; a full run (scene, level, all nine avfx
+effects) is clean after the fix.
 
-One `.avfx` effect triggered it in the first run and a different effect did not in the second, so
-there is a separate effect-specific trigger on top of the structural one.
+The model viewer's own `resolve()`/`sheer()` (`viewer/src/assets/viewers/mdl/gpu.rs`) share the
+identical `frame()`-into-`engine()` pattern and got the same `cut()`/`bare()` fix, but neither
+`chara/human/c0101/obj/hair/h0001/model/c0101h0001_hir.mdl` nor
+`bg/ffxiv/sea_s1/fld/s1f2/bgparts/s1f2_w1_sea01.mdl` turned out to sample `DEPTH` there, so that
+half of the fix is unverified by reproduction - fixed by inspection and structural identity with
+the leg that did reproduce, not by a measured before/after.
+
+The avfx effects were never part of the 376x: on this tree they were clean before the fix too, and
+`viewer/src/assets/viewers/avfx/gpu.rs` draws through its own small buffer set rather than
+`mdl::deferred::Buffers`, so it cannot reach this aliasing at all. The earlier note that one avfx
+effect had triggered it was never reproduced here and stays unexplained; if it recurs it is a
+separate cause.
+
+**`GL_INVALID_OPERATION: glDrawElementsInstanced: Mismatch between texture format and sampler type
+(signed/unsigned/float/shadow)`, level phase.** Seen once in five full post-fix runs (3x in that
+run), never in the pre-fix baseline or in six more level-only repeats afterward. Not yet diagnosed
+and not attributed to the fix above: it is a different failing call
+(`glDrawElementsInstanced`, not `glDrawElements`) and a different validation reason, but WebGL only
+reports one reason per failing draw and a draw that fails validation never executes, so a
+feedback-loop draw that used to be rejected outright could be reaching a second, independent fault
+in the same draw now that it runs. `engine()` hands `SHADOW_DEPTH` a compare-mode texture and
+`DEPTH`/`DEPTH_PLANE` a plain one, which is the right shape for a signed/unsigned/float/shadow
+mismatch if something binds the wrong one. Whoever hits this next: reproduce it under
+`smoke/run.sh`'s own counting rather than assuming it is noise.
 
 `the preview frame changed after game shaders were turned on and off again` used to fire on a
 `--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately

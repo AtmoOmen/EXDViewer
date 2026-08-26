@@ -4,7 +4,13 @@
 //! and compiles far more strictly than the software rasterizers this repo's smoke gates run on, so
 //! a failure here can be invisible to both `smoke/native.sh` and `smoke/run.sh`.
 //!
-//! `shpk_glsl_gate [package name ...]`
+//! `shpk_glsl_gate [sqpack dir] [package name ...]`
+//!
+//! The default package list (31 names) took 17 minutes for `character` alone measured
+//! 2026-08-26, so a whole-corpus run is a background job, not a quick check. A single argument is
+//! the sqpack dir, not a package name: `shpk_glsl_gate character` reads no such install, sweeps
+//! nothing and still exits clean. Name the packages after it: `shpk_glsl_gate
+//! /home/asriel/.xlcore/ffxiv/game/sqpack character hair`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::panic::{self, AssertUnwindSafe};

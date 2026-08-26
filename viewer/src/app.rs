@@ -1692,9 +1692,14 @@ impl App {
 
     fn draw_music(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
         if let Some(backend) = self.backend.clone()
-            && let Some(row_id) = self.music.ui(ui, &backend)
+            && let Some(action) = self.music.ui(ui, &backend)
         {
-            self.navigate(format!("/music/{row_id}"));
+            match action {
+                music::Action::Select(row_id) => self.navigate(format!("/music/{row_id}")),
+                music::Action::Navigate(asset_path) => {
+                    self.navigate(format!("/assets/{asset_path}"))
+                }
+            }
         }
     }
 

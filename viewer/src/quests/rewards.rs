@@ -162,7 +162,15 @@ pub(crate) fn icon(ui: &mut egui::Ui, index: &Index, icon_id: u32, size: f32) {
             response
         }
     };
-    icon_context_menu(&response, icon_mgr, excel, icon_id, &path, loaded);
+    icon_context_menu(
+        &response,
+        icon_mgr,
+        excel,
+        global.backend().files().clone(),
+        icon_id,
+        &path,
+        loaded,
+    );
 }
 
 /// A swatch constrained to its own small rect - `draw_color` otherwise claims the rest of the row.

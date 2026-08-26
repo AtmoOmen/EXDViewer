@@ -578,7 +578,15 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
         }
     };
     let resp = resp.on_hover_text(format!("Id: {icon_id}\nPath: {path}"));
-    icon_context_menu(&resp, icon_mgr, excel, icon_id, &path, loaded);
+    icon_context_menu(
+        &resp,
+        icon_mgr,
+        excel,
+        ctx.backend().files().clone(),
+        icon_id,
+        &path,
+        loaded,
+    );
     resp
 }
 

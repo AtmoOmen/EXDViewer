@@ -1,7 +1,9 @@
+use std::rc::Rc;
+
 use egui::{Button, Context, Id, Image, Layout, Modal, Sense, Spinner, TextStyle, UiBuilder, Vec2};
 
-use super::{ManagedIcon, TrackedPromise, export, icon_export_choice, spawn_icon_copy};
-use crate::excel::base::CachedProvider;
+use super::{ManagedIcon, TrackedPromise, export, icon_export_choices, spawn_icon_copy};
+use crate::{data::FileProvider, excel::base::CachedProvider};
 
 /// Loading/failed states have no image to size against, so they hold this rect instead.
 const PLACEHOLDER: f32 = 160.0;
@@ -17,6 +19,7 @@ pub fn icon_modal(
     icon: ManagedIcon,
     export: &mut Option<TrackedPromise<()>>,
     excel: CachedProvider,
+    files: Rc<dyn FileProvider>,
     path: &str,
 ) -> bool {
     export.take_if(|promise| promise.try_get().is_some());
@@ -89,23 +92,11 @@ pub fn icon_modal(
                 {
                     ui.ctx().copy_text(icon_id.to_string());
                 }
-                if let Some(source) = loaded_source {
-                    let promise = export::menu(
-                        ui,
-                        "Export",
-                        None,
-                        busy,
-                        vec![icon_export_choice(
-                            ui.ctx(),
-                            excel,
-                            icon_id,
-                            path.to_owned(),
-                            source,
-                        )],
-                    );
-                    if promise.is_some() {
-                        *export = promise;
-                    }
+                let choices =
+                    icon_export_choices(ui.ctx(), excel, files, icon_id, path, loaded_source);
+                let promise = export::menu(ui, "Export", None, busy, choices);
+                if promise.is_some() {
+                    *export = promise;
                 }
             });
         })

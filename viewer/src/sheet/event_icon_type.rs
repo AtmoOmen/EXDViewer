@@ -158,7 +158,15 @@ fn thumb(
         }
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let clicked = response.clicked();
-        icon_context_menu(&response, icon_mgr, excel.clone(), icon_id, &path, loaded);
+        icon_context_menu(
+            &response,
+            icon_mgr,
+            excel.clone(),
+            global.backend().files().clone(),
+            icon_id,
+            &path,
+            loaded,
+        );
         ui.label(RichText::new(label).weak().small())
             .on_hover_text(format!(
                 "Id: {icon_id}\nPath: {path}\nIconRange: {range} (additional variants not shown)"

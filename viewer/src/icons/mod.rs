@@ -19,7 +19,7 @@ use crate::{
     settings::{ALWAYS_HIRES, LANGUAGE, api_base},
     utils::{
         CollapsibleSidePanel, IconManager, ManagedIcon, PromiseKind, Side, TrackedPromise, export,
-        icon_context_menu, icon_export_choice, icon_modal, spawn_icon_copy,
+        icon_context_menu, icon_export_choices, icon_modal, spawn_icon_copy,
     },
 };
 
@@ -190,6 +190,7 @@ impl IconBrowser {
                 source,
                 &mut self.export,
                 backend.excel().clone(),
+                backend.files().clone(),
                 &path,
             ) {
                 self.modal_icon = None;
@@ -718,7 +719,15 @@ impl IconBrowser {
                 .on_hover_text(format!("Id: {icon_id}\nPath: {path}"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             let clicked = response.clicked();
-            icon_context_menu(&response, icons, backend.excel().clone(), icon_id, &path, loaded);
+            icon_context_menu(
+                &response,
+                icons,
+                backend.excel().clone(),
+                backend.files().clone(),
+                icon_id,
+                &path,
+                loaded,
+            );
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(format!("{icon_id:06}")).small());
             });
@@ -866,23 +875,17 @@ impl IconBrowser {
             {
                 ui.ctx().copy_text(icon_id.to_string());
             }
-            if let Some(source) = loaded_source.clone() {
-                let promise = export::menu(
-                    ui,
-                    "Export",
-                    None,
-                    busy,
-                    vec![icon_export_choice(
-                        ui.ctx(),
-                        backend.excel().clone(),
-                        icon_id,
-                        path.clone(),
-                        source,
-                    )],
-                );
-                if promise.is_some() {
-                    self.export = promise;
-                }
+            let choices = icon_export_choices(
+                ui.ctx(),
+                backend.excel().clone(),
+                backend.files().clone(),
+                icon_id,
+                &path,
+                loaded_source.clone(),
+            );
+            let promise = export::menu(ui, "Export", None, busy, choices);
+            if promise.is_some() {
+                self.export = promise;
             }
         });
 

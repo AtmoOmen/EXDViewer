@@ -1,8 +1,13 @@
+use std::rc::Rc;
+
 use anyhow::Result;
 use either::Either;
 use image::RgbaImage;
 
-use crate::excel::{base::CachedProvider, provider::ExcelProvider};
+use crate::{
+    data::FileProvider,
+    excel::{base::CachedProvider, provider::ExcelProvider},
+};
 
 use super::{IconManager, TrackedPromise, export};
 
@@ -64,8 +69,8 @@ pub fn spawn_icon_copy(
     })
 }
 
-/// The one export choice an icon offers: its pixels, resolved and PNG-encoded.
-pub fn icon_export_choice(
+/// The pixels, resolved and PNG-encoded.
+fn icon_png_choice(
     ctx: &egui::Context,
     excel: CachedProvider,
     icon_id: u32,
@@ -84,6 +89,36 @@ pub fn icon_export_choice(
     .filter("PNG image", &["png"])
 }
 
+/// The file exactly as sqpack stores it, undecoded.
+fn icon_raw_choice(files: Rc<dyn FileProvider>, icon_id: u32, path: String) -> export::Choice<'static> {
+    let file_name = format!("icon_{icon_id:06}.tex");
+    export::Choice::new(
+        "Export Raw (.tex)…",
+        file_name,
+        move || Box::pin(async move { files.read(&path).await }),
+    )
+    .title("Export Icon")
+    .filter("Texture", &["tex"])
+}
+
+/// Every way an icon can be exported: its resolved pixels as a PNG once it has decoded, and the raw
+/// `.tex` file, which needs no decode and so is offered even while the preview is still loading.
+pub fn icon_export_choices(
+    ctx: &egui::Context,
+    excel: CachedProvider,
+    files: Rc<dyn FileProvider>,
+    icon_id: u32,
+    path: &str,
+    source: Option<egui::ImageSource<'static>>,
+) -> Vec<export::Choice<'static>> {
+    let mut choices = Vec::new();
+    if let Some(source) = source {
+        choices.push(icon_png_choice(ctx, excel, icon_id, path.to_owned(), source));
+    }
+    choices.push(icon_raw_choice(files, icon_id, path.to_owned()));
+    choices
+}
+
 /// The right-click menu every drawn icon offers, wherever it is drawn: copy the pixels, copy the
 /// id, export to a file, and jump to it in the Icons tab. `icons` holds the promises this starts,
 /// since most call sites have nowhere of their own to keep one alive. `source` is `None` while the
@@ -92,6 +127,7 @@ pub fn icon_context_menu(
     response: &egui::Response,
     icons: &IconManager,
     excel: CachedProvider,
+    files: Rc<dyn FileProvider>,
     icon_id: u32,
     path: &str,
     source: Option<egui::ImageSource<'static>>,
@@ -115,23 +151,10 @@ pub fn icon_context_menu(
             ui.ctx().copy_text(icon_id.to_string());
             ui.close();
         }
-        if let Some(source) = source {
-            let promise = export::menu(
-                ui,
-                "Export",
-                None,
-                false,
-                vec![icon_export_choice(
-                    ui.ctx(),
-                    excel,
-                    icon_id,
-                    path.to_owned(),
-                    source,
-                )],
-            );
-            if let Some(promise) = promise {
-                icons.spawn_action(promise);
-            }
+        let choices = icon_export_choices(ui.ctx(), excel, files, icon_id, path, source);
+        let promise = export::menu(ui, "Export", None, false, choices);
+        if let Some(promise) = promise {
+            icons.spawn_action(promise);
         }
         ui.separator();
         if ui

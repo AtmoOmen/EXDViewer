@@ -1329,7 +1329,15 @@ impl CharacterBuilder {
                                 .on_hover_text("The game does not offer this to this race and gender"),
                             _ => response,
                         };
-                        icon_context_menu(&response, icons, excel, piece.icon, &icon, loaded);
+                        icon_context_menu(
+                            &response,
+                            icons,
+                            excel,
+                            backend.files().clone(),
+                            piece.icon,
+                            &icon,
+                            loaded,
+                        );
                         if response.clicked() {
                             picked = Some(index);
                         }
@@ -2204,7 +2212,15 @@ fn listed<'a>(
                         .selected(chosen == Some(index))
                         .min_size(egui::vec2(ui.available_width(), PIECE)),
                 );
-                icon_context_menu(&response, icons, excel, icon, &path, loaded);
+                icon_context_menu(
+                    &response,
+                    icons,
+                    excel,
+                    backend.files().clone(),
+                    icon,
+                    &path,
+                    loaded,
+                );
                 if response.clicked() {
                     picked = Some(index);
                 }
@@ -2313,7 +2329,15 @@ fn chip(
                     .selected(selected),
                 )
                 .on_hover_text(choice.id.to_string());
-            icon_context_menu(&response, icons, excel, icon, &path, Some(source));
+            icon_context_menu(
+                &response,
+                icons,
+                excel,
+                backend.files().clone(),
+                icon,
+                &path,
+                Some(source),
+            );
             response.clicked()
         }
         // An icon that has not landed yet is not one the creator never named, and saying so would

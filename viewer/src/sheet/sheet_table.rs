@@ -177,6 +177,7 @@ impl SheetTable {
                 icon,
                 &mut self.modal_export,
                 excel,
+                global.backend().files().clone(),
                 &path,
             ) {
                 self.modal_image = None;

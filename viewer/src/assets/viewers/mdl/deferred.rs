@@ -1672,6 +1672,7 @@ impl Buffers {
                 unit as u32,
                 bound,
                 target(texture.kind),
+                0.0,
             );
         }
         unsafe {
@@ -3699,6 +3700,7 @@ impl Buffers {
                 unit,
                 bound,
                 target(texture.kind),
+                0.0,
             );
             unit += 1;
         }
@@ -4284,11 +4286,28 @@ pub fn sampler(
     unit: u32,
     texture: glow::Texture,
 ) {
-    bind(gl, program, name, unit, texture, glow::TEXTURE_2D);
+    bind(gl, program, name, unit, texture, glow::TEXTURE_2D, 0.0);
+}
+
+/// The driver's own anisotropy ceiling, asked for once. `EXT_texture_filter_anisotropic` is an
+/// extension on every backend this runs on, WebGL2 included, and the enum is only meaningful once
+/// the driver has answered whether it exists.
+static MAX_ANISOTROPY: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+fn max_anisotropy(gl: &glow::Context) -> f32 {
+    *MAX_ANISOTROPY.get_or_init(|| {
+        match gl.supported_extensions().contains("EXT_texture_filter_anisotropic") {
+            true => unsafe { gl.get_parameter_f32(glow::MAX_TEXTURE_MAX_ANISOTROPY_EXT) },
+            false => 0.0,
+        }
+    })
 }
 
 /// The same over whichever target the shader declared the sampler against. A draw only validates if
 /// the texture bound to a unit is of the sampler's own type, so the target follows the declaration.
+///
+/// `aniso` is the anisotropy a material's own sampler asks for; it degrades to whatever the driver
+/// actually offers, and to nothing at all where the extension is absent.
 pub fn bind(
     gl: &glow::Context,
     program: glow::Program,
@@ -4296,10 +4315,22 @@ pub fn bind(
     unit: u32,
     texture: glow::Texture,
     target: u32,
+    aniso: f32,
 ) {
     unsafe {
         gl.active_texture(glow::TEXTURE0 + unit);
         gl.bind_texture(target, Some(texture));
+        // Screen-space and G-buffer planes bind through here too, every draw; skip the call
+        // entirely where no material sampler asked for anisotropy, rather than setting 1.0 (a no-op
+        // value) on textures that never wanted the state touched.
+        let ceiling = max_anisotropy(gl);
+        if aniso > 0.0 && ceiling > 0.0 {
+            gl.tex_parameter_f32(
+                target,
+                glow::TEXTURE_MAX_ANISOTROPY_EXT,
+                aniso.clamp(1.0, ceiling),
+            );
+        }
     }
     point_sampler(gl, program, name, unit);
 }

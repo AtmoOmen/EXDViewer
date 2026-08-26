@@ -2027,6 +2027,28 @@ fn parameters(package: &ShaderPackage, material: &mtrl::Material) -> Vec<u8> {
             &values[..lanes.min(values.len())],
         );
     }
+    // WebGL2 dropped the sampler-object LOD bias `hair.shpk`'s slot-0 sampler otherwise states, so
+    // it is added into this term instead: the alpha-discard already reads
+    // `g_TextureMipBias + m_MipBias`, and every character-family package declares the field at the
+    // same offset. Bias is read off the one normal-map sampler and applied as a material-wide
+    // uniform; anisotropy, by contrast, is looked up per texture in `bind()` since raw GL carries it
+    // as sampler state rather than a shader parameter.
+    let bias = material
+        .samplers()
+        .iter()
+        .find(|sampler| super::material::NORMAL_SAMPLER.contains(&sampler.id()))
+        .map(mtrl::Sampler::lod_bias)
+        .unwrap_or(0.0);
+    if bias != 0.0
+        && let Some(param) = package
+            .material_params()
+            .iter()
+            .find(|param| param.id() == shaders::names::hash(b"g_TextureMipBias"))
+        && let Some(slot) = out.get_mut(param.byte_offset() as usize..param.byte_offset() as usize + 4)
+    {
+        let current = f32::from_le_bytes(slot.try_into().expect("four bytes"));
+        slot.copy_from_slice(&(current + bias).to_le_bytes());
+    }
     out
 }
 

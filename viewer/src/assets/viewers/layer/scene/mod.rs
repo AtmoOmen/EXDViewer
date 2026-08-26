@@ -4108,10 +4108,10 @@ impl Scene {
         });
         // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
         // its package is translated, and answering with that one would pin the sampler to it.
-        let bind = |path: &str| match self.stacked.get_key_value(path) {
+        let bind = |path: &str, aniso: f32| match self.stacked.get_key_value(path) {
             Some((held, Stack::Ready)) => Some(mdl::gpu::Bound::Stacked(held.clone())),
             _ => match self.textures.get(path) {
-                Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id())),
+                Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id(), aniso)),
                 _ => None,
             },
         };
@@ -4128,7 +4128,7 @@ impl Scene {
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()
-                    .map(|(id, path)| (id, bind(path)))
+                    .map(|(id, path)| (id, bind(path, material.anisotropic(id))))
                     .collect(),
             });
         gpu::Surface {

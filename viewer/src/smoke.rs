@@ -1,7 +1,8 @@
 //! Drives the real native app offscreen and screenshots it, for `main.rs`'s `--smoke` mode. Plays
 //! the same role `smoke/smoke.ts` plays over CDP against the wasm build: open an asset, wait for it
-//! to decode, click the same control-row positions, and shoot the result. Failure is a panic, an
-//! ERROR-level log, or a screenshot that never changes from the blank starting frame.
+//! to decode, click the same control-row positions, and shoot the result. Failure is a panic
+//! (native eframe does not catch one; the process exits non-zero and the harness sees it), an
+//! ERROR-level log, or a step that times out without decoding.
 //!
 //! Navigation is seeded through the same `egui::Context` keys [`crate::router::history::memory`]
 //! reads, since `App::navigate` is private to `app.rs` and this module cannot add a public door to
@@ -99,18 +100,15 @@ impl<L: Log + 'static> Log for CountingLogger<L> {
     }
 
     fn log(&self, record: &Record<'_>) {
+        let text = record.args().to_string();
         if record.level() == Level::Error {
             self.counters.errors.fetch_add(1, Ordering::SeqCst);
-            self.counters
-                .messages
-                .lock()
-                .unwrap()
-                .push(record.args().to_string());
+            self.counters.messages.lock().unwrap().push(text.clone());
         }
         // The line `assets/preview: <viewer> in <time>` fires once a viewer has actually decoded
         // its bytes, which is what says a route change turned into a rendered file rather than
         // just a URL change.
-        if record.args().to_string().starts_with("assets/preview: ") {
+        if text.starts_with("assets/preview: ") {
             self.counters.decoded.fetch_add(1, Ordering::SeqCst);
         }
         self.inner.log(record);
@@ -191,7 +189,7 @@ impl SmokeApp {
         let first = config.steps.first().map_or("/".to_string(), Step::route);
         // The setup route only auto-submits when its URL carries a `redirect`, the same query
         // param a real deep link bounces through `ensure_backend` with.
-        let start = Path::with_params("/", &[("redirect", first.as_str())]);
+        let start = Path::with_params("/", [("redirect", first.as_str())]);
         seed_route(&cc.egui_ctx, start);
 
         Self {

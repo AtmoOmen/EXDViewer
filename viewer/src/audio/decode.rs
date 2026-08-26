@@ -366,4 +366,85 @@ mod tests {
     fn no_streams_is_an_error() {
         assert!(package(vec![], "empty").is_err());
     }
+
+    /// The ITU-R BS.775 fold itself, previously untested: front channels at unity, center and
+    /// surrounds at -3 dB (1/sqrt(2)), LFE dropped. `decode_stream_data`'s `if downmix {}` is the
+    /// only thing standing between this (playback) and skipping it (export); that gate is a
+    /// one-line conditional around this same call, not exercised separately here.
+    #[test]
+    fn downmix_applies_the_itu_r_bs775_weights_and_drops_lfe() {
+        // One 5.1 frame: FL, FR, FC, LFE, RL, RR. FC is zero so each output isolates its own
+        // front/rear pair; LFE is a large, otherwise-unused value that would push the result past
+        // the values asserted below (and past the +-1 clamp) if it leaked in.
+        let mut decoded = Decoded {
+            samples: vec![0.2, 0.3, 0.0, 0.9, 0.4, 0.5],
+            channels: 6,
+            sample_rate: 44100,
+            loop_start: None,
+            loop_end: None,
+        };
+        downmix_to_stereo(&mut decoded);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 2);
+
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((decoded.samples[0] - (0.2 + half * 0.4)).abs() < 1e-6, "FL + sqrt(1/2)*RL");
+        assert!((decoded.samples[1] - (0.3 + half * 0.5)).abs() < 1e-6, "FR + sqrt(1/2)*RR");
+    }
+}
+
+#[cfg(test)]
+mod real_scd {
+    use super::*;
+    use ironworks::file::File as _;
+    use ironworks::file::scd::SoundContainer;
+    use std::io::Cursor as ReadCursor;
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    fn read_local(path: &str) -> Vec<u8> {
+        use ironworks::sqpack::{Install, SqPack};
+        use std::io::Read;
+        let pack = SqPack::new(Install::at_sqpack(SQPACK));
+        let mut stream = pack.file(path).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// A real multi-entry bank (18 sound entries, two `Empty`, sixteen `MsAdpcm`): `Empty` drops
+    /// out of both exports, the rest zip under both, and the decoded WAV keeps each entry's own
+    /// channel count rather than the player's stereo downmix.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_multi_entry_bank_exports_every_non_empty_stream() {
+        let bytes = read_local("sound/system/SE_10thMG.scd");
+        let container = SoundContainer::read(ReadCursor::new(bytes)).unwrap();
+        let entries = container.entries();
+        assert_eq!(entries.len(), 18);
+        let non_empty = entries.iter().filter(|e| e.format() != Codec::Empty).count();
+        assert_eq!(non_empty, 16);
+
+        let native = export_native(entries);
+        assert_eq!(native.len(), 16);
+        assert!(native.iter().all(|(ext, _)| *ext == "adpcm.wav"));
+
+        let wav = export_wav(entries).unwrap();
+        assert_eq!(wav.len(), 16);
+
+        for (entry, (_, wav_bytes)) in entries.iter().filter(|e| e.format() != Codec::Empty).zip(&wav) {
+            let channels_at = |offset: usize| u16::from_le_bytes([wav_bytes[offset], wav_bytes[offset + 1]]);
+            assert_eq!(
+                channels_at(22),
+                entry.channel_count() as u16,
+                "the decoded wav should keep the source's own channel count, not downmix it"
+            );
+        }
+
+        let (name, zipped) = package(native, "SE_10thMG").unwrap();
+        assert_eq!(name, "SE_10thMG.zip");
+        let mut archive = zip::ZipArchive::new(ReadCursor::new(zipped)).unwrap();
+        assert_eq!(archive.len(), 16);
+        assert!(archive.by_name("SE_10thMG_00.adpcm.wav").is_ok());
+    }
 }

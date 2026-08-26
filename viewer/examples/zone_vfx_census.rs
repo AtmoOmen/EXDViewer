@@ -21,11 +21,8 @@ struct Tally {
     auto_play: usize,
     no_far_clip: usize,
     non_white: usize,
-    intensity_not_one: usize,
-    intensity_nan: usize,
     alpha_zero: usize,
     rgba_counts: BTreeMap<(u8, u8, u8, u8), usize>,
-    intensity_counts: BTreeMap<String, usize>,
     near_ordered: usize,
     far_ordered: usize,
     far_ordered_clip: usize,
@@ -33,8 +30,11 @@ struct Tally {
     clip_total: usize,
     no_clip_total: usize,
     near_before_far: usize,
+    near_touches_far: usize,
     soft_particle_zero: usize,
     soft_particle_values: BTreeMap<String, usize>,
+    z_correct_zero: usize,
+    z_correct_values: BTreeMap<String, usize>,
     examples_non_white: Vec<String>,
     examples_bad_order: Vec<String>,
 }
@@ -63,24 +63,12 @@ fn visit(group: &LayerGroup, tally: &mut Tally, path: &str) {
                 if rgba.3 == 0 {
                     tally.alpha_zero += 1;
                 }
-                if !colour.intensity().is_nan() && tally.examples_non_white.len() < 10 {
+                if tally.examples_non_white.len() < 10 {
                     tally.examples_non_white.push(format!(
-                        "{path} #{} {:?} rgba={rgba:?} intensity={}",
+                        "{path} #{} {:?} rgba={rgba:?}",
                         instance.id(),
-                        vfx.asset_path(),
-                        colour.intensity()
+                        vfx.asset_path()
                     ));
-                }
-            }
-            if colour.intensity().is_nan() {
-                tally.intensity_nan += 1;
-            } else {
-                *tally
-                    .intensity_counts
-                    .entry(format!("{:.3}", colour.intensity()))
-                    .or_default() += 1;
-                if colour.intensity() != 1.0 {
-                    tally.intensity_not_one += 1;
                 }
             }
             let [n0, n1] = vfx.fade_near();
@@ -113,6 +101,9 @@ fn visit(group: &LayerGroup, tally: &mut Tally, path: &str) {
                     instance.id()
                 ));
             }
+            if n1 == f0 {
+                tally.near_touches_far += 1;
+            }
             let range = vfx.soft_particle_fade_range();
             if range == 0.0 {
                 tally.soft_particle_zero += 1;
@@ -121,6 +112,11 @@ fn visit(group: &LayerGroup, tally: &mut Tally, path: &str) {
                 .soft_particle_values
                 .entry(format!("{range:.2}"))
                 .or_default() += 1;
+            let z = vfx.z_correct();
+            if z == 0.0 {
+                tally.z_correct_zero += 1;
+            }
+            *tally.z_correct_values.entry(format!("{z:.3}")).or_default() += 1;
         }
     }
 }
@@ -146,7 +142,11 @@ fn main() {
     }
 
     println!("Vfx instances with a non-empty asset_path: {}", tally.total);
-    println!("  auto_play: {} ({:.1}%)", tally.auto_play, pct(tally.auto_play, tally.total));
+    println!(
+        "  auto_play: {} ({:.1}%)",
+        tally.auto_play,
+        pct(tally.auto_play, tally.total)
+    );
     println!(
         "  no_far_clip: {} ({:.1}%)",
         tally.no_far_clip,
@@ -159,24 +159,15 @@ fn main() {
         tally.alpha_zero,
         pct(tally.alpha_zero, tally.total)
     );
-    println!(
-        "  intensity NaN: {} ({:.1}%), intensity != 1.0 of the rest: {} ({:.1}%)",
-        tally.intensity_nan,
-        pct(tally.intensity_nan, tally.total),
-        tally.intensity_not_one,
-        pct(tally.intensity_not_one, tally.total - tally.intensity_nan)
-    );
     println!("  most common rgba tuples:");
     let mut rgba: Vec<_> = tally.rgba_counts.iter().collect();
     rgba.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
     for (tuple, count) in rgba.iter().take(10) {
         println!("    {tuple:?}: {count}");
     }
-    println!("  most common intensity values (excluding NaN):");
-    let mut intensities: Vec<_> = tally.intensity_counts.iter().collect();
-    intensities.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
-    for (value, count) in intensities.iter().take(10) {
-        println!("    {value}: {count}");
+    println!("  non-white examples:");
+    for example in &tally.examples_non_white {
+        println!("    {example}");
     }
     println!(
         "  fade_near[0] <= fade_near[1]: {} ({:.1}%)",
@@ -201,29 +192,41 @@ fn main() {
         pct(tally.far_ordered_no_clip, tally.no_clip_total)
     );
     println!(
-        "  fade_near[1] <= fade_far[0]: {} ({:.1}%)",
+        "  fade_near[1] <= fade_far[0]: {} ({:.1}%), of which exactly equal: {} ({:.1}%)",
         tally.near_before_far,
-        pct(tally.near_before_far, tally.total)
+        pct(tally.near_before_far, tally.total),
+        tally.near_touches_far,
+        pct(tally.near_touches_far, tally.total)
     );
+    println!("  bad-order examples (near[1] > far[0]):");
+    for example in &tally.examples_bad_order {
+        println!("    {example}");
+    }
     println!(
         "  soft_particle_fade_range == 0: {} ({:.1}%)",
         tally.soft_particle_zero,
         pct(tally.soft_particle_zero, tally.total)
     );
     println!("  soft_particle_fade_range distinct values: {}", tally.soft_particle_values.len());
-    for (value, count) in tally.soft_particle_values.iter().take(15) {
+    for (value, count) in &tally.soft_particle_values {
         println!("    {value}: {count}");
     }
-    println!("\nnon-white examples:");
-    for example in &tally.examples_non_white {
-        println!("  {example}");
-    }
-    println!("\nbad fade order examples:");
-    for example in &tally.examples_bad_order {
-        println!("  {example}");
+    println!(
+        "  z_correct == 0: {} ({:.1}%)",
+        tally.z_correct_zero,
+        pct(tally.z_correct_zero, tally.total)
+    );
+    println!("  z_correct distinct values: {}", tally.z_correct_values.len());
+    let mut z_correct: Vec<_> = tally.z_correct_values.iter().collect();
+    z_correct.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
+    for (value, count) in z_correct.iter().take(20) {
+        println!("    {value}: {count}");
     }
 }
 
 fn pct(part: usize, total: usize) -> f64 {
-    if total == 0 { 0.0 } else { part as f64 / total as f64 * 100.0 }
+    if total == 0 {
+        return 0.0;
+    }
+    part as f64 / total as f64 * 100.0
 }

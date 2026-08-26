@@ -152,7 +152,10 @@ fn seed_route(ctx: &egui::Context, path: Path) {
 
 enum Phase {
     Opening { at: Instant, opened: usize },
+    /// Waiting out the initial settle before the pre-click reference shot.
     Settling { at: Instant },
+    /// The reference shot has been requested; `before` lands via `Event::Screenshot`.
+    Referencing { at: Instant },
     Clicked { at: Instant },
     Shooting { at: Instant, requested: bool },
 }
@@ -164,6 +167,8 @@ pub struct SmokeApp {
     step: usize,
     phase: Phase,
     click: Option<Pos2>,
+    /// The frame taken just before the click, kept only to prove the click changed something.
+    reference: Option<Arc<egui::ColorImage>>,
     failure: Option<String>,
     outcomes: Vec<StepOutcome>,
 }
@@ -202,6 +207,7 @@ impl SmokeApp {
                 opened: 0,
             },
             click: None,
+            reference: None,
             failure: None,
             outcomes: Vec::new(),
         }
@@ -234,6 +240,95 @@ impl SmokeApp {
         log::info!("smoke: {}", if ok { "PASS" } else { "FAIL" });
         std::process::exit(if ok { 0 } else { 1 });
     }
+
+    /// The post-click shot: checked against the reference taken before the click (a click that
+    /// missed its target leaves the frame unchanged) and against a blank frame (a click that hit
+    /// nothing, or a pass that silently drew into the wrong buffer), then saved and advanced.
+    fn land_shot(&mut self, ctx: &egui::Context, image: Arc<egui::ColorImage>) {
+        let Some(step) = self.config.steps.get(self.step) else {
+            return;
+        };
+        let path = step.path().to_string();
+
+        if self.reference.as_ref().is_some_and(|before| same(before, &image)) {
+            self.fail(format!(
+                "{path}: the frame after the click is identical to the one before it; the click \
+                 never landed on \"Game shaders\" or \"Scene\""
+            ));
+            return;
+        }
+        if blank(&image) {
+            self.fail(format!("{path}: the shot after the click is a single flat color"));
+            return;
+        }
+
+        let name = crate::utils::file_name(&path);
+        let out = self.config.out_dir.join(format!("{name}.png"));
+        let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+        if let Err(e) = image::save_buffer(
+            &out,
+            &rgba,
+            image.width() as u32,
+            image.height() as u32,
+            image::ColorType::Rgba8,
+        ) {
+            self.fail(format!("could not save screenshot for {path}: {e}"));
+            return;
+        }
+        self.outcomes.push(StepOutcome {
+            path,
+            screenshot: out,
+        });
+
+        self.reference = None;
+        self.step += 1;
+        match self.config.steps.get(self.step) {
+            Some(next) => {
+                ctx.data_mut(|d| {
+                    let history: &mut Vec<Path> = d
+                        .get_persisted_mut_or_insert_with(Id::new("memory_history"), || {
+                            vec![Path::parse("/")]
+                        });
+                    history.push(Path::parse(&next.route()));
+                    let position: &mut usize =
+                        d.get_persisted_mut_or_insert_with(Id::new("memory_history_position"), || 0);
+                    *position += 1;
+                });
+                self.phase = Phase::Opening {
+                    at: Instant::now(),
+                    opened: self.counters.decoded(),
+                };
+            }
+            None => self.finish(),
+        }
+    }
+}
+
+/// Whether two shots of the same size are close enough to call unchanged: exact equality is too
+/// strict once anything animates (water, foliage, the effect clock), so this tolerates a handful
+/// of differing pixels rather than none.
+fn same(a: &egui::ColorImage, b: &egui::ColorImage) -> bool {
+    a.size == b.size
+        && a.pixels
+            .iter()
+            .zip(&b.pixels)
+            .filter(|(x, y)| x != y)
+            .count()
+            < a.pixels.len() / 1000 + 1
+}
+
+/// Whether a shot is close enough to one flat color to be worth failing on: a viewport that never
+/// drew anything, or a pass that cleared its target and stopped.
+fn blank(image: &egui::ColorImage) -> bool {
+    let Some(first) = image.pixels.first() else {
+        return true;
+    };
+    image
+        .pixels
+        .iter()
+        .filter(|p| *p != first)
+        .count()
+        < image.pixels.len() / 1000 + 1
 }
 
 impl eframe::App for SmokeApp {
@@ -267,51 +362,17 @@ impl eframe::App for SmokeApp {
         }
 
         for event in ctx.input(|i| i.events.clone()) {
-            if let Event::Screenshot { image, .. } = event
-                && let Phase::Shooting { .. } = &self.phase
-            {
-                let Some(step) = self.config.steps.get(self.step) else {
-                    continue;
-                };
-                let name = crate::utils::file_name(step.path());
-                let out = self.config.out_dir.join(format!("{name}.png"));
-                let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
-                if let Err(e) = image::save_buffer(
-                    &out,
-                    &rgba,
-                    image.width() as u32,
-                    image.height() as u32,
-                    image::ColorType::Rgba8,
-                ) {
-                    self.fail(format!("could not save screenshot for {}: {e}", step.path()));
-                } else {
-                    self.outcomes.push(StepOutcome {
-                        path: step.path().to_string(),
-                        screenshot: out,
-                    });
+            let Event::Screenshot { image, .. } = event else {
+                continue;
+            };
+            match &self.phase {
+                Phase::Referencing { .. } => {
+                    self.reference = Some(image);
+                    self.click = Some(self.config.steps[self.step].click_at());
+                    self.phase = Phase::Clicked { at: Instant::now() };
                 }
-                self.step += 1;
-                match self.config.steps.get(self.step) {
-                    Some(next) => {
-                        ctx.data_mut(|d| {
-                            let history: &mut Vec<Path> = d
-                                .get_persisted_mut_or_insert_with(Id::new("memory_history"), || {
-                                    vec![Path::parse("/")]
-                                });
-                            history.push(Path::parse(&next.route()));
-                            let position: &mut usize = d.get_persisted_mut_or_insert_with(
-                                Id::new("memory_history_position"),
-                                || 0,
-                            );
-                            *position += 1;
-                        });
-                        self.phase = Phase::Opening {
-                            at: Instant::now(),
-                            opened: self.counters.decoded(),
-                        };
-                    }
-                    None => self.finish(),
-                }
+                Phase::Shooting { .. } => self.land_shot(&ctx, image),
+                _ => {}
             }
         }
 
@@ -335,8 +396,13 @@ impl eframe::App for SmokeApp {
             }
             Phase::Settling { at } => {
                 if at.elapsed() > Duration::from_millis(800) {
-                    self.click = Some(step.click_at());
-                    self.phase = Phase::Clicked { at: Instant::now() };
+                    ctx.send_viewport_cmd(ViewportCommand::Screenshot(Default::default()));
+                    self.phase = Phase::Referencing { at: Instant::now() };
+                }
+            }
+            Phase::Referencing { at } => {
+                if at.elapsed() > self.config.step_timeout {
+                    self.fail(format!("{} never produced a reference shot", step.path()));
                 }
             }
             Phase::Clicked { at } => {

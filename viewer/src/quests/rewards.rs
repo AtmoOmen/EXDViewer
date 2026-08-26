@@ -12,7 +12,7 @@ use crate::{
     },
     sheet::read_integer,
     settings::ALWAYS_HIRES,
-    utils::{ManagedIcon, TrackedPromise},
+    utils::{ManagedIcon, TrackedPromise, icon_context_menu},
 };
 
 /// How many ranks `BeastRankBonus.ItemQuantity` carries, from `Neutral` to `AlliedBloodsworn`.
@@ -130,30 +130,38 @@ fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
     read_integer::<i64>(row, offset, column.kind()).unwrap_or(0)
 }
 
-fn icon(ui: &mut egui::Ui, index: &Index, icon_id: u32, size: f32) {
+pub(crate) fn icon(ui: &mut egui::Ui, index: &Index, icon_id: u32, size: f32) {
     if icon_id == 0 {
         ui.add_space(size);
         return;
     }
     let global = index.table.global();
+    let icon_mgr = global.icon_manager();
     let hires = ALWAYS_HIRES.get(ui.ctx());
     let path = get_icon_path(global.backend().icons(), icon_id, hires, global.language());
     let excel = global.backend().excel().clone();
-    let source = global.icon_manager().get_or_insert_icon(&path, ui.ctx(), || {
+    let source = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
+        let excel = excel.clone();
         let path = path.clone();
         TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
-    match source {
+    let loaded = match &source {
+        ManagedIcon::Loaded(image) => Some(image.clone()),
+        _ => None,
+    };
+    let response = match source {
         ManagedIcon::Loaded(image) => {
-            ui.add(egui::Image::new(image).fit_to_exact_size(Vec2::splat(size)));
+            ui.add(egui::Image::new(image).sense(Sense::click()).fit_to_exact_size(Vec2::splat(size)))
         }
         ManagedIcon::Loading | ManagedIcon::NotLoaded => {
-            ui.add(egui::Spinner::new().size(size));
+            ui.add(egui::Spinner::new().size(size))
         }
         ManagedIcon::Failed(_) => {
-            ui.add_space(size);
+            let (_, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+            response
         }
-    }
+    };
+    icon_context_menu(&response, icon_mgr, excel, icon_id, &path, loaded);
 }
 
 /// A swatch constrained to its own small rect - `draw_color` otherwise claims the rest of the row.

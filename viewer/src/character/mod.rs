@@ -36,6 +36,7 @@ use crate::excel::provider::ExcelProvider;
 use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{
     CollapsibleSidePanel, FuzzyMatcher, IconManager, ManagedIcon, Side, TrackedPromise,
+    icon_context_menu,
 };
 
 /// The set every character is built from. The game holds one body mesh, `c0101b0001`, and stands
@@ -1294,9 +1295,14 @@ impl CharacterBuilder {
                         let icon = get_icon_path(backend.icons(), piece.icon, false, Language::None);
                         let excel = backend.excel().clone();
                         let source = icons.get_or_insert_icon(&icon, ui.ctx(), || {
+                            let excel = excel.clone();
                             let icon = icon.clone();
                             TrackedPromise::spawn_local(async move { excel.get_icon(&icon).await })
                         });
+                        let loaded = match &source {
+                            ManagedIcon::Loaded(source) => Some(source.clone()),
+                            _ => None,
+                        };
                         let button = match source {
                             ManagedIcon::Loaded(source) => egui::Button::image_and_text(
                                 egui::Image::new(source)
@@ -1323,6 +1329,7 @@ impl CharacterBuilder {
                                 .on_hover_text("The game does not offer this to this race and gender"),
                             _ => response,
                         };
+                        icon_context_menu(&response, icons, excel, piece.icon, &icon, loaded);
                         if response.clicked() {
                             picked = Some(index);
                         }
@@ -2174,9 +2181,14 @@ fn listed<'a>(
                 let path = get_icon_path(backend.icons(), icon, false, Language::None);
                 let excel = backend.excel().clone();
                 let source = icons.get_or_insert_icon(&path, ui.ctx(), || {
+                    let excel = excel.clone();
                     let path = path.clone();
                     TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
                 });
+                let loaded = match &source {
+                    ManagedIcon::Loaded(source) => Some(source.clone()),
+                    _ => None,
+                };
                 let button = match source {
                     ManagedIcon::Loaded(source) => egui::Button::image_and_text(
                         egui::Image::new(source)
@@ -2186,15 +2198,14 @@ fn listed<'a>(
                     ),
                     _ => egui::Button::new(name),
                 };
-                if ui
-                    .add(
-                        button
-                            .truncate()
-                            .selected(chosen == Some(index))
-                            .min_size(egui::vec2(ui.available_width(), PIECE)),
-                    )
-                    .clicked()
-                {
+                let response = ui.add(
+                    button
+                        .truncate()
+                        .selected(chosen == Some(index))
+                        .min_size(egui::vec2(ui.available_width(), PIECE)),
+                );
+                icon_context_menu(&response, icons, excel, icon, &path, loaded);
+                if response.clicked() {
                     picked = Some(index);
                 }
             }
@@ -2283,24 +2294,28 @@ fn chip(
     let path = get_icon_path(backend.icons(), icon, false, Language::None);
     let excel = backend.excel().clone();
     let held = icons.get_or_insert_icon(&path, ui.ctx(), || {
+        let excel = excel.clone();
         let path = path.clone();
         TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
     match held {
         // Sized rather than fitted, so a cell is the same size whichever way it is drawn: a grid
         // that grows as its icons land walks every control under it down the panel.
-        ManagedIcon::Loaded(source) => ui
-            .add_sized(
-                egui::Vec2::splat(ICON),
-                egui::Button::image(
-                    egui::Image::new(source)
-                        .maintain_aspect_ratio(true)
-                        .shrink_to_fit(),
+        ManagedIcon::Loaded(source) => {
+            let response = ui
+                .add_sized(
+                    egui::Vec2::splat(ICON),
+                    egui::Button::image(
+                        egui::Image::new(source.clone())
+                            .maintain_aspect_ratio(true)
+                            .shrink_to_fit(),
+                    )
+                    .selected(selected),
                 )
-                .selected(selected),
-            )
-            .on_hover_text(choice.id.to_string())
-            .clicked(),
+                .on_hover_text(choice.id.to_string());
+            icon_context_menu(&response, icons, excel, icon, &path, Some(source));
+            response.clicked()
+        }
         // An icon that has not landed yet is not one the creator never named, and saying so would
         // have every chip claim it has no icon for as long as the icons take to arrive.
         ManagedIcon::Failed(_) => numbered(ui, choice, selected, "No icon"),

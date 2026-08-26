@@ -19,7 +19,7 @@ use crate::{
     settings::{ALWAYS_HIRES, LANGUAGE, api_base},
     utils::{
         CollapsibleSidePanel, IconManager, ManagedIcon, PromiseKind, Side, TrackedPromise, export,
-        icon_export_choice, icon_modal, spawn_icon_copy,
+        icon_context_menu, icon_export_choice, icon_modal, spawn_icon_copy,
     },
 };
 
@@ -655,6 +655,10 @@ impl IconBrowser {
     ) -> (bool, Option<String>) {
         let path = get_icon_path(backend.icons(), icon_id, hires, language);
         let source = icon_source(icons, backend, ui.ctx(), &path);
+        let loaded = match &source {
+            ManagedIcon::Loaded(image) => Some(image.clone()),
+            _ => None,
+        };
 
         let uri = match &source {
             ManagedIcon::Loaded(egui::ImageSource::Uri(uri))
@@ -693,10 +697,11 @@ impl IconBrowser {
                     response
                 }
             };
-            let clicked = response
+            let response = response
                 .on_hover_text(format!("Id: {icon_id}\nPath: {path}"))
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .clicked();
+                .on_hover_cursor(egui::CursorIcon::PointingHand);
+            let clicked = response.clicked();
+            icon_context_menu(&response, icons, backend.excel().clone(), icon_id, &path, loaded);
             ui.vertical_centered(|ui| {
                 ui.label(RichText::new(format!("{icon_id:06}")).small());
             });
@@ -836,6 +841,13 @@ impl IconBrowser {
                     path.clone(),
                     source,
                 ));
+            }
+            if ui
+                .button("Copy Id")
+                .on_hover_text("Copy the icon's id to the clipboard")
+                .clicked()
+            {
+                ui.ctx().copy_text(icon_id.to_string());
             }
             if let Some(source) = loaded_source.clone() {
                 let promise = export::menu(

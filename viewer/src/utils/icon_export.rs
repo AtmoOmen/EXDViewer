@@ -4,7 +4,7 @@ use image::RgbaImage;
 
 use crate::excel::{base::CachedProvider, provider::ExcelProvider};
 
-use super::{TrackedPromise, export};
+use super::{IconManager, TrackedPromise, export};
 
 /// A `Uri` source is a `.tex` file the web backend hands the browser a link to; only the loader
 /// already showing it on screen (`icon_loader::TexLoader`) knows how to decode that, so this reads
@@ -82,4 +82,64 @@ pub fn icon_export_choice(
     })
     .title("Export Icon")
     .filter("PNG image", &["png"])
+}
+
+/// The right-click menu every drawn icon offers, wherever it is drawn: copy the pixels, copy the
+/// id, export to a file, and jump to it in the Icons tab. `icons` holds the promises this starts,
+/// since most call sites have nowhere of their own to keep one alive. `source` is `None` while the
+/// icon is still loading or failed to load, which still leaves the id and the Icons tab reachable.
+pub fn icon_context_menu(
+    response: &egui::Response,
+    icons: &IconManager,
+    excel: CachedProvider,
+    icon_id: u32,
+    path: &str,
+    source: Option<egui::ImageSource<'static>>,
+) {
+    response.context_menu(|ui| {
+        if ui
+            .add_enabled(source.is_some(), egui::Button::new("Copy Image"))
+            .clicked()
+            && let Some(source) = source.clone()
+        {
+            icons.spawn_action(spawn_icon_copy(
+                ui.ctx(),
+                excel.clone(),
+                icon_id,
+                path.to_owned(),
+                source,
+            ));
+            ui.close();
+        }
+        if ui.button("Copy Icon Id").clicked() {
+            ui.ctx().copy_text(icon_id.to_string());
+            ui.close();
+        }
+        if let Some(source) = source {
+            let promise = export::menu(
+                ui,
+                "Export",
+                None,
+                false,
+                vec![icon_export_choice(
+                    ui.ctx(),
+                    excel,
+                    icon_id,
+                    path.to_owned(),
+                    source,
+                )],
+            );
+            if let Some(promise) = promise {
+                icons.spawn_action(promise);
+            }
+        }
+        ui.separator();
+        if ui
+            .button(format!("Open “{icon_id:06}” in Icons"))
+            .clicked()
+        {
+            icons.request_open(icon_id);
+            ui.close();
+        }
+    });
 }

@@ -82,6 +82,13 @@ pub fn icon_modal(
                         source,
                     ));
                 }
+                if ui
+                    .button("Copy Id")
+                    .on_hover_text("Copy the icon's id to the clipboard")
+                    .clicked()
+                {
+                    ui.ctx().copy_text(icon_id.to_string());
+                }
                 if let Some(source) = loaded_source {
                     let promise = export::menu(
                         ui,

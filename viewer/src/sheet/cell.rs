@@ -21,7 +21,7 @@ use crate::{
         should_ignore_clicks, string_label_wrapped, wrap_string_lines_estimate,
     },
     stopwatch::stopwatches::MULTILINE_STOPWATCH,
-    utils::{ManagedIcon, TrackedPromise},
+    utils::{ManagedIcon, TrackedPromise, icon_context_menu},
 };
 
 use super::{
@@ -543,9 +543,14 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
     let path = get_icon_path(ctx.backend().icons(), icon_id, hires, ctx.language());
     let image_source = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
         log::debug!("Icon not found in cache: {icon_id}");
+        let excel = excel.clone();
         let path = path.clone();
         TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
+    let loaded = match &image_source {
+        ManagedIcon::Loaded(source) => Some(source.clone()),
+        _ => None,
+    };
     let resp = match image_source {
         ManagedIcon::Loaded(source) => {
             ui.with_layout(
@@ -573,12 +578,7 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
         }
     };
     let resp = resp.on_hover_text(format!("Id: {icon_id}\nPath: {path}"));
-    resp.context_menu(|ui| {
-        if ui.button("Copy").clicked() {
-            ui.ctx().copy_text(icon_id.to_string());
-            ui.close();
-        }
-    });
+    icon_context_menu(&resp, icon_mgr, excel, icon_id, &path, loaded);
     resp
 }
 

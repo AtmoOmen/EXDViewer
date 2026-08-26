@@ -1,6 +1,6 @@
 use anyhow::Result;
 use egui::{Color32, Label, RichText, Sense, Vec2};
-use ironworks::excel::Language;
+use ironworks::{excel::Language, file::exh::ColumnKind};
 
 use crate::{
     backend::Backend,
@@ -114,6 +114,8 @@ fn stain_color(fields: &Fields, row_id: u32) -> Option<(String, Color32)> {
     Some((name, Color32::from_rgb(r, g, b)))
 }
 
+/// `read_integer` only handles the integer `ColumnKind`s; the HQ flags in this sheet are plain
+/// `Bool` columns, which it errors on and this would silently read as 0 without the special case.
 fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
     let Some(at) = index.column(name) else {
         return 0;
@@ -121,7 +123,11 @@ fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
     let Ok((_, column)) = index.table.get_column_by_offset(at) else {
         return 0;
     };
-    read_integer::<i64>(row, u32::from(column.offset()), column.kind()).unwrap_or(0)
+    let offset = u32::from(column.offset());
+    if column.kind() == ColumnKind::Bool {
+        return i64::from(row.read_bool(offset).unwrap_or(false));
+    }
+    read_integer::<i64>(row, offset, column.kind()).unwrap_or(0)
 }
 
 fn icon(ui: &mut egui::Ui, index: &Index, icon_id: u32, size: f32) {

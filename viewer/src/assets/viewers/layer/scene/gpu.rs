@@ -556,7 +556,11 @@ impl Renderer {
             let offsets = self.windows(gl, frame, &sun, false)?;
             let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
             unsafe {
-                gl.viewport(0, split as i32 * size, size, size);
+                let (column, row) = (
+                    (split % program::ATLAS_COLUMNS) as i32,
+                    (split / program::ATLAS_COLUMNS) as i32,
+                );
+                gl.viewport(column * size, row * size, size, size);
                 gl.polygon_offset(program::SHADOW_SLOPE, program::shadow_push(scene.reach, split));
             }
             for (batch, (offset, windows, window)) in frame.batches.iter().zip(&offsets) {

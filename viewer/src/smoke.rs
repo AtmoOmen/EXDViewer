@@ -42,6 +42,10 @@ impl Step {
         }
     }
 
+    fn route(&self) -> String {
+        format!("/assets/{}", self.path())
+    }
+
     fn click_at(&self) -> Pos2 {
         match self {
             Step::Model(_) => pos2(GAME_SHADERS_X, ROW_Y),
@@ -52,7 +56,7 @@ impl Step {
 
 // Calibrated against a 1600x1000 viewport, the same layout the browser gate's `smoke.ts` clicks.
 const ROW_Y: f32 = 116.0;
-const GAME_SHADERS_X: f32 = 320.0;
+const GAME_SHADERS_X: f32 = 267.0;
 const SCENE_TAB_X: f32 = 287.0;
 
 pub struct Config {
@@ -141,9 +145,9 @@ impl Counters {
 /// Writes a path straight into the keys [`crate::router::history::memory::MemoryHistory`] reads,
 /// since the router itself is seeded lazily on the app's first draw and there is no earlier public
 /// hook to hand it a starting route.
-fn seed_route(ctx: &egui::Context, path: &str) {
+fn seed_route(ctx: &egui::Context, path: Path) {
     ctx.data_mut(|d| {
-        d.insert_persisted(Id::new("memory_history"), vec![Path::parse(path)]);
+        d.insert_persisted(Id::new("memory_history"), vec![path]);
         d.insert_persisted(Id::new("memory_history_position"), 0usize);
     });
 }
@@ -184,15 +188,11 @@ impl SmokeApp {
         };
         BACKEND_CONFIG.set(&cc.egui_ctx, Some(backend_config));
 
-        let first = config
-            .steps
-            .first()
-            .map(Step::path)
-            .unwrap_or("/")
-            .to_string();
+        let first = config.steps.first().map_or("/".to_string(), Step::route);
         // The setup route only auto-submits when its URL carries a `redirect`, the same query
         // param a real deep link bounces through `ensure_backend` with.
-        seed_route(&cc.egui_ctx, &format!("/?redirect={first}"));
+        let start = Path::with_params("/", &[("redirect", first.as_str())]);
+        seed_route(&cc.egui_ctx, start);
 
         Self {
             app: App::new(cc),
@@ -294,7 +294,7 @@ impl eframe::App for SmokeApp {
                                 .get_persisted_mut_or_insert_with(Id::new("memory_history"), || {
                                     vec![Path::parse("/")]
                                 });
-                            history.push(Path::parse(next.path()));
+                            history.push(Path::parse(&next.route()));
                             let position: &mut usize = d.get_persisted_mut_or_insert_with(
                                 Id::new("memory_history_position"),
                                 || 0,
@@ -336,7 +336,13 @@ impl eframe::App for SmokeApp {
                 }
             }
             Phase::Clicked { at } => {
-                if at.elapsed() > Duration::from_secs(2) {
+                // A scene's instances stream in over several seconds; a model's shaded frame
+                // settles inside one. Matches `smoke.ts`'s `SETTLE` for the same reason.
+                let settle = match step {
+                    Step::Model(_) => Duration::from_secs(2),
+                    Step::Scene(_) => Duration::from_secs(8),
+                };
+                if at.elapsed() > settle {
                     self.phase = Phase::Shooting {
                         at: Instant::now(),
                         requested: false,

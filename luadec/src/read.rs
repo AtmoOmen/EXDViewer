@@ -777,10 +777,28 @@ impl<'a> Reader<'a> {
     }
 
     /// Two operands, taken from the top of the stack down so neither is read past the other.
+    ///
+    /// `C` is not always the higher register -- an instruction reads whichever operand its own
+    /// register numbering put on top first, or a read of the lower one would still find the
+    /// higher one's value sitting there and mistake it for a temporary that outlived its
+    /// statement.
     fn operands(&mut self, b: u16, c: u16) -> Reading<(Expr, Expr)> {
-        let right = self.operand(c)?;
-        let left = self.operand(b)?;
-        Ok((left, right))
+        let c_first = !matches!(
+            (Operand::from(b), Operand::from(c)),
+            (Operand::Register(b), Operand::Register(c)) if b > c
+        );
+        Ok(match c_first {
+            true => {
+                let right = self.operand(c)?;
+                let left = self.operand(b)?;
+                (left, right)
+            }
+            false => {
+                let left = self.operand(b)?;
+                let right = self.operand(c)?;
+                (left, right)
+            }
+        })
     }
 
     // -- locals ------------------------------------------------------------------------------

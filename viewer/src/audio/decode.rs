@@ -214,3 +214,53 @@ fn decode_hca(data: &[u8]) -> Result<Decoded> {
         loop_end,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_header_matches_the_pcm_it_wraps() {
+        let audio = Decoded {
+            samples: vec![0.0, 1.0, -1.0, 0.5],
+            channels: 2,
+            sample_rate: 44100,
+            loop_start: None,
+            loop_end: None,
+        };
+        let wav = encode_wav(&audio).unwrap();
+
+        let u32_at =
+            |offset: usize| u32::from_le_bytes(wav[offset..offset + 4].try_into().unwrap());
+        let u16_at =
+            |offset: usize| u16::from_le_bytes(wav[offset..offset + 2].try_into().unwrap());
+
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32_at(4), 44);
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u32_at(16), 16);
+        assert_eq!(u16_at(20), 1);
+        assert_eq!(u16_at(22), 2);
+        assert_eq!(u32_at(24), 44100);
+        assert_eq!(u32_at(28), 44100 * 2 * 2);
+        assert_eq!(u16_at(32), 4);
+        assert_eq!(u16_at(34), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32_at(40), 8);
+        assert_eq!(wav.len(), 44 + 8);
+
+        let pcm: Vec<i16> = wav[44..]
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        assert_eq!(
+            pcm,
+            vec![
+                0,
+                i16::MAX,
+                i16::MIN,
+                (0.5 * f32::from(i16::MAX)).round() as i16
+            ]
+        );
+    }
+}

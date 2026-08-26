@@ -80,6 +80,9 @@ const TRANSFORM_VIEW_SKIN: u32 = 0x9c14_c8e9;
 /// writes is the geometry's own.
 const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
 const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
+/// The third value, which walks the normal map's blue channel as a parallax height under the
+/// material's own `g_HeightScale`. Only `bg.shpk` ships a node for it.
+const GET_NORMAL_MAP_PARALLAX: u32 = 0xd9fd_8a1c;
 
 /// The scene key deciding whether a character shader clips against its own alpha threshold. A
 /// package defaults it to off, and the variant that answer selects carries no clip at all, so a
@@ -2654,18 +2657,15 @@ impl Rendered {
         let mut translated = self.translated.borrow_mut();
         let mut tables = self.tables.borrow_mut();
         // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
-        // game would draw through the skinning variant.
-        let mut set = vec![
-            (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
-            (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
-        ];
+        // game would draw through the skinning variant. `GetNormalMap` is added per material below,
+        // since only `bg.shpk` has a node for the parallax value.
+        let mut base = vec![(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON)];
         if skinned {
-            set.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
+            base.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
         }
         if waving {
-            set.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
+            base.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
         }
-        let set = &set[..];
         let mut read: HashMap<String, ShaderPackage> = HashMap::new();
         for (index, slot) in slots.iter().enumerate() {
             let Some(Slot::Ready(material)) = slot else {
@@ -2696,12 +2696,20 @@ impl Rendered {
                 }
             }
             let package = &read[&name];
+            let mut keys = base.clone();
+            keys.push((
+                GET_NORMAL_MAP,
+                match name.ends_with("/bg.shpk") {
+                    true => GET_NORMAL_MAP_PARALLAX,
+                    false => GET_NORMAL_MAP_ON,
+                },
+            ));
             let build = |pass, at| {
                 program::Program::build(
                     package,
                     bytes,
                     material,
-                    set,
+                    &keys,
                     pass,
                     program::SUB_VIEW_MAIN,
                     at,

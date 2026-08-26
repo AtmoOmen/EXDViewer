@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import zlib from "node:zlib";
 
 import { Cdp } from "./cdp.ts";
 
@@ -241,34 +242,150 @@ function text(argument: any): string {
     return argument.type ?? "";
 }
 
-async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
+async function screenshot(cdp: Cdp, clip?: any): Promise<Buffer> {
     const params: Record<string, unknown> = { format: "png" };
     if (clip) params.clip = { ...clip, scale: 1 };
     const result = await cdp.send("Page.captureScreenshot", params);
-    if (shots) {
-        mkdirSync(shotDir, { recursive: true });
-        writeFileSync(join(shotDir, `${name}.png`), Buffer.from(result.data, "base64"));
-    }
-    return Bun.hash(result.data).toString(16);
+    return Buffer.from(result.data, "base64");
 }
 
-/// The preview frame, once it has held still across two intervals rather than one. A model's
-/// textures, its color table and its imc arrive on requests of their own over several seconds and
-/// each lands on geometry already on screen, so a frame that has only matched once can still be
-/// waiting on the last of them and is not what anything should be compared against.
-async function settled(cdp: Cdp): Promise<string> {
-    let held = await shot(cdp, "01-preview", VIEWPORT);
+async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
+    const data = await screenshot(cdp, clip);
+    if (shots) {
+        mkdirSync(shotDir, { recursive: true });
+        writeFileSync(join(shotDir, `${name}.png`), data);
+    }
+    return Bun.hash(data).toString(16);
+}
+
+/// Chromium's own screenshot encoder, confirmed against its actual output: 8-bit, non-interlaced,
+/// color type 2 (RGB) or 6 (RGBA). Anything else is a chromium change this needs to know about.
+function decodePng(png: Buffer): { width: number; height: number; channels: number; pixels: Buffer } {
+    let offset = 8;
+    let width = 0;
+    let height = 0;
+    let bitDepth = 0;
+    let colorType = 0;
+    const idat: Buffer[] = [];
+    while (offset < png.length) {
+        const length = png.readUInt32BE(offset);
+        const kind = png.toString("ascii", offset + 4, offset + 8);
+        const data = png.subarray(offset + 8, offset + 8 + length);
+        if (kind === "IHDR") {
+            width = data.readUInt32BE(0);
+            height = data.readUInt32BE(4);
+            bitDepth = data.readUInt8(8);
+            colorType = data.readUInt8(9);
+        } else if (kind === "IDAT") {
+            idat.push(data);
+        } else if (kind === "IEND") {
+            break;
+        }
+        offset += 12 + length;
+    }
+    if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+        throw new Error(`unsupported screenshot PNG: bit depth ${bitDepth}, color type ${colorType}`);
+    }
+    const channels = colorType === 6 ? 4 : 3;
+    const raw = zlib.inflateSync(Buffer.concat(idat));
+    const stride = width * channels;
+    const pixels = Buffer.alloc(height * stride);
+    let pos = 0;
+    for (let y = 0; y < height; y++) {
+        const filterType = raw[pos++];
+        const row = raw.subarray(pos, pos + stride);
+        pos += stride;
+        const out = pixels.subarray(y * stride, (y + 1) * stride);
+        const prior = y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : undefined;
+        for (let x = 0; x < stride; x++) {
+            const a = x >= channels ? out[x - channels] : 0;
+            const b = prior ? prior[x] : 0;
+            const c = prior && x >= channels ? prior[x - channels] : 0;
+            let value = row[x];
+            switch (filterType) {
+                case 1:
+                    value += a;
+                    break;
+                case 2:
+                    value += b;
+                    break;
+                case 3:
+                    value += (a + b) >> 1;
+                    break;
+                case 4: {
+                    const p = a + b - c;
+                    const pa = Math.abs(p - a);
+                    const pb = Math.abs(p - b);
+                    const pc = Math.abs(p - c);
+                    value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                    break;
+                }
+            }
+            out[x] = value & 0xff;
+        }
+    }
+    return { width, height, channels, pixels };
+}
+
+// How far a channel can move before a pixel counts as changed, and how much of the frame can
+// change that way before it is a regression rather than an idle animation's own silhouette moving
+// against a fixed camera and a fixed background.
+const CHANNEL_TOLERANCE = 24;
+const CHANGED_TOLERANCE = 0.12;
+
+/// The share of pixels that moved more than a small per-channel amount between two shots of the
+/// same clip. Used only once a model never held still to begin with, since an idle animation never
+/// stops moving and an exact match is not the thing to ask of it.
+function changedFraction(a: Buffer, b: Buffer): number {
+    const left = decodePng(a);
+    const right = decodePng(b);
+    if (left.width !== right.width || left.height !== right.height) {
+        return 1;
+    }
+    const pixels = left.width * left.height;
+    let changed = 0;
+    for (let at = 0; at < pixels; at++) {
+        const lo = at * left.channels;
+        const ro = at * right.channels;
+        let worst = 0;
+        for (let c = 0; c < 3; c++) {
+            worst = Math.max(worst, Math.abs(left.pixels[lo + c] - right.pixels[ro + c]));
+        }
+        if (worst > CHANNEL_TOLERANCE) changed++;
+    }
+    return changed / pixels;
+}
+
+/// The preview frame, once it has held still across two intervals rather than one, and whether it
+/// ever did. A model's textures, its color table and its imc arrive on requests of their own over
+/// several seconds and each lands on geometry already on screen, so a frame that has only matched
+/// once can still be waiting on the last of them and is not what anything should be compared
+/// against. A character model plays an idle animation that never holds still at all: `converged`
+/// says which case this run is in, so the caller can ask an exact match only where one is possible.
+async function settled(cdp: Cdp): Promise<{ data: Buffer; hash: string; converged: boolean }> {
+    const save = (data: Buffer) => {
+        if (shots) {
+            mkdirSync(shotDir, { recursive: true });
+            writeFileSync(join(shotDir, "01-preview.png"), data);
+        }
+    };
+    let held = await screenshot(cdp, VIEWPORT);
+    let hash = Bun.hash(held).toString(16);
+    save(held);
     let same = 0;
     for (let at = 0; at < 20; at++) {
         await sleep(1500);
-        const next = await shot(cdp, "01-preview", VIEWPORT);
-        same = next === held ? same + 1 : 0;
+        const next = await screenshot(cdp, VIEWPORT);
+        const nextHash = Bun.hash(next).toString(16);
+        same = nextHash === hash ? same + 1 : 0;
         held = next;
+        hash = nextHash;
+        save(held);
         if (same >= 2) {
-            return held;
+            return { data: held, hash, converged: true };
         }
     }
-    return held;
+    return { data: held, hash, converged: false };
 }
 
 async function counters(cdp: Cdp) {
@@ -559,13 +676,35 @@ async function main() {
         console.log("\n== back to the preview");
         await click(cdp, ROW_LEFT, ROW_Y);
         await sleep(2000);
-        if ((await shot(cdp, "03-preview", VIEWPORT)) !== preview) {
-            throw new Error(
-                "the preview frame changed after game shaders were turned on and off again, so " +
-                    "the deferred path left state behind that the preview path reads",
-            );
+        const after = await screenshot(cdp, VIEWPORT);
+        if (shots) {
+            mkdirSync(shotDir, { recursive: true });
+            writeFileSync(join(shotDir, "03-preview.png"), after);
         }
-        console.log("   the preview frame came back the same");
+        report.previewConverged = preview.converged;
+        if (preview.converged) {
+            if (Bun.hash(after).toString(16) !== preview.hash) {
+                throw new Error(
+                    "the preview frame changed after game shaders were turned on and off again, so " +
+                        "the deferred path left state behind that the preview path reads",
+                );
+            }
+            console.log("   the preview frame came back the same");
+        } else {
+            const fraction = changedFraction(preview.data, after);
+            report.previewChanged = fraction;
+            console.log(
+                `   the preview never held still to begin with (idle animation); ` +
+                    `${(fraction * 100).toFixed(2)}% of pixels moved more than tolerance`,
+            );
+            if (fraction > CHANGED_TOLERANCE) {
+                throw new Error(
+                    `${(fraction * 100).toFixed(1)}% of the preview's pixels changed after game ` +
+                        `shaders were turned on and off again (tolerance ${(CHANGED_TOLERANCE * 100).toFixed(0)}%), ` +
+                        `more than the idle animation this model plays accounts for`,
+                );
+            }
+        }
 
         phase = "scene";
         report.scene = await walk(cdp, origin, SCENE, "04-scene", "assets");

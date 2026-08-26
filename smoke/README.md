@@ -150,6 +150,25 @@ in the same draw now that it runs. `engine()` hands `SHADOW_DEPTH` a compare-mod
 mismatch if something binds the wrong one. Whoever hits this next: reproduce it under
 `smoke/run.sh`'s own counting rather than assuming it is noise.
 
+**Unattributed `GL_INVALID_OPERATION (0x502)` at `egui_glow/painter.rs:447`, `/zones/` runs of
+`r2t1` and `r2d1`.** Not diagnosed. The attribution is generic: it is egui_glow's own
+`check_for_gl_error!` polling `getError()`, not the call that raised it, and no chromium-native
+named error (the kind that named `glDrawElementsInstanced` above) accompanied it. `generateMipmap`
+is ruled out: bracketed alone with a `getError()` drain before and after, on a run where the 0x502
+did fire, with zero hits. `drawArraysInstanced`/`drawElementsInstanced` are untested, not ruled
+out - every run with them bracketed also failed to reproduce the 0x502 at all, so the probe never
+had a chance to fire. The reproduction itself is flaky: roughly 1 in 5 to 1 in 6 of `/zones/.../
+r2d1` runs, with instanced-draw counts swinging 8,986 to 81,603 across identical wasm on both
+`/zones/` and a plain `/assets/` `.lgb` open, the same shape of variance the scene/level phase
+already shows for how much of a streaming zone lands in time. So the acceptance bar of zero errors
+on one run each of `r2t1`/`r2d1` cannot be read off a single pass or a single fail. A single
+`/assets/` `bg.lgb` run at the highest instanced-draw count seen anywhere did not reproduce it
+either, which argues against "Zones-tab specifically" but is one run against a roughly-1-in-5 rate
+and proves nothing alone. Whoever picks this up: narrowing the bracket did not visibly change the
+repro rate once instrumentation stayed to a handful of calls, so the flakiness looks like genuine
+load-timing variance rather than an observer effect, and many repeated runs are a more promising
+next lever than a wider wrap.
+
 `the preview frame changed after game shaders were turned on and off again` used to fire on a
 `--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately
 after the last channel label and is a plain button, not a selectable label, so a sweep that walked
@@ -197,11 +216,19 @@ The two blit faults are gone too. Measured at `b965b62`, before
 | total messages | 623 | 19 | 0 |
 
 **`the preview frame changed after game shaders were turned on and off again`, passing `--model=`
-a `chara/...` path.** Not a GL fault: every character model plays an idle animation, `settled()`
-gives up after 20 tries whether or not the frame ever held still, and the two preview shots this
-compares land on different points of that animation's timeline regardless. The default `--model=`
-is a static background piece for exactly this reason; a character model fails this specific check
-by construction and always will until the comparison accounts for the clock.
+a `chara/...` path.** RESOLVED. Not a GL fault: every character model plays an idle animation that
+never holds still, and `settled()` used to give up after 20 tries regardless, so the two preview
+shots compared landed on arbitrary, uncorrelated points of that animation. `settled()` now reports
+whether it actually converged. Where it did (the default static background model), the comparison
+is still the exact hash it always was. Where it did not, the comparison falls back to the share of
+pixels that moved more than a small per-channel amount, since idle motion changes a bounded part of
+the frame and a real state leak does not: measured at 0.20-2.11% across four runs of
+`chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl` against a 12% tolerance. Two attempts
+at reproducing a real leak (an unrestored `BLEND` enable, a viewport left at the G-buffer's own
+size) both turned out to be no-ops: `Model::draw`'s plain path re-establishes cull, texture units
+and its own depth/blend state every frame, and the viewport a shaded frame leaves does not survive
+into the next callback either. Confirmed the check's throw path itself fires correctly by lowering
+the tolerance to 0.1% against the same idle-only run.
 
 ## Probing one model
 

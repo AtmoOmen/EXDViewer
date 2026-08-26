@@ -277,6 +277,15 @@ type Table = Arc<(Vec<u16>, usize, usize)>;
 /// A material's last-applied stains, and the table they were dyed into.
 type Dyed = (Table, [Option<u8>; 2]);
 
+/// A piece to carry rigidly at another bone's placement rather than pose on the shared rig: a
+/// weapon, hanging off whichever bone its attach point names this frame.
+struct Attachment {
+    /// The file this piece was worn as, which is what a mesh's own `piece` index names it by.
+    path: String,
+    bone: String,
+    local: Mat4,
+}
+
 /// One detail level's geometry, and everything the browser says about it.
 struct Level {
     identity: Vec<(&'static str, String)>,
@@ -323,6 +332,7 @@ struct Piece {
     asked: u16,
     deform: Option<Arc<Deform>>,
     skin: Option<u16>,
+    rigid: bool,
 }
 
 /// One file to build a model out of, and the imc variant it is worn at. Nought is the file's own
@@ -336,6 +346,9 @@ pub struct Source {
     pub deform: Option<Arc<Deform>>,
     /// The body whose skin to draw it with, where it is a body's own model.
     pub skin: Option<u16>,
+    /// Whether this piece hangs rigidly off a bone rather than posing on the shared rig: a weapon,
+    /// carried at the placement its own attach point states.
+    pub rigid: bool,
 }
 
 impl Piece {
@@ -348,6 +361,7 @@ impl Piece {
             asked: source.variant,
             deform: source.deform.clone(),
             skin: source.skin,
+            rigid: source.rigid,
         })
     }
 
@@ -358,6 +372,7 @@ impl Piece {
         self.path == source.path
             && self.asked == source.variant
             && self.skin == source.skin
+            && self.rigid == source.rigid
             && match (&self.deform, &source.deform) {
                 (None, None) => true,
                 (Some(held), Some(wanted)) => Arc::ptr_eq(held, wanted),
@@ -447,6 +462,9 @@ pub struct Rendered {
     /// with nothing newly picked costs a lookup rather than a rebuild.
     stains: RefCell<Vec<[Option<u8>; 2]>>,
     dyed: RefCell<BTreeMap<usize, Dyed>>,
+    /// A piece hung rigidly off a bone rather than skinned to the shared rig, by the path it was
+    /// worn as: a weapon, carried at the placement its attach point states this frame.
+    attachments: RefCell<Vec<Attachment>>,
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
@@ -488,6 +506,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         variant: 0,
         deform: None,
         skin: None,
+        rigid: false,
     }])?;
     model.chrome.set(Chrome::Asset);
     model.shaded.set(false);
@@ -531,6 +550,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         dye_templates: Default::default(),
         stains: Default::default(),
         dyed: Default::default(),
+        attachments: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
         customize: Cell::new(program::Customize::default()),
@@ -560,6 +580,7 @@ fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
                     variant: piece.variant.get(),
                     deform: piece.deform.as_deref(),
                     skin: piece.skin,
+                    rigid: piece.rigid,
                 },
                 &piece.container,
             )
@@ -701,6 +722,7 @@ struct Worn<'a> {
     variant: u16,
     deform: Option<&'a Deform>,
     skin: Option<u16>,
+    rigid: bool,
 }
 
 fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level> {
@@ -753,16 +775,22 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
                 }
             };
 
-            let table: Vec<String> = mesh
-                .bone_table()
-                .iter()
-                .map(|bone| {
-                    bone_names
-                        .get(usize::from(*bone))
-                        .cloned()
-                        .unwrap_or_default()
-                })
-                .collect();
+            // A rigid piece carries no bone table of its own to resolve against the shared rig:
+            // one placeholder entry is what gives it a joint to be carried on, which
+            // `Rendered::carried` fills in every frame.
+            let table: Vec<String> = match worn.rigid {
+                true => vec![String::new()],
+                false => mesh
+                    .bone_table()
+                    .iter()
+                    .map(|bone| {
+                        bone_names
+                            .get(usize::from(*bone))
+                            .cloned()
+                            .unwrap_or_default()
+                    })
+                    .collect(),
+            };
             if let Some(deform) = worn.deform {
                 deform.apply(&mut vertices, &table);
             }
@@ -2033,7 +2061,28 @@ impl Rendered {
             .iter()
             .map(|mesh| self.pieces[mesh.piece].path.as_str())
             .collect();
-        let pose = self.animation.pose(&level.bones, &worn, self.skeleton.get());
+        let mut pose = self.animation.pose(&level.bones, &worn, self.skeleton.get());
+        // A carried piece has no bone table of its own to resolve against the shared rig, so
+        // `pose` names it by an unresolvable placeholder and leaves it at `Mat4::IDENTITY`; this
+        // overwrites that with the bone it actually hangs from, carried the way a rider is.
+        if !self.attachments.borrow().is_empty()
+            && let Some((names, ..)) = self.animation.rig()
+        {
+            for attachment in self.attachments.borrow().iter() {
+                let Some(bone) = names.iter().position(|name| *name == attachment.bone) else {
+                    continue;
+                };
+                let Some(&world) = pose.world.get(bone) else {
+                    continue;
+                };
+                let carried = world * attachment.local;
+                for (index, mesh) in level.meshes.iter().enumerate() {
+                    if self.pieces[mesh.piece].path == attachment.path {
+                        pose.joints[index] = vec![carried];
+                    }
+                }
+            }
+        }
         // Carried rather than written into the camera, so a motion that walks runs in place and the
         // user's own orbit, pan and zoom still mean what they did.
         let focus = level.home.target + pose.drift;
@@ -2994,6 +3043,16 @@ impl Rendered {
     /// How far a raised visor has turned, one angle per bone it hinges on.
     pub fn hinged(&self, visor: [f32; 3]) {
         self.animation.hinged(visor);
+    }
+
+    /// Which pieces hang rigidly off a bone this frame rather than posing on the shared rig, each
+    /// by the path it was worn as, the bone it hangs from, and its own placement relative to that
+    /// bone. Replaces whatever was carried last frame outright: a weapon put away carries nothing.
+    pub fn carried(&self, pieces: Vec<(String, String, Mat4)>) {
+        *self.attachments.borrow_mut() = pieces
+            .into_iter()
+            .map(|(path, bone, local)| Attachment { path, bone, local })
+            .collect();
     }
 
     /// Poses the character out of a different pack, which is what picking an emote is.

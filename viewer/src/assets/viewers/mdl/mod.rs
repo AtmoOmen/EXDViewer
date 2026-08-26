@@ -18,7 +18,7 @@ pub mod dye;
 mod export;
 pub(super) mod gpu;
 mod grid;
-pub(super) mod material;
+pub(crate) mod material;
 pub(super) mod program;
 mod skin;
 
@@ -321,6 +321,9 @@ struct Piece {
     /// Which one it was asked for, which is not always where it settles: a file whose variants are
     /// alternatives rather than toggles is drawn at the first of them.
     asked: u16,
+    /// The material variant to draw with, where a caller has already resolved the imc's own
+    /// `material_id` for `variant`. Equal to `variant` wherever it has not.
+    material: u16,
     deform: Option<Arc<Deform>>,
     skin: Option<u16>,
 }
@@ -331,6 +334,10 @@ pub struct Source {
     pub path: String,
     pub bytes: Vec<u8>,
     pub variant: u16,
+    /// The material variant to draw with, where it differs from `variant`: several imc variants
+    /// commonly share one material, and a caller that already has the imc in hand states the
+    /// `material_id` it names here rather than the raw variant. Equal to `variant` otherwise.
+    pub material: u16,
     /// What to move the file's vertices by, where it was modelled for a body other than the one
     /// wearing it.
     pub deform: Option<Arc<Deform>>,
@@ -346,6 +353,7 @@ impl Piece {
             imc: RefCell::new(None),
             variant: Cell::new(source.variant),
             asked: source.variant,
+            material: source.material,
             deform: source.deform.clone(),
             skin: source.skin,
         })
@@ -486,6 +494,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         path: path.to_owned(),
         bytes: bytes.to_vec(),
         variant: 0,
+        material: 0,
         deform: None,
         skin: None,
     }])?;
@@ -501,7 +510,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
     parts.first().context("a model of no files")?;
     let pieces = parts.iter().map(Piece::new).collect::<Result<Vec<_>>>()?;
     let drawn = drawn_levels(&pieces);
-    let level = level_of(&pieces, 0)?;
+    let level = level_of(&pieces, 0, 0)?;
     let camera = level.home;
     Ok(Rendered {
         pieces,
@@ -550,7 +559,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
     })
 }
 
-fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
+fn level_of(pieces: &[Piece], lod: u8, attachments: usize) -> Result<Level> {
     let sources: Vec<_> = pieces
         .iter()
         .map(|piece| {
@@ -558,6 +567,7 @@ fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
                 Worn {
                     path: piece.path.as_str(),
                     variant: piece.variant.get(),
+                    material: piece.material,
                     deform: piece.deform.as_deref(),
                     skin: piece.skin,
                 },
@@ -565,7 +575,7 @@ fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
             )
         })
         .collect();
-    read_level(&sources, lod)
+    read_level(&sources, lod, attachments)
 }
 
 /// Which detail levels the pieces draw anything at.
@@ -625,7 +635,7 @@ fn kind_name(kind: MeshKind) -> &'static str {
 ///
 /// A human ships none. Its body, face, hair and ears wear no variant, and asking for one is a
 /// request for a file the game does not have.
-fn imc_path(path: &str) -> Option<String> {
+pub(crate) fn imc_path(path: &str) -> Option<String> {
     if path.starts_with("chara/human/") {
         return None;
     }
@@ -699,11 +709,12 @@ fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> 
 struct Worn<'a> {
     path: &'a str,
     variant: u16,
+    material: u16,
     deform: Option<&'a Deform>,
     skin: Option<u16>,
 }
 
-fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level> {
+fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usize) -> Result<Level> {
     let mut names: Vec<String> = Vec::new();
     let mut meshes = Vec::new();
     let mut unreadable = Vec::new();
@@ -774,7 +785,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
             }
 
             let name = mesh.material().unwrap_or_default();
-            let resolved = material::path(&name, worn.variant, worn.skin).unwrap_or(name);
+            let resolved = material::path(&name, worn.material, worn.skin).unwrap_or(name);
             let material = names
                 .iter()
                 .position(|held| *held == resolved)
@@ -899,6 +910,10 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
         unreadable.len()
     );
 
+    let gpu = gpu::Model::new(pending);
+    if attachments != 0 {
+        gpu.lock().unwrap().seed_attachments(attachments);
+    }
     Ok(Level {
         identity,
         groups: group(&shapes),
@@ -912,7 +927,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
         waving,
         bones,
         attributes: declares,
-        gpu: gpu::Model::new(pending),
+        gpu,
     })
 }
 
@@ -2906,7 +2921,15 @@ impl Rendered {
             .iter()
             .map(|piece| piece.path.as_str())
             .collect();
-        match level_of(&self.pieces, lod) {
+        let attachments = self
+            .level
+            .borrow()
+            .gpu
+            .lock()
+            .unwrap()
+            .attachments_learned()
+            .unwrap_or(0);
+        match level_of(&self.pieces, lod, attachments) {
             Ok(level) => {
                 self.lod.set(lod);
                 self.rebuild(level);
@@ -3036,7 +3059,15 @@ impl Rendered {
             true => self.lod.get(),
             false => 0,
         };
-        let level = level_of(&pieces, lod)?;
+        let attachments = self
+            .level
+            .borrow()
+            .gpu
+            .lock()
+            .unwrap()
+            .attachments_learned()
+            .unwrap_or(0);
+        let level = level_of(&pieces, lod, attachments)?;
 
         let rode = self.animation.rides().map(str::to_owned);
         if !self

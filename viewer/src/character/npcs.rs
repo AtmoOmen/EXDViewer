@@ -69,6 +69,10 @@ const LIPSTICK_AT: u32 = 19;
 /// The model quad worn in each of `Slot::ALL`, packed as the set in the low half and the variant
 /// in the high one.
 const MODELS: [u32; 10] = [148, 152, 156, 160, 164, 168, 172, 176, 180, 184];
+/// The dye worn in each of `Slot::ALL`, a `Stain` row id kept apart from the model quad rather than
+/// packed into it. The second channel trails all ten of the first rather than sitting beside it.
+const DYES: [u32; 10] = [31, 32, 33, 34, 35, 36, 37, 38, 39, 40];
+const DYES2: [u32; 10] = [41, 42, 43, 44, 45, 46, 47, 48, 49, 50];
 
 /// One of the game's own characters, as far as building it goes.
 pub struct Npc {
@@ -80,6 +84,8 @@ pub struct Npc {
     /// What each of the creator's menus was left at, by the `Customize` it drives.
     pub choices: Vec<(u32, u32)>,
     pub outfit: [Option<Gear>; 10],
+    /// What each of `Slot::ALL` is dyed, one id per channel a modern item can carry.
+    pub stains: [[Option<u8>; 2]; 10],
 }
 
 /// Every named character the game builds out of a human body. The unnamed ones are left out: a
@@ -115,6 +121,11 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
                 .filter(|quad| *quad != u32::MAX)
                 .and_then(|quad| Gear::read(u64::from(quad)));
         }
+        let stain = |at: u32| (byte(at) != 0).then(|| byte(at) as u8);
+        let mut stains = [[None; 2]; 10];
+        for slot in 0..10 {
+            stains[slot] = [stain(DYES[slot]), stain(DYES2[slot])];
+        }
         let (left, right) = (byte(LEFT_EYE_AT), byte(EYE_AT));
         found.push(Npc {
             name,
@@ -140,6 +151,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
                 ])
                 .collect(),
             outfit,
+            stains,
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));

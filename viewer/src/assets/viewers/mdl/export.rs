@@ -86,7 +86,15 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
     for (index, path) in level.materials.iter().enumerate() {
         match slots.get(index) {
             Some(Some(Slot::Ready(material))) => materials.push(material_info(path, material)),
-            Some(Some(Slot::Failed(why))) => bail!("material {path} failed to load: {why}"),
+            // A material can legitimately be absent from the install (a stated variant with no file
+            // behind it), which is not reason enough to fail an export of everything else that did
+            // load: draw that one piece untextured instead.
+            Some(Some(Slot::Failed(why))) => {
+                log::warn!(
+                    "assets/mdl: export: material {path} failed to load: {why}, exporting untextured"
+                );
+                materials.push(placeholder_material(path));
+            }
             _ => bail!("material {path} has not finished loading yet"),
         }
     }
@@ -273,6 +281,21 @@ fn material_info(path: &str, material: &Material) -> MaterialInfo {
         diffuse_color: material.diffuse(),
         emissive_color: material.emissive(),
         normal_scale: material.normal_scale(),
+    }
+}
+
+/// What a material that failed to load exports as: flat grey, untextured, cut at nothing.
+fn placeholder_material(path: &str) -> MaterialInfo {
+    MaterialInfo {
+        name: piece_name(path),
+        family: Family::Character,
+        alpha_threshold: 0.0,
+        cull: true,
+        textures: [None, None, None, None],
+        table: None,
+        diffuse_color: [0.5, 0.5, 0.5],
+        emissive_color: [0.0, 0.0, 0.0],
+        normal_scale: 1.0,
     }
 }
 
@@ -1239,6 +1262,7 @@ mod tests {
             path: path.to_owned(),
             bytes,
             variant: 0,
+            material: 0,
             deform: None,
             skin: None,
         }])
@@ -1334,6 +1358,7 @@ mod tests {
                 path: body_path.to_owned(),
                 bytes: read_local(body_path),
                 variant: 0,
+                material: 0,
                 deform: None,
                 skin: None,
             },
@@ -1341,6 +1366,7 @@ mod tests {
                 path: hair_path.to_owned(),
                 bytes: read_local(hair_path),
                 variant: 0,
+                material: 0,
                 deform: None,
                 skin: None,
             },

@@ -28,12 +28,16 @@ fn chunks(root: &str) -> Vec<PathBuf> {
 fn main() {
     let mut arguments = std::env::args().skip(1);
     let Some(root) = arguments.next() else {
-        eprintln!("usage: coverage <dir> [reasons] [perfile]");
+        eprintln!("usage: coverage <dir> [reasons] [perfile] [dump=<dir>]");
         return;
     };
     let flags: Vec<String> = arguments.collect();
     let reasons = flags.iter().any(|held| held == "reasons");
     let perfile = flags.iter().any(|held| held == "perfile");
+    let dump = flags
+        .iter()
+        .find_map(|held| held.strip_prefix("dump="))
+        .map(PathBuf::from);
 
     let (mut whole, mut partial, mut unread, mut broken) = (0usize, 0, 0, 0);
     let (mut read, mut raw) = (0usize, 0);
@@ -58,6 +62,14 @@ fn main() {
         raw += held.disassembled;
         if perfile {
             println!("{}\t{}\t{}", file.display(), held.functions, held.disassembled);
+        }
+        if let Some(dump) = &dump {
+            let relative = file.strip_prefix(&root).unwrap_or(file);
+            let target = dump.join(relative);
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(target, held.lines.join("\n"));
         }
         match (held.functions, held.disassembled) {
             (_, 0) => whole += 1,

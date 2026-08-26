@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import zlib from "node:zlib";
 
 import { Cdp } from "./cdp.ts";
 
@@ -18,6 +19,7 @@ const shots = args.has("--shots") || args.has("--explore");
 const explore = args.has("--explore");
 const modelOnly = explore || args.has("--model-only");
 const effectsOnly = args.has("--avfx-only");
+const characterOnly = args.has("--character-only");
 const orbit = args.has("--orbit");
 const views = args.has("--views");
 const shotDir = join(root, "smoke/shots");
@@ -106,6 +108,18 @@ const VIEWS: [string, number][] = [
 // SV_Target, SV_Target1..4 and Lit.
 const CHANNELS = 6;
 
+// The Character tab's Head slot: the row that opens its picker, and the first item once the list
+// has populated. Both sit in the side panel, which only reaches its full width once the race
+// selector and the default attire have both arrived; recalibrate with smoke/drive.ts against
+// --path=/character if the panel's layout changes.
+const HEAD_SLOT = { x: 52, y: 436 };
+const HEAD_ITEM = { x: 113, y: 502 };
+
+// How many more times the G-buffer has to bind its draw targets after an equipment change for the
+// composite to count as still running. A composite that has stopped holds this at exactly zero, so
+// the floor is only here to demand more than one incidental call; see smoke/README.md.
+const DRAW_BUFFERS_FLOOR = 20;
+
 type Message = { where: string; source: string; level: string; text: string };
 
 const failures: Message[] = [];
@@ -143,6 +157,12 @@ const noted: Message[] = [];
 // and a viewer has anything on screen. What says one is up is the line the app logs when it decodes
 // the file: a click sent against a title alone lands on the empty panel and is gone.
 let decoded = 0;
+// The mdl viewer and the Character tab share `read_level()`, which logs this line once a level's
+// meshes are ready whether it was reached by opening a file or by redressing a worn one.
+let rebuilt = 0;
+// The Character tab's own menus and equipment list load over a separate fetch from the mesh
+// geometry, unordered against it; this is what says the picker has something to click on.
+let pieced = 0;
 
 function record(where: string, source: string, level: string, text: string) {
     const message: Message = { where: phase, source, level, text };
@@ -150,6 +170,8 @@ function record(where: string, source: string, level: string, text: string) {
     // The Zones tab decodes a level straight through the layer viewer rather than through the
     // Assets tab's preview wrapper, so it logs under its own line instead of "assets/preview:".
     if (/assets\/(preview: |layer: )/.test(text)) decoded += 1;
+    if (/assets\/mdl: .* meshes,/.test(text)) rebuilt += 1;
+    if (/character: \d+ pieces to wear/.test(text)) pieced += 1;
     if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
         muted.push(message);
         return;
@@ -241,34 +263,150 @@ function text(argument: any): string {
     return argument.type ?? "";
 }
 
-async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
+async function screenshot(cdp: Cdp, clip?: any): Promise<Buffer> {
     const params: Record<string, unknown> = { format: "png" };
     if (clip) params.clip = { ...clip, scale: 1 };
     const result = await cdp.send("Page.captureScreenshot", params);
-    if (shots) {
-        mkdirSync(shotDir, { recursive: true });
-        writeFileSync(join(shotDir, `${name}.png`), Buffer.from(result.data, "base64"));
-    }
-    return Bun.hash(result.data).toString(16);
+    return Buffer.from(result.data, "base64");
 }
 
-/// The preview frame, once it has held still across two intervals rather than one. A model's
-/// textures, its color table and its imc arrive on requests of their own over several seconds and
-/// each lands on geometry already on screen, so a frame that has only matched once can still be
-/// waiting on the last of them and is not what anything should be compared against.
-async function settled(cdp: Cdp): Promise<string> {
-    let held = await shot(cdp, "01-preview", VIEWPORT);
+async function shot(cdp: Cdp, name: string, clip?: any): Promise<string> {
+    const data = await screenshot(cdp, clip);
+    if (shots) {
+        mkdirSync(shotDir, { recursive: true });
+        writeFileSync(join(shotDir, `${name}.png`), data);
+    }
+    return Bun.hash(data).toString(16);
+}
+
+/// Chromium's own screenshot encoder, confirmed against its actual output: 8-bit, non-interlaced,
+/// color type 2 (RGB) or 6 (RGBA). Anything else is a chromium change this needs to know about.
+function decodePng(png: Buffer): { width: number; height: number; channels: number; pixels: Buffer } {
+    let offset = 8;
+    let width = 0;
+    let height = 0;
+    let bitDepth = 0;
+    let colorType = 0;
+    const idat: Buffer[] = [];
+    while (offset < png.length) {
+        const length = png.readUInt32BE(offset);
+        const kind = png.toString("ascii", offset + 4, offset + 8);
+        const data = png.subarray(offset + 8, offset + 8 + length);
+        if (kind === "IHDR") {
+            width = data.readUInt32BE(0);
+            height = data.readUInt32BE(4);
+            bitDepth = data.readUInt8(8);
+            colorType = data.readUInt8(9);
+        } else if (kind === "IDAT") {
+            idat.push(data);
+        } else if (kind === "IEND") {
+            break;
+        }
+        offset += 12 + length;
+    }
+    if (bitDepth !== 8 || (colorType !== 2 && colorType !== 6)) {
+        throw new Error(`unsupported screenshot PNG: bit depth ${bitDepth}, color type ${colorType}`);
+    }
+    const channels = colorType === 6 ? 4 : 3;
+    const raw = zlib.inflateSync(Buffer.concat(idat));
+    const stride = width * channels;
+    const pixels = Buffer.alloc(height * stride);
+    let pos = 0;
+    for (let y = 0; y < height; y++) {
+        const filterType = raw[pos++];
+        const row = raw.subarray(pos, pos + stride);
+        pos += stride;
+        const out = pixels.subarray(y * stride, (y + 1) * stride);
+        const prior = y > 0 ? pixels.subarray((y - 1) * stride, y * stride) : undefined;
+        for (let x = 0; x < stride; x++) {
+            const a = x >= channels ? out[x - channels] : 0;
+            const b = prior ? prior[x] : 0;
+            const c = prior && x >= channels ? prior[x - channels] : 0;
+            let value = row[x];
+            switch (filterType) {
+                case 1:
+                    value += a;
+                    break;
+                case 2:
+                    value += b;
+                    break;
+                case 3:
+                    value += (a + b) >> 1;
+                    break;
+                case 4: {
+                    const p = a + b - c;
+                    const pa = Math.abs(p - a);
+                    const pb = Math.abs(p - b);
+                    const pc = Math.abs(p - c);
+                    value += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+                    break;
+                }
+            }
+            out[x] = value & 0xff;
+        }
+    }
+    return { width, height, channels, pixels };
+}
+
+// How far a channel can move before a pixel counts as changed, and how much of the frame can
+// change that way before it is a regression rather than an idle animation's own silhouette moving
+// against a fixed camera and a fixed background.
+const CHANNEL_TOLERANCE = 24;
+const CHANGED_TOLERANCE = 0.04;
+
+/// The share of pixels that moved more than a small per-channel amount between two shots of the
+/// same clip. Used only once a model never held still to begin with, since an idle animation never
+/// stops moving and an exact match is not the thing to ask of it.
+function changedFraction(a: Buffer, b: Buffer): number {
+    const left = decodePng(a);
+    const right = decodePng(b);
+    if (left.width !== right.width || left.height !== right.height) {
+        return 1;
+    }
+    const pixels = left.width * left.height;
+    let changed = 0;
+    for (let at = 0; at < pixels; at++) {
+        const lo = at * left.channels;
+        const ro = at * right.channels;
+        let worst = 0;
+        for (let c = 0; c < 3; c++) {
+            worst = Math.max(worst, Math.abs(left.pixels[lo + c] - right.pixels[ro + c]));
+        }
+        if (worst > CHANNEL_TOLERANCE) changed++;
+    }
+    return changed / pixels;
+}
+
+/// The preview frame, once it has held still across two intervals rather than one, and whether it
+/// ever did. A model's textures, its color table and its imc arrive on requests of their own over
+/// several seconds and each lands on geometry already on screen, so a frame that has only matched
+/// once can still be waiting on the last of them and is not what anything should be compared
+/// against. A character model plays an idle animation that never holds still at all: `converged`
+/// says which case this run is in, so the caller can ask an exact match only where one is possible.
+async function settled(cdp: Cdp): Promise<{ data: Buffer; hash: string; converged: boolean }> {
+    const save = (data: Buffer) => {
+        if (shots) {
+            mkdirSync(shotDir, { recursive: true });
+            writeFileSync(join(shotDir, "01-preview.png"), data);
+        }
+    };
+    let held = await screenshot(cdp, VIEWPORT);
+    let hash = Bun.hash(held).toString(16);
+    save(held);
     let same = 0;
     for (let at = 0; at < 20; at++) {
         await sleep(1500);
-        const next = await shot(cdp, "01-preview", VIEWPORT);
-        same = next === held ? same + 1 : 0;
+        const next = await screenshot(cdp, VIEWPORT);
+        const nextHash = Bun.hash(next).toString(16);
+        same = nextHash === hash ? same + 1 : 0;
         held = next;
+        hash = nextHash;
+        save(held);
         if (same >= 2) {
-            return held;
+            return { data: held, hash, converged: true };
         }
     }
-    return held;
+    return { data: held, hash, converged: false };
 }
 
 async function counters(cdp: Cdp) {
@@ -430,6 +568,92 @@ async function main() {
         }
     }
 
+    /// Loads a character, then changes its head piece: the one path here that redresses an
+    /// already-drawn model rather than opening a fresh one. A mesh whose program failed to link
+    /// used to abort the whole pass, composite included, every frame from then on, which reads as
+    /// a model that loaded in full and then drew nothing; no other phase visits this path.
+    async function character() {
+        phase = "character";
+        console.log(`\n== character: equipment change`);
+        const openedAt = rebuilt;
+        const pieceAt = pieced;
+        await cdp.send("Page.navigate", { url: `${origin}/character` });
+        await cdp.eval("localStorage.clear()").catch(() => {});
+        await waitFor("the character tab to be titled", 180_000, async () => {
+            const title = await cdp.eval<string>("document.title").catch(() => "");
+            return title.includes("Character");
+        });
+        // Two rebuilds, not a hold-still window: the tab composes the bare body first and then
+        // redresses it once with the default race attire, on its own, as soon as that attire has
+        // fetched. A hold-still window would be racy against however long that fetch takes; the
+        // count is not, since nothing else rebuilds the model before a slot is clicked. The menus
+        // and equipment list are a separate fetch, unordered against the mesh geometry: without
+        // waiting on both, the panel can still be in its pre-menu, single-column layout (or, past
+        // that, still missing the picker's own items) when the click below lands.
+        await waitFor(
+            "the default body and its starting attire to both be built",
+            180_000,
+            async () => rebuilt > openedAt + 1,
+        );
+        await waitFor("the equipment menus to load", 180_000, async () => pieced > pieceAt);
+        await sleep(3000);
+        await shot(cdp, "06-character");
+
+        const builtBefore = rebuilt;
+        // Programs are linked into a fresh, empty cache on every redress; this is what says how
+        // many of them a single equipment click paid to retranslate.
+        const linksBefore = (await counters(cdp)).links;
+        await click(cdp, HEAD_SLOT.x, HEAD_SLOT.y);
+        // The picker's item list is its own fetch, behind the model that is already on screen.
+        await sleep(6000);
+        await shot(cdp, "06-character-picker");
+        await click(cdp, HEAD_ITEM.x, HEAD_ITEM.y);
+        await waitFor(
+            "the equipment change to rebuild the model",
+            180_000,
+            async () => rebuilt > builtBefore,
+        );
+        await sleep(4000);
+        const linksOnRedress = (await counters(cdp)).links - linksBefore;
+        console.log(`   links to retranslate the redress: ${linksOnRedress}`);
+        await shot(cdp, "06-character-worn");
+
+        // Not a screenshot comparison: the failure this guards against is silent. It draws
+        // nothing past the rebuild that already succeeded above, and it logs nothing new either,
+        // so the only thing left to ask is whether the composite is still running at all. `draws`
+        // cannot answer that: egui's own panel repaints it constantly on their own, game shaders
+        // or not. `drawBuffers` cannot be confused with that traffic, since only the deferred
+        // path's own passes ever call it; a G-buffer that never runs again holds it at exactly
+        // zero, not just low, which is what a mesh whose program fails to link and takes the whole
+        // pass down with it looks like instead of one that is skipped and drawn around.
+        const mid = await counters(cdp);
+        try {
+            await waitFor(
+                "the composite to keep running after the redress",
+                30_000,
+                async () => (await counters(cdp)).drawBuffers > mid.drawBuffers + DRAW_BUFFERS_FLOOR,
+            );
+        } catch {
+            throw new Error(
+                "the G-buffer never bound another draw target in the 30s after an equipment " +
+                    "change; the model rebuilt but the composite stopped running",
+            );
+        }
+        const after = await counters(cdp);
+        console.log(
+            `   after redress: draws +${after.draws - mid.draws}` +
+                ` drawBuffers +${after.drawBuffers - mid.drawBuffers}` +
+                ` blits +${after.blits - mid.blits}` +
+                ` links +${after.links - mid.links}`,
+        );
+        report.character = {
+            linksOnRedress,
+            draws: after.draws - mid.draws,
+            drawBuffers: after.drawBuffers - mid.drawBuffers,
+            links: after.links - mid.links,
+        };
+    }
+
     try {
         phase = "boot";
         const first = effectsOnly ? `${origin}/assets/${EFFECTS[0]}` : `${origin}/assets/${MODEL}`;
@@ -459,6 +683,11 @@ async function main() {
 
         if (effectsOnly) {
             await effects();
+            return;
+        }
+
+        if (characterOnly) {
+            await character();
             return;
         }
 
@@ -561,19 +790,43 @@ async function main() {
         console.log("\n== back to the preview");
         await click(cdp, ROW_LEFT, ROW_Y);
         await sleep(2000);
-        if ((await shot(cdp, "03-preview", VIEWPORT)) !== preview) {
-            throw new Error(
-                "the preview frame changed after game shaders were turned on and off again, so " +
-                    "the deferred path left state behind that the preview path reads",
-            );
+        const after = await screenshot(cdp, VIEWPORT);
+        if (shots) {
+            mkdirSync(shotDir, { recursive: true });
+            writeFileSync(join(shotDir, "03-preview.png"), after);
         }
-        console.log("   the preview frame came back the same");
+        report.previewConverged = preview.converged;
+        if (preview.converged) {
+            if (Bun.hash(after).toString(16) !== preview.hash) {
+                throw new Error(
+                    "the preview frame changed after game shaders were turned on and off again, so " +
+                        "the deferred path left state behind that the preview path reads",
+                );
+            }
+            console.log("   the preview frame came back the same");
+        } else {
+            const fraction = changedFraction(preview.data, after);
+            report.previewChanged = fraction;
+            console.log(
+                `   the preview never held still to begin with (idle animation); ` +
+                    `${(fraction * 100).toFixed(2)}% of pixels moved more than tolerance`,
+            );
+            if (fraction > CHANGED_TOLERANCE) {
+                throw new Error(
+                    `${(fraction * 100).toFixed(1)}% of the preview's pixels changed after game ` +
+                        `shaders were turned on and off again (tolerance ${(CHANGED_TOLERANCE * 100).toFixed(0)}%), ` +
+                        `more than the idle animation this model plays accounts for`,
+                );
+            }
+        }
 
         phase = "scene";
         report.scene = await walk(cdp, origin, SCENE, "04-scene", "assets");
 
         phase = "level";
         report.level = await walk(cdp, origin, LEVEL, "05-level", "zones");
+
+        await character();
 
         await effects();
     } finally {

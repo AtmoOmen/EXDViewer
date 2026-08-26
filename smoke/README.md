@@ -91,6 +91,14 @@ It then walks the paths that broke:
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
+8. Opens `/character`, waits for the default body and its starting attire to both build and for
+   the equipment menus to load, then opens the Head slot and picks an item, which is the one path
+   here that redresses an already-drawn model rather than opening a fresh one. `drawBuffers` has to
+   climb again within 30s of the redress: only the deferred path's own passes ever call it, so a
+   G-buffer that has stopped running holds it at exactly zero rather than merely low, which is what
+   a mesh whose program fails to link and takes the whole pass down with it looks like instead of
+   one that is skipped and drawn around. `draws` cannot stand in for this: egui's own panels repaint
+   it constantly on their own, game shaders or not.
 
 `smoke/instrument.js` is injected before the app loads and counts draws, instanced draws, blits,
 `drawBuffers` calls and program links. Those counters are asserted, so a click that lands in the
@@ -150,6 +158,28 @@ in the same draw now that it runs. `engine()` hands `SHADOW_DEPTH` a compare-mod
 mismatch if something binds the wrong one. Whoever hits this next: reproduce it under
 `smoke/run.sh`'s own counting rather than assuming it is noise.
 
+**Unattributed `GL_INVALID_OPERATION (0x502)` at `egui_glow/painter.rs:447`, `/zones/` runs of
+`r2t1` and `r2d1`.** Not diagnosed. The attribution is generic: it is egui_glow's own
+`check_for_gl_error!` polling `getError()`, not the call that raised it, and no chromium-native
+named error (the kind that named `glDrawElementsInstanced` above) accompanied it. `generateMipmap`
+is ruled out: bracketed alone with a `getError()` drain before and after, on a run where the 0x502
+did fire, with zero hits. `drawArraysInstanced`/`drawElementsInstanced` are untested, not ruled
+out - every run with them bracketed also failed to reproduce the 0x502 at all, so the probe never
+had a chance to fire. The reproduction itself is flaky: roughly 1 in 5 to 1 in 6 of `/zones/.../
+r2d1` runs, with instanced-draw counts swinging 8,986 to 81,603 across identical wasm on both
+`/zones/` and a plain `/assets/` `.lgb` open, the same shape of variance the scene/level phase
+already shows for how much of a streaming zone lands in time. So the acceptance bar of zero errors
+on one run each of `r2t1`/`r2d1` cannot be read off a single pass or a single fail. A single
+`/assets/` `bg.lgb` run at the highest instanced-draw count seen anywhere did not reproduce it
+either, which argues against "Zones-tab specifically" but is one run against a roughly-1-in-5 rate
+and proves nothing alone. One run had no instrumentation at all - `instrument.js` failed to parse
+that time (a stray brace from mid-edit), so nothing was wrapped and `__smoke` never existed - and
+it still did not reproduce, which is the one clean data point against the wrap itself being what
+suppresses it. Whoever picks this up: many repeated runs looks like a more promising lever than a
+wider wrap, since the reproduction looks like genuine load-timing variance rather than an observer
+effect, but that rests on a single successful repro and a single zero-instrumentation miss, not on
+a controlled series.
+
 `the preview frame changed after game shaders were turned on and off again` used to fire on a
 `--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately
 after the last channel label and is a plain button, not a selectable label, so a sweep that walked
@@ -197,11 +227,46 @@ The two blit faults are gone too. Measured at `b965b62`, before
 | total messages | 623 | 19 | 0 |
 
 **`the preview frame changed after game shaders were turned on and off again`, passing `--model=`
-a `chara/...` path.** Not a GL fault: every character model plays an idle animation, `settled()`
-gives up after 20 tries whether or not the frame ever held still, and the two preview shots this
-compares land on different points of that animation's timeline regardless. The default `--model=`
-is a static background piece for exactly this reason; a character model fails this specific check
-by construction and always will until the comparison accounts for the clock.
+a `chara/...` path.** RESOLVED. Not a GL fault: every character model plays an idle animation that
+never holds still, and `settled()` used to give up after 20 tries regardless, so the two preview
+shots compared landed on arbitrary, uncorrelated points of that animation. `settled()` now reports
+whether it actually converged. Where it did (the default static background model), the comparison
+is still the exact hash it always was. Where it did not, the comparison falls back to the share of
+pixels that moved more than a small per-channel amount, since idle motion changes a bounded part of
+the frame and a real state leak does not.
+
+Two attempts at forcing a real leak turned out to be no-ops and said so honestly rather than
+passing by accident: an unrestored `BLEND` enable and a viewport left at the G-buffer's own size
+both measured *below* idle noise, and `Model::draw`'s plain path turned out to re-establish cull,
+texture units and its own depth/blend state every frame regardless, with the viewport a shaded
+frame leaves not surviving into the next callback either. A third attempt did leak: gating
+`u_alpha_threshold` at 2.0 on `self.game.buffers.size() != (0, 0)` (true once shading has ever run,
+since the G-buffer is never torn back down) discards the model outright once shaded has toggled on
+and off, which is deterministic Rust control flow rather than GL state, so it cannot be silently
+re-established. Confirmed with `--shots` that the model actually vanishes in the second screenshot,
+not just a metric moving.
+
+Measured against `chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl`: idle-only noise
+0.11-2.11% across five runs; the same model discarded outright measured 6.68% and 7.76% on two
+runs. `CHANGED_TOLERANCE` is set to 4%, roughly 2x the worst idle noise seen and roughly half the
+smallest deliberate-regression signal measured; a run built with the `alpha_threshold` gate above
+fails at 7.8%, and the same run reverted passes at 0.11%. A second, independent numpy diff over the
+same two PNGs the harness compared landed at 6.6785%, three decimal places from the TypeScript
+decoder's own 6.68%, which is what says the hand-rolled PNG decode and threshold arithmetic are
+correct rather than coincidentally close.
+
+**`the preview frame changed after game shaders were turned on and off again`, on the default
+static `bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl`.** Not diagnosed, not caused by
+anything in this branch: reproduces identically on an unmodified `origin/main` checkout
+(`c1731987`) built and run on its own, with none of this branch's commits present. This model does
+not animate, so `settled()` reports `converged: true` and the comparison is the exact hash it
+always was; two full-gate runs on this branch and one on stock `main` all failed it the same way.
+The diff is small and structural, not a blank or a solid-color tell: about 0.35% of pixels move by
+more than 24 per channel, bounded to the model's own silhouette, and amplifying the difference image
+4x shows the model's surface detail rather than a flat region, which reads as a rendering-order or
+multisample-resolve difference rather than a leaked binding. Whoever picks this up: bisect the
+merges into `main` since this branch forked rather than this branch's own commits, since stock
+`main` alone already reproduces it.
 
 ## Probing one model
 

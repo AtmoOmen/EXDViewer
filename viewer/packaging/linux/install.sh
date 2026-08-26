@@ -23,7 +23,7 @@ sed "s|@BIN@|$bin|" "$here/XIViewer.desktop" >"$apps/XIViewer.desktop"
 cp "$assets/icon.svg" "$scalable/xiviewer.svg"
 cp "$assets/icon.png" "$size512/xiviewer.png"
 
-command -v update-desktop-database >/dev/null && update-desktop-database "$apps"
+command -v update-desktop-database >/dev/null && update-desktop-database "$apps" || true
 command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -qtf "$data_home/icons/hicolor" || true
 
 echo "Installed $apps/XIViewer.desktop"

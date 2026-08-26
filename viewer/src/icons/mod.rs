@@ -812,7 +812,9 @@ impl IconBrowser {
             {
                 self.export_icon(ui.ctx(), backend, icon_id, path.clone(), source, false);
             }
-            if ui.add_enabled(enabled, Button::new("Export PNG…")).clicked()
+            if ui
+                .add_enabled(enabled, Button::new("Export PNG…"))
+                .clicked()
                 && let Some(source) = loaded_source.clone()
             {
                 self.export_icon(ui.ctx(), backend, icon_id, path.clone(), source, true);

@@ -91,6 +91,14 @@ It then walks the paths that broke:
    which both pauses it and seeks, so the two shots of an effect land on the same frames every run.
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
+8. Opens `/character`, waits for the default body and its starting attire to both build and for
+   the equipment menus to load, then opens the Head slot and picks an item, which is the one path
+   here that redresses an already-drawn model rather than opening a fresh one. `drawBuffers` has to
+   climb again within 30s of the redress: only the deferred path's own passes ever call it, so a
+   G-buffer that has stopped running holds it at exactly zero rather than merely low, which is what
+   a mesh whose program fails to link and takes the whole pass down with it looks like instead of
+   one that is skipped and drawn around. `draws` cannot stand in for this: egui's own panels repaint
+   it constantly on their own, game shaders or not.
 
 `smoke/instrument.js` is injected before the app loads and counts draws, instanced draws, blits,
 `drawBuffers` calls and program links. Those counters are asserted, so a click that lands in the
@@ -246,6 +254,19 @@ fails at 7.8%, and the same run reverted passes at 0.11%. A second, independent 
 same two PNGs the harness compared landed at 6.6785%, three decimal places from the TypeScript
 decoder's own 6.68%, which is what says the hand-rolled PNG decode and threshold arithmetic are
 correct rather than coincidentally close.
+
+**`the preview frame changed after game shaders were turned on and off again`, on the default
+static `bg/ex1/01_roc_r2/dun/r2d1/bgparts/r2d1_u1_yam04.mdl`.** Not diagnosed, not caused by
+anything in this branch: reproduces identically on an unmodified `origin/main` checkout
+(`c1731987`) built and run on its own, with none of this branch's commits present. This model does
+not animate, so `settled()` reports `converged: true` and the comparison is the exact hash it
+always was; two full-gate runs on this branch and one on stock `main` all failed it the same way.
+The diff is small and structural, not a blank or a solid-color tell: about 0.35% of pixels move by
+more than 24 per channel, bounded to the model's own silhouette, and amplifying the difference image
+4x shows the model's surface detail rather than a flat region, which reads as a rendering-order or
+multisample-resolve difference rather than a leaked binding. Whoever picks this up: bisect the
+merges into `main` since this branch forked rather than this branch's own commits, since stock
+`main` alone already reproduces it.
 
 ## Probing one model
 

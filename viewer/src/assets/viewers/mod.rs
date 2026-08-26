@@ -8,6 +8,7 @@ use egui::{
 };
 
 use super::{Bytes, Channels, MAX_TEXT_PREVIEW};
+use crate::utils::export;
 
 pub mod atch;
 pub mod avfx;
@@ -560,6 +561,23 @@ impl Preview {
             }
         }
         follow
+    }
+
+    /// Export choices beyond the raw file, which the browser always offers on its own. `viewer` is
+    /// what tells apart the several formats that decode into the same [`Self::Image`] shape.
+    pub fn export_choices<'a>(
+        &'a self,
+        viewer: Viewer,
+        bytes: &'a [u8],
+        ctx: &egui::Context,
+    ) -> Vec<export::Choice<'a>> {
+        match self {
+            Self::Luab(chunk) => luab::export_choices(chunk),
+            Self::Shpk(package) => shpk::export_choices(package, bytes, ctx),
+            Self::Shcd(code) => shcd::export_choices(code, bytes),
+            Self::Image { .. } if viewer == Viewer::Hwc => hwc::export_choices(bytes),
+            _ => Vec::new(),
+        }
     }
 
     /// The info sidebar: property table, channel toggles, then the mipmap picker. Returns the new

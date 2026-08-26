@@ -6,7 +6,7 @@ use itertools::Itertools;
 use crate::{
     excel::{
         base::BaseSheet,
-        provider::{ExcelHeader, ExcelProvider, ExcelRow},
+        provider::{ExcelHeader, ExcelProvider, ExcelRow, ExcelSheet},
     },
     schema::{Schema, provider::SchemaProvider},
     sheet::{
@@ -18,7 +18,9 @@ use crate::{
 };
 
 use super::{
-    cell::Cell, global_context::GlobalContext, schema_column::SchemaColumn,
+    cell::{Cell, CellValue, read_integer},
+    global_context::GlobalContext,
+    schema_column::{ResolvedTableContext, SchemaColumn, SchemaColumnMeta},
     sheet_column::SheetColumnDefinition,
 };
 
@@ -235,6 +237,30 @@ impl TableContext {
             sheet_column,
             self,
         ))
+    }
+
+    /// The icon a `Link` column's target row itself names under `field`, once the target sheet has
+    /// loaded and the row is found. Used where a linked row's own icon belongs beside its resolved
+    /// name, which the display field alone does not carry.
+    pub fn linked_icon(&self, at: u32, row: ExcelRow<'_>, field: &str) -> Option<u32> {
+        let (schema_column, sheet_column) = self.get_column_by_offset(at).ok()?;
+        let SchemaColumnMeta::Link(sheets) = schema_column.meta() else {
+            return None;
+        };
+        let row_id: i128 =
+            read_integer(row, sheet_column.offset() as u32, sheet_column.kind()).ok()?;
+        let row_id = u32::try_from(row_id).ok().filter(|id| *id != 0)?;
+        let ResolvedTableContext::Found { table: linked, .. } = sheets.resolve(self, row_id) else {
+            return None;
+        };
+        let target_row = linked.sheet().get_row(row_id).ok()?;
+        let columns = linked.columns().ok()?;
+        let idx = columns.iter().position(|(c, _)| c.name() == field)?;
+        let cell = linked.cell_by_offset(target_row, idx as u32).ok()?;
+        match cell.read(false).ok()? {
+            CellValue::Icon(icon_id) => u32::try_from(icon_id).ok().filter(|id| *id != 0),
+            _ => None,
+        }
     }
 
     pub fn display_column_idx(&self) -> Option<u32> {

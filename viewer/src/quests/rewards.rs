@@ -8,6 +8,7 @@ use crate::{
     excel::provider::{ExcelProvider, ExcelRow, ExcelSheet},
     quests::{
         detail::Action,
+        glyph,
         index::{Fields, Index, integer, text},
     },
     sheet::read_integer,
@@ -116,7 +117,7 @@ fn stain_color(fields: &Fields, row_id: u32) -> Option<(String, Color32)> {
 
 /// `read_integer` only handles the integer `ColumnKind`s; the HQ flags in this sheet are plain
 /// `Bool` columns, which it errors on and this would silently read as 0 without the special case.
-fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
+pub(crate) fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
     let Some(at) = index.column(name) else {
         return 0;
     };
@@ -182,10 +183,12 @@ fn link_label(ui: &mut egui::Ui, label: &str, width: f32, sheet: &str, row_id: u
     response.clicked().then(|| Action::Navigate(format!("/sheet/{sheet}#R{row_id}")))
 }
 
-const ICON_SIZE: f32 = 20.0;
+pub(crate) const ICON_SIZE: f32 = 20.0;
 /// Space reserved for the count, stain swatch and HQ badge trailing an item row, so the name gets
 /// the rest of the line instead of a fixed split that clips long names.
 const TRAILING_WIDTH: f32 = 96.0;
+/// Gil's own row in `Item`, which the reward computation already special-cases the same way.
+const GIL_ITEM_ID: u32 = 1;
 
 #[allow(clippy::too_many_arguments)]
 fn item_row(
@@ -202,7 +205,16 @@ fn item_row(
     let icon_id = resolved.as_ref().map_or(0, |(_, icon_id)| *icon_id);
     let name = resolved.map_or_else(|| format!("Item #{item_id}"), |(name, _)| name);
     ui.horizontal(|ui| {
-        icon(ui, index, icon_id, ICON_SIZE);
+        // Gil's own coin glyph is already in the font, so showing it costs nothing an icon fetch
+        // would: no spinner, no texture.
+        if item_id == GIL_ITEM_ID {
+            ui.add_sized(
+                Vec2::splat(ICON_SIZE),
+                Label::new(RichText::new(glyph::GIL.to_string()).size(ICON_SIZE)),
+            );
+        } else {
+            icon(ui, index, icon_id, ICON_SIZE);
+        }
         let name_width = (ui.available_width() - TRAILING_WIDTH).max(40.0);
         action = link_label(ui, &name, name_width, "Item", item_id);
         if count > 1 {
@@ -214,7 +226,8 @@ fn item_row(
             swatch(ui, color, 14.0).on_hover_text(stain_name);
         }
         if hq {
-            ui.label(RichText::new("HQ").strong().small());
+            ui.label(RichText::new(glyph::HIGH_QUALITY.to_string()).size(16.0))
+                .on_hover_text("High Quality");
         }
     });
     action

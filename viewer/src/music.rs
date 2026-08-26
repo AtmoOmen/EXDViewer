@@ -23,7 +23,7 @@ use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{
     CollapsibleSidePanel, FuzzyMatcher, PromiseKind, Side, TrackedPromise, center, empty_view,
-    fetch_url_str,
+    fetch_url_str, file_name,
 };
 
 const FILTER_ID: &str = "music_filter";
@@ -167,6 +167,13 @@ impl Default for MusicPlayer {
     }
 }
 
+pub enum Action {
+    /// A track was picked from the list or the palette; reflect it in the URL.
+    Select(u32),
+    /// The now-playing panel's path was followed to the Assets tab.
+    Navigate(String),
+}
+
 enum Cmd {
     Toggle,
     Scrub(f64),
@@ -174,6 +181,7 @@ enum Cmd {
     Volume(f32),
     ToggleVisualizer,
     Export(ExportFormat),
+    OpenInAssets,
 }
 
 #[derive(Clone, Copy)]
@@ -229,7 +237,7 @@ impl MusicPlayer {
         self.palette = Some(Palette::new("Find Track…", "Filter", self.search.clone()));
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<u32> {
+    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<Action> {
         self.poll(backend, &api_base(ui.ctx()), LANGUAGE.get(ui.ctx()));
         if let Some(player) = &mut self.player {
             player.take_media_action();
@@ -252,8 +260,11 @@ impl MusicPlayer {
             .claim(ui.ctx(), listed, Some(egui::Id::new(FILTER_ID)));
 
         let clicked = self.side_panel(ui);
-        self.now_playing_panel(ui);
-        picked.or(clicked)
+        let navigate = self.now_playing_panel(ui);
+        picked
+            .or(clicked)
+            .map(Action::Select)
+            .or_else(|| navigate.map(Action::Navigate))
     }
 
     fn draw_palette(&mut self, ctx: &egui::Context) -> Option<u32> {
@@ -653,7 +664,8 @@ impl MusicPlayer {
         }
     }
 
-    fn now_playing_panel(&mut self, ui: &mut egui::Ui) {
+    fn now_playing_panel(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        let mut navigate = None;
         CentralPanel::default().show(ui, |ui| {
             if CollapsibleSidePanel::is_collapsed(ui.ctx(), "music_list") {
                 Panel::top("music_reexpand").show(ui, |ui| {
@@ -665,7 +677,7 @@ impl MusicPlayer {
                 });
             }
             if self.now_playing.is_some() {
-                self.draw_player(ui);
+                navigate = self.draw_player(ui);
             } else if let Some(loading) = &self.loading {
                 let phase = loading.phase();
                 let name = loading.name.clone();
@@ -679,9 +691,10 @@ impl MusicPlayer {
                 empty_view(ui, "♪", "Select a track to play");
             }
         });
+        navigate
     }
 
-    fn draw_player(&mut self, ui: &mut egui::Ui) {
+    fn draw_player(&mut self, ui: &mut egui::Ui) -> Option<String> {
         self.export_promise
             .take_if(|promise| promise.try_get().is_some());
         let now = self.now_playing.as_ref().unwrap();
@@ -786,7 +799,7 @@ impl MusicPlayer {
                         ui.spinner();
                     }
                     ui.add_enabled_ui(!exporting, |ui| {
-                        ui.menu_button("Export", |ui| {
+                        ui.menu_button("📤 Export", |ui| {
                             if ui.button("Original file").clicked() {
                                 cmd = Some(Cmd::Export(ExportFormat::Original));
                                 ui.close();
@@ -811,7 +824,7 @@ impl MusicPlayer {
                 });
                 ui.add_space(18.0);
 
-                draw_info(
+                if draw_info(
                     ui,
                     &info,
                     channels,
@@ -819,7 +832,9 @@ impl MusicPlayer {
                     duration,
                     loop_range,
                     &path,
-                );
+                ) {
+                    cmd = Some(Cmd::OpenInAssets);
+                }
             },
         );
 
@@ -832,23 +847,36 @@ impl MusicPlayer {
                         player.resume();
                     }
                 }
+                None
             }
-            Some(Cmd::Scrub(seconds)) => self.scrub = Some(seconds),
+            Some(Cmd::Scrub(seconds)) => {
+                self.scrub = Some(seconds);
+                None
+            }
             Some(Cmd::Seek(seconds)) => {
                 if let Some(player) = &mut self.player {
                     player.seek(seconds);
                 }
                 self.scrub = None;
+                None
             }
             Some(Cmd::Volume(value)) => {
                 self.volume = value;
                 if let Some(player) = &mut self.player {
                     player.set_volume(value);
                 }
+                None
             }
-            Some(Cmd::ToggleVisualizer) => self.show_visualizer = !self.show_visualizer,
-            Some(Cmd::Export(format)) => self.export(name, info.codec, stream, format),
-            None => {}
+            Some(Cmd::ToggleVisualizer) => {
+                self.show_visualizer = !self.show_visualizer;
+                None
+            }
+            Some(Cmd::Export(format)) => {
+                self.export(name, info.codec, stream, format);
+                None
+            }
+            Some(Cmd::OpenInAssets) => Some(path),
+            None => None,
         }
     }
 
@@ -949,7 +977,7 @@ fn draw_info(
     duration: f64,
     loop_range: Option<(f64, f64)>,
     path: &str,
-) {
+) -> bool {
     let looping = loop_range.is_some();
     let bitrate = if duration > 0.0 {
         (info.stream_size as f64 * 8.0 / duration / 1000.0).round() as u64
@@ -986,7 +1014,7 @@ fn draw_info(
         ));
     }
     ui.add_space(4.0);
-    ui.label(RichText::new(path).weak().small());
+    crate::assets::viewers::link(ui, file_name(path), path)
 }
 
 fn codec_name(codec: Codec) -> &'static str {
@@ -1009,6 +1037,7 @@ fn codec_extension(codec: Codec) -> &'static str {
     match codec {
         Codec::OggVorbis => "ogg",
         Codec::Hca => "hca",
+        Codec::MsAdpcm => "wav",
         _ => "bin",
     }
 }

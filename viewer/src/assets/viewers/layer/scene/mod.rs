@@ -96,6 +96,10 @@ const LAMPS: usize = 256;
 /// writes is the geometry's own.
 const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
 const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
+/// The third value, which walks the normal map's blue channel as a parallax height under the
+/// material's own `g_HeightScale`. Only `bg.shpk` ships a node for it - `bgprop.shpk` declares the
+/// same key but has none, so asking it for this value finds no node at all.
+const GET_NORMAL_MAP_PARALLAX: u32 = 0xd9fd_8a1c;
 
 /// The scene key deciding whether a shader clips against its own alpha threshold. A package defaults
 /// it to off, and the variant that answer selects carries no clip at all, so a material's cutout
@@ -113,13 +117,31 @@ const APPLY_DETAIL_MAP_ON: u32 = 0x7a3d_9efd;
 const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
 const APPLY_WAVING_ANIM_ON: u32 = 0xf801_b859;
 
-/// The keys the engine sets rather than the material. A package that declares none of them resolves
-/// exactly as it did, since a key the package never declares is never looked up.
-const KEYS: [(u32, u32); 3] = [
-    (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
+/// The keys the engine sets rather than the material, other than `GetNormalMap`: a package that
+/// declares none of them resolves exactly as it did, since a key the package never declares is
+/// never looked up.
+const KEYS: [(u32, u32); 2] = [
     (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
     (APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON),
 ];
+
+/// The engine keys this package's materials draw with. `GetNormalMap` is separate from `KEYS`
+/// because only `bg.shpk` has a node for the parallax value; everything else stays on the plain
+/// normal map.
+fn engine_keys(package: &str, waving: bool) -> Vec<(u32, u32)> {
+    let mut keys = KEYS.to_vec();
+    keys.push((
+        GET_NORMAL_MAP,
+        match package.ends_with("/bg.shpk") {
+            true => GET_NORMAL_MAP_PARALLAX,
+            false => GET_NORMAL_MAP_ON,
+        },
+    ));
+    if waving {
+        keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
+    }
+    keys
+}
 
 /// How large a box a light is drawn as where the zone states none for it.
 const REACH: f32 = 6.0;
@@ -520,6 +542,7 @@ struct Translated {
     depth: Option<Arc<program::Program>>,
     shadow: Option<Arc<program::Program>>,
     resolve: Option<Arc<program::Program>>,
+    sheer: Option<(Arc<program::Program>, Arc<program::Program>)>,
 }
 
 /// One light the zone places. The box it is clipped against is stated in its own space, so the
@@ -546,6 +569,14 @@ struct Light {
     /// Set where the scene cycles its colour, in which case the colour above is only where the
     /// file left it.
     glow: Option<Glow>,
+}
+
+/// A placed `.avfx` glow. Collected, not drawn: nothing in the scene fetches or steps it yet.
+struct Vfx {
+    placement: Mat4,
+    path: String,
+    layer: usize,
+    key: (u32, [u8; 4]),
 }
 
 /// A file the scene names beside itself and reads once: the boxes its lights are clipped against,
@@ -734,6 +765,7 @@ pub struct Scene {
     look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
+    effects: Vec<Vfx>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
     clips: HashMap<(u32, [u8; 4]), (Vec3, Vec3)>,
     clip: Aside,
@@ -996,6 +1028,7 @@ impl Scene {
             look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
+            effects: Vec::new(),
             clips: HashMap::new(),
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
@@ -1064,6 +1097,12 @@ impl Scene {
             ),
         }
         scene.fit();
+        // A preset held for this path was left by an import that had to open it first, and would
+        // otherwise sit unapplied: nothing else ever stands the view where it says.
+        if let Some(held) = scene.preset.take() {
+            scene.stand_where(&held);
+            scene.preset = Some(held);
+        }
         scene
     }
 
@@ -1368,6 +1407,14 @@ impl Scene {
                                 ),
                                 key: reach(key, depth, instance.id()),
                                 glow,
+                            });
+                        }
+                        InstanceData::Vfx(vfx) if !vfx.asset_path().is_empty() => {
+                            self.effects.push(Vfx {
+                                placement: here,
+                                path: vfx.asset_path().clone(),
+                                layer: at,
+                                key: reach(key, depth, instance.id()),
                             });
                         }
                         _ => {}
@@ -2535,10 +2582,7 @@ impl Scene {
                 // Both readings of the wind, since a model that carries it may be read after the
                 // material it shares with one that does not.
                 for waving in [false, true] {
-                    let mut keys = KEYS.to_vec();
-                    if waving {
-                        keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
-                    }
+                    let keys = engine_keys(&path, waving);
                     for (pass, subview) in DRAWS {
                         let Some((vertex, pixel)) =
                             program::picks(&package, material, &keys, pass, subview)
@@ -3004,10 +3048,7 @@ impl Scene {
                 }
             }
             let package = &read[&name];
-            let mut keys = KEYS.to_vec();
-            if waving {
-                keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
-            }
+            let keys = engine_keys(&name, waving);
             let page = |pass, page| {
                 program::Program::build(
                     package,
@@ -3056,6 +3097,16 @@ impl Scene {
                     attachments,
                 ),
             };
+            // Only where the material states a clip the semi-transparent pass's own reaches under.
+            // Below that the two passes cover the same fragments, and the resolve drops every one
+            // the opaque half already drew.
+            let sheer = (!blended && material.clip() > program::SHEER_CLIP)
+                .then(|| {
+                    page(program::Pass::Blended, 0).and_then(|held| {
+                        Ok((Arc::new(held), Arc::new(page(program::Pass::CompositeBlended, 0)?)))
+                    })
+                })
+                .and_then(Result::ok);
             // The same depth pass as the light sees it. A package that answers no shadow subview
             // casts none, which is what the flag on a placed instance says anyway. One that answers
             // it and then fails to translate is a fault, and is reported rather than dropped.
@@ -3120,6 +3171,7 @@ impl Scene {
                     depth: depth.ok().map(Arc::new),
                     shadow: shadow.map(Arc::new),
                     resolve,
+                    sheer,
                 },
             );
             if let Some((values, columns, rows)) =
@@ -3586,6 +3638,7 @@ impl Scene {
             step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
+            effects: self.effects.len(),
             casting: self.casts.iter().flatten().sum(),
             models: format!(
                 "{} of {}",
@@ -3798,7 +3851,7 @@ impl Scene {
                 depth: held.depth.clone(),
                 shadow: held.shadow.clone(),
                 resolve: held.resolve.clone(),
-                sheer: None,
+                sheer: held.sheer.clone(),
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()
@@ -3833,6 +3886,9 @@ impl Scene {
         {
             log::warn!("assets/layer: this zone states no weather {id}");
         }
+        // Counts as fitted, so `poll`'s first-placements auto-frame does not undo this once the
+        // zone's own content streams in.
+        self.fitted = self.fitted.max(1);
         self.dirty = true;
     }
 
@@ -3920,15 +3976,15 @@ impl Scene {
                         Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
                     }
                 }
+                let held = preset::Preset::of(
+                    &self.path,
+                    self.camera.position,
+                    self.camera.forward(),
+                    self.fov,
+                    self.ambient.weather_id(),
+                    self.ambient.time,
+                );
                 if ui.button("Export preset").clicked() {
-                    let held = preset::Preset::of(
-                        &self.path,
-                        self.camera.position,
-                        self.camera.forward(),
-                        self.fov,
-                        self.ambient.weather_id(),
-                        self.ambient.time,
-                    );
                     match held.write() {
                         Ok(text) => {
                             let name = format!("TE_{}.json", held.name);
@@ -3944,6 +4000,14 @@ impl Scene {
                                 }
                             }));
                         }
+                        Err(why) => log::error!("assets/layer: {why}"),
+                    }
+                }
+                // The same shape the plugin hands over its own clipboard, so a paste elsewhere
+                // reads it back.
+                if ui.button("Copy preset").clicked() {
+                    match held.share() {
+                        Ok(text) => ui.ctx().copy_text(text),
                         Err(why) => log::error!("assets/layer: {why}"),
                     }
                 }
@@ -3992,6 +4056,12 @@ impl Scene {
                 ui.add(egui::Slider::new(&mut self.look.darkening, 0.0..=2.0))
                     .on_hover_text("How steeply it deepens past that");
             });
+            ui.label(RichText::new("Twinkle rate").weak());
+            ui.add(egui::Slider::new(&mut self.look.star_twinkle, 0.0..=1.0))
+                .on_hover_text(
+                    "How many tiles a second the night sky's point mask scrolls by. The stars do \
+                     animate, but no capture pins down the rate, so this is a guess",
+                );
 
             ui.add_space(8.0);
             ui.separator();
@@ -4024,6 +4094,7 @@ impl Scene {
                             "Lights",
                             format!("{} of {}", self.lamps().len(), self.lights.len()),
                         ),
+                        ("Effects placed, none drawn", self.effects.len().to_string()),
                         ("Wind", {
                             let count = self.models.iter().filter(|model| model.waving).count();
                             let plural = match count {

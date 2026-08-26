@@ -272,7 +272,7 @@ fn labelled(ui: &mut egui::Ui, kind: &str, name: &str, shown: &str, id: u32, dim
 
 /// A path rendered as a link: hyperlink color, pointer cursor, and the same hover and right-click
 /// menu every other path in the browser gets. Returns whether it was followed.
-fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
+pub(crate) fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
     let response = ui
         .add(
             egui::Label::new(

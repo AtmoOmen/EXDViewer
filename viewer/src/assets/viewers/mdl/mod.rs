@@ -80,6 +80,9 @@ const TRANSFORM_VIEW_SKIN: u32 = 0x9c14_c8e9;
 /// writes is the geometry's own.
 const GET_NORMAL_MAP: u32 = 0xcbdf_d5ec;
 const GET_NORMAL_MAP_ON: u32 = 0xd999_4ef1;
+/// The third value, which walks the normal map's blue channel as a parallax height under the
+/// material's own `g_HeightScale`. Only `bg.shpk` ships a node for it.
+const GET_NORMAL_MAP_PARALLAX: u32 = 0xd9fd_8a1c;
 
 /// The scene key deciding whether a character shader clips against its own alpha threshold. A
 /// package defaults it to off, and the variant that answer selects carries no clip at all, so a
@@ -1231,16 +1234,21 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                 .on_hover_text("Materials, shader packages and textures still on their way");
         }
         let exporting = matches!(model.export.borrow().as_ref(), Some(Export::Fetching(_)));
-        ui.add_enabled_ui(arrived >= wanted && !exporting, |ui| {
-            if ui
-                .button("Export glTF")
-                .on_hover_text(
-                    "Write the geometry, materials and posed skeleton as a self-contained .glb. \
-                     Textures are baked from this viewer's own preview shading, not the game \
-                     shaders' G-buffer, so a shaded render and the export will not match exactly",
-                )
-                .clicked()
-            {
+        let ready = arrived >= wanted;
+        ui.add_enabled_ui(ready && !exporting, |ui| {
+            let hover = match ready {
+                true => "Write the geometry, materials and posed skeleton as a self-contained \
+                     .glb. Textures are baked from this viewer's own preview shading, not the \
+                     game shaders' G-buffer, so a shaded render and the export will not match \
+                     exactly"
+                    .to_owned(),
+                false => format!(
+                    "Waiting on {} of {wanted} materials, shader packages and textures to \
+                     finish loading before this can export",
+                    wanted - arrived,
+                ),
+            };
+            if ui.button("Export glTF").on_hover_text(hover).clicked() {
                 model.export_gltf(backend);
             }
         });
@@ -1596,8 +1604,8 @@ impl Rendered {
             self.apply_variant();
         }
 
+        let mut packages = self.packages.borrow_mut();
         if self.shaded.get() {
-            let mut packages = self.packages.borrow_mut();
             // The packages that light the frame belong to no material, so they are asked for
             // alongside the ones the materials name.
             let wanted = slots
@@ -1688,137 +1696,152 @@ impl Rendered {
                     })),
                 );
             }
-            for (path, package) in packages.iter_mut() {
-                let Package::Fetching(promise) = package else {
-                    continue;
-                };
-                let Some(result) = promise.try_get() else {
-                    continue;
-                };
-                *package = match result {
-                    Ok(bytes) => Package::Ready(bytes.clone()),
-                    Err(why) => {
-                        log::error!("assets/mdl: {path}: {why}");
-                        Package::Failed(why.to_string())
-                    }
-                };
-            }
+        }
+        // Drained whether or not shading is still on: a package still in flight when a build
+        // failure elsewhere turned shading off on its own would otherwise never be consumed, and
+        // `arrived` would hold short of `wanted` forever.
+        for (path, package) in packages.iter_mut() {
+            let Package::Fetching(promise) = package else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *package = match result {
+                Ok(bytes) => Package::Ready(bytes.clone()),
+                Err(why) => {
+                    log::error!("assets/mdl: {path}: {why}");
+                    Package::Failed(why.to_string())
+                }
+            };
+        }
 
-            let mut arrays = self.arrays.borrow_mut();
-            // Picking another face paint drops what was fetched for the last one, since the two are
-            // the one binding and the fetch below is what fills it.
-            let paint = self.customize.get().paint;
-            if self.painted.replace(paint) != paint {
-                arrays.remove(&deferred::FACE_PAINT);
-            }
-            let held = deferred::ENGINE
-                .into_iter()
-                .chain([deferred::GRADING])
-                .map(|(id, path, filter)| (id, path.to_owned(), filter))
-                .chain(paint.map(|set| {
-                    (
-                        deferred::FACE_PAINT,
-                        format!("{}{set}.tex", deferred::PAINTS),
-                        glow::LINEAR,
-                    )
-                }));
-            for (id, path, filter) in held {
-                let held = arrays.entry(id).or_insert_with(|| {
+        let mut arrays = self.arrays.borrow_mut();
+        // Picking another face paint drops what was fetched for the last one, since the two are
+        // the one binding and the fetch below is what fills it.
+        let paint = self.customize.get().paint;
+        if self.painted.replace(paint) != paint {
+            arrays.remove(&deferred::FACE_PAINT);
+        }
+        let held = deferred::ENGINE
+            .into_iter()
+            .chain([deferred::GRADING])
+            .map(|(id, path, filter)| (id, path.to_owned(), filter))
+            .chain(paint.map(|set| {
+                (
+                    deferred::FACE_PAINT,
+                    format!("{}{set}.tex", deferred::PAINTS),
+                    glow::LINEAR,
+                )
+            }));
+        for (id, path, filter) in held {
+            let held = match arrays.entry(id) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(_) if !self.shaded.get() => continue,
+                std::collections::btree_map::Entry::Vacant(entry) => {
                     let files = backend.files().clone();
                     let path = path.clone();
-                    Array::Fetching(TrackedPromise::spawn_local(async move {
+                    entry.insert(Array::Fetching(TrackedPromise::spawn_local(async move {
                         files.read(&path).await
-                    }))
-                });
-                let Array::Fetching(promise) = held else {
-                    continue;
-                };
-                let Some(result) = promise.try_get() else {
-                    continue;
-                };
-                *held = match result
-                    .as_ref()
-                    .map_err(ToString::to_string)
-                    .and_then(|bytes| layered(bytes, &path, filter).map_err(|why| why.to_string()))
-                {
-                    Ok(decoded) => {
-                        level.gpu.lock().unwrap().queue_array(id, decoded.clone());
-                        self.graded
-                            .set(self.graded.get() || id == deferred::GRADING.0);
-                        Array::Ready(decoded)
-                    }
-                    Err(why) => {
-                        log::error!("assets/mdl: {path}: {why}");
-                        Array::Failed
-                    }
-                };
-            }
-
-            let mut parameters = self.parameters.borrow_mut();
-            let mut arrived = false;
-            for (base, path) in program::PARAMETERS {
-                let held = parameters.entry(base).or_insert_with(|| {
-                    let files = backend.files().clone();
-                    Parameters::Fetching(TrackedPromise::spawn_local(async move {
-                        files.read(path).await
-                    }))
-                });
-                let Parameters::Fetching(promise) = held else {
-                    continue;
-                };
-                let Some(result) = promise.try_get() else {
-                    continue;
-                };
-                *held = match result
-                    .as_ref()
-                    .map_err(ToString::to_string)
-                    .and_then(|bytes| {
-                        ShaderParameters::read(Cursor::new(bytes.clone()))
-                            .map_err(|why| why.to_string())
-                    }) {
-                    Ok(file) => Parameters::Ready(file),
-                    Err(why) => {
-                        log::error!("assets/mdl: {path}: {why}");
-                        Parameters::Failed
-                    }
-                };
-                arrived = true;
-            }
-            if arrived && let Some(values) = types(&parameters) {
-                level.gpu.lock().unwrap().queue_types(values);
-            }
-
-            // The fur pass belongs to no material either, and nothing can be softened with it until
-            // the frame is lit at all, so it is only worth a fetch of its own once the four above
-            // are in hand and the model turns out to state a fur length.
-            if self.lighting.borrow().is_some()
-                && !packages.contains_key(program::FUR)
-                && let Some(values) = types(&parameters)
-                && slots.iter().flatten().any(|slot| match slot {
-                    Slot::Ready(material) => program::furred(material, &values),
-                    _ => false,
-                })
+                    })))
+                }
+            };
+            let Array::Fetching(promise) = held else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *held = match result
+                .as_ref()
+                .map_err(ToString::to_string)
+                .and_then(|bytes| layered(bytes, &path, filter).map_err(|why| why.to_string()))
             {
-                let files = backend.files().clone();
-                packages.insert(
-                    program::FUR.to_owned(),
-                    Package::Fetching(TrackedPromise::spawn_local(async move {
-                        files.read(program::FUR).await
-                    })),
-                );
-            }
-            // Skin softens the light that fell on it, and every character has some, so this is
-            // asked for as soon as the frame can be lit at all rather than off a material's own
-            // record: the pass decides per pixel from the type table which ones scatter.
-            if self.lighting.borrow().is_some() && !packages.contains_key(program::SCATTER) {
-                let files = backend.files().clone();
-                packages.insert(
-                    program::SCATTER.to_owned(),
-                    Package::Fetching(TrackedPromise::spawn_local(async move {
-                        files.read(program::SCATTER).await
-                    })),
-                );
-            }
+                Ok(decoded) => {
+                    level.gpu.lock().unwrap().queue_array(id, decoded.clone());
+                    self.graded
+                        .set(self.graded.get() || id == deferred::GRADING.0);
+                    Array::Ready(decoded)
+                }
+                Err(why) => {
+                    log::error!("assets/mdl: {path}: {why}");
+                    Array::Failed
+                }
+            };
+        }
+
+        let mut parameters = self.parameters.borrow_mut();
+        let mut arrived = false;
+        for (base, path) in program::PARAMETERS {
+            let held = match parameters.entry(base) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(_) if !self.shaded.get() => continue,
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let files = backend.files().clone();
+                    entry.insert(Parameters::Fetching(TrackedPromise::spawn_local(
+                        async move { files.read(path).await },
+                    )))
+                }
+            };
+            let Parameters::Fetching(promise) = held else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *held = match result
+                .as_ref()
+                .map_err(ToString::to_string)
+                .and_then(|bytes| {
+                    ShaderParameters::read(Cursor::new(bytes.clone()))
+                        .map_err(|why| why.to_string())
+                }) {
+                Ok(file) => Parameters::Ready(file),
+                Err(why) => {
+                    log::error!("assets/mdl: {path}: {why}");
+                    Parameters::Failed
+                }
+            };
+            arrived = true;
+        }
+        if arrived && let Some(values) = types(&parameters) {
+            level.gpu.lock().unwrap().queue_types(values);
+        }
+
+        // The fur pass belongs to no material either, and nothing can be softened with it until
+        // the frame is lit at all, so it is only worth a fetch of its own once the four above
+        // are in hand and the model turns out to state a fur length.
+        if self.shaded.get()
+            && self.lighting.borrow().is_some()
+            && !packages.contains_key(program::FUR)
+            && let Some(values) = types(&parameters)
+            && slots.iter().flatten().any(|slot| match slot {
+                Slot::Ready(material) => program::furred(material, &values),
+                _ => false,
+            })
+        {
+            let files = backend.files().clone();
+            packages.insert(
+                program::FUR.to_owned(),
+                Package::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(program::FUR).await
+                })),
+            );
+        }
+        // Skin softens the light that fell on it, and every character has some, so this is
+        // asked for as soon as the frame can be lit at all rather than off a material's own
+        // record: the pass decides per pixel from the type table which ones scatter.
+        if self.shaded.get()
+            && self.lighting.borrow().is_some()
+            && !packages.contains_key(program::SCATTER)
+        {
+            let files = backend.files().clone();
+            packages.insert(
+                program::SCATTER.to_owned(),
+                Package::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(program::SCATTER).await
+                })),
+            );
         }
 
         let sliced = self.sliced(&slots);
@@ -2634,18 +2657,15 @@ impl Rendered {
         let mut translated = self.translated.borrow_mut();
         let mut tables = self.tables.borrow_mut();
         // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
-        // game would draw through the skinning variant.
-        let mut set = vec![
-            (GET_NORMAL_MAP, GET_NORMAL_MAP_ON),
-            (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
-        ];
+        // game would draw through the skinning variant. `GetNormalMap` is added per material below,
+        // since only `bg.shpk` has a node for the parallax value.
+        let mut base = vec![(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON)];
         if skinned {
-            set.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
+            base.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
         }
         if waving {
-            set.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
+            base.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
         }
-        let set = &set[..];
         let mut read: HashMap<String, ShaderPackage> = HashMap::new();
         for (index, slot) in slots.iter().enumerate() {
             let Some(Slot::Ready(material)) = slot else {
@@ -2676,12 +2696,20 @@ impl Rendered {
                 }
             }
             let package = &read[&name];
+            let mut keys = base.clone();
+            keys.push((
+                GET_NORMAL_MAP,
+                match name.ends_with("/bg.shpk") {
+                    true => GET_NORMAL_MAP_PARALLAX,
+                    false => GET_NORMAL_MAP_ON,
+                },
+            ));
             let build = |pass, at| {
                 program::Program::build(
                     package,
                     bytes,
                     material,
-                    set,
+                    &keys,
                     pass,
                     program::SUB_VIEW_MAIN,
                     at,

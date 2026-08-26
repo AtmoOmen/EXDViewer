@@ -98,7 +98,7 @@ impl Rendered {
         let decoding = matches!(&*state, PlayState::Decoding(decoding, _) if *decoding == index);
         drop(state);
 
-        let playable = matches!(entry.format(), Codec::OggVorbis | Codec::Hca);
+        let playable = matches!(entry.format(), Codec::OggVorbis | Codec::Hca | Codec::MsAdpcm);
         let glyph = match (playing, decoding) {
             (true, _) => "⏹",
             (_, true) => "…",

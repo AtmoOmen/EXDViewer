@@ -1176,4 +1176,130 @@ mod tests {
             assert!((a - b).abs() < 1e-4);
         }
     }
+
+    /// Polls a future to completion on the current thread with no real waker, which is enough for
+    /// the local install's own I/O: nothing here needs to run concurrently with anything else.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::Wake;
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(value) => return value,
+                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    fn read_local(path: &str) -> Vec<u8> {
+        use ironworks::sqpack::{Install, SqPack};
+        use std::io::Read;
+        let pack = SqPack::new(Install::at_sqpack(SQPACK));
+        let mut stream = pack.file(path).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Real data end to end, run manually (`cargo test -p viewer --lib -- --ignored
+    /// export::tests::a_real --nocapture`): the body model, its skeleton off the local install,
+    /// posed by the bust slider so `world` differs from bind by a real, non-uniform-scale margin
+    /// (the case a TRS-decomposed joint node would get wrong), baked with real textures and
+    /// written as a `.glb` to the scratchpad for the standalone `gltf`-crate check.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_body_exports_posed_and_skinned() {
+        let path = "chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl";
+        let bytes = read_local(path);
+        let rendered = super::super::compose(&[super::super::Source {
+            path: path.to_owned(),
+            bytes,
+            variant: 0,
+            deform: None,
+            skin: None,
+        }])
+        .unwrap();
+
+        let backend = block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(SQPACK.to_owned()),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        for _ in 0..500 {
+            // `spawn_local`'s futures only run when something ticks `poll_promise`'s own local
+            // executor, which the real app does once a frame from `tick_promises`; materials and
+            // the skeleton both land off `Rendered::poll`, which wants a real `Ui` to call it with.
+            crate::utils::tick_promises(&ctx);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| rendered.poll(ui, &backend));
+            });
+            let ready = rendered
+                .slots
+                .borrow()
+                .iter()
+                .all(|slot| matches!(slot, Some(super::Slot::Ready(_))));
+            if ready && rendered.animation.rig().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        rendered.animation.rig().expect("the skeleton never landed");
+        assert!(
+            rendered.slots.borrow().iter().all(|slot| matches!(slot, Some(super::Slot::Ready(_)))),
+            "not every material finished loading"
+        );
+
+        rendered.animation.shaped(glam::Vec3::new(1.0, 1.6, 1.0));
+        let scene = gather(&rendered).expect("gather");
+
+        let bones = scene.skeleton.as_ref().expect("body carries a skeleton");
+        let bust = bones
+            .names
+            .iter()
+            .position(|name| name == "j_mune_l")
+            .expect("body names j_mune_l");
+        let root = bones.names.iter().position(|name| name == "n_root").expect("body names n_root");
+        let bust_delta = (bones.world[bust] * bones.rest_inverse[bust] - Mat4::IDENTITY)
+            .to_cols_array()
+            .iter()
+            .fold(0.0f32, |acc, value| acc.max(value.abs()));
+        let root_delta = (bones.world[root] * bones.rest_inverse[root] - Mat4::IDENTITY)
+            .to_cols_array()
+            .iter()
+            .fold(0.0f32, |acc, value| acc.max(value.abs()));
+        println!("bust joint delta from bind: {bust_delta}, root joint delta from bind: {root_delta}");
+        assert!(bust_delta > 0.05, "the bust slider should move its own joint off bind");
+        assert!(root_delta < 1e-4, "a bone the slider does not touch should stay at bind");
+
+        let vertices: usize = scene.pieces.iter().flat_map(|piece| &piece.primitives).map(|p| p.positions.len()).sum();
+        let triangles: usize = scene.pieces.iter().flat_map(|piece| &piece.primitives).map(|p| p.indices.len() / 3).sum();
+        println!(
+            "pieces: {}, primitives: {}, vertices (post-compaction, visible parts only): {vertices}, triangles: {triangles}, materials: {}, joints: {}",
+            scene.pieces.len(),
+            scene.pieces.iter().map(|piece| piece.primitives.len()).sum::<usize>(),
+            scene.materials.len(),
+            bones.names.len(),
+        );
+        assert!(vertices > 0 && triangles > 0);
+
+        let files = crate::data::sqpack::SqpackFileProvider::new(SQPACK);
+        let bytes = block_on(finish(scene, &files)).expect("finish");
+        println!("glb size: {} bytes", bytes.len());
+        assert_eq!(&bytes[0..4], b"glTF");
+
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
+        let out = std::path::Path::new(&dir).join("c0101b0001.glb");
+        std::fs::write(&out, &bytes).unwrap();
+        println!("wrote {}", out.display());
+    }
 }

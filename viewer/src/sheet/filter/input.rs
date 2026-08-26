@@ -61,21 +61,44 @@ impl FilterInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct CompiledFilterInput {
     filter: Option<CompiledComplexFilter>,
+    source: FilterInput,
     options: MatchOptions,
     generation: u32,
+}
+
+// KeyEquals holds an index into the filter's own lookup, not a column identity, so
+// `filter` can't tell two columns apart; `source` names them instead.
+impl PartialEq for CompiledFilterInput {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source
+            && self.options == other.options
+            && self.generation == other.generation
+    }
+}
+
+impl Eq for CompiledFilterInput {}
+
+impl std::hash::Hash for CompiledFilterInput {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.source.hash(state);
+        self.options.hash(state);
+        self.generation.hash(state);
+    }
 }
 
 impl CompiledFilterInput {
     pub fn new(
         filter: Option<CompiledComplexFilter>,
+        source: FilterInput,
         options: MatchOptions,
         generation: u32,
     ) -> Self {
         Self {
             filter,
+            source,
             options,
             generation,
         }

@@ -835,11 +835,13 @@ pub struct Drawn {
 impl Drawn {
     /// Carried into a placement external to the effect itself: a zone stands its own copy wherever
     /// an instance says, so what the emitters ran out in their own space is turned by the
-    /// placement's rotation and scale before it is offset into the world.
-    pub(crate) fn placed(mut self, rotation: Quat, offset: Vec3, scale: f32) -> Self {
+    /// placement's rotation and scale before it is offset into the world, and tinted by whatever
+    /// colour and distance fade the placement itself states.
+    pub(crate) fn placed(mut self, rotation: Quat, offset: Vec3, scale: f32, tint: Vec4) -> Self {
         self.center = (offset + rotation * (Vec3::from(self.center) * scale)).to_array();
         self.turn = (rotation * Quat::from_array(self.turn)).to_array();
         self.scale = (Vec3::from(self.scale) * scale).to_array();
+        self.color = (Vec4::from(self.color) * tint).to_array();
         self
     }
 }

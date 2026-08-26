@@ -48,8 +48,12 @@ const EXISTS_DELAY: Duration = Duration::from_millis(250);
 const EXTENSION_MENU_WIDTH: f32 = 50.0;
 /// Widest the tree panel may stand.
 const TREE_WIDTH: f32 = 360.0;
+/// Narrowest the tree panel can go before its own header (tree toggle, mode and extension menus,
+/// clear button) no longer fits.
+const TREE_MIN_WIDTH: f32 = 200.0;
 /// Widest the details panel beside a preview may stand.
 pub(crate) const DETAILS_WIDTH: f32 = 400.0;
+const DETAILS_MIN_WIDTH: f32 = 200.0;
 const SEARCH_ID: &str = "asset_search";
 
 /// One entry in the flattened view of the tree that is currently on screen.
@@ -813,6 +817,13 @@ fn direct_path(query: &str, roots: impl Fn(&str) -> bool) -> Option<String> {
     (roots(segments.next()?) && segments.next_back()?.contains('.')).then_some(query)
 }
 
+#[derive(Clone, Copy)]
+enum TexExportKind {
+    Raw,
+    Dds,
+    Png,
+}
+
 pub struct AssetBrowser {
     state: Load<(Vec<u8>, Vec<u8>), Box<Loaded>>,
     /// The selected file as it was read: the kind of sqpack stream it was stored as, where the
@@ -854,6 +865,7 @@ pub struct AssetBrowser {
     /// button rather than reading `TerritoryType` and `PlaceName` a second time.
     zone_names: Load<HashMap<String, String>>,
     zone_names_lang: Option<Language>,
+    export_promise: Option<TrackedPromise<()>>,
 }
 
 impl Default for AssetBrowser {
@@ -886,6 +898,7 @@ impl Default for AssetBrowser {
             redirect: None,
             zone_names: Load::Idle,
             zone_names_lang: None,
+            export_promise: None,
         }
     }
 }
@@ -969,6 +982,7 @@ impl AssetBrowser {
     pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<Action> {
         self.poll(ui.ctx(), backend);
         self.apply_pending();
+        self.export_promise.take_if(|p| p.try_get().is_some());
 
         let picked = self.draw_palette(ui.ctx(), backend);
         let listed = !self.grouped
@@ -1090,6 +1104,7 @@ impl AssetBrowser {
         let mut clicked = None;
         let mut nav = std::mem::take(&mut self.nav);
         CollapsibleSidePanel::new("asset_tree", Side::Left)
+            .min_width(TREE_MIN_WIDTH)
             .max_width(TREE_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
@@ -1678,6 +1693,9 @@ impl AssetBrowser {
                             // nothing to choose between.
                             if !empty {
                                 self.viewer_picker(ui, &path);
+                                if self.viewer.unwrap_or(self.recommended(&path)) == Viewer::Texture {
+                                    self.texture_export_button(ui, &path);
+                                }
                             }
                             match Kind::of(&path) {
                                 Kind::Sheet => {
@@ -1752,6 +1770,7 @@ impl AssetBrowser {
             if self.preview.as_ref().is_some_and(Preview::has_details) {
                 let mut change = None;
                 CollapsibleSidePanel::new("asset_info", Side::Right)
+                    .min_width(DETAILS_MIN_WIDTH)
                     .max_width(DETAILS_WIDTH)
                     .show(ui, |ui, is_open| {
                         if !is_open {
@@ -1890,6 +1909,102 @@ impl AssetBrowser {
                     }
                 }
             });
+    }
+
+    /// A `.tex`'s export options: raw bytes always win as the ground truth, DDS relays the file's
+    /// own compressed or raw blocks into a container a wider range of tools reads, and PNG covers
+    /// the formats that fit one losslessly -- a zip of one PNG per face, layer or slice where the
+    /// texture has more than one.
+    fn texture_export_button(&mut self, ui: &mut egui::Ui, path: &str) {
+        let exporting = self.export_promise.is_some();
+        if exporting {
+            ui.spinner();
+        }
+        let mip = self.mip;
+        ui.add_enabled_ui(!exporting, |ui| {
+            ui.menu_button("Export", |ui| {
+                if ui.button("Raw .tex").clicked() {
+                    if let Load::Ready((_, bytes)) = &self.bytes {
+                        let bytes = bytes.clone();
+                        self.command_export_texture(path.to_owned(), bytes, mip, TexExportKind::Raw);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("DDS")
+                    .on_hover_text("The file's own pixel blocks, exact, with every mip level")
+                    .clicked()
+                {
+                    if let Load::Ready((_, bytes)) = &self.bytes {
+                        let bytes = bytes.clone();
+                        self.command_export_texture(path.to_owned(), bytes, mip, TexExportKind::Dds);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("PNG")
+                    .on_hover_text(
+                        "The mip level shown now; zipped when the texture has more than one face, layer or slice",
+                    )
+                    .clicked()
+                {
+                    if let Load::Ready((_, bytes)) = &self.bytes {
+                        let bytes = bytes.clone();
+                        self.command_export_texture(path.to_owned(), bytes, mip, TexExportKind::Png);
+                    }
+                    ui.close();
+                }
+            });
+        });
+    }
+
+    fn command_export_texture(&mut self, path: String, bytes: Vec<u8>, mip: u8, kind: TexExportKind) {
+        let stem = crate::utils::file_name(&path)
+            .trim_end_matches(".atex")
+            .trim_end_matches(".tex")
+            .to_owned();
+        self.export_promise = Some(TrackedPromise::spawn_local(async move {
+            let packaged: Result<(String, Vec<u8>)> = (|| {
+                if matches!(kind, TexExportKind::Raw) {
+                    return Ok((format!("{stem}.tex"), bytes));
+                }
+                let texture = <ironworks::file::tex::Texture as ironworks::file::File>::read(
+                    std::io::Cursor::new(bytes),
+                )?;
+                match kind {
+                    TexExportKind::Raw => unreachable!(),
+                    TexExportKind::Dds => Ok((format!("{stem}.dds"), crate::utils::dds(&texture)?)),
+                    TexExportKind::Png => {
+                        let images = crate::utils::png(&texture, mip, &path)?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "{:?} has no lossless PNG form; use DDS instead",
+                                texture.format()
+                            )
+                        })?;
+                        Ok((images.file_name(&stem), images.bytes()))
+                    }
+                }
+            })();
+            let (file_name, data) = match packaged {
+                Ok(packaged) => packaged,
+                Err(error) => {
+                    log::error!("tex export failed: {error}");
+                    return;
+                }
+            };
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Export Texture")
+                .set_file_name(file_name)
+                .save_file()
+                .await
+            {
+                if let Err(error) = file.write(&data).await {
+                    log::error!("tex export failed: {error}");
+                } else {
+                    log::info!("tex exported successfully");
+                }
+            }
+        }));
     }
 
     /// Fetch the selected file if it is not already in hand, and decode a view of it.

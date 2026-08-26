@@ -428,6 +428,7 @@ fn quest_list(ui: &mut egui::Ui, index: &Index, nodes: &[u32]) -> Option<Action>
         let response = ui
             .add(
                 Label::new(RichText::new(&quest.name).color(ui.visuals().hyperlink_color))
+                    .truncate()
                     .sense(Sense::click()),
             )
             .on_hover_text(&quest.id)
@@ -450,6 +451,8 @@ pub fn path_link(ui: &mut egui::Ui, path: &str) -> bool {
                     .color(ui.visuals().hyperlink_color)
                     .small(),
             )
+            .truncate()
+            .show_tooltip_when_elided(false)
             .sense(Sense::click()),
         )
         .on_hover_text(path)

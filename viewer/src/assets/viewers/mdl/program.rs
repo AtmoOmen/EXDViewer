@@ -308,16 +308,22 @@ const STAR_ROTATION: [[f32; 3]; 3] = [
 /// `cParam[0].xyz`, constant across three independently captured frames of two different zones.
 /// `.w` is a scrolling twinkle phase, animated: three captures of the same zone at the same
 /// declared hour (byte-identical `cWorldMatrix`) read three different values, so it is driven by
-/// the scene clock at [`Look::star_twinkle`] rather than the day-night hour, which the same three
-/// captures rule out as the driver.
+/// [`STAR_TWINKLE_RATE`] rather than the day-night hour, which the same three captures rule out
+/// as the driver.
 const STAR_PARAM_0: [f32; 3] = [0.000_554, 0.000_985, 1.418_846];
 
+/// Tiles a second the night sky's twinkle mask scrolls by, before wrapping mod one. Read off
+/// `ffxiv_dx11.exe` rather than fitted: its own star update accumulates `rate * frame time` into
+/// the phase every frame, and `rate` is a flat `1.0` with no other write to that field anywhere
+/// in the binary.
+pub const STAR_TWINKLE_RATE: f32 = 1.0;
+
 /// `cParam[2].x`: the horizon fade's own scale, `saturate(x * dot(cWorldMatrix.row1, position) + 1)`.
-/// Constant at 10 across two frames of x6f1 - but a third capture, Ultima Thule, reads 0 here
-/// instead, which a fixed engine constant cannot: this is very likely envb-sourced too, off a field
-/// this project has not placed. Kept at x6f1's own reading, which is right for that zone and wrong
-/// for at least Ultima Thule's own, where the term evaluates to `saturate(0 + 1) = 1` everywhere -
-/// no fade at all, which is plausible for a zone with no real horizon.
+/// Not envb: the exe carries this on the star object itself, next to [`STAR_TWINKLE_RATE`], as a
+/// literal `10.0` default and a boolean beside it that zeroes it instead. Nothing in this project
+/// places what sets that boolean, so this stays the engine's own default - right for every zone
+/// sampled but Ultima Thule, where the flag is set and the term evaluates to `saturate(0 + 1) = 1`
+/// everywhere: no fade at all, which is plausible for a zone with no real horizon.
 const STAR_HORIZON: f32 = 10.0;
 
 /// `cParam[3]`, read by neither shader tier 0 runs and not even constant across zones (Ultima Thule
@@ -1134,11 +1140,6 @@ pub struct Look {
     /// the game they follow a graphics setting.
     pub onset: f32,
     pub darkening: f32,
-    /// Tiles a second the night sky's twinkle mask scrolls by. The phase is real: three captures of
-    /// the same zone at the same hour read three different values, consistent with it wrapping mod
-    /// one between them rather than holding still. No capture pins down how fast, so this is a guess
-    /// on a slider rather than a fit.
-    pub star_twinkle: f32,
 }
 
 /// The occlusion values are a guess. Nothing states them: the buffer behind them reports no member
@@ -1165,7 +1166,6 @@ impl Default for Look {
             reflect: true,
             onset: 0.35,
             darkening: 0.5,
-            star_twinkle: 0.03,
         }
     }
 }
@@ -2886,7 +2886,7 @@ impl Buffer {
         // pass tells the two apart rather than the members being empty for both.
         if matches!(pass, Pass::Star) && self.name == "cParam" {
             let held = scene.star;
-            let twinkle = (clock * scene.look.star_twinkle).fract();
+            let twinkle = (clock * STAR_TWINKLE_RATE).fract();
             write(&mut out, 0, &[STAR_PARAM_0[0], STAR_PARAM_0[1], STAR_PARAM_0[2], twinkle]);
             write(&mut out, 1, &[held.horizon, held.point, held.band, held.alpha]);
             write(&mut out, 2, &[STAR_HORIZON, 0.0, 0.0, 0.0]);

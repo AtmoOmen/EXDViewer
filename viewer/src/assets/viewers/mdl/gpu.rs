@@ -701,6 +701,13 @@ impl Game {
 
         // The G-buffer a page at a time, and each page's depth pass before its buffer pass: the game
         // runs those as two passes over the whole draw rather than as two draws of one surface.
+        //
+        // A mesh whose program will not link or bind is skipped rather than aborting the pass: one
+        // material a real driver rejects (and a software one does not) would otherwise blank every
+        // mesh behind it in the loop, and the composite below along with it, every frame from then
+        // on. The first such failure is kept and returned once the loop and the composite have both
+        // had their turn, which is what still reaches the "game shaders would not build" banner.
+        let mut failed: Option<String> = None;
         for page in 0..self.buffers.pages() {
             self.buffers.open(gl, page);
             for depth in [true, false] {
@@ -718,12 +725,24 @@ impl Game {
                     let Some(held) = held.filter(|held| depth || !held.targets.is_empty()) else {
                         continue;
                     };
-                    let program = deferred::link(
+                    let program = match deferred::link(
                         gl,
                         &mut self.programs,
                         (surface.material, depth, page),
                         held,
-                    )?;
+                    ) {
+                        Ok(program) => program,
+                        Err(why) => {
+                            let why = format!(
+                                "material {} depth={depth} page={page} attachments={}: {why}",
+                                surface.material,
+                                self.buffers.attachments()
+                            );
+                            log::error!("assets/mdl: {why}");
+                            failed.get_or_insert(why);
+                            continue;
+                        }
+                    };
                     unsafe {
                         gl.use_program(Some(program));
                         // A material with no depth pass writes its own, since the depth buffer is
@@ -751,7 +770,17 @@ impl Game {
                             false => gl.disable(glow::CULL_FACE),
                         }
                     }
-                    self.bind(gl, painter, program, held, surface, at, buffers, &scene)?;
+                    if let Err(why) =
+                        self.bind(gl, painter, program, held, surface, at, buffers, &scene)
+                    {
+                        let why = format!(
+                            "material {} depth={depth} page={page} attachments={}: {why}",
+                            surface.material,
+                            self.buffers.attachments()
+                        );
+                        log::error!("assets/mdl: {why}");
+                        failed.get_or_insert(why);
+                    }
                 }
             }
         }
@@ -789,7 +818,10 @@ impl Game {
                 self.buffers.vignette(gl, vignette, &scene)?;
             }
         }
-        Ok(())
+        match failed {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
     }
 
     /// Every material resolved into the frame as its own geometry, after the lighting.

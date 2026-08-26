@@ -236,6 +236,36 @@ fn read_unorm16(width: u16, height: u16, data: &[u8], channels: usize) -> Result
     to_rgba(width, height, data, channels * 2, channels, values)
 }
 
+/// The same source `read_unorm16` narrows to 8 bits for the on-screen preview (the egui texture it
+/// feeds is 8-bit regardless), kept at full precision for a lossless PNG export.
+pub fn read_unorm16_precise(
+    width: u16,
+    height: u16,
+    data: &[u8],
+    channels: usize,
+) -> Result<DynamicImage> {
+    let texel = |bytes: &[u8]| -> [u16; 2] {
+        let value = |i: usize| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+        [value(0), if channels > 1 { value(1) } else { 0 }]
+    };
+    if channels == 1 {
+        let pixels: Vec<u16> = data.chunks_exact(2).map(|t| texel(t)[0]).collect();
+        let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
+            .context("failed to build image buffer")?;
+        return Ok(DynamicImage::ImageLuma16(buffer));
+    }
+    let pixels: Vec<u16> = data
+        .chunks_exact(channels * 2)
+        .flat_map(|t| {
+            let [r, g] = texel(t);
+            [r, g, 0, u16::MAX]
+        })
+        .collect();
+    let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
+        .context("failed to build image buffer")?;
+    Ok(DynamicImage::ImageRgba16(buffer))
+}
+
 /// Half and single precision are scene values rather than colors, so they are clamped into the
 /// unit range instead of being scaled by whatever the maximum in the image happens to be.
 fn read_half(width: u16, height: u16, data: &[u8], channels: usize) -> Result<DynamicImage> {

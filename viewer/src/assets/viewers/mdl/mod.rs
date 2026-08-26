@@ -417,8 +417,11 @@ pub struct Rendered {
     translated: RefCell<BTreeMap<usize, Translated>>,
     /// The skeleton the model is skinned to, and the motion it is posed by.
     animation: skin::Animation,
-    /// The passes that light the G-buffer, which belong to the frame rather than to a material.
-    lighting: RefCell<Option<Arc<gpu::Lighting>>>,
+    /// The passes that light the G-buffer, which belong to the frame rather than to a material. Kept
+    /// against the attachment count they were built at: a piece change stands up a fresh G-buffer of
+    /// its own, and one drawn against a page split this was not built for reads channels nothing
+    /// wrote.
+    lighting: RefCell<Option<(usize, Arc<gpu::Lighting>)>>,
     /// The pass that grades the frame they resolve, and whether the table it reads has landed.
     post: RefCell<Option<Arc<program::Program>>>,
     graded: Cell<bool>,
@@ -2570,10 +2573,20 @@ impl Rendered {
     /// The passes that light the G-buffer, translated once their packages have arrived. They are the
     /// same whatever is being drawn, so they are built once and kept.
     fn lighting(&self, attachments: usize) -> Option<Arc<gpu::Lighting>> {
-        if self.lighting.borrow().is_some() {
+        let matches = |held: &Option<(usize, Arc<gpu::Lighting>)>| {
+            held.as_ref().is_some_and(|(held, _)| *held == attachments)
+        };
+        if matches(&self.lighting.borrow()) {
+            // Read again after these: each replaces `self.lighting` with a fur or subsurface pass
+            // added, and returning the clone taken before them would hand the caller a frame short
+            // of whichever just landed.
             self.soften(attachments);
             self.scatter(attachments);
-            return self.lighting.borrow().clone();
+            return self
+                .lighting
+                .borrow()
+                .as_ref()
+                .map(|(_, built)| built.clone());
         }
         let packages = self.packages.borrow();
         let held = |path: &str, pass| {
@@ -2582,8 +2595,8 @@ impl Rendered {
             };
             program::Program::screen(bytes, pass, attachments, &[])
                 .inspect_err(|why| {
-                    log::warn!("assets/mdl: {path}: {why}");
-                    self.fail_shading(format!("{path}: {why}"));
+                    log::warn!("assets/mdl: {path} attachments={attachments}: {why}");
+                    self.fail_shading(format!("{path} attachments={attachments}: {why}"));
                 })
                 .ok()
                 .map(Arc::new)
@@ -2608,7 +2621,7 @@ impl Rendered {
         };
         drop(packages);
         let built = Arc::new(built);
-        *self.lighting.borrow_mut() = Some(built.clone());
+        *self.lighting.borrow_mut() = Some((attachments, built.clone()));
         Some(built)
     }
 
@@ -2616,7 +2629,9 @@ impl Rendered {
     /// pixel off the type table.
     fn scatter(&self, attachments: usize) {
         let lit = self.lighting.borrow().clone();
-        let Some(lighting) = lit.filter(|held| held.subsurface.is_none()) else {
+        let Some((_, lighting)) =
+            lit.filter(|(held, lighting)| *held == attachments && lighting.subsurface.is_none())
+        else {
             return;
         };
         let mut packages = self.packages.borrow_mut();
@@ -2633,10 +2648,13 @@ impl Rendered {
             }
         };
         drop(packages);
-        *self.lighting.borrow_mut() = Some(Arc::new(gpu::Lighting {
-            subsurface: Some(held),
-            ..(*lighting).clone()
-        }));
+        *self.lighting.borrow_mut() = Some((
+            attachments,
+            Arc::new(gpu::Lighting {
+                subsurface: Some(held),
+                ..(*lighting).clone()
+            }),
+        ));
     }
 
     /// Takes the fur pass up on whichever frame its package arrives on, the frame having lit without
@@ -2644,7 +2662,9 @@ impl Rendered {
     /// translated again every frame, which costs a whole one.
     fn soften(&self, attachments: usize) {
         let lit = self.lighting.borrow().clone();
-        let Some(lighting) = lit.filter(|held| held.fur.is_none()) else {
+        let Some((_, lighting)) =
+            lit.filter(|(held, lighting)| *held == attachments && lighting.fur.is_none())
+        else {
             return;
         };
         let mut packages = self.packages.borrow_mut();
@@ -2660,10 +2680,13 @@ impl Rendered {
             }
         };
         drop(packages);
-        *self.lighting.borrow_mut() = Some(Arc::new(gpu::Lighting {
-            fur: Some(fur),
-            ..(*lighting).clone()
-        }));
+        *self.lighting.borrow_mut() = Some((
+            attachments,
+            Arc::new(gpu::Lighting {
+                fur: Some(fur),
+                ..(*lighting).clone()
+            }),
+        ));
     }
 
     /// Translates every ready material's passes, again where the context's own limit changed how
@@ -2760,6 +2783,12 @@ impl Rendered {
                             .and_then(|held| {
                                 Ok((Arc::new(held), Arc::new(build(program::Pass::CompositeBlended, 0)?)))
                             })
+                            .inspect_err(|why| {
+                                log::warn!(
+                                    "assets/mdl: {}: no semi-transparent pass: {why}",
+                                    material.package()
+                                )
+                            })
                             .ok();
                     }
                 }
@@ -2778,8 +2807,12 @@ impl Rendered {
                 false => Ok(passes),
             };
             if let Err(why) = &held {
-                log::warn!("assets/mdl: {}: {why}", material.package());
-                self.fail_shading(format!("{}: {why}", material.package()));
+                let why = format!(
+                    "material {index} ({}) attachments={attachments}: {why}",
+                    material.package()
+                );
+                log::warn!("assets/mdl: {why}");
+                self.fail_shading(why);
             }
             translated.insert(index, Translated { attachments, held });
             if let Some((values, columns, rows)) =

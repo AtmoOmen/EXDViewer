@@ -66,9 +66,9 @@ use crate::{
 
 const SHEETS_FILTER_ID: &str = "sheets_filter";
 
-/// A panel keeps whatever width its widest row has ever asked for, so an unbounded one grows for
-/// good the first time a long sheet name scrolls through.
 const SHEET_LIST_WIDTH: f32 = 320.0;
+/// Below this the filter row's own buttons no longer fit and would pin the panel wider regardless.
+const SHEET_LIST_MIN_WIDTH: f32 = 180.0;
 /// Room the version and GitHub links need beside the tab switcher. Below this they are dropped
 /// rather than drawn on top of it: a right-to-left layout doesn't stop at its own left edge.
 const LINKS_WIDTH: f32 = 280.0;
@@ -920,6 +920,7 @@ impl App {
         );
         let mut nav = std::mem::take(&mut self.sheet_nav);
         CollapsibleSidePanel::new("sheet_list", Side::Left)
+            .min_width(SHEET_LIST_MIN_WIDTH)
             .max_width(SHEET_LIST_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {

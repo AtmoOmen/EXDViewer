@@ -1,4 +1,4 @@
-use std::io::Cursor;
+use std::io::{Cursor, Write as _};
 
 use anyhow::{Result, anyhow};
 use ironworks::file::scd::{Codec, SoundEntry};
@@ -8,6 +8,7 @@ use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 /// Decoded interleaved f32 PCM plus its loop region.
 pub struct Decoded {
@@ -19,12 +20,22 @@ pub struct Decoded {
     pub loop_end: Option<u32>,
 }
 
-/// Decode a BGM sound entry to interleaved PCM.
+/// Decode a BGM sound entry to interleaved PCM, downmixed to stereo for playback.
 pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
-    let mut decoded = decode_data(entry.format(), entry.data())?;
+    decode_entry(entry, true)
+}
+
+/// The same, keeping every channel the source holds; playback always downmixes instead, but an
+/// export billed as lossless can't drop the surrounds.
+pub fn decode_full(entry: &SoundEntry) -> Result<Decoded> {
+    decode_entry(entry, false)
+}
+
+fn decode_entry(entry: &SoundEntry, downmix: bool) -> Result<Decoded> {
+    let mut decoded = decode_stream_data(entry.format(), entry.data(), downmix)?;
     // MS ADPCM carries no loop metadata of its own (unlike the Ogg/HCA containers, which do and
-    // are read from inside `decode_data`); the SCD-level fields are the only source, and they are
-    // byte offsets into the compressed body rather than sample indices.
+    // are read from inside `decode_stream_data`); the SCD-level fields are the only source, and
+    // they are byte offsets into the compressed body rather than sample indices.
     if entry.format() == Codec::MsAdpcm
         && entry.loop_end() > 0
         && let (Some(block_align), Some(samples_per_block)) =
@@ -42,14 +53,79 @@ pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
 
 /// Decode raw codec bytes directly, for re-decoding a stream already held in memory.
 pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
+    decode_stream_data(codec, data, true)
+}
+
+fn decode_stream_data(codec: Codec, data: &[u8], downmix: bool) -> Result<Decoded> {
     let mut decoded = match codec {
         Codec::OggVorbis => decode_stream(data, "ogg"),
         Codec::Hca => decode_hca(data),
         Codec::MsAdpcm => decode_stream(data, "wav"),
         other => Err(anyhow!("unsupported audio codec {other:?}")),
     }?;
-    downmix_to_stereo(&mut decoded);
+    if downmix {
+        downmix_to_stereo(&mut decoded);
+    }
     Ok(decoded)
+}
+
+/// The extension a codec's own bytes are already a complete file in, or `None` where `data()` is
+/// either empty ([`Codec::Empty`]) or a bare payload with no container of its own.
+fn native_extension(codec: Codec) -> Option<&'static str> {
+    match codec {
+        Codec::OggVorbis => Some("ogg"),
+        Codec::Hca => Some("hca"),
+        // Already a standalone WAVE_FORMAT_ADPCM `.wav`; qualified so it never collides with the
+        // decoded WAV of the same entry.
+        Codec::MsAdpcm => Some("adpcm.wav"),
+        Codec::Mp3 => Some("mp3"),
+        Codec::Atrac9 => Some("at9"),
+        Codec::Pcm => Some("pcm"),
+        Codec::Unknown(_) => Some("bin"),
+        Codec::Empty => None,
+    }
+}
+
+/// Every entry's own bytes, native container and all, as `(extension, bytes)` for [`package`].
+pub fn export_native(entries: &[SoundEntry]) -> Vec<(&'static str, Vec<u8>)> {
+    entries
+        .iter()
+        .filter_map(|entry| Some((native_extension(entry.format())?, entry.data().clone())))
+        .collect()
+}
+
+/// Every entry this crate can actually decode, as a 16-bit WAV, for [`package`].
+pub fn export_wav(entries: &[SoundEntry]) -> Result<Vec<(&'static str, Vec<u8>)>> {
+    entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.format(),
+                Codec::OggVorbis | Codec::Hca | Codec::MsAdpcm
+            )
+        })
+        .map(|entry| Ok(("wav", encode_wav(&decode_full(entry)?)?)))
+        .collect()
+}
+
+/// A lone stream saves directly under `stem`; more than one zips together under it instead, since
+/// a save dialog only ever picks one file.
+pub fn package(files: Vec<(&str, Vec<u8>)>, stem: &str) -> Result<(String, Vec<u8>)> {
+    match files.len() {
+        0 => anyhow::bail!("no streams to export"),
+        1 => {
+            let (ext, bytes) = files.into_iter().next().unwrap();
+            Ok((format!("{stem}.{ext}"), bytes))
+        }
+        _ => {
+            let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+            for (index, (ext, bytes)) in files.iter().enumerate() {
+                archive.start_file(format!("{stem}_{index:02}.{ext}"), SimpleFileOptions::default())?;
+                archive.write_all(bytes)?;
+            }
+            Ok((format!("{stem}.zip"), archive.finish()?.into_inner()))
+        }
+    }
 }
 
 /// Encode decoded PCM as a 16-bit PCM WAV file.
@@ -256,5 +332,125 @@ mod tests {
                 (0.5 * f32::from(i16::MAX)).round() as i16
             ]
         );
+    }
+
+    #[test]
+    fn a_lone_stream_saves_directly() {
+        let (name, bytes) = package(vec![("ogg", vec![1, 2, 3])], "bgm_title").unwrap();
+        assert_eq!(name, "bgm_title.ogg");
+        assert_eq!(bytes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn several_streams_zip_under_the_shared_stem() {
+        let (name, bytes) = package(
+            vec![("ogg", vec![1, 2, 3]), ("wav", vec![4, 5, 6, 7])],
+            "se_battle",
+        )
+        .unwrap();
+        assert_eq!(name, "se_battle.zip");
+
+        let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(archive.len(), 2);
+        let mut read = |name: &str| -> Vec<u8> {
+            let mut file = archive.by_name(name).unwrap();
+            let mut out = Vec::new();
+            std::io::Read::read_to_end(&mut file, &mut out).unwrap();
+            out
+        };
+        assert_eq!(read("se_battle_00.ogg"), vec![1, 2, 3]);
+        assert_eq!(read("se_battle_01.wav"), vec![4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn no_streams_is_an_error() {
+        assert!(package(vec![], "empty").is_err());
+    }
+
+    /// The ITU-R BS.775 fold itself, previously untested: front channels at unity, center and
+    /// surrounds at -3 dB (1/sqrt(2)), LFE dropped. `decode_stream_data`'s `if downmix {}` is the
+    /// only thing standing between this (playback) and skipping it (export); that gate is a
+    /// one-line conditional around this same call, not exercised separately here.
+    #[test]
+    fn downmix_applies_the_itu_r_bs775_weights_and_drops_lfe() {
+        // One 5.1 frame: FL, FR, FC, LFE, RL, RR. FC is zero so each output isolates its own
+        // front/rear pair; LFE is a large, otherwise-unused value that would push the result past
+        // the values asserted below (and past the +-1 clamp) if it leaked in.
+        let mut decoded = Decoded {
+            samples: vec![0.2, 0.3, 0.0, 0.9, 0.4, 0.5],
+            channels: 6,
+            sample_rate: 44100,
+            loop_start: None,
+            loop_end: None,
+        };
+        downmix_to_stereo(&mut decoded);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 2);
+
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        assert!((decoded.samples[0] - (0.2 + half * 0.4)).abs() < 1e-6, "FL + sqrt(1/2)*RL");
+        assert!((decoded.samples[1] - (0.3 + half * 0.5)).abs() < 1e-6, "FR + sqrt(1/2)*RR");
+    }
+}
+
+#[cfg(test)]
+mod real_scd {
+    use super::*;
+    use ironworks::file::File as _;
+    use ironworks::file::scd::SoundContainer;
+    use std::io::Cursor as ReadCursor;
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    fn read_local(path: &str) -> Vec<u8> {
+        use ironworks::sqpack::{Install, SqPack};
+        use std::io::Read;
+        let pack = SqPack::new(Install::at_sqpack(SQPACK));
+        let mut stream = pack.file(path).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// A real multi-entry bank (18 sound entries, two `Empty`, sixteen `MsAdpcm`): `Empty` drops
+    /// out of both exports, the rest zip under both, and the decoded WAV keeps each entry's own
+    /// channel count rather than the player's stereo downmix.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_multi_entry_bank_exports_every_non_empty_stream() {
+        let bytes = read_local("sound/system/SE_10thMG.scd");
+        let container = SoundContainer::read(ReadCursor::new(bytes)).unwrap();
+        let entries = container.entries();
+        assert_eq!(entries.len(), 18);
+        let non_empty = entries.iter().filter(|e| e.format() != Codec::Empty).count();
+        assert_eq!(non_empty, 16);
+
+        let native = export_native(entries);
+        assert_eq!(native.len(), 16);
+        assert!(native.iter().all(|(ext, _)| *ext == "adpcm.wav"));
+
+        let wav = export_wav(entries).unwrap();
+        assert_eq!(wav.len(), 16);
+
+        for (entry, (_, wav_bytes)) in entries.iter().filter(|e| e.format() != Codec::Empty).zip(&wav) {
+            // A full parse rather than a byte offset: proves the exported file is a WAV any
+            // reader accepts, not merely a header shaped like one.
+            let mut reader = hound::WavReader::new(Cursor::new(wav_bytes.as_slice())).unwrap();
+            let spec = reader.spec();
+            assert_eq!(
+                spec.channels as u32,
+                entry.channel_count(),
+                "the decoded wav should keep the source's own channel count, not downmix it"
+            );
+            assert_eq!(spec.bits_per_sample, 16);
+            let samples: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
+            assert!(!samples.is_empty());
+        }
+
+        let (name, zipped) = package(native, "SE_10thMG").unwrap();
+        assert_eq!(name, "SE_10thMG.zip");
+        let mut archive = zip::ZipArchive::new(ReadCursor::new(zipped)).unwrap();
+        assert_eq!(archive.len(), 16);
+        assert!(archive.by_name("SE_10thMG_00.adpcm.wav").is_ok());
     }
 }

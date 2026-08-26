@@ -21,6 +21,12 @@ enum PlayState {
     Playing(usize),
 }
 
+#[derive(Clone, Copy)]
+enum ExportKind {
+    Native,
+    Wav,
+}
+
 thread_local! {
     // One audio backend for every sound container the Assets tab opens, not one per file: on the
     // web a `Player` owns an `AudioContext` and wasm-bindgen closures tied to it, and tearing one
@@ -31,10 +37,12 @@ thread_local! {
 
 /// A sound container, decoded and ready to draw.
 pub struct Rendered {
+    name: String,
     identity: Vec<(&'static str, String)>,
     container: SoundContainer,
     state: RefCell<PlayState>,
     error: RefCell<Option<String>>,
+    export: RefCell<Option<TrackedPromise<()>>>,
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
@@ -49,10 +57,14 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     log::info!("assets/scd: {path} {} streams", container.entries().len());
 
     Ok(Preview::Scd(Box::new(Rendered {
+        name: crate::utils::file_name(path)
+            .trim_end_matches(".scd")
+            .to_owned(),
         identity,
         container,
         state: RefCell::new(PlayState::Idle),
         error: RefCell::new(None),
+        export: RefCell::new(None),
     })))
 }
 
@@ -61,11 +73,40 @@ const HEADERS: [&str; COLUMNS] = ["", "#", "Codec", "Ch", "Rate", "Bytes", "Loop
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
     file.poll();
-    if !matches!(&*file.state.borrow(), PlayState::Idle) {
+    file.poll_export();
+    let exporting = file.export.borrow().is_some();
+    if !matches!(&*file.state.borrow(), PlayState::Idle) || exporting {
         ui.ctx().request_repaint_after(Duration::from_millis(200));
     }
 
-    section(ui, "Streams");
+    ui.horizontal(|ui| {
+        section(ui, "Streams");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            if exporting {
+                ui.spinner();
+            }
+            ui.add_enabled_ui(!exporting, |ui| {
+                ui.menu_button("Export", |ui| {
+                    if ui
+                        .button("Native streams")
+                        .on_hover_text("Each entry's own codec bytes")
+                        .clicked()
+                    {
+                        file.export(ExportKind::Native);
+                        ui.close();
+                    }
+                    if ui
+                        .button("Decoded WAV")
+                        .on_hover_text("Every channel the entry holds, undownmixed")
+                        .clicked()
+                    {
+                        file.export(ExportKind::Wav);
+                        ui.close();
+                    }
+                });
+            });
+        });
+    });
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Grid::new("scd_entries")
             .num_columns(COLUMNS)
@@ -203,6 +244,44 @@ impl Rendered {
         if matches!(&*state, PlayState::Playing(_)) && !still_playing {
             *state = PlayState::Idle;
         }
+    }
+
+    fn export(&self, kind: ExportKind) {
+        let entries = self.container.entries().to_vec();
+        let name = self.name.clone();
+        let promise = TrackedPromise::spawn_local(async move {
+            let files = match kind {
+                ExportKind::Native => Ok(audio::export_native(&entries)),
+                ExportKind::Wav => audio::export_wav(&entries),
+            };
+            let packaged = files.and_then(|files| audio::package(files, &name));
+            let (file_name, data) = match packaged {
+                Ok(packaged) => packaged,
+                Err(error) => {
+                    log::error!("scd export failed: {error}");
+                    return;
+                }
+            };
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Export Audio")
+                .set_file_name(file_name)
+                .save_file()
+                .await
+            {
+                if let Err(error) = file.write(&data).await {
+                    log::error!("scd export failed: {error}");
+                } else {
+                    log::info!("scd exported successfully");
+                }
+            }
+        });
+        *self.export.borrow_mut() = Some(promise);
+    }
+
+    fn poll_export(&self) {
+        self.export
+            .borrow_mut()
+            .take_if(|promise| promise.try_get().is_some());
     }
 }
 

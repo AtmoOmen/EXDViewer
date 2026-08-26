@@ -331,7 +331,7 @@ function decodePng(png: Buffer): { width: number; height: number; channels: numb
 // change that way before it is a regression rather than an idle animation's own silhouette moving
 // against a fixed camera and a fixed background.
 const CHANNEL_TOLERANCE = 24;
-const CHANGED_TOLERANCE = 0.12;
+const CHANGED_TOLERANCE = 0.04;
 
 /// The share of pixels that moved more than a small per-channel amount between two shots of the
 /// same clip. Used only once a model never held still to begin with, since an idle animation never

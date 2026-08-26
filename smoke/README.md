@@ -164,10 +164,13 @@ already shows for how much of a streaming zone lands in time. So the acceptance 
 on one run each of `r2t1`/`r2d1` cannot be read off a single pass or a single fail. A single
 `/assets/` `bg.lgb` run at the highest instanced-draw count seen anywhere did not reproduce it
 either, which argues against "Zones-tab specifically" but is one run against a roughly-1-in-5 rate
-and proves nothing alone. Whoever picks this up: narrowing the bracket did not visibly change the
-repro rate once instrumentation stayed to a handful of calls, so the flakiness looks like genuine
-load-timing variance rather than an observer effect, and many repeated runs are a more promising
-next lever than a wider wrap.
+and proves nothing alone. One run had no instrumentation at all - `instrument.js` failed to parse
+that time (a stray brace from mid-edit), so nothing was wrapped and `__smoke` never existed - and
+it still did not reproduce, which is the one clean data point against the wrap itself being what
+suppresses it. Whoever picks this up: many repeated runs looks like a more promising lever than a
+wider wrap, since the reproduction looks like genuine load-timing variance rather than an observer
+effect, but that rests on a single successful repro and a single zero-instrumentation miss, not on
+a controlled series.
 
 `the preview frame changed after game shaders were turned on and off again` used to fire on a
 `--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately
@@ -222,13 +225,27 @@ shots compared landed on arbitrary, uncorrelated points of that animation. `sett
 whether it actually converged. Where it did (the default static background model), the comparison
 is still the exact hash it always was. Where it did not, the comparison falls back to the share of
 pixels that moved more than a small per-channel amount, since idle motion changes a bounded part of
-the frame and a real state leak does not: measured at 0.20-2.11% across four runs of
-`chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl` against a 12% tolerance. Two attempts
-at reproducing a real leak (an unrestored `BLEND` enable, a viewport left at the G-buffer's own
-size) both turned out to be no-ops: `Model::draw`'s plain path re-establishes cull, texture units
-and its own depth/blend state every frame, and the viewport a shaded frame leaves does not survive
-into the next callback either. Confirmed the check's throw path itself fires correctly by lowering
-the tolerance to 0.1% against the same idle-only run.
+the frame and a real state leak does not.
+
+Two attempts at forcing a real leak turned out to be no-ops and said so honestly rather than
+passing by accident: an unrestored `BLEND` enable and a viewport left at the G-buffer's own size
+both measured *below* idle noise, and `Model::draw`'s plain path turned out to re-establish cull,
+texture units and its own depth/blend state every frame regardless, with the viewport a shaded
+frame leaves not surviving into the next callback either. A third attempt did leak: gating
+`u_alpha_threshold` at 2.0 on `self.game.buffers.size() != (0, 0)` (true once shading has ever run,
+since the G-buffer is never torn back down) discards the model outright once shaded has toggled on
+and off, which is deterministic Rust control flow rather than GL state, so it cannot be silently
+re-established. Confirmed with `--shots` that the model actually vanishes in the second screenshot,
+not just a metric moving.
+
+Measured against `chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl`: idle-only noise
+0.11-2.11% across five runs; the same model discarded outright measured 6.68% and 7.76% on two
+runs. `CHANGED_TOLERANCE` is set to 4%, roughly 2x the worst idle noise seen and roughly half the
+smallest deliberate-regression signal measured; a run built with the `alpha_threshold` gate above
+fails at 7.8%, and the same run reverted passes at 0.11%. A second, independent numpy diff over the
+same two PNGs the harness compared landed at 6.6785%, three decimal places from the TypeScript
+decoder's own 6.68%, which is what says the hand-rolled PNG decode and threshold arithmetic are
+correct rather than coincidentally close.
 
 ## Probing one model
 

@@ -107,6 +107,9 @@ pub struct Built {
     /// entitled to drop, and the text pass pairs blocks with regions by position, so what was not
     /// emitted must not be counted.
     pub kept: Vec<usize>,
+    /// Whether any kept region writes `oDepth`, the same predicate `dcl_output oDepth` is emitted
+    /// under.
+    pub depth: bool,
 }
 
 pub struct Synth<'a> {
@@ -732,6 +735,7 @@ impl<'a> Synth<'a> {
             },
             table: self.table,
             kept,
+            depth: self.depth,
         }
     }
 

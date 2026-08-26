@@ -505,7 +505,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
     parts.first().context("a model of no files")?;
     let pieces = parts.iter().map(Piece::new).collect::<Result<Vec<_>>>()?;
     let drawn = drawn_levels(&pieces);
-    let level = level_of(&pieces, 0)?;
+    let level = level_of(&pieces, 0, 0)?;
     let camera = level.home;
     Ok(Rendered {
         pieces,
@@ -554,7 +554,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
     })
 }
 
-fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
+fn level_of(pieces: &[Piece], lod: u8, attachments: usize) -> Result<Level> {
     let sources: Vec<_> = pieces
         .iter()
         .map(|piece| {
@@ -569,7 +569,7 @@ fn level_of(pieces: &[Piece], lod: u8) -> Result<Level> {
             )
         })
         .collect();
-    read_level(&sources, lod)
+    read_level(&sources, lod, attachments)
 }
 
 /// Which detail levels the pieces draw anything at.
@@ -707,7 +707,7 @@ struct Worn<'a> {
     skin: Option<u16>,
 }
 
-fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level> {
+fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usize) -> Result<Level> {
     let mut names: Vec<String> = Vec::new();
     let mut meshes = Vec::new();
     let mut unreadable = Vec::new();
@@ -903,6 +903,10 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
         unreadable.len()
     );
 
+    let gpu = gpu::Model::new(pending);
+    if attachments != 0 {
+        gpu.lock().unwrap().seed_attachments(attachments);
+    }
     Ok(Level {
         identity,
         groups: group(&shapes),
@@ -916,7 +920,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8) -> Result<Level>
         waving,
         bones,
         attributes: declares,
-        gpu: gpu::Model::new(pending),
+        gpu,
     })
 }
 
@@ -2903,7 +2907,15 @@ impl Rendered {
             .iter()
             .map(|piece| piece.path.as_str())
             .collect();
-        match level_of(&self.pieces, lod) {
+        let attachments = self
+            .level
+            .borrow()
+            .gpu
+            .lock()
+            .unwrap()
+            .attachments_learned()
+            .unwrap_or(0);
+        match level_of(&self.pieces, lod, attachments) {
             Ok(level) => {
                 self.lod.set(lod);
                 self.rebuild(level);
@@ -3033,7 +3045,15 @@ impl Rendered {
             true => self.lod.get(),
             false => 0,
         };
-        let level = level_of(&pieces, lod)?;
+        let attachments = self
+            .level
+            .borrow()
+            .gpu
+            .lock()
+            .unwrap()
+            .attachments_learned()
+            .unwrap_or(0);
+        let level = level_of(&pieces, lod, attachments)?;
 
         let rode = self.animation.rides().map(str::to_owned);
         if !self

@@ -1070,6 +1070,21 @@ impl Buffers {
         }
     }
 
+    /// What `limit()` answered, once it has: `None` until a frame has actually asked the context.
+    pub fn attachments_learned(&self) -> Option<usize> {
+        (self.attachments != 0).then_some(self.attachments)
+    }
+
+    /// Carries an answer `limit()` already got on another `Buffers` over to this one, so a model
+    /// rebuilt fresh (an equipment change, a detail level) does not spend its first frame assuming
+    /// four and its second correcting to what the context actually promises: the count is a
+    /// property of the context, not of the model, and does not change between them.
+    pub fn seed_attachments(&mut self, learned: usize) {
+        if self.attachments == 0 {
+            self.attachments = learned.clamp(1, TARGETS);
+        }
+    }
+
     pub fn pages(&self) -> usize {
         self.frames.len()
     }

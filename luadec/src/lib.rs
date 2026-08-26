@@ -673,4 +673,72 @@ mod tests {
         };
         assert_eq!(source(held), "t.k = true");
     }
+
+    const VARARG: u32 = 37;
+
+    /// A fixed-count `VARARG` declares one local per slot it fills; reading one that is not the
+    /// last still outstanding does not touch the call machinery, and the slots nothing reads still
+    /// belong to the same declaration rather than being left as a dangling `Rest`.
+    #[test]
+    fn a_fixed_vararg_read_out_of_order_reads_as_one_declaration() {
+        let held = Proto {
+            parameters: 3,
+            varargs: 3,
+            code: vec![
+                abc(VARARG, 4, 7, 0),
+                abc(SELF, 10, 0, 0x100),
+                abc(MOVE, 12, 1, 0),
+                abc(MOVE, 13, 2, 0),
+                abx(LOADK, 14, 1),
+                abc(MOVE, 15, 8, 0),
+                abc(CALL, 10, 6, 1),
+                abc(RETURN, 0, 1, 0),
+            ],
+            constants: vec![Value::Text("OnTalk"), Value::Bool(true)],
+            stack: 16,
+            ..Proto::default()
+        };
+        assert_eq!(
+            source(held),
+            "local v0, v1, v2, v3, v4, v5 = ...\nself:OnTalk(a1, a2, true, v4)"
+        );
+    }
+
+    /// `touches` named `VARARG`'s count from the wrong operand, which under-reported how many
+    /// registers it holds and left a later read of one of them thinking nothing had written it.
+    #[test]
+    fn a_fixed_vararg_read_twice_across_a_branch_reads_as_one_declaration() {
+        let held = Proto {
+            parameters: 3,
+            varargs: 3,
+            code: vec![
+                abc(VARARG, 4, 7, 0),
+                abc(SELF, 10, 0, 0x100),
+                abc(MOVE, 12, 1, 0),
+                abc(MOVE, 13, 2, 0),
+                abx(LOADK, 14, 1),
+                abc(MOVE, 15, 8, 0),
+                abc(CALL, 10, 6, 1),
+                abc(EQ, 0, 8, 0x102),
+                asbx(JMP, 0, 4),
+                abc(SELF, 10, 0, 0x103),
+                abc(MOVE, 12, 1, 0),
+                abc(MOVE, 13, 2, 0),
+                abc(CALL, 10, 4, 1),
+                abc(RETURN, 0, 1, 0),
+            ],
+            constants: vec![
+                Value::Text("OnTalk_ItemSupply00000"),
+                Value::Bool(true),
+                Value::Number(1.0),
+                Value::Text("OnTalk_Tutorial00001"),
+            ],
+            stack: 16,
+            ..Proto::default()
+        };
+        assert_eq!(
+            source(held),
+            "local v0, v1, v2, v3, v4, v5 = ...\nself:OnTalk_ItemSupply00000(a1, a2, true, v4)\nif v4 == 1 then\n\tself:OnTalk_Tutorial00001(a1, a2)\nend"
+        );
+    }
 }

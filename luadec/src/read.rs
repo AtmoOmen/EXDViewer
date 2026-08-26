@@ -345,7 +345,7 @@ fn touches(held: Instruction, reads: &mut Vec<usize>) -> Option<usize> {
             reads.extend(a + 1..=a + b.max(1));
             None
         }
-        Opcode::Vararg => Some(a + c.saturating_sub(1)),
+        Opcode::Vararg => Some(a + b.saturating_sub(2)),
         Opcode::Jmp | Opcode::Close | Opcode::Unknown(_) => None,
     }
 }
@@ -750,7 +750,13 @@ impl<'a> Reader<'a> {
             .skip(register + 1)
             .any(|slot| !matches!(slot, Slot::Empty))
         {
-            self.declare(register + 1)?;
+            // Further pieces of the same call or vararg go with it into the one declaration, or the
+            // registers nothing ever named would be left as a `Rest` no later read resolves.
+            let mut top = register + 1;
+            while matches!(self.slots.get(top), Some(Slot::Rest)) {
+                top += 1;
+            }
+            self.declare(top)?;
             return self.named(register);
         }
         match self.slots.get_mut(register) {
@@ -1527,7 +1533,11 @@ impl<'a> Reader<'a> {
 
         match instruction.opcode() {
             Opcode::Move => {
-                if matches!(self.slots.get(usize::from(b)), Some(Slot::Rest)) {
+                // A spread always starts from the top of the run its call or vararg left, working
+                // down; a register with a further one still waiting above it is read on its own.
+                if matches!(self.slots.get(usize::from(b)), Some(Slot::Rest))
+                    && !matches!(self.slots.get(usize::from(b) + 1), Some(Slot::Rest))
+                {
                     return self.spread(pc, usize::from(b));
                 }
                 let held = self.take(usize::from(b))?;

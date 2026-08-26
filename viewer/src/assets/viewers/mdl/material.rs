@@ -356,3 +356,30 @@ pub fn resolve_variant(path: &str, variant: u16, imc_bytes: Option<&[u8]>) -> u1
         .entry(super::imc_part(path), variant)
         .map_or(variant, |entry| u16::from(entry.material_id()))
 }
+
+#[cfg(test)]
+mod tests {
+    use ironworks::Ironworks;
+    use ironworks::sqpack::{Install, SqPack};
+
+    use super::resolve_variant;
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    /// Tataru's `ModelHead` names `e0005` variant 224, which has no `v0224` material on disk. Its
+    /// own `e0005.imc` states variant 224's material_id as 26, and `v0026` does exist: the failing
+    /// glTF export was asking `chara/equipment/e0005/material/v0224/...` for a folder the imc never
+    /// pointed there.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_shared_variant_resolves_to_its_own_material() {
+        let ironworks = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(SQPACK)));
+        let imc = ironworks
+            .file::<Vec<u8>>("chara/equipment/e0005/e0005.imc")
+            .unwrap();
+        let path = "chara/equipment/e0005/model/c0101e0005_met.mdl";
+        assert_eq!(resolve_variant(path, 224, Some(&imc)), 26);
+        assert_eq!(resolve_variant(path, 1, Some(&imc)), 1);
+        assert_eq!(resolve_variant(path, 224, None), 224);
+    }
+}

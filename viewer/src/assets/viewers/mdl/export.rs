@@ -162,7 +162,9 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
                 deform.apply(&mut vertices, &table);
             }
 
-            let level_mesh = &level.meshes[level_index];
+            let Some(level_mesh) = level.meshes.get(level_index) else {
+                bail!("mesh accounting drifted out of sync with the model's own level");
+            };
             if !level_mesh.base.is_empty() {
                 let mut patched = level_mesh.base.clone();
                 for shape in level
@@ -187,7 +189,10 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
             let mut kept: Vec<u16> = Vec::new();
             for part in &level_mesh.parts {
                 if part.shown.get() {
-                    kept.extend_from_slice(&indices[part.range.clone()]);
+                    let Some(run) = indices.get(part.range.clone()) else {
+                        bail!("a submesh names indices past the end of its own mesh");
+                    };
+                    kept.extend_from_slice(run);
                 }
             }
             let material = level_mesh.material;
@@ -198,15 +203,22 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
 
             let mut remap: HashMap<u16, u32> = HashMap::new();
             let mut compact: Vec<Vertex> = Vec::new();
-            let compact_indices: Vec<u32> = kept
-                .into_iter()
-                .map(|old| {
-                    *remap.entry(old).or_insert_with(|| {
-                        compact.push(vertices[usize::from(old)]);
-                        (compact.len() - 1) as u32
-                    })
-                })
-                .collect();
+            let mut compact_indices: Vec<u32> = Vec::with_capacity(kept.len());
+            for old in kept {
+                let at = match remap.get(&old) {
+                    Some(at) => *at,
+                    None => {
+                        let Some(vertex) = vertices.get(usize::from(old)) else {
+                            bail!("an index names none of its mesh's own vertices");
+                        };
+                        compact.push(*vertex);
+                        let at = (compact.len() - 1) as u32;
+                        remap.insert(old, at);
+                        at
+                    }
+                };
+                compact_indices.push(at);
+            }
 
             let primitive = primitive_from(
                 &compact,
@@ -222,6 +234,9 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
             pieces[piece_index].primitives.push(primitive);
         }
     }
+    if level_index != level.meshes.len() {
+        bail!("walked {level_index} meshes but the model's own level built {}", level.meshes.len());
+    }
     if wanted > 0 {
         log::info!("assets/mdl: export: {missing} of {wanted} bone influences are named by no skeleton");
     }
@@ -235,9 +250,10 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
 }
 
 fn piece_name(path: &str) -> String {
-    crate::utils::file_name(path)
-        .strip_suffix(".mdl")
-        .unwrap_or(path)
+    let stem = crate::utils::file_name(path);
+    stem.strip_suffix(".mdl")
+        .or_else(|| stem.strip_suffix(".mtrl"))
+        .unwrap_or(stem)
         .to_owned()
 }
 
@@ -621,8 +637,16 @@ fn table_texel(table: &[f32], row: usize, column: usize) -> [f32; 4] {
     [table[at], table[at + 1], table[at + 2], table[at + 3]]
 }
 
+/// glTF declares `baseColorTexture` and `emissiveTexture` sRGB-encoded, so a compliant renderer
+/// decodes with the real sRGB EOTF, not the viewer's own `sqrt` approximation of one.
 fn to_srgb(linear: f32) -> u8 {
-    (linear.max(0.0).sqrt().min(1.0) * 255.0).round() as u8
+    let linear = linear.clamp(0.0, 1.0);
+    let encoded = if linear <= 0.003_130_8 {
+        linear * 12.92
+    } else {
+        1.055 * linear.powf(1.0 / 2.4) - 0.055
+    };
+    (encoded * 255.0).round() as u8
 }
 
 fn repack_normal(raw: [u8; 4]) -> [u8; 4] {

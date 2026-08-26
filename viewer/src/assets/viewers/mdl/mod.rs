@@ -1235,7 +1235,9 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
             if ui
                 .button("Export glTF")
                 .on_hover_text(
-                    "Write the geometry, materials and posed skeleton drawn now as a self-contained .glb",
+                    "Write the geometry, materials and posed skeleton as a self-contained .glb. \
+                     Textures are baked from this viewer's own preview shading, not the game \
+                     shaders' G-buffer, so a shaded render and the export will not match exactly",
                 )
                 .clicked()
             {

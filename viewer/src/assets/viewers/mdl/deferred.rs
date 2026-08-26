@@ -4337,7 +4337,7 @@ pub fn sampler(
 /// the driver has answered whether it exists.
 static MAX_ANISOTROPY: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
 
-fn max_anisotropy(gl: &glow::Context) -> f32 {
+pub(super) fn max_anisotropy(gl: &glow::Context) -> f32 {
     *MAX_ANISOTROPY.get_or_init(|| {
         match gl.supported_extensions().contains("EXT_texture_filter_anisotropic") {
             true => unsafe { gl.get_parameter_f32(glow::MAX_TEXTURE_MAX_ANISOTROPY_EXT) },

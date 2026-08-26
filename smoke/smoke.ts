@@ -202,6 +202,9 @@ async function waitFor(what: string, timeoutMs: number, probe: () => Promise<boo
 function serve() {
     return Bun.serve({
         port: 0,
+        // The wasm bundle is large enough that Bun's ten second default aborts the transfer
+        // whenever the machine is loaded, which reads as a boot failure rather than a timeout.
+        idleTimeout: 255,
         async fetch(request) {
             const url = new URL(request.url);
             const asked = join(dist, decodeURIComponent(url.pathname));

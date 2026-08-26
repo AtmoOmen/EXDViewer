@@ -34,7 +34,7 @@ use crate::{
 
 const FILTER_ID: &str = "quest_filter";
 const INFO_WIDTH: f32 = 420.0;
-const INFO_MIN_WIDTH: f32 = 220.0;
+const INFO_MIN_WIDTH: f32 = 180.0;
 
 pub enum Action {
     /// A quest was picked; reflect it in the URL.

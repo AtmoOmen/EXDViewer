@@ -33,6 +33,8 @@ use crate::{
 };
 
 const FILTER_ID: &str = "quest_filter";
+const INFO_WIDTH: f32 = 420.0;
+const INFO_MIN_WIDTH: f32 = 220.0;
 
 pub enum Action {
     /// A quest was picked; reflect it in the URL.
@@ -721,6 +723,8 @@ impl QuestBrowser {
         let mut action = None;
         CollapsibleSidePanel::new("quest_info", Side::Right)
             .collapsed_width(0.0)
+            .min_width(INFO_MIN_WIDTH)
+            .max_width(INFO_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;

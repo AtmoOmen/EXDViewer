@@ -69,7 +69,10 @@ pub struct IconBrowser {
     /// Icons egui has decoded for the grid, in the order they were first drawn.
     loaded: Vec<(u32, String)>,
     loaded_ids: HashSet<u32>,
-    /// `all` cut down to the picked category and the id filter; what the grid indexes.
+    /// `all` cut down to the picked category, with no id filter applied.
+    category_shown: Vec<u32>,
+    category_shown_for: Option<Category>,
+    /// `category_shown` cut down further by the id filter; what the grid indexes.
     shown: Vec<u32>,
     shown_for: Option<(Category, String)>,
     category: Category,
@@ -100,6 +103,8 @@ impl Default for IconBrowser {
             localized: 0,
             loaded: Vec::new(),
             loaded_ids: HashSet::new(),
+            category_shown: Vec::new(),
+            category_shown_for: None,
             shown: Vec::new(),
             shown_for: None,
             category: Category::All,
@@ -124,10 +129,12 @@ impl IconBrowser {
         self.selected.or(self.pending)
     }
 
-    /// Select the icon a deep link names, once there is an index to place it in.
+    /// Select the icon a deep link names, once there is an index to place it in. Clears the id
+    /// filter, so a stale search does not hide the very icon this is asking to show in context.
     pub fn request(&mut self, icon_id: u32) {
         if self.selected != Some(icon_id) {
             self.pending = Some(icon_id);
+            self.lookup.clear();
         }
     }
 
@@ -139,6 +146,8 @@ impl IconBrowser {
         self.localized = 0;
         self.loaded.clear();
         self.loaded_ids.clear();
+        self.category_shown.clear();
+        self.category_shown_for = None;
         self.shown.clear();
         self.shown_for = None;
         // Sheet categories are indices into the reverse index that just went away.
@@ -195,13 +204,14 @@ impl IconBrowser {
 
     fn draw_palette(&mut self, ctx: &egui::Context, backend: &Backend) -> Option<u32> {
         let palette = self.palette.take()?;
+        self.rebuild_category(backend);
         match palette.draw(ctx, |query| {
-            self.lookup = query.to_owned();
-            self.rebuild_shown(backend);
-            self.shown
-                .iter()
+            // Not `self.lookup`: that also drives the grid's own id filter, and picking a
+            // suggestion here must not narrow what the grid shows afterwards.
+            filter_by_lookup(&self.category_shown, query)
+                .into_iter()
                 .take(SUGGESTIONS)
-                .map(|id| (*id, format!("{id:06}")))
+                .map(|id| (id, format!("{id:06}")))
                 .collect()
         }) {
             Ok(picked) => picked,
@@ -238,6 +248,7 @@ impl IconBrowser {
         {
             self.all = icons.ids().collect();
             self.localized = self.all.iter().filter(|id| icons.localized(**id)).count();
+            self.category_shown_for = None;
             self.shown_for = None;
         }
 
@@ -249,6 +260,7 @@ impl IconBrowser {
                 Ok(refs) => Load::Ready(refs),
                 Err(error) => Load::Failed(error.to_string()),
             };
+            self.category_shown_for = None;
             self.shown_for = None;
         }
         if matches!(self.refs, Load::Loading(_)) {
@@ -273,15 +285,16 @@ impl IconBrowser {
         }
     }
 
-    fn rebuild_shown(&mut self, backend: &Backend) {
-        let key = (self.category.clone(), self.lookup.clone());
-        if self.shown_for.as_ref() == Some(&key) {
+    /// `all` cut down to the picked category, with no id filter applied yet. Kept separately from
+    /// `shown` so the palette can search the same set the grid would show with its id box cleared,
+    /// without narrowing `shown` itself.
+    fn rebuild_category(&mut self, backend: &Backend) {
+        if self.category_shown_for.as_ref() == Some(&self.category) {
             return;
         }
-        self.shown_for = Some(key);
-        self.pages = 1;
+        self.category_shown_for = Some(self.category.clone());
 
-        self.shown = match (&self.category, self.refs()) {
+        self.category_shown = match (&self.category, self.refs()) {
             (Category::Localized, _) => match backend.icons() {
                 Some(icons) => self
                     .all
@@ -300,18 +313,17 @@ impl IconBrowser {
             (Category::Sheet(sheet), Some(refs)) => refs.icons_of(*sheet),
             _ => self.all.clone(),
         };
+    }
 
-        let lookup = self.lookup.trim();
-        if !lookup.is_empty() {
-            self.shown.retain(|id| format!("{id:06}").contains(lookup));
-            // The list only names paths that have been observed, so it misses icons an install
-            // ships. An id given in full is offered whether or not the list knows it.
-            if let Ok(icon_id) = lookup.parse::<u32>()
-                && let Err(at) = self.shown.binary_search(&icon_id)
-            {
-                self.shown.insert(at, icon_id);
-            }
+    fn rebuild_shown(&mut self, backend: &Backend) {
+        self.rebuild_category(backend);
+        let key = (self.category.clone(), self.lookup.clone());
+        if self.shown_for.as_ref() == Some(&key) {
+            return;
         }
+        self.shown_for = Some(key);
+        self.pages = 1;
+        self.shown = filter_by_lookup(&self.category_shown, &self.lookup);
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) {
@@ -544,10 +556,15 @@ impl IconBrowser {
         let step = cell + spacing.y + label_height;
         let columns = (((ui.available_width() + spacing.x) / (cell + spacing.x)) as usize).max(1);
 
-        let scroll_row = self.scroll_to.take().and_then(|icon_id| {
-            let slot = self.shown.binary_search(&icon_id).ok()?;
+        let scroll_row = self.scroll_to.take().map(|icon_id| {
+            // Scrolling to an id means showing it in context, so it has to be in `shown` even if
+            // the current category or id filter would otherwise have left it out.
+            let slot = self.shown.binary_search(&icon_id).unwrap_or_else(|at| {
+                self.shown.insert(at, icon_id);
+                at
+            });
             self.pages = self.pages.max((slot + 1).div_ceil(PAGE));
-            Some(slot / columns)
+            slot / columns
         });
 
         let capped = self.shown.len().min(self.pages * PAGE);
@@ -998,6 +1015,27 @@ fn checkerboard(ui: &egui::Ui, rect: egui::Rect) {
         y += SQUARE;
         row += 1;
     }
+}
+
+/// `ids` (ascending) narrowed to those whose number contains `lookup`. The list only names paths
+/// that have been observed, so it misses icons an install ships; an id given in full is offered
+/// whether or not the list knows it.
+fn filter_by_lookup(ids: &[u32], lookup: &str) -> Vec<u32> {
+    let lookup = lookup.trim();
+    if lookup.is_empty() {
+        return ids.to_vec();
+    }
+    let mut filtered: Vec<u32> = ids
+        .iter()
+        .copied()
+        .filter(|id| format!("{id:06}").contains(lookup))
+        .collect();
+    if let Ok(icon_id) = lookup.parse::<u32>()
+        && let Err(at) = filtered.binary_search(&icon_id)
+    {
+        filtered.insert(at, icon_id);
+    }
+    filtered
 }
 
 fn thousands(n: usize) -> String {

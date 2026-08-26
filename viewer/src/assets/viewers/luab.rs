@@ -6,6 +6,7 @@ use luadec::Chunk;
 
 use super::shader::code::listing;
 use super::{Preview, facts};
+use crate::utils::export;
 
 /// A chunk, read and ready to draw.
 pub struct Rendered {
@@ -131,6 +132,21 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
             false => "Lua bytecode",
         },
     );
+}
+
+/// Beyond the raw file: the same reading the two toggles above already hold, so a save always
+/// matches what is on screen.
+pub fn export_choices(file: &Rendered) -> Vec<export::Choice<'_>> {
+    vec![
+        export::Choice::bytes("As Lua", "script.lua", move || {
+            Ok(file.source.join("\n").into_bytes())
+        })
+        .filter("Lua source", &["lua"]),
+        export::Choice::bytes("Disassembly", "script.luadis.txt", move || {
+            Ok(file.assembly.join("\n").into_bytes())
+        })
+        .filter("Text", &["txt"]),
+    ]
 }
 
 impl Rendered {

@@ -315,6 +315,8 @@ pub struct CharacterBuilder {
     mounts: Vec<mounts::Mount>,
     reading_mounts: Option<TrackedPromise<Result<Vec<mounts::Mount>>>>,
     mount: Option<usize>,
+    /// Which of the mount's own seats the character rides in, for one that seats more than one.
+    mount_seat: usize,
     mount_search: String,
     mounts_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The models each set is worn as under the current code, by slot. A set number means one
@@ -396,6 +398,7 @@ impl Default for CharacterBuilder {
             mounts: Vec::new(),
             reading_mounts: None,
             mount: None,
+            mount_seat: 0,
             mount_search: String::new(),
             mounts_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
@@ -438,6 +441,7 @@ impl CharacterBuilder {
         self.mounts.clear();
         self.reading_mounts = None;
         self.mount = None;
+        self.mount_seat = 0;
         self.mounts_matched.take();
         self.stood = false;
         self.body.clear();
@@ -794,6 +798,7 @@ impl CharacterBuilder {
             let (customize, hidden, shapes, stature, bust) = self.made();
             model.made(customize, hidden, shapes, stature, bust);
             model.hinged(self.raised());
+            model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
         }
     }
@@ -1715,7 +1720,7 @@ impl CharacterBuilder {
 
     /// The mounts the game names, one of which the character rides. A mount is a body of its own
     /// and names the same bones a rider does, so the two are posed apart and the rider is carried
-    /// to the seat the mount's own skeleton names.
+    /// to whichever seat its own skeleton names is picked, for the ones that seat more than one.
     fn mounts_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1736,7 +1741,7 @@ impl CharacterBuilder {
         );
         let query = self.mount_search.clone();
         let matched = self.mounts_matching(&query);
-        listed(
+        let picked = listed(
             ui,
             backend,
             icons,
@@ -1748,7 +1753,32 @@ impl CharacterBuilder {
                 (mount.name.as_str(), mount.icon)
             },
         )
-        .map(|index| Pick::Mount((self.mount != Some(index)).then_some(index)))
+        .map(|index| Pick::Mount((self.mount != Some(index)).then_some(index)));
+        if picked.is_none()
+            && let Some(mount) = self.mount.and_then(|at| self.mounts.get(at))
+            && mount.extra_seats > 0
+        {
+            return self.seat_ui(ui, mount.extra_seats);
+        }
+        picked
+    }
+
+    /// Which of a mount's own seats the character rides in, for one seating more than one. Seat
+    /// zero is the one the mount's skeleton names first, whatever the game calls it in its own UI.
+    fn seat_ui(&self, ui: &mut egui::Ui, extra_seats: u8) -> Option<Pick> {
+        let mut picked = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Seat").strong());
+            for seat in 0..=usize::from(extra_seats) {
+                if ui
+                    .selectable_label(self.mount_seat == seat, (seat + 1).to_string())
+                    .clicked()
+                {
+                    picked = Some(Pick::Seat(seat));
+                }
+            }
+        });
+        picked
     }
 
     /// Which mounts a search names, kept the way a slot's own list is.
@@ -2004,7 +2034,11 @@ impl CharacterBuilder {
                     }
                 }
             }
-            Some(Pick::Mount(mount)) => self.mount = mount,
+            Some(Pick::Mount(mount)) => {
+                self.mount = mount;
+                self.mount_seat = 0;
+            }
+            Some(Pick::Seat(seat)) => self.mount_seat = seat,
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }
@@ -2036,6 +2070,8 @@ enum Pick {
     Emote(usize),
     /// A mount to seat the character on, or none to stand it on the ground again.
     Mount(Option<usize>),
+    /// Which of the mount's own seats to ride in.
+    Seat(usize),
     Npc(usize),
 }
 

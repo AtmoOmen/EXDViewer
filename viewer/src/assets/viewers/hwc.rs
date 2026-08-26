@@ -85,7 +85,7 @@ mod tests {
         assert_eq!(&bmp[0..2], b"BM", "a BMP starts with its own magic");
 
         let read_back = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp)
-            .expect("the image crate can read back what it just wrote")
+            .expect("the image crate can read back what it wrote")
             .to_rgba8();
         assert_eq!(read_back.dimensions(), image.dimensions());
         assert_eq!(read_back.as_raw(), image.as_raw());

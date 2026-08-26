@@ -11,7 +11,7 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::TrackedPromise;
 
-/// A choice's own name for what it just built, alongside the bytes to write.
+/// A choice's own name for what it built, alongside the bytes to write.
 type Named = Result<(String, Vec<u8>)>;
 
 /// Bundles named files into a zip, for a choice that only makes sense once there is genuinely more

@@ -371,3 +371,143 @@ impl Rendered {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use ironworks::sqpack::{Install, SqPack};
+
+    fn createviewposition() -> (String, Vec<u8>) {
+        let path = "shader/sm5/shpk/createviewposition.shpk".to_owned();
+        let pack = SqPack::new(Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"));
+        let mut stream = pack.file(&path).expect("the shader is in the local install");
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        (path, bytes)
+    }
+
+    /// The chip state `list.rs` writes is a 1-based (stage row, pass row) pair; `merge_target`
+    /// turns that back into the 0-based stage index `shadermerge::pass` takes and the pass's own
+    /// id. Naming exactly one of each should add the Merged pair to the two All-shaders choices.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn export_choices_gain_the_merged_pair_once_the_chips_name_one_stage_and_one_pass() {
+        let (path, bytes) = createviewposition();
+        let preview = super::decode(&path, &bytes).expect("a real .shpk decodes");
+        let super::Preview::Shpk(package) = preview else {
+            panic!("decode() of a .shpk did not return Preview::Shpk");
+        };
+        let ctx = egui::Context::default();
+
+        let plain = super::export_choices(&package, &bytes, &ctx);
+        assert_eq!(plain.len(), 2, "no chip state set: only the two All-shaders choices");
+
+        let mut target = None;
+        for stage_chip in 1..=package.stages.len() {
+            for pass_chip in 1..=package.keys.passes.len() {
+                if let Ok(count) = super::list::mergeable(&package, stage_chip, pass_chip)
+                    && count > 0
+                {
+                    target = Some((stage_chip, pass_chip));
+                }
+            }
+        }
+        let (stage_chip, pass_chip) =
+            target.expect("createviewposition.shpk has a stage and pass that share a shader");
+        ctx.data_mut(|data| data.insert_temp(package.state, (stage_chip, pass_chip, 0usize)));
+
+        let named = super::export_choices(&package, &bytes, &ctx);
+        assert_eq!(
+            named.len(),
+            4,
+            "one stage and one pass named: the Merged pair joins the All-shaders pair"
+        );
+    }
+
+    /// A real small package, run manually against the local install and `dxc` (`cargo test -p
+    /// viewer --lib -- --ignored shpk::tests --nocapture`, with `dxc` on `PATH`): the zip of every
+    /// shader's HLSL, and the merged pass `shadermerge::pass` builds for it, both compile.
+    #[test]
+    #[ignore = "reads the real local FFXIV install and shells out to dxc"]
+    fn the_export_producers_compile_under_dxc() {
+        use ironworks::file::shpk;
+
+        let (path, bytes) = createviewposition();
+        let preview = super::decode(&path, &bytes).expect("a real .shpk decodes");
+        let super::Preview::Shpk(package) = preview else {
+            panic!("decode() of a .shpk did not return Preview::Shpk");
+        };
+
+        let target = |stage: &str| match stage {
+            "Vertex" => "vs_6_0",
+            "Pixel" => "ps_6_0",
+            "Geometry" => "gs_6_0",
+            "Hull" => "hs_6_0",
+            "Domain" => "ds_6_0",
+            other => panic!("no dxc target for stage {other}"),
+        };
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
+        let compile = |name: &str, source: &str, dxc_target: &str| {
+            let out = std::path::Path::new(&dir).join(name);
+            std::fs::write(&out, source).unwrap();
+            let check = std::process::Command::new("dxc")
+                .args(["-T", dxc_target, "-E", "main", "-Fo", "/dev/null"])
+                .arg(&out)
+                .output()
+                .expect("dxc must be on PATH to run this check");
+            assert!(
+                check.status.success(),
+                "dxc rejected {name}:\n{}",
+                String::from_utf8_lossy(&check.stderr)
+            );
+        };
+
+        let files: Vec<(String, Vec<u8>)> = package
+            .shaders
+            .iter()
+            .enumerate()
+            .filter_map(|(index, shader)| {
+                let (lines, _) = super::shader::code::text(shader, &package.naming, &bytes, true)?;
+                Some((format!("{index:04}_{}.hlsl", shader.stage), lines.join("\n").into_bytes()))
+            })
+            .collect();
+        assert_eq!(files.len(), package.shaders.len(), "every shader decoded to HLSL");
+        let zipped = super::export::zip(&files).expect("zipping the shader listing succeeds");
+        println!("{} shaders zipped into {} bytes", files.len(), zipped.len());
+        let (first_name, first_source) = &files[0];
+        let first_target = target(&package.shaders[0].stage);
+        compile(first_name, &String::from_utf8_lossy(first_source), first_target);
+
+        // The first stage and pass that share more than one shader, so the merge below is a real
+        // union rather than a single shader passed straight through.
+        let mut target_combo = None;
+        for stage_chip in 1..=package.stages.len() {
+            for pass_chip in 1..=package.keys.passes.len() {
+                if let Ok(count) = super::list::mergeable(&package, stage_chip, pass_chip)
+                    && count > 1
+                {
+                    target_combo = Some((stage_chip, pass_chip));
+                }
+            }
+        }
+        let (stage_chip, pass_chip) = target_combo
+            .expect("createviewposition.shpk has a stage and pass that share more than one shader");
+        let stage_name = package.stages[stage_chip - 1].0;
+        let stage_index = match stage_name {
+            "Vertex" => 0,
+            "Pixel" => 1,
+            "Hull" => 2,
+            "Domain" => 3,
+            "Geometry" => 4,
+            other => panic!("no shadermerge stage index for {other}"),
+        };
+        let pass_id = package.keys.passes[pass_chip - 1].id;
+
+        let raw = shpk::ShaderPackage::parse(&bytes).expect("the raw package parses");
+        let merged = shadermerge::pass(&raw, &bytes, stage_index, pass_id)
+            .unwrap_or_else(|error| panic!("shadermerge::pass failed: {error:?}"));
+        println!("merged {stage_name} pass into {} lines", merged.lines.len());
+        compile("shpk_export_check_merged.hlsl", &merged.lines.join("\n"), target(stage_name));
+    }
+}

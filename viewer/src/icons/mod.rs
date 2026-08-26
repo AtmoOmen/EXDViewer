@@ -7,13 +7,15 @@ use egui::{
     Align, Button, CentralPanel, Color32, Layout, RichText, ScrollArea, Sense, TextEdit, Vec2,
     Widget, containers::panel::Panel,
 };
+use either::Either;
+use image::RgbaImage;
 use ironworks::excel::Language;
 use itertools::Itertools;
 
 use crate::{
     backend::Backend,
     data::{IconIndex, get_icon_path, listing::Listed},
-    excel::provider::ExcelProvider,
+    excel::{base::CachedProvider, provider::ExcelProvider},
     github::GithubApi,
     goto::{ListNav, Palette, SUGGESTIONS},
     settings::{ALWAYS_HIRES, LANGUAGE, api_base},
@@ -81,6 +83,8 @@ pub struct IconBrowser {
     palette: Option<Palette>,
     /// Keyboard cursor over the backreference list in the detail panel.
     nav: ListNav,
+    /// A copy-to-clipboard or PNG export fetch in flight for the selected icon.
+    export: Option<TrackedPromise<()>>,
 }
 
 impl Default for IconBrowser {
@@ -107,6 +111,7 @@ impl Default for IconBrowser {
             order_by_count: true,
             palette: None,
             nav: ListNav::default(),
+            export: None,
         }
     }
 }
@@ -198,6 +203,8 @@ impl IconBrowser {
     }
 
     fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
+        self.export.take_if(|promise| promise.try_get().is_some());
+
         // The assets tab cuts the same subset out of the same listing, but only once it has been
         // opened. Without this the tab shows nothing until the user has been there.
         if matches!(self.index, Load::Idle) {
@@ -751,6 +758,10 @@ impl IconBrowser {
         let path = get_icon_path(backend.icons(), icon_id, hires, language);
 
         let source = icon_source(icons, backend, ui.ctx(), &path);
+        let loaded_source = match &source {
+            ManagedIcon::Loaded(image) => Some(image.clone()),
+            _ => None,
+        };
         let bounds = Vec2::splat(ui.available_width().min(192.0));
         let mut size = None;
         let zoomed = ui
@@ -789,6 +800,27 @@ impl IconBrowser {
             .weak()
             .small(),
         );
+
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let enabled = loaded_source.is_some() && self.export.is_none();
+            if ui
+                .add_enabled(enabled, Button::new("Copy"))
+                .on_hover_text("Copy the icon to the clipboard")
+                .clicked()
+                && let Some(source) = loaded_source.clone()
+            {
+                self.export_icon(ui.ctx(), backend, icon_id, path.clone(), source, false);
+            }
+            if ui
+                .add_enabled(enabled, Button::new("Export PNG…"))
+                .clicked()
+                && let Some(source) = loaded_source.clone()
+            {
+                self.export_icon(ui.ctx(), backend, icon_id, path.clone(), source, true);
+            }
+        });
+
         if backend
             .icons()
             .is_some_and(|index| index.localized(icon_id))
@@ -833,6 +865,91 @@ impl IconBrowser {
         }
         followed
     }
+
+    fn export_icon(
+        &mut self,
+        ctx: &egui::Context,
+        backend: &Backend,
+        icon_id: u32,
+        path: String,
+        source: egui::ImageSource<'static>,
+        to_file: bool,
+    ) {
+        let ctx = ctx.clone();
+        let excel = backend.excel().clone();
+        self.export = Some(TrackedPromise::spawn_local(async move {
+            let image = match resolve_icon_pixels(&ctx, excel, &path, source).await {
+                Ok(image) => image,
+                Err(error) => {
+                    log::error!("Failed to resolve icon {icon_id} for export: {error}");
+                    return;
+                }
+            };
+            if to_file {
+                let data = match crate::utils::tex_loader::write(image, image::ImageFormat::Png) {
+                    Ok(data) => data,
+                    Err(error) => {
+                        log::error!("Failed to encode icon {icon_id} as PNG: {error}");
+                        return;
+                    }
+                };
+                if let Some(file) = rfd::AsyncFileDialog::new()
+                    .set_title("Export Icon")
+                    .set_file_name(format!("icon_{icon_id:06}.png"))
+                    .add_filter("PNG image", &["png"])
+                    .save_file()
+                    .await
+                {
+                    if let Err(error) = file.write(&data).await {
+                        log::error!("Failed to write icon {icon_id}: {error}");
+                    } else {
+                        log::info!("Exported icon {icon_id} successfully");
+                    }
+                }
+            } else {
+                ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width() as usize, image.height() as usize],
+                    image.as_raw(),
+                ));
+            }
+        }));
+    }
+}
+
+/// A `Uri` source is a `.tex` file the web backend hands the browser a link to; only the loader
+/// already showing it on screen (`icon_loader::TexLoader`) knows how to decode that, so this reads
+/// back its cache rather than refetching and running the bytes through the wrong decoder. A
+/// `Texture` source came from a decoded [`RgbaImage`] the manager uploaded and dropped, so getting
+/// it back means asking the backend for the same icon again.
+async fn resolve_icon_pixels(
+    ctx: &egui::Context,
+    excel: CachedProvider,
+    path: &str,
+    source: egui::ImageSource<'static>,
+) -> Result<RgbaImage> {
+    if let egui::ImageSource::Uri(uri) = source {
+        return match ctx.try_load_image(&uri, egui::SizeHint::Scale(1.0.into())) {
+            Ok(egui::load::ImagePoll::Ready { image }) => Ok(color_image_to_rgba(&image)),
+            Ok(egui::load::ImagePoll::Pending { .. }) => {
+                anyhow::bail!("icon is still loading")
+            }
+            Err(error) => Err(anyhow::anyhow!("{error}")),
+        };
+    }
+    match excel.get_icon(path).await? {
+        Either::Right(image) => Ok(image),
+        Either::Left(_) => anyhow::bail!("expected a decoded icon, got a URL"),
+    }
+}
+
+fn color_image_to_rgba(image: &egui::ColorImage) -> RgbaImage {
+    let [width, height] = image.size;
+    let mut bytes = Vec::with_capacity(image.pixels.len() * 4);
+    for pixel in &image.pixels {
+        bytes.extend_from_slice(&pixel.to_srgba_unmultiplied());
+    }
+    RgbaImage::from_raw(width as u32, height as u32, bytes)
+        .expect("ColorImage's pixel buffer matches its own size")
 }
 
 fn use_row(ui: &mut egui::Ui, sheet: &str, use_: &Use) -> egui::InnerResponse<egui::Response> {

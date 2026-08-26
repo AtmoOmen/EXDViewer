@@ -223,7 +223,7 @@ impl Rendered {
                 // `toggle` already created the player before spawning this decode.
                 Ok(decoded) => {
                     let played = PLAYER.with_borrow_mut(|player| {
-                        player.as_mut().map(|player| player.play(decoded))
+                        player.as_mut().map(|player| player.play(decoded, false))
                     });
                     match played {
                         Some(Ok(())) => *self.state.borrow_mut() = PlayState::Playing(index),

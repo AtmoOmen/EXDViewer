@@ -33,7 +33,9 @@ impl Player {
         })
     }
 
-    pub fn play(&mut self, audio: Decoded) -> Result<()> {
+    /// `_announce` mirrors the web backend's OS media-session flag; native has no such surface
+    /// yet (souvlaki is deferred), so it is ignored.
+    pub fn play(&mut self, audio: Decoded, _announce: bool) -> Result<()> {
         self.audio = Some(Arc::new(audio));
         self.start_from(0)
     }

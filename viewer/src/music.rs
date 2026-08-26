@@ -455,6 +455,12 @@ impl MusicPlayer {
             return;
         }
         let rate = f64::from(decoded.sample_rate);
+        // OS media-session integration is only for a track that actually loops; a fanfare-length
+        // BGM entry with no real loop region gets no more OS surface than an Assets tab preview.
+        let announce = decoded
+            .loop_start
+            .zip(decoded.loop_end)
+            .is_some_and(|(start, end)| end > start);
         let now_playing = NowPlaying {
             name: name.clone(),
             path,
@@ -470,11 +476,11 @@ impl MusicPlayer {
         };
         let player = self.player.as_mut().unwrap();
         player.set_volume(self.volume);
-        player.set_metadata(&name);
-        if let Err(error) = player.play(decoded) {
+        if let Err(error) = player.play(decoded, announce) {
             log::error!("BGM playback failed: {error}");
             return;
         }
+        player.set_metadata(&name);
         self.now_playing = Some(now_playing);
     }
 

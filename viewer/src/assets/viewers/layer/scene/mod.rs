@@ -3929,15 +3929,15 @@ impl Scene {
                         Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
                     }
                 }
+                let held = preset::Preset::of(
+                    &self.path,
+                    self.camera.position,
+                    self.camera.forward(),
+                    self.fov,
+                    self.ambient.weather_id(),
+                    self.ambient.time,
+                );
                 if ui.button("Export preset").clicked() {
-                    let held = preset::Preset::of(
-                        &self.path,
-                        self.camera.position,
-                        self.camera.forward(),
-                        self.fov,
-                        self.ambient.weather_id(),
-                        self.ambient.time,
-                    );
                     match held.write() {
                         Ok(text) => {
                             let name = format!("TE_{}.json", held.name);
@@ -3953,6 +3953,14 @@ impl Scene {
                                 }
                             }));
                         }
+                        Err(why) => log::error!("assets/layer: {why}"),
+                    }
+                }
+                // The same shape the plugin hands over its own clipboard, so a paste elsewhere
+                // reads it back.
+                if ui.button("Copy preset").clicked() {
+                    match held.share() {
+                        Ok(text) => ui.ctx().copy_text(text),
                         Err(why) => log::error!("assets/layer: {why}"),
                     }
                 }

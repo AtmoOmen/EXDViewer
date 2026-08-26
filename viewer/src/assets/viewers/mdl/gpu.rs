@@ -27,6 +27,20 @@ pub use super::deferred::{
 const SHEER_BUFFER: usize = deferred::REFLECTED + 1;
 const SHEER_RESOLVE: usize = SHEER_BUFFER + 1;
 
+/// Whether the driver offers anisotropic filtering at all, asked for once. Duplicates
+/// `deferred::max_anisotropy`, which is private to that module; this plain pass only needs to know
+/// whether the state it resets even exists.
+static MAX_ANISOTROPY: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+fn max_anisotropy(gl: &glow::Context) -> f32 {
+    *MAX_ANISOTROPY.get_or_init(|| {
+        match gl.supported_extensions().contains("EXT_texture_filter_anisotropic") {
+            true => unsafe { gl.get_parameter_f32(glow::MAX_TEXTURE_MAX_ANISOTROPY_EXT) },
+            false => 0.0,
+        }
+    })
+}
+
 /// Attribute locations, in the order [`Vertex`] stores them.
 const ATTRIBUTES: [(u32, i32, i32); 4] = [(0, 3, 0), (1, 3, 12), (2, 4, 24), (3, 2, 56)];
 const COLOR: u32 = 4;
@@ -504,6 +518,13 @@ impl Model {
                     let texture = id.and_then(|id| painter.texture(id));
                     gl.active_texture(glow::TEXTURE0 + unit);
                     gl.bind_texture(glow::TEXTURE_2D, texture);
+                    // The game-shader pass may have left this same egui-owned texture object at a
+                    // material's own anisotropy: it is texture-object state, not per-draw state,
+                    // so it survives toggling "Game shaders" off and this plain pass would
+                    // otherwise inherit it silently.
+                    if texture.is_some() && max_anisotropy(gl) > 0.0 {
+                        gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MAX_ANISOTROPY_EXT, 1.0);
+                    }
                     bound |= i32::from(texture.is_some()) << unit;
                 }
                 gl.active_texture(glow::TEXTURE0 + JOINTS_UNIT);

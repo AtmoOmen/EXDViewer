@@ -1289,12 +1289,20 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
                     .join("\n"),
             );
         }
-        if let Some(why) = model.shade_failure.borrow().as_ref() {
+        // Bound first, or the `Ref` from `borrow()` would still be held when the click handler
+        // below reaches for `borrow_mut()`. The Character chrome hides the toggle that would
+        // otherwise be the only way to clear this.
+        let failure = model.shade_failure.borrow().clone();
+        if let Some(why) = failure {
             ui.label(
                 RichText::new("⚠ game shaders would not build, showing the plain pass")
                     .color(Color32::LIGHT_RED),
             )
             .on_hover_text(why.as_str());
+            if ui.button("Retry").clicked() {
+                model.shade_failure.borrow_mut().take();
+                model.shaded.set(true);
+            }
         }
     });
 

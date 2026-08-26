@@ -19,6 +19,7 @@ const shots = args.has("--shots") || args.has("--explore");
 const explore = args.has("--explore");
 const modelOnly = explore || args.has("--model-only");
 const effectsOnly = args.has("--avfx-only");
+const characterOnly = args.has("--character-only");
 const orbit = args.has("--orbit");
 const views = args.has("--views");
 const shotDir = join(root, "smoke/shots");
@@ -107,6 +108,18 @@ const VIEWS: [string, number][] = [
 // SV_Target, SV_Target1..4 and Lit.
 const CHANNELS = 6;
 
+// The Character tab's Head slot: the row that opens its picker, and the first item once the list
+// has populated. Both sit in the side panel, which only reaches its full width once the race
+// selector and the default attire have both arrived; recalibrate with smoke/drive.ts against
+// --path=/character if the panel's layout changes.
+const HEAD_SLOT = { x: 52, y: 436 };
+const HEAD_ITEM = { x: 113, y: 502 };
+
+// How many more times the G-buffer has to bind its draw targets after an equipment change for the
+// composite to count as still running. A composite that has stopped holds this at exactly zero, so
+// the floor is only here to demand more than one incidental call; see smoke/README.md.
+const DRAW_BUFFERS_FLOOR = 20;
+
 type Message = { where: string; source: string; level: string; text: string };
 
 const failures: Message[] = [];
@@ -144,6 +157,12 @@ const noted: Message[] = [];
 // and a viewer has anything on screen. What says one is up is the line the app logs when it decodes
 // the file: a click sent against a title alone lands on the empty panel and is gone.
 let decoded = 0;
+// The mdl viewer and the Character tab share `read_level()`, which logs this line once a level's
+// meshes are ready whether it was reached by opening a file or by redressing a worn one.
+let rebuilt = 0;
+// The Character tab's own menus and equipment list load over a separate fetch from the mesh
+// geometry, unordered against it; this is what says the picker has something to click on.
+let pieced = 0;
 
 function record(where: string, source: string, level: string, text: string) {
     const message: Message = { where: phase, source, level, text };
@@ -151,6 +170,8 @@ function record(where: string, source: string, level: string, text: string) {
     // The Zones tab decodes a level straight through the layer viewer rather than through the
     // Assets tab's preview wrapper, so it logs under its own line instead of "assets/preview:".
     if (/assets\/(preview: |layer: )/.test(text)) decoded += 1;
+    if (/assets\/mdl: .* meshes,/.test(text)) rebuilt += 1;
+    if (/character: \d+ pieces to wear/.test(text)) pieced += 1;
     if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
         muted.push(message);
         return;
@@ -547,6 +568,92 @@ async function main() {
         }
     }
 
+    /// Loads a character, then changes its head piece: the one path here that redresses an
+    /// already-drawn model rather than opening a fresh one. A mesh whose program failed to link
+    /// used to abort the whole pass, composite included, every frame from then on, which reads as
+    /// a model that loaded in full and then drew nothing; no other phase visits this path.
+    async function character() {
+        phase = "character";
+        console.log(`\n== character: equipment change`);
+        const openedAt = rebuilt;
+        const pieceAt = pieced;
+        await cdp.send("Page.navigate", { url: `${origin}/character` });
+        await cdp.eval("localStorage.clear()").catch(() => {});
+        await waitFor("the character tab to be titled", 180_000, async () => {
+            const title = await cdp.eval<string>("document.title").catch(() => "");
+            return title.includes("Character");
+        });
+        // Two rebuilds, not a hold-still window: the tab composes the bare body first and then
+        // redresses it once with the default race attire, on its own, as soon as that attire has
+        // fetched. A hold-still window would be racy against however long that fetch takes; the
+        // count is not, since nothing else rebuilds the model before a slot is clicked. The menus
+        // and equipment list are a separate fetch, unordered against the mesh geometry: without
+        // waiting on both, the panel can still be in its pre-menu, single-column layout (or, past
+        // that, still missing the picker's own items) when the click below lands.
+        await waitFor(
+            "the default body and its starting attire to both be built",
+            180_000,
+            async () => rebuilt > openedAt + 1,
+        );
+        await waitFor("the equipment menus to load", 180_000, async () => pieced > pieceAt);
+        await sleep(3000);
+        await shot(cdp, "06-character");
+
+        const builtBefore = rebuilt;
+        // Programs are linked into a fresh, empty cache on every redress; this is what says how
+        // many of them a single equipment click paid to retranslate.
+        const linksBefore = (await counters(cdp)).links;
+        await click(cdp, HEAD_SLOT.x, HEAD_SLOT.y);
+        // The picker's item list is its own fetch, behind the model that is already on screen.
+        await sleep(6000);
+        await shot(cdp, "06-character-picker");
+        await click(cdp, HEAD_ITEM.x, HEAD_ITEM.y);
+        await waitFor(
+            "the equipment change to rebuild the model",
+            180_000,
+            async () => rebuilt > builtBefore,
+        );
+        await sleep(4000);
+        const linksOnRedress = (await counters(cdp)).links - linksBefore;
+        console.log(`   links to retranslate the redress: ${linksOnRedress}`);
+        await shot(cdp, "06-character-worn");
+
+        // Not a screenshot comparison: the failure this guards against is silent. It draws
+        // nothing past the rebuild that already succeeded above, and it logs nothing new either,
+        // so the only thing left to ask is whether the composite is still running at all. `draws`
+        // cannot answer that: egui's own panel repaints it constantly on their own, game shaders
+        // or not. `drawBuffers` cannot be confused with that traffic, since only the deferred
+        // path's own passes ever call it; a G-buffer that never runs again holds it at exactly
+        // zero, not just low, which is what a mesh whose program fails to link and takes the whole
+        // pass down with it looks like instead of one that is skipped and drawn around.
+        const mid = await counters(cdp);
+        try {
+            await waitFor(
+                "the composite to keep running after the redress",
+                30_000,
+                async () => (await counters(cdp)).drawBuffers > mid.drawBuffers + DRAW_BUFFERS_FLOOR,
+            );
+        } catch {
+            throw new Error(
+                "the G-buffer never bound another draw target in the 30s after an equipment " +
+                    "change; the model rebuilt but the composite stopped running",
+            );
+        }
+        const after = await counters(cdp);
+        console.log(
+            `   after redress: draws +${after.draws - mid.draws}` +
+                ` drawBuffers +${after.drawBuffers - mid.drawBuffers}` +
+                ` blits +${after.blits - mid.blits}` +
+                ` links +${after.links - mid.links}`,
+        );
+        report.character = {
+            linksOnRedress,
+            draws: after.draws - mid.draws,
+            drawBuffers: after.drawBuffers - mid.drawBuffers,
+            links: after.links - mid.links,
+        };
+    }
+
     try {
         phase = "boot";
         const first = effectsOnly ? `${origin}/assets/${EFFECTS[0]}` : `${origin}/assets/${MODEL}`;
@@ -576,6 +683,11 @@ async function main() {
 
         if (effectsOnly) {
             await effects();
+            return;
+        }
+
+        if (characterOnly) {
+            await character();
             return;
         }
 
@@ -713,6 +825,8 @@ async function main() {
 
         phase = "level";
         report.level = await walk(cdp, origin, LEVEL, "05-level", "zones");
+
+        await character();
 
         await effects();
     } finally {

@@ -1690,7 +1690,9 @@ impl AssetBrowser {
                                 let name = crate::utils::file_name(&path);
                                 let mut choices = vec![export::Choice::raw(bytes, name)];
                                 if let Some(preview) = &self.preview {
-                                    choices.extend(preview.export_choices(viewer, bytes, ui.ctx()));
+                                    choices.extend(preview.export_choices(
+                                        viewer, &path, bytes, self.mip, ui.ctx(),
+                                    ));
                                 }
                                 let busy = self.export.is_some();
                                 let promise = export::menu(ui, "Export", None, busy, choices);

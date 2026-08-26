@@ -11,6 +11,9 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::TrackedPromise;
 
+/// A choice's own name for what it just built, alongside the bytes to write.
+type Named = Result<(String, Vec<u8>)>;
+
 /// Bundles named files into a zip, for a choice that only makes sense once there is genuinely more
 /// than one output file.
 pub fn zip(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
@@ -28,29 +31,31 @@ pub fn zip(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
 /// `Choice` itself must stay cheap, since the caller does it every frame the menu could open; the
 /// borrow in `build` is what keeps a raw file's bytes from being cloned before someone asks for
 /// them.
+///
+/// The future resolves to the file's own name alongside its bytes rather than a fixed one, since a
+/// producer that bundles more than one file (a zip, past the first) cannot always name itself
+/// before it has gathered them.
 pub struct Choice<'a> {
     label: String,
     hover: Option<String>,
     dialog_title: String,
-    file_name: String,
     filter: Option<(String, Vec<String>)>,
     enabled: bool,
     disabled_hover: Option<String>,
-    build: Box<dyn FnOnce() -> LocalBoxFuture<'static, Result<Vec<u8>>> + 'a>,
+    build: Box<dyn FnOnce() -> LocalBoxFuture<'static, Named> + 'a>,
 }
 
 impl<'a> Choice<'a> {
-    pub fn new(
+    /// The general form: `build` names the file it saves for itself.
+    pub fn named(
         label: impl Into<String>,
-        file_name: impl Into<String>,
-        build: impl FnOnce() -> LocalBoxFuture<'static, Result<Vec<u8>>> + 'a,
+        build: impl FnOnce() -> LocalBoxFuture<'static, Named> + 'a,
     ) -> Self {
         let label = label.into();
         Self {
             dialog_title: label.clone(),
             label,
             hover: None,
-            file_name: file_name.into(),
             filter: None,
             enabled: true,
             disabled_hover: None,
@@ -58,14 +63,39 @@ impl<'a> Choice<'a> {
         }
     }
 
-    /// The common case: a producer with nothing to await, only something to compute. Runs at the
-    /// moment the choice is picked, same as `build` itself.
+    /// The common case: a fixed file name known up front.
+    pub fn new(
+        label: impl Into<String>,
+        file_name: impl Into<String>,
+        build: impl FnOnce() -> LocalBoxFuture<'static, Result<Vec<u8>>> + 'a,
+    ) -> Self {
+        let file_name = file_name.into();
+        Self::named(label, move || {
+            let inner = build();
+            Box::pin(async move { Ok((file_name, inner.await?)) })
+        })
+    }
+
+    /// A fixed file name, with nothing to await: a producer with only something to compute. Runs
+    /// at the moment the choice is picked, same as `build` itself.
     pub fn bytes(
         label: impl Into<String>,
         file_name: impl Into<String>,
         produce: impl FnOnce() -> Result<Vec<u8>> + 'a,
     ) -> Self {
         Self::new(label, file_name, move || {
+            let result = produce();
+            Box::pin(async move { result })
+        })
+    }
+
+    /// The synchronous form of [`Choice::named`]: `produce` names the file it hands back for
+    /// itself, such as a bundle that is a lone file's own name until a second one makes it a zip.
+    pub fn named_bytes(
+        label: impl Into<String>,
+        produce: impl FnOnce() -> Named + 'a,
+    ) -> Self {
+        Self::named(label, move || {
             let result = produce();
             Box::pin(async move { result })
         })
@@ -173,17 +203,16 @@ pub fn menu<'a>(
 fn start(choice: Choice<'_>) -> TrackedPromise<()> {
     let Choice {
         dialog_title,
-        file_name,
         filter,
         build,
         ..
     } = choice;
     let future = build();
     TrackedPromise::spawn_local(async move {
-        let data = match future.await {
-            Ok(data) => data,
+        let (file_name, data) = match future.await {
+            Ok(named) => named,
             Err(error) => {
-                log::error!("Failed to export {file_name}: {error:?}");
+                log::error!("Failed to export {dialog_title}: {error:?}");
                 return;
             }
         };

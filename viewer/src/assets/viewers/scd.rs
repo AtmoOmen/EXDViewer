@@ -14,6 +14,7 @@ use super::{Preview, facts, headers, section};
 use crate::assets::Bytes;
 use crate::audio::{self, Player};
 use crate::utils::TrackedPromise;
+use crate::utils::export;
 
 enum PlayState {
     Idle,
@@ -31,10 +32,12 @@ thread_local! {
 
 /// A sound container, decoded and ready to draw.
 pub struct Rendered {
+    name: String,
     identity: Vec<(&'static str, String)>,
     container: SoundContainer,
     state: RefCell<PlayState>,
     error: RefCell<Option<String>>,
+    export: RefCell<Option<TrackedPromise<()>>>,
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
@@ -49,10 +52,14 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     log::info!("assets/scd: {path} {} streams", container.entries().len());
 
     Ok(Preview::Scd(Box::new(Rendered {
+        name: crate::utils::file_name(path)
+            .trim_end_matches(".scd")
+            .to_owned(),
         identity,
         container,
         state: RefCell::new(PlayState::Idle),
         error: RefCell::new(None),
+        export: RefCell::new(None),
     })))
 }
 
@@ -61,11 +68,40 @@ const HEADERS: [&str; COLUMNS] = ["", "#", "Codec", "Ch", "Rate", "Bytes", "Loop
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
     file.poll();
-    if !matches!(&*file.state.borrow(), PlayState::Idle) {
+    file.poll_export();
+    let exporting = file.export.borrow().is_some();
+    if !matches!(&*file.state.borrow(), PlayState::Idle) || exporting {
         ui.ctx().request_repaint_after(Duration::from_millis(200));
     }
 
-    section(ui, "Streams");
+    ui.horizontal(|ui| {
+        section(ui, "Streams");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            let promise = export::menu(
+                ui,
+                "Export",
+                None,
+                exporting,
+                vec![
+                    export::Choice::named_bytes("Native streams", || {
+                        let entries = file.container.entries().to_vec();
+                        audio::package(audio::export_native(&entries), &file.name)
+                    })
+                    .title("Export Audio")
+                    .hover("Each entry's own codec bytes"),
+                    export::Choice::named_bytes("Decoded WAV", || {
+                        let entries = file.container.entries().to_vec();
+                        audio::package(audio::export_wav(&entries)?, &file.name)
+                    })
+                    .title("Export Audio")
+                    .hover("Every channel the entry holds, undownmixed"),
+                ],
+            );
+            if promise.is_some() {
+                *file.export.borrow_mut() = promise;
+            }
+        });
+    });
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Grid::new("scd_entries")
             .num_columns(COLUMNS)
@@ -203,6 +239,12 @@ impl Rendered {
         if matches!(&*state, PlayState::Playing(_)) && !still_playing {
             *state = PlayState::Idle;
         }
+    }
+
+    fn poll_export(&self) {
+        self.export
+            .borrow_mut()
+            .take_if(|promise| promise.try_get().is_some());
     }
 }
 

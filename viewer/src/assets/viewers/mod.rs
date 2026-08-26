@@ -565,10 +565,13 @@ impl Preview {
 
     /// Export choices beyond the raw file, which the browser always offers on its own. `viewer` is
     /// what tells apart the several formats that decode into the same [`Self::Image`] shape.
+    #[allow(clippy::too_many_arguments)]
     pub fn export_choices<'a>(
         &'a self,
         viewer: Viewer,
+        path: &str,
         bytes: &'a [u8],
+        mip: u8,
         ctx: &egui::Context,
     ) -> Vec<export::Choice<'a>> {
         match self {
@@ -576,6 +579,9 @@ impl Preview {
             Self::Shpk(package) => shpk::export_choices(package, bytes, ctx),
             Self::Shcd(code) => shcd::export_choices(code, bytes),
             Self::Image { .. } if viewer == Viewer::Hwc => hwc::export_choices(bytes),
+            Self::Image { .. } if viewer == Viewer::Texture => {
+                texture_export_choices(bytes, path, mip)
+            }
             _ => Vec::new(),
         }
     }
@@ -1068,6 +1074,38 @@ pub struct Mip {
     pub width: u16,
     pub height: u16,
     pub bytes: usize,
+}
+
+/// Beyond the raw file: an exact DDS container, and a lossless PNG (zipped, past one face, layer
+/// or slice) where the format has one. Decoded fresh at click time rather than kept: `Preview`
+/// only holds a `.tex`'s uploaded texture handle, not the container `dds`/`png` read from.
+fn texture_export_choices<'a>(bytes: &'a [u8], path: &str, mip: u8) -> Vec<export::Choice<'a>> {
+    use ironworks::file::{File as _, tex};
+
+    let path = path.to_owned();
+    vec![
+        export::Choice::bytes("DDS", "texture.dds", move || {
+            let texture = tex::Texture::read(std::io::Cursor::new(bytes.to_vec()))?;
+            crate::utils::dds(&texture)
+        })
+        .hover("The file's own pixel blocks, exact, with every mip level")
+        .filter("DDS image", &["dds"]),
+        export::Choice::named_bytes("PNG", move || {
+            let texture = tex::Texture::read(std::io::Cursor::new(bytes.to_vec()))?;
+            let level = mip.min(texture.mip_levels().saturating_sub(1));
+            let images = crate::utils::png(&texture, level, &path)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{:?} has no lossless PNG form; use DDS instead",
+                    texture.format()
+                )
+            })?;
+            Ok((images.file_name("texture"), images.bytes()))
+        })
+        .hover(
+            "The mip level shown now; zipped when the texture has more than one face, layer or \
+             slice",
+        ),
+    ]
 }
 
 /// Build the image preview both the image and texture viewers end at.

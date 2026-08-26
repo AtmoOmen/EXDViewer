@@ -43,6 +43,8 @@ mod settings;
 mod setup;
 mod sheet;
 mod shortcuts;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod smoke;
 pub mod stopwatch;
 pub mod utils;
 #[cfg(target_arch = "wasm32")]

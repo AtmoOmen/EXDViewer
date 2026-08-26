@@ -1138,6 +1138,7 @@ const VIEWS: [(gpu::Debug, &str); 9] = [
 
 pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     if let Some(why) = model.level.borrow().gpu.lock().unwrap().take_shader_failure() {
+        log::error!("assets/mdl: game shaders: {why}");
         model.fail_shading(why);
     }
     ui.horizontal_wrapped(|ui| {
@@ -2558,9 +2559,11 @@ impl Rendered {
             let Some(Slot::Ready(material)) = slot else {
                 continue;
             };
+            // Not a failed one: a fresh attempt is what a deliberate re-enable after a build failure
+            // is for, rather than the same answer coming back forever with no notice of it.
             if translated
                 .get(&index)
-                .is_some_and(|held| held.attachments == attachments)
+                .is_some_and(|held| held.attachments == attachments && held.held.is_ok())
             {
                 continue;
             }

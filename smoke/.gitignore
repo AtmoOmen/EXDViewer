@@ -7,3 +7,5 @@
 !*.sh
 !*.js
 !*.py
+# Compile-time input for viewer/examples/shpk_uses.rs.
+!shpk_names.txt

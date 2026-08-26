@@ -168,6 +168,9 @@ pub struct Pose {
     /// How much further from the middle of them the pose flings the bones than the rest pose does,
     /// which the geometry hung on them reaches by too.
     pub stretch: f32,
+    /// Every bone's own placement this frame, in the model's own space, for whatever wants a joint
+    /// on its own rather than through a mesh's palette. Empty until the rig has landed.
+    pub world: Vec<Mat4>,
     /// Where this rig seats a rider, for the one that is a mount.
     seat: Option<Placement>,
 }
@@ -468,6 +471,17 @@ impl Animation {
     /// The mount the body is seated on, where it is on one.
     pub fn rides(&self) -> Option<&str> {
         self.mounted.as_ref()?.code.as_deref()
+    }
+
+    /// The rig everything is posed on, once it has landed: its bones, each one's parent, and the
+    /// matrix that carries a bind-pose vertex into that bone's own rest frame.
+    pub fn rig(&self) -> Option<(Vec<String>, Vec<Option<usize>>, Vec<Mat4>)> {
+        let skin = self.skin.borrow();
+        let skin = skin.as_ref()?;
+        let parents = (0..skin.rig.bones())
+            .map(|bone| skin.rig.parent(bone))
+            .collect();
+        Some((skin.rig.names().to_vec(), parents, skin.rest.clone()))
     }
 
     /// Whether the rigs on hand are the ones a set of models is posed on: the body the first of
@@ -852,6 +866,7 @@ impl Animation {
             },
             drift: center - skin.home,
             stretch: (spread - skin.spread).max(0.0),
+            world: posed.iter().map(Placement::matrix).collect(),
             seat,
         }
     }

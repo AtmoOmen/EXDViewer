@@ -23,7 +23,7 @@ use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{
     CollapsibleSidePanel, FuzzyMatcher, PromiseKind, Side, TrackedPromise, center, empty_view,
-    fetch_url_str, file_name,
+    export, fetch_url_str, file_name,
 };
 
 const FILTER_ID: &str = "music_filter";
@@ -181,14 +181,7 @@ enum Cmd {
     Seek(f64),
     Volume(f32),
     ToggleVisualizer,
-    Export(ExportFormat),
     OpenInAssets,
-}
-
-#[derive(Clone, Copy)]
-enum ExportFormat {
-    Original,
-    Wav,
 }
 
 impl MusicPlayer {
@@ -743,6 +736,7 @@ impl MusicPlayer {
             vec2(col_w, outer.height()),
         );
         let mut cmd = None;
+        let mut export_start = None;
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(col_rect)
@@ -798,21 +792,39 @@ impl MusicPlayer {
                     {
                         cmd = Some(Cmd::ToggleVisualizer);
                     }
-                    if exporting {
-                        ui.spinner();
-                    }
-                    ui.add_enabled_ui(!exporting, |ui| {
-                        ui.menu_button("📤 Export", |ui| {
-                            if ui.button("Original file").clicked() {
-                                cmd = Some(Cmd::Export(ExportFormat::Original));
-                                ui.close();
-                            }
-                            if ui.button("WAV").clicked() {
-                                cmd = Some(Cmd::Export(ExportFormat::Wav));
-                                ui.close();
-                            }
-                        });
-                    });
+                    // `Original` hands back the entry's own bytes untouched, multichannel and all;
+                    // `Wav` re-decodes them, so it carries the same stereo downmix the player is
+                    // producing.
+                    let codec = info.codec;
+                    let extension = codec_extension(codec);
+                    export_start = export::menu(
+                        ui,
+                        "📤",
+                        Some("Export"),
+                        exporting,
+                        vec![
+                            export::Choice::bytes(
+                                "Original file",
+                                format!("{}.{extension}", safe_file_name(&name)),
+                                {
+                                    let stream = stream.clone();
+                                    move || Ok(stream.to_vec())
+                                },
+                            )
+                            .title("Export Original Audio")
+                            .filter(extension.to_ascii_uppercase(), &[extension]),
+                            export::Choice::bytes(
+                                "WAV",
+                                format!("{}.wav", safe_file_name(&name)),
+                                move || {
+                                    audio::decode_data(codec, &stream)
+                                        .and_then(|decoded| audio::encode_wav(&decoded))
+                                },
+                            )
+                            .title("Export WAV Audio")
+                            .filter("WAV", &["wav"]),
+                        ],
+                    );
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().slider_width = 150.0;
@@ -840,6 +852,10 @@ impl MusicPlayer {
                 }
             },
         );
+
+        if export_start.is_some() {
+            self.export_promise = export_start;
+        }
 
         match cmd {
             Some(Cmd::Toggle) => {
@@ -874,52 +890,9 @@ impl MusicPlayer {
                 self.show_visualizer = !self.show_visualizer;
                 None
             }
-            Some(Cmd::Export(format)) => {
-                self.export(name, info.codec, stream, format);
-                None
-            }
             Some(Cmd::OpenInAssets) => Some(path),
             None => None,
         }
-    }
-
-    /// `Original` hands back the entry's own bytes untouched, multichannel and all; `Wav`
-    /// re-decodes them, so it carries the same stereo downmix the player is producing.
-    fn export(&mut self, name: String, codec: Codec, stream: Arc<[u8]>, format: ExportFormat) {
-        let (extension, title) = match format {
-            ExportFormat::Original => (codec_extension(codec), "Export Original Audio"),
-            ExportFormat::Wav => ("wav", "Export WAV Audio"),
-        };
-        let file_name = format!("{}.{extension}", safe_file_name(&name));
-        self.export_promise = Some(TrackedPromise::spawn_local(async move {
-            let data = match format {
-                ExportFormat::Original => stream.to_vec(),
-                ExportFormat::Wav => {
-                    let encoded = audio::decode_data(codec, &stream)
-                        .and_then(|decoded| audio::encode_wav(&decoded));
-                    match encoded {
-                        Ok(data) => data,
-                        Err(error) => {
-                            log::error!("BGM WAV encode failed: {error}");
-                            return;
-                        }
-                    }
-                }
-            };
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title(title)
-                .set_file_name(file_name)
-                .add_filter(extension.to_ascii_uppercase(), &[extension])
-                .save_file()
-                .await
-            {
-                if let Err(error) = file.write(&data).await {
-                    log::error!("BGM export failed: {error}");
-                } else {
-                    log::info!("BGM exported successfully");
-                }
-            }
-        }));
     }
 
     fn viz_bars(&mut self, spectrum: &[u8], sample_rate: u32, playing: bool) -> Vec<f32> {

@@ -1168,7 +1168,7 @@ fn found(root: &str, paths: Vec<String>) -> Vec<Pack> {
 
 #[cfg(test)]
 mod tests {
-    use glam::{Mat4, Quat, Vec3};
+    use glam::{Mat4, Vec3};
     use ironworks::file::sklb::Transform;
 
     use super::super::super::skeleton::{Rig, middle};

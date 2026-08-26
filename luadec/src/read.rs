@@ -1004,19 +1004,12 @@ impl<'a> Reader<'a> {
         escape: Option<usize>,
     ) -> Reading<usize> {
         // A conditional at the head whose failure lands past the jump back is a `while`; a
-        // conditional just before the jump back is a `repeat`; anything else loops forever. A
-        // chain that runs all the way to the jump back and lands on the head at the end of it is
-        // that jump's own condition, a `repeat`'s `until`, however short a prefix `choose`
-        // manages to explain on its own -- unlike an unrelated nested jump that only happens to
-        // collapse onto the head, which does not reach all the way to `end`.
+        // conditional just before the jump back is a `repeat`; anything else loops forever.
         let tests = self.tests(pc, hi);
-        let until_tail = tests
-            .last()
-            .is_some_and(|test| test.target == pc && test.after == end + 1);
         if let Some((count, false_target)) = choose(&tests)
             && false_target == end + 1
             && tests.get(count - 1).is_some_and(|test| test.after <= end)
-            && !until_tail
+            && !until_tail(&tests, pc)
         {
             let condition = self.condition(&tests, count, pc)?;
             let body = self.block(tests[count - 1].after, end, escape, None)?;
@@ -1253,10 +1246,8 @@ impl<'a> Reader<'a> {
     ) -> Reading<usize> {
         let held = self.tests(pc, hi);
         let tests = &held[..self.unbroken(&held)];
-        // A chain ending on a jump back to the enclosing `repeat`'s own head is that loop's
-        // `until`, however short a prefix `choose` can otherwise explain on its own terms.
         if let Some(head) = until
-            && tests.last().is_some_and(|test| test.target == head)
+            && until_tail(tests, head)
         {
             return self.until_condition(&held, pc, head);
         }
@@ -1903,6 +1894,16 @@ impl<'a> Reader<'a> {
         }
         Ok(closure(held, upvalues, self.depth + 1, &mut self.counts))
     }
+}
+
+/// Whether a chain runs, with no real statement breaking it, all the way to a jump back to `head` --
+/// the shape a `repeat`'s own `until` takes, however short a prefix `choose` can otherwise explain as
+/// an unrelated `if` or `while` guard. Contiguity is what tells the two apart: an unrelated jump that
+/// only happens to collapse onto the head sits behind real body code, while an `until`'s own tests run
+/// straight into one another.
+fn until_tail(tests: &[Test], head: usize) -> bool {
+    tests.last().is_some_and(|test| test.target == head)
+        && tests.windows(2).all(|pair| pair[0].after == pair[1].test)
 }
 
 /// How many conditionals of a chain belong to one condition, and where failing it lands. The longest

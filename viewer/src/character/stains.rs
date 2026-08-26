@@ -22,10 +22,7 @@ pub struct Stain {
     pub id: u8,
     pub name: String,
     pub color: Color32,
-    /// `Stain.IsMetallic`. The sheet states no separate pearl category: Pearl White reads
-    /// identically to the rest of the metallics in every staining template checked. The one
-    /// metallic that reads distinctly there is Gunmetal Black's roughness, not a pearl value, so
-    /// metallic stays the single grouping the swatch draws.
+    /// `Stain.IsMetallic`.
     pub metallic: bool,
 }
 
@@ -33,8 +30,7 @@ const CORNER: f32 = 2.0;
 
 /// The flat fill every swatch gets, plus a diagonal sheen for a metallic dye. The gradient is
 /// inset by the fill's own corner radius so its straight edges never poke past the rounded fill
-/// into the surrounding theme. Both the highlight and the shadow side stop well short of white or
-/// black, so the underlying dye color still reads as itself.
+/// into the surrounding theme.
 pub fn paint(painter: &Painter, rect: Rect, color: Color32, metallic: bool) {
     painter.rect_filled(rect, CORNER, color);
     if !metallic {

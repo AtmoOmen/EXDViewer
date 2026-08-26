@@ -131,7 +131,11 @@ pub fn dds(texture: &tex::Texture) -> Result<Vec<u8>> {
         depth: (kind == TextureKind::D3).then(|| u32::from(texture.depth())),
         format,
         mipmap_levels: (texture.mip_levels() > 1).then(|| u32::from(texture.mip_levels())),
-        array_layers: (kind == TextureKind::D2Array).then(|| u32::from(texture.layers(0))),
+        // `Dds::new_dxgi` sizes its data buffer as `array_layers * one layer's mip chain`, then
+        // divides by 6 for the header10 field only when `is_cubemap`; passing `None` here for a
+        // cube under-sizes the buffer by 6x rather than being implicitly "times six" already.
+        array_layers: matches!(kind, TextureKind::D2Array | TextureKind::Cube)
+            .then(|| u32::from(texture.layers(0))),
         caps2: (kind == TextureKind::Cube).then_some(Caps2::CUBEMAP | Caps2::CUBEMAP_ALLFACES),
         is_cubemap: kind == TextureKind::Cube,
         resource_dimension: if kind == TextureKind::D3 {
@@ -353,5 +357,68 @@ mod tests {
         let tex = texture(0b0000010, 0x3420, 4, 4, 1, 0, &vec![0u8; 8]);
         assert!(png(&tex, 0, "test").unwrap().is_none());
         assert!(dxgi_format(tex.format()).is_some());
+    }
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    fn read_local(path: &str) -> Vec<u8> {
+        use ironworks::sqpack::{Install, SqPack};
+        use std::io::Read;
+        let pack = SqPack::new(Install::at_sqpack(SQPACK));
+        let mut stream = pack.file(path).unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// A real BC1 cube (six faces, eight mip levels), covering the same reorder code path as the
+    /// `D2Array` test below plus the cubemap header flags (`is_cubemap`, `Caps2::CUBEMAP`).
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_bc1_cube_survives_the_reorder_at_every_mip() {
+        let path = "bgcommon/nature/envmap/texture/_n_envmap_000.tex";
+        let bytes = read_local(path);
+        let tex = tex::Texture::read(ReadCursor::new(bytes)).unwrap();
+        assert_eq!(tex.kind(), TextureKind::Cube);
+
+        let dds_bytes = dds(&tex).unwrap();
+        let file = Dds::read(&mut ReadCursor::new(dds_bytes)).unwrap();
+        assert_eq!(file.get_dxgi_format(), Some(DxgiFormat::BC1_UNorm));
+        for level in 0..tex.mip_levels() {
+            let decoded = image_dds::image_from_dds(&file, u32::from(level)).unwrap();
+            let expected = tex_loader::decode_stack(&tex, level, path).unwrap();
+            assert_eq!(
+                decoded.as_raw(),
+                expected.to_rgba8().as_raw(),
+                "mip {level}"
+            );
+        }
+    }
+
+    /// A real BC7 `D2Array` (the reorder code path also used for `Cube`), run manually (`cargo
+    /// test -p viewer --lib -- --ignored tex_export::tests::a_real --nocapture`): decodes every
+    /// mip level both through `image_dds` off the assembled DDS and through `decode_stack` off
+    /// the original file, and requires the two to agree pixel for pixel. Mip 0 catches a wrong
+    /// layer/mip order; the deepest mip catches a stride or block-padding mistake, since by then a
+    /// slice has shrunk below BC7's 4x4 block grid.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_bc7_array_survives_the_reorder_at_every_mip() {
+        let path = "chara/common/texture/tile_norm_array.tex";
+        let bytes = read_local(path);
+        let tex = tex::Texture::read(ReadCursor::new(bytes)).unwrap();
+        assert_eq!(tex.kind(), TextureKind::D2Array);
+
+        let dds_bytes = dds(&tex).unwrap();
+        let file = Dds::read(&mut ReadCursor::new(dds_bytes)).unwrap();
+        for level in 0..tex.mip_levels() {
+            let decoded = image_dds::image_from_dds(&file, u32::from(level)).unwrap();
+            let expected = tex_loader::decode_stack(&tex, level, path).unwrap();
+            assert_eq!(
+                decoded.as_raw(),
+                expected.to_rgba8().as_raw(),
+                "mip {level}"
+            );
+        }
     }
 }

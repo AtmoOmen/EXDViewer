@@ -84,7 +84,14 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
-Nothing at present.
+**`Feedback loop formed between Framebuffer and active Texture`, in the scene and level phases.**
+Measured on an unmodified tree with no edits: 374 occurrences at `20fc1c2c`, 512 at `90ff3ced`,
+firing on the scene phase's first draw. The model phase is clean in both runs, so it lives in the
+shared G-buffer machinery rather than in any one viewer. A texture is being sampled while still
+attached to the bound framebuffer, which is undefined behaviour. Not yet diagnosed.
+
+One `.avfx` effect triggered it in the first run and a different effect did not in the second, so
+there is a separate effect-specific trigger on top of the structural one.
 
 `the preview frame changed after game shaders were turned on and off again` used to fire on a
 `--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately

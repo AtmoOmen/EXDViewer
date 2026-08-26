@@ -1,6 +1,6 @@
 use egui::{Button, Context, Id, Image, Layout, Modal, Sense, Spinner, TextStyle, UiBuilder, Vec2};
 
-use super::{ManagedIcon, TrackedPromise, spawn_icon_export};
+use super::{ManagedIcon, TrackedPromise, export, icon_export_choice, spawn_icon_copy};
 use crate::excel::base::CachedProvider;
 
 /// Loading/failed states have no image to size against, so they hold this rect instead.
@@ -66,39 +66,39 @@ pub fn icon_modal(
             }
 
             ui.add_space(4.0);
-            let enabled = loaded_source.is_some() && export.is_none();
+            let busy = export.is_some();
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(enabled, Button::new("Copy"))
+                    .add_enabled(loaded_source.is_some() && !busy, Button::new("Copy"))
                     .on_hover_text("Copy the icon to the clipboard")
                     .clicked()
                     && let Some(source) = loaded_source.clone()
                 {
-                    *export = Some(spawn_icon_export(
+                    *export = Some(spawn_icon_copy(
                         ui.ctx(),
                         excel.clone(),
                         icon_id,
                         path.to_owned(),
                         source,
-                        false,
                     ));
                 }
-                if ui
-                    .add_enabled(enabled, Button::new("Export PNG…"))
-                    .clicked()
-                    && let Some(source) = loaded_source
-                {
-                    *export = Some(spawn_icon_export(
-                        ui.ctx(),
-                        excel,
-                        icon_id,
-                        path.to_owned(),
-                        source,
-                        true,
-                    ));
-                }
-                if export.is_some() {
-                    ui.spinner();
+                if let Some(source) = loaded_source {
+                    let promise = export::menu(
+                        ui,
+                        "Export",
+                        None,
+                        busy,
+                        vec![icon_export_choice(
+                            ui.ctx(),
+                            excel,
+                            icon_id,
+                            path.to_owned(),
+                            source,
+                        )],
+                    );
+                    if promise.is_some() {
+                        *export = promise;
+                    }
                 }
             });
         })

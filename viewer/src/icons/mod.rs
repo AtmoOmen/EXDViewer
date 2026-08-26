@@ -18,8 +18,8 @@ use crate::{
     goto::{ListNav, Palette, SUGGESTIONS},
     settings::{ALWAYS_HIRES, LANGUAGE, api_base},
     utils::{
-        CollapsibleSidePanel, IconManager, ManagedIcon, PromiseKind, Side, TrackedPromise,
-        icon_modal, spawn_icon_export,
+        CollapsibleSidePanel, IconManager, ManagedIcon, PromiseKind, Side, TrackedPromise, export,
+        icon_export_choice, icon_modal, spawn_icon_copy,
     },
 };
 
@@ -810,22 +810,39 @@ impl IconBrowser {
         );
 
         ui.add_space(4.0);
+        let busy = self.export.is_some();
         ui.horizontal(|ui| {
-            let enabled = loaded_source.is_some() && self.export.is_none();
             if ui
-                .add_enabled(enabled, Button::new("Copy"))
+                .add_enabled(loaded_source.is_some() && !busy, Button::new("Copy"))
                 .on_hover_text("Copy the icon to the clipboard")
                 .clicked()
                 && let Some(source) = loaded_source.clone()
             {
-                self.export_icon(ui.ctx(), backend, icon_id, path.clone(), source, false);
+                self.export = Some(spawn_icon_copy(
+                    ui.ctx(),
+                    backend.excel().clone(),
+                    icon_id,
+                    path.clone(),
+                    source,
+                ));
             }
-            if ui
-                .add_enabled(enabled, Button::new("Export PNG…"))
-                .clicked()
-                && let Some(source) = loaded_source.clone()
-            {
-                self.export_icon(ui.ctx(), backend, icon_id, path.clone(), source, true);
+            if let Some(source) = loaded_source.clone() {
+                let promise = export::menu(
+                    ui,
+                    "Export",
+                    None,
+                    busy,
+                    vec![icon_export_choice(
+                        ui.ctx(),
+                        backend.excel().clone(),
+                        icon_id,
+                        path.clone(),
+                        source,
+                    )],
+                );
+                if promise.is_some() {
+                    self.export = promise;
+                }
             }
         });
 
@@ -872,25 +889,6 @@ impl IconBrowser {
             }
         }
         followed
-    }
-
-    fn export_icon(
-        &mut self,
-        ctx: &egui::Context,
-        backend: &Backend,
-        icon_id: u32,
-        path: String,
-        source: egui::ImageSource<'static>,
-        to_file: bool,
-    ) {
-        self.export = Some(spawn_icon_export(
-            ctx,
-            backend.excel().clone(),
-            icon_id,
-            path,
-            source,
-            to_file,
-        ));
     }
 }
 

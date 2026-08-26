@@ -306,6 +306,9 @@ pub struct CharacterBuilder {
     sets: RefCell<BTreeMap<(bool, u16), Models>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<(String, u16)>,
+    /// Whether the last fetch for `worn` failed, so the same equipment is asked for again rather
+    /// than left stuck: `worn` alone can't tell a landed dress from a failed one.
+    worn_failed: bool,
     /// What each borrowed body is shaped onto this one by, kept rather than rebuilt. The model
     /// keeps a piece across a change of clothes by the deform it was built with, and one built
     /// afresh is a different one however equal it is.
@@ -371,6 +374,7 @@ impl Default for CharacterBuilder {
             mounts_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
+            worn_failed: false,
             shaped: RefCell::new(BTreeMap::new()),
             held: Files::new(),
             fetching: Vec::new(),
@@ -414,6 +418,7 @@ impl CharacterBuilder {
         self.sets.borrow_mut().clear();
         self.shaped.borrow_mut().clear();
         self.worn.clear();
+        self.worn_failed = false;
         self.held.clear();
         self.fetching.clear();
         self.model = None;
@@ -647,8 +652,9 @@ impl CharacterBuilder {
         }
 
         let wanted = self.wearing(&listing, &deformers);
-        if wanted != self.worn && !wanted.is_empty() {
+        if (wanted != self.worn || self.worn_failed) && !wanted.is_empty() {
             self.worn = wanted;
+            self.worn_failed = false;
             let missing: Vec<String> = self
                 .worn
                 .iter()
@@ -679,7 +685,10 @@ impl CharacterBuilder {
                     self.held.extend(read);
                     landed = true;
                 }
-                Ok(Err(why)) => self.model = Some(Err(why.to_string())),
+                Ok(Err(why)) => {
+                    self.model = Some(Err(why.to_string()));
+                    self.worn_failed = true;
+                }
                 Err(promise) => waiting.push(promise),
             }
         }

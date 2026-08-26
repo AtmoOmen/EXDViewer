@@ -69,6 +69,9 @@ const SHEETS_FILTER_ID: &str = "sheets_filter";
 /// A panel keeps whatever width its widest row has ever asked for, so an unbounded one grows for
 /// good the first time a long sheet name scrolls through.
 const SHEET_LIST_WIDTH: f32 = 320.0;
+/// Room the version and GitHub links need beside the tab switcher. Below this they are dropped
+/// rather than drawn on top of it: a right-to-left layout doesn't stop at its own left edge.
+const LINKS_WIDTH: f32 = 280.0;
 
 type CachedSheetEntry = (
     Language, // language
@@ -807,7 +810,9 @@ impl App {
                         }
                     }
 
-                    add_links(ui, &mut self.about_open);
+                    if bar_left + bar_width - ui.cursor().left() >= LINKS_WIDTH {
+                        add_links(ui, &mut self.about_open);
+                    }
                 });
             });
     }

@@ -1064,6 +1064,12 @@ impl Scene {
             ),
         }
         scene.fit();
+        // A preset held for this path was left by an import that had to open it first, and would
+        // otherwise sit unapplied: nothing else ever stands the view where it says.
+        if let Some(held) = scene.preset.take() {
+            scene.stand_where(&held);
+            scene.preset = Some(held);
+        }
         scene
     }
 
@@ -3833,6 +3839,9 @@ impl Scene {
         {
             log::warn!("assets/layer: this zone states no weather {id}");
         }
+        // Counts as fitted, so `poll`'s first-placements auto-frame does not undo this once the
+        // zone's own content streams in.
+        self.fitted = self.fitted.max(1);
         self.dirty = true;
     }
 

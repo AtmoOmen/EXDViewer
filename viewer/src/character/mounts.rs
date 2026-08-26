@@ -5,8 +5,10 @@
 //! demihuman is several pieces of equipment, so what is kept here is the directory they sit in
 //! rather than a list of suffixes.
 //!
-//! Where the rider sits is the mount's own skeleton's to say: every body a mount is drawn from
-//! carries an `n_mount` bone, and nothing else does.
+//! Where a rider sits is the mount's own skeleton's to say: every body a mount is drawn from
+//! carries an `n_mount` bone, and nothing else does. A mount seating more than one carries a
+//! further `n_mount_second` or `n_mount_a`/`n_mount_b`/... per extra rider, in skeleton order;
+//! `extra_seats` is how many of those `Mount` itself promises.
 
 use anyhow::Result;
 use ironworks::excel::Language;
@@ -23,6 +25,9 @@ const MODEL: u32 = 12;
 const KIND: u32 = 16;
 const BASE: u32 = 17;
 const VARIANT: u32 = 18;
+/// How many riders past the first `Mount` seats. A vehicle-class mount can promise more than its
+/// own skeleton names a bone for.
+const EXTRA_SEATS: u32 = 81;
 
 /// The two kinds of body a mount is drawn from.
 const DEMIHUMAN: u8 = 2;
@@ -36,6 +41,8 @@ pub struct Mount {
     pub under: String,
     /// Which of the set's variants it is drawn at.
     pub variant: u16,
+    /// How many riders past the first it seats.
+    pub extra_seats: u8,
 }
 
 /// Every mount the game names, in name order.
@@ -49,10 +56,11 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Mount>> {
         let Ok(row) = mounts.get_row(id) else {
             continue;
         };
-        let (Ok(name), Ok(icon), Ok(chara)) = (
+        let (Ok(name), Ok(icon), Ok(chara), Ok(extra_seats)) = (
             row.read_string(NAME),
             row.read::<u16>(ICON),
             row.read::<u32>(CHARA),
+            row.read::<u8>(EXTRA_SEATS),
         ) else {
             continue;
         };
@@ -81,6 +89,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Mount>> {
             icon: u32::from(icon),
             under,
             variant: u16::from(variant),
+            extra_seats,
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));

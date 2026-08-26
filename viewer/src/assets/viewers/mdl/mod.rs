@@ -2996,6 +2996,11 @@ impl Rendered {
         self.animation.hinged(visor);
     }
 
+    /// Which of the mount's own seats the rider takes.
+    pub fn seated(&self, seat: usize) {
+        self.animation.seated(seat);
+    }
+
     /// Poses the character out of a different pack, which is what picking an emote is.
     pub fn play(&self, path: &str, then: Option<&str>) {
         self.animation.play(path, then);

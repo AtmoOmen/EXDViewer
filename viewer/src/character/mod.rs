@@ -1393,8 +1393,12 @@ impl CharacterBuilder {
         let dye = current.and_then(|id| self.dyes.iter().find(|dye| dye.id == id));
         let (rect, response) =
             ui.allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
-        ui.painter()
-            .rect_filled(rect, 2.0, dye.map_or(Color32::TRANSPARENT, |dye| dye.color));
+        stains::paint(
+            ui.painter(),
+            rect,
+            dye.map_or(Color32::TRANSPARENT, |dye| dye.color),
+            dye.is_some_and(|dye| dye.metallic),
+        );
         ui.painter().rect_stroke(
             rect,
             2.0,
@@ -1421,29 +1425,32 @@ impl CharacterBuilder {
                         .spacing(egui::Vec2::splat(2.0))
                         .show(ui, |ui| {
                             let mut column = 0;
-                            let mut cell = |ui: &mut egui::Ui, color, name: &str, hit: Option<u8>| {
-                                if column > 0 && column % 9 == 0 {
-                                    ui.end_row();
-                                }
-                                column += 1;
-                                let (rect, response) = ui
-                                    .allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
-                                ui.painter().rect_filled(rect, 2.0, color);
-                                if current == hit {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        2.0,
-                                        ui.visuals().selection.stroke,
-                                        egui::StrokeKind::Inside,
+                            let mut cell =
+                                |ui: &mut egui::Ui, color, metallic, name: &str, hit: Option<u8>| {
+                                    if column > 0 && column % 9 == 0 {
+                                        ui.end_row();
+                                    }
+                                    column += 1;
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::Vec2::splat(SWATCH),
+                                        egui::Sense::click(),
                                     );
-                                }
-                                if response.on_hover_text(name).clicked() {
-                                    picked = Some(hit);
-                                }
-                            };
-                            cell(ui, Color32::TRANSPARENT, "No dye", None);
+                                    stains::paint(ui.painter(), rect, color, metallic);
+                                    if current == hit {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            2.0,
+                                            ui.visuals().selection.stroke,
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+                                    if response.on_hover_text(name).clicked() {
+                                        picked = Some(hit);
+                                    }
+                                };
+                            cell(ui, Color32::TRANSPARENT, false, "No dye", None);
                             for dye in &self.dyes {
-                                cell(ui, dye.color, &dye.name, Some(dye.id));
+                                cell(ui, dye.color, dye.metallic, &dye.name, Some(dye.id));
                             }
                         });
                 });

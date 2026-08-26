@@ -262,6 +262,12 @@ impl eframe::App for SmokeApp {
         self.app.ui(ui, frame);
         let ctx = ui.ctx().clone();
 
+        if self.failure.is_none() && self.counters.error_count() > 0 {
+            // The counting logger already printed it; failing here just stops the run instead of
+            // idling out to the step timeout on top of the error that already doomed it.
+            self.failure = Some(format!("{} ERROR-level log(s)", self.counters.error_count()));
+        }
+
         for event in ctx.input(|i| i.events.clone()) {
             if let Event::Screenshot { image, .. } = event
                 && let Phase::Shooting { .. } = &self.phase

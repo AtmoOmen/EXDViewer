@@ -2101,9 +2101,9 @@ impl Rendered {
         };
         // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
         // its package is translated, and answering with that one would pin the sampler to it.
-        let sampled = |path: &str| match stacks.get_key_value(path) {
+        let sampled = |path: &str, aniso: f32| match stacks.get_key_value(path) {
             Some((held, Array::Ready(_))) => Some(gpu::Bound::Stacked(held.clone())),
-            _ => bind(path).map(gpu::Bound::Plane),
+            _ => bind(path).map(|handle| gpu::Bound::Plane(handle, aniso)),
         };
         // One that has not answered yet, as against one that answered with nothing. The flat
         // stand-in a draw reaches for meanwhile is opaque, so a cutout authored into a normal map's
@@ -2149,7 +2149,7 @@ impl Rendered {
                             .map(|base| self.dyed_table(mesh, material, base)),
                         textures: material
                             .bound()
-                            .map(|(id, path)| (id, sampled(path)))
+                            .map(|(id, path)| (id, sampled(path, material.anisotropic(id))))
                             .collect(),
                     })
                 });

@@ -36,9 +36,14 @@ pub enum Family {
     Hair,
 }
 
+/// `g_SamplerNormal`'s two id variants. The only sampler this viewer takes an address mode, LOD
+/// bias or anisotropy hint from: every family's normal map states the same values as its other
+/// samplers, so one read stands for the whole material.
+pub(super) const NORMAL_SAMPLER: [u32; 2] = [0x0C5E_C1F1, 0xAAB4_D9E9];
+
 const ROLES: [(u32, Role); 7] = [
-    (0x0C5E_C1F1, Role::Normal),
-    (0xAAB4_D9E9, Role::Normal),
+    (NORMAL_SAMPLER[0], Role::Normal),
+    (NORMAL_SAMPLER[1], Role::Normal),
     (0x565F_8FD8, Role::Index),
     (0x8A4E_82B6, Role::Mask),
     (0x1BBC_2F12, Role::Mask),
@@ -193,6 +198,15 @@ impl Material {
                 .and_then(|index| self.held.textures().get(usize::from(index)))?;
             Some((sampler.id(), texture.path()))
         })
+    }
+
+    /// The anisotropy the material's own sampler of this id asks for, `0.0` where it does not. The
+    /// corpus only ever states 16x where this is set.
+    pub fn anisotropic(&self, id: u32) -> f32 {
+        match self.held.samplers().iter().find(|sampler| sampler.id() == id) {
+            Some(sampler) if sampler.anisotropic() => 16.0,
+            _ => 0.0,
+        }
     }
 
     pub fn family(&self) -> Family {

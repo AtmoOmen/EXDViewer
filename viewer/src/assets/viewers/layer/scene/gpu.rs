@@ -941,14 +941,16 @@ impl Renderer {
                 };
                 let mut unit = 0;
                 for texture in &held.textures {
+                    let mut aniso = 0.0;
                     let bound = match texture.kind {
                         program::Kind::Plane => {
                             let held = match texture.id {
                                 TABLE => table,
-                                id => shaded
-                                    .bound(id)
-                                    .and_then(Bound::plane)
-                                    .and_then(|held| painter.texture(held)),
+                                id => {
+                                    let plane = shaded.bound(id).and_then(Bound::plane);
+                                    aniso = plane.map_or(0.0, |(_, aniso)| aniso);
+                                    plane.and_then(|(held, _)| painter.texture(held))
+                                }
                             };
                             match held {
                                 Some(held) => held,
@@ -971,6 +973,7 @@ impl Renderer {
                         unit,
                         bound,
                         deferred::target(texture.kind),
+                        aniso,
                     );
                     unit += 1;
                 }
@@ -1100,6 +1103,7 @@ impl Renderer {
                         at as u32,
                         bound.unwrap_or(supplied[at]),
                         deferred::target(texture.kind),
+                        0.0,
                     );
                 }
                 unsafe {
@@ -1224,14 +1228,16 @@ impl Renderer {
                         for texture in &held.textures {
                             // Only a plane can come from the material: what it binds is an egui
                             // texture, and egui has nothing but two-dimensional ones.
+                            let mut aniso = 0.0;
                             let bound = match texture.kind {
                                 program::Kind::Plane => {
                                     let held = match texture.id {
                                         TABLE => table,
-                                        id => shaded
-                                            .bound(id)
-                                            .and_then(Bound::plane)
-                                            .and_then(|held| painter.texture(held)),
+                                        id => {
+                                            let plane = shaded.bound(id).and_then(Bound::plane);
+                                            aniso = plane.map_or(0.0, |(_, aniso)| aniso);
+                                            plane.and_then(|(held, _)| painter.texture(held))
+                                        }
                                     };
                                     match held {
                                         Some(held) => held,
@@ -1254,6 +1260,7 @@ impl Renderer {
                                 unit,
                                 bound,
                                 deferred::target(texture.kind),
+                                aniso,
                             );
                             unit += 1;
                         }

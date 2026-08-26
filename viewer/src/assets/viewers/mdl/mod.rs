@@ -2760,6 +2760,12 @@ impl Rendered {
                             .and_then(|held| {
                                 Ok((Arc::new(held), Arc::new(build(program::Pass::CompositeBlended, 0)?)))
                             })
+                            .inspect_err(|why| {
+                                log::warn!(
+                                    "assets/mdl: {}: no semi-transparent pass: {why}",
+                                    material.package()
+                                )
+                            })
                             .ok();
                     }
                 }

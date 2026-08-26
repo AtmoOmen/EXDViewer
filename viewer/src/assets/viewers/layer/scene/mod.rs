@@ -3302,7 +3302,13 @@ impl Scene {
                         Ok((Arc::new(held), Arc::new(page(program::Pass::CompositeBlended, 0)?)))
                     })
                 })
-                .and_then(Result::ok);
+                .and_then(|result| {
+                    result
+                        .inspect_err(|why| {
+                            log::warn!("assets/layer: {name}: no semi-transparent pass: {why}")
+                        })
+                        .ok()
+                });
             // The same depth pass as the light sees it. A package that answers no shadow subview
             // casts none, which is what the flag on a placed instance says anyway. One that answers
             // it and then fails to translate is a fault, and is reported rather than dropped.

@@ -1443,10 +1443,12 @@ impl CharacterBuilder {
             .show_rows(ui, step, matched.len(), |ui, rows| {
                 for at in rows {
                     let index = matched[at];
-                    if ui
-                        .selectable_label(self.npc == Some(index), &self.npcs[index].name)
-                        .clicked()
-                    {
+                    let button = egui::Button::selectable(
+                        self.npc == Some(index),
+                        &self.npcs[index].name,
+                    )
+                    .min_size(egui::vec2(ui.available_width(), row));
+                    if ui.add(button).clicked() {
                         picked = Some(Pick::Npc(index));
                     }
                 }

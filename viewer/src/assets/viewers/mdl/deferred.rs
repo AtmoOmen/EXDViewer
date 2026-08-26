@@ -4320,8 +4320,11 @@ pub fn bind(
     unsafe {
         gl.active_texture(glow::TEXTURE0 + unit);
         gl.bind_texture(target, Some(texture));
+        // Screen-space and G-buffer planes bind through here too, every draw; skip the call
+        // entirely where no material sampler asked for anisotropy, rather than setting 1.0 (a no-op
+        // value) on textures that never wanted the state touched.
         let ceiling = max_anisotropy(gl);
-        if ceiling > 0.0 {
+        if aniso > 0.0 && ceiling > 0.0 {
             gl.tex_parameter_f32(
                 target,
                 glow::TEXTURE_MAX_ANISOTROPY_EXT,

@@ -2030,7 +2030,9 @@ fn parameters(package: &ShaderPackage, material: &mtrl::Material) -> Vec<u8> {
     // WebGL2 dropped the sampler-object LOD bias `hair.shpk`'s slot-0 sampler otherwise states, so
     // it is added into this term instead: the alpha-discard already reads
     // `g_TextureMipBias + m_MipBias`, and every character-family package declares the field at the
-    // same offset.
+    // same offset. Bias is read off the one normal-map sampler and applied as a material-wide
+    // uniform; anisotropy, by contrast, is looked up per texture in `bind()` since raw GL carries it
+    // as sampler state rather than a shader parameter.
     let bias = material
         .samplers()
         .iter()

@@ -15,9 +15,59 @@ mod shortcuts;
 use combined_log::CombinedLogger;
 use viewer::App;
 
+/// `viewer --smoke <sqpack-path> <out-dir> <step> [<step> ...]`, where a step is `model:<path>` or
+/// `scene:<path>`. See `smoke/native.sh`.
+#[cfg(not(target_arch = "wasm32"))]
+fn smoke_config(mut args: std::iter::Skip<std::env::Args>) -> viewer::smoke::Config {
+    let usage = "usage: viewer --smoke <sqpack> <out-dir> <step:path>...";
+    let sqpack_path = args.next().expect(usage);
+    let out_dir = args.next().expect(usage).into();
+    let steps = args
+        .map(|arg| {
+            let (kind, path) = arg.split_once(':').expect("step must be kind:path");
+            match kind {
+                "model" => viewer::smoke::Step::Model(path.to_string()),
+                "scene" => viewer::smoke::Step::Scene(path.to_string()),
+                other => panic!("unknown step kind {other}"),
+            }
+        })
+        .collect();
+    viewer::smoke::Config {
+        sqpack_path,
+        schema_path: std::env::var("EXDVIEWER_SCHEMA_PATH").ok(),
+        steps,
+        out_dir,
+        width: 1600,
+        height: 1000,
+        step_timeout: std::time::Duration::from_secs(60),
+    }
+}
+
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--smoke") {
+        let config = smoke_config(args);
+        let (logger, counters) = viewer::smoke::CountingLogger::new(
+            env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).build(),
+        );
+        logger.init();
+        log::set_max_level(log::LevelFilter::Info);
+        let smoke_options = eframe::NativeOptions {
+            depth_buffer: 24,
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([config.width as f32, config.height as f32])
+                .with_visible(false),
+            ..Default::default()
+        };
+        return eframe::run_native(
+            "XIViewer (smoke)",
+            smoke_options,
+            Box::new(|cc| Ok(Box::new(viewer::smoke::SmokeApp::new(cc, config, counters)))),
+        );
+    }
+
     CombinedLogger(
         env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).build(),
         egui_logger::builder().build(),

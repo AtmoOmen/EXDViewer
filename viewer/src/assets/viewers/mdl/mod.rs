@@ -1781,17 +1781,6 @@ impl Rendered {
         }
 
         let sliced = self.sliced(&slots);
-        // A color table row index, not a color, so filtering it linearly would blend two rows'
-        // indices into a third one that names neither. Point sampled and never mipmapped, the
-        // same reasoning `deferred::ENGINE` gives for the subsurface kernel.
-        let index_paths: BTreeSet<&str> = slots
-            .iter()
-            .flatten()
-            .filter_map(|slot| match slot {
-                Slot::Ready(material) => material.texture(Role::Index).map(String::as_str),
-                _ => None,
-            })
-            .collect();
         let mut stacks = self.stacks.borrow_mut();
         for path in &sliced {
             let held = stacks.entry(path.as_str().into()).or_insert_with(|| {
@@ -1807,14 +1796,10 @@ impl Rendered {
             let Some(result) = promise.try_get() else {
                 continue;
             };
-            let filter = match index_paths.contains(path.as_str()) {
-                true => glow::NEAREST,
-                false => glow::LINEAR,
-            };
             *held = match result
                 .as_ref()
                 .map_err(ToString::to_string)
-                .and_then(|bytes| layered(bytes, path, filter).map_err(|why| why.to_string()))
+                .and_then(|bytes| layered(bytes, path, glow::LINEAR).map_err(|why| why.to_string()))
             {
                 Ok(decoded) => {
                     level
@@ -1832,6 +1817,18 @@ impl Rendered {
         }
         drop(stacks);
 
+        // A color table row index, not a color, so filtering it linearly would blend two rows'
+        // indices into a third one that names neither. Point sampled and never mipmapped, the
+        // same reasoning `deferred::ENGINE` gives for the subsurface kernel. Always a plane, so
+        // this is the one place it is read: an array kind would go through `stacks` above instead.
+        let index_paths: BTreeSet<&str> = slots
+            .iter()
+            .flatten()
+            .filter_map(|slot| match slot {
+                Slot::Ready(material) => material.texture(Role::Index).map(String::as_str),
+                _ => None,
+            })
+            .collect();
         let mut textures = self.textures.borrow_mut();
         let detail = self.look.get().detail;
         for slot in slots.iter().flatten() {

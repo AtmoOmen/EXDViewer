@@ -30,7 +30,7 @@ const TREE_WIDTH: f32 = 320.0;
 const TREE_MIN_WIDTH: f32 = 160.0;
 const DETAILS_WIDTH: f32 = 320.0;
 /// Set by the Copy / Export PNG buttons beside each other; narrower and they overflow.
-const DETAILS_MIN_WIDTH: f32 = 220.0;
+const DETAILS_MIN_WIDTH: f32 = 170.0;
 /// How many cells the grid adds each time the scroll reaches the end.
 const PAGE: usize = 360;
 /// How many decoded icons the grid will let egui hold before it starts giving them back.
@@ -362,8 +362,7 @@ impl IconBrowser {
                 let mut category = self.category.clone();
                 let mut select = |ui: &mut egui::Ui, what: Category, label: String| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    let response = Button::selectable(category == what, label.as_str()).ui(ui);
-                    if response.on_hover_text(&label).clicked() {
+                    if Button::selectable(category == what, label).ui(ui).clicked() {
                         category = what;
                     }
                 };

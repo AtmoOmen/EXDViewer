@@ -26,6 +26,7 @@ use ironworks::file::File;
 use ironworks::file::est::ExtraSkeletonTemplate;
 use ironworks::file::pap::{AnimationPack, Binding};
 use ironworks::file::sklb::{SkeletonBinary, Transform};
+use ironworks::file::tmb::{CommandKind, Item, Timeline};
 
 use super::super::skeleton::{Placement, Rig, middle};
 use super::super::{link, placed, section};
@@ -182,6 +183,9 @@ const IDLE: &str = "_id0";
 struct Motions {
     /// Animation names, each with the motion it plays.
     named: Vec<(String, usize)>,
+    /// The `cfxf_` companion each of `named`'s own timeline plays over it, parallel to it. An
+    /// emote often states its facial expression this way rather than by a name the creator picks.
+    companions: Vec<Option<String>>,
     bindings: Vec<Binding>,
 }
 
@@ -189,23 +193,33 @@ impl Motions {
     fn read(bytes: &[u8]) -> Result<Self> {
         let file = AnimationPack::read(Cursor::new(bytes.to_vec()))?;
         let bindings = file.parse_animations()?;
-        let named = file
-            .animations()
-            .iter()
-            .filter_map(|animation| {
-                let motion = usize::try_from(animation.havok_index()).ok()?;
-                bindings
-                    .get(motion)
-                    .map(|_| (animation.name().to_owned(), motion))
-            })
-            .collect();
-        Ok(Self { named, bindings })
+        let (mut named, mut companions) = (Vec::new(), Vec::new());
+        for (animation, timeline) in file.animations().iter().zip(file.timelines()) {
+            let Some(motion) = usize::try_from(animation.havok_index())
+                .ok()
+                .filter(|motion| bindings.get(*motion).is_some())
+            else {
+                continue;
+            };
+            named.push((animation.name().to_owned(), motion));
+            companions.push(companion(timeline));
+        }
+        Ok(Self {
+            named,
+            companions,
+            bindings,
+        })
     }
 
     /// The motion the picker is on.
     fn binding(&self, motion: usize) -> Option<&Binding> {
         let (_, at) = self.named.get(motion)?;
         self.bindings.get(*at)
+    }
+
+    /// The `cfxf_` companion the motion at `motion` names, if its own timeline names one.
+    fn companion(&self, motion: usize) -> Option<&str> {
+        self.companions.get(motion)?.as_deref()
     }
 
     /// Which motion the pack opens on: the idle where it names one, since a monster's pack leads
@@ -220,6 +234,22 @@ impl Motions {
             .or_else(|| (0..self.named.len()).find(alone))
             .or((!self.named.is_empty()).then_some(0))
     }
+}
+
+/// The `cfxf_` name a motion's own timeline plays over it, out of the `C009`/`C010` that plays it.
+fn companion(timeline: &[u8]) -> Option<String> {
+    let timeline = Timeline::read(Cursor::new(timeline.to_vec())).ok()?;
+    timeline.items().iter().find_map(|item| {
+        let Item::Command(command) = item else {
+            return None;
+        };
+        let path = match command.kind() {
+            CommandKind::C009(animation) => animation.path(),
+            CommandKind::C010(animation) => animation.path(),
+            _ => None,
+        }?;
+        path.strip_prefix("cfxf_").map(ToOwned::to_owned)
+    })
 }
 
 /// One motion playing on the rig: the pack it comes from, which of that pack's motions, and how
@@ -311,6 +341,13 @@ impl Layer {
         let motions = pack.as_ref().and_then(Fetch::ready)?;
         let binding = self.motion.get().and_then(|at| motions.binding(at))?;
         Some(binding.motion().duration().max(f32::EPSILON))
+    }
+
+    /// The `cfxf_` companion the motion now playing names, if its own timeline names one.
+    fn companion(&self) -> Option<String> {
+        let pack = self.pack.borrow();
+        let motions = pack.as_ref().and_then(Fetch::ready)?;
+        motions.companion(self.motion.get()?).map(ToOwned::to_owned)
     }
 
     /// Runs the clock on by `step`, taking up whatever was queued behind the motion once it has
@@ -420,6 +457,9 @@ pub struct Animation {
     /// bones the body's own motions never touch, so the two play at once rather than in turn.
     body: Layer,
     face: Layer,
+    /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
+    /// is what asks for another rather than every frame re-loading the same pack.
+    linked: RefCell<Option<String>>,
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
     /// How far a raised visor has turned, one angle per bone it hinges on.
@@ -453,6 +493,7 @@ impl Animation {
                 ..Default::default()
             },
             face: Default::default(),
+            linked: RefCell::new(None),
             bust: Cell::new(Vec3::ONE),
             visor: Cell::new([0.0; 3]),
             running: Cell::new(true),
@@ -533,6 +574,7 @@ impl Animation {
             layer.poll(backend);
         }
         self.poll_ordering(backend);
+        self.poll_companion();
         if self.running.get() {
             let step = ctx.input(|input| input.stable_dt);
             for layer in self.layers() {
@@ -725,6 +767,45 @@ impl Animation {
             ),
         }
         self.running.set(true);
+    }
+
+    /// Drives the face from the `cfxf_` companion the body's own motion names, the way an emote
+    /// like Joy carries its own expression rather than leaving the creator to pick one. A change of
+    /// companion is what asks for another; a body pack with none leaves the face as it was.
+    fn poll_companion(&self) {
+        let wanted = self.body.companion();
+        if wanted == *self.linked.borrow() {
+            return;
+        }
+        let Some(name) = &wanted else {
+            *self.linked.borrow_mut() = wanted;
+            return;
+        };
+        let Some(root) = self.face_root() else {
+            return;
+        };
+        let held = self.packs.borrow();
+        let Some(Ok(packs)) = held.as_ref() else {
+            return;
+        };
+        let tail = file_name(&self.body.wanted.borrow())
+            .strip_suffix(".pap")
+            .unwrap_or_default()
+            .to_owned();
+        let candidates = [
+            format!("{root}nonresident/{name}.pap"),
+            format!("{root}nonresident/emot/{tail}.pap"),
+            format!("{root}resident/face.pap"),
+        ];
+        let Some(path) = candidates
+            .into_iter()
+            .find(|candidate| packs.iter().any(|pack| pack.path == *candidate))
+        else {
+            return;
+        };
+        drop(held);
+        self.face.load(&path, Some(&format!("cfxf_{name}")), None);
+        *self.linked.borrow_mut() = wanted;
     }
 
     /// Where the packs of the face the character wears are filed.

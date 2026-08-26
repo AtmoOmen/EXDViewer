@@ -21,7 +21,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::Result;
-use egui::{CentralPanel, Color32, RichText, ScrollArea, TextEdit, containers::panel::Panel};
+use egui::{
+    CentralPanel, Color32, Popup, PopupCloseBehavior, RectAlign, RichText, ScrollArea, TextEdit,
+    containers::panel::Panel,
+};
 use glam::Vec3;
 use ironworks::excel::Language;
 
@@ -1238,6 +1241,15 @@ impl CharacterBuilder {
         if visored {
             ui.checkbox(&mut self.visor, "Visor");
         }
+        // Offered on every slot rather than only where a worn piece's material states a dye row:
+        // that is not known until the material has been fetched, and a swatch that appears once it
+        // has would move everything under it.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Dye").weak());
+            for channel in 0..2u8 {
+                self.dye_swatch(ui, slot, channel);
+            }
+        });
         if !open {
             return;
         }
@@ -1318,6 +1330,75 @@ impl CharacterBuilder {
         }
         if let Some(index) = picked {
             self.chosen[at] = Some(index);
+        }
+    }
+
+    /// One slot's swatch for one of the two channels a modern item can carry, and the popup it
+    /// opens onto every dye the game names. Picking one dyes only the fields a worn piece's own
+    /// material states, so a stain with no dyeable row to land in changes nothing.
+    fn dye_swatch(&mut self, ui: &mut egui::Ui, slot: Slot, channel: u8) {
+        let at = slot as usize;
+        let current = self.stains[at][usize::from(channel)];
+        let dye = current.and_then(|id| self.dyes.iter().find(|dye| dye.id == id));
+        let (rect, response) =
+            ui.allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
+        ui.painter()
+            .rect_filled(rect, 2.0, dye.map_or(Color32::TRANSPARENT, |dye| dye.color));
+        ui.painter().rect_stroke(
+            rect,
+            2.0,
+            ui.visuals().widgets.inactive.fg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        let response = response.on_hover_text(dye.map_or("No dye", |dye| dye.name.as_str()));
+        let open = self.dyeing == Some((slot, channel));
+        if response.clicked() {
+            self.dyeing = (!open).then_some((slot, channel));
+        }
+        if !open {
+            return;
+        }
+        let mut picked = None;
+        Popup::from_response(&response)
+            .align(RectAlign::BOTTOM_START)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_max_width(9.0 * (SWATCH + 4.0));
+                ScrollArea::vertical().max_height(10.0 * (SWATCH + 4.0)).show(ui, |ui| {
+                    egui::Grid::new(("character_dyes", at, channel))
+                        .spacing(egui::Vec2::splat(2.0))
+                        .show(ui, |ui| {
+                            let mut column = 0;
+                            let mut cell = |ui: &mut egui::Ui, color, name: &str, hit: Option<u8>| {
+                                if column > 0 && column % 9 == 0 {
+                                    ui.end_row();
+                                }
+                                column += 1;
+                                let (rect, response) = ui
+                                    .allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
+                                ui.painter().rect_filled(rect, 2.0, color);
+                                if current == hit {
+                                    ui.painter().rect_stroke(
+                                        rect,
+                                        2.0,
+                                        ui.visuals().selection.stroke,
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                if response.on_hover_text(name).clicked() {
+                                    picked = Some(hit);
+                                }
+                            };
+                            cell(ui, Color32::TRANSPARENT, "No dye", None);
+                            for dye in &self.dyes {
+                                cell(ui, dye.color, &dye.name, Some(dye.id));
+                            }
+                        });
+                });
+            });
+        if let Some(hit) = picked {
+            self.stains[at][usize::from(channel)] = hit;
+            self.dyeing = None;
         }
     }
 

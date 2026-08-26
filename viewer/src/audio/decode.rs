@@ -21,11 +21,99 @@ pub struct Decoded {
 
 /// Decode a BGM sound entry to interleaved PCM.
 pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
-    match entry.format() {
-        Codec::OggVorbis => decode_ogg(entry.data()),
-        Codec::Hca => decode_hca(entry.data()),
+    decode_data(entry.format(), entry.data())
+}
+
+/// Decode raw codec bytes directly, for re-decoding a stream already held in memory.
+pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
+    let mut decoded = match codec {
+        Codec::OggVorbis => decode_ogg(data),
+        Codec::Hca => decode_hca(data),
         other => Err(anyhow!("unsupported audio codec {other:?}")),
+    }?;
+    downmix_to_stereo(&mut decoded);
+    Ok(decoded)
+}
+
+/// Encode decoded PCM as a 16-bit PCM WAV file.
+pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
+    let channels = u32::from(audio.channels);
+    let data_size = audio
+        .samples
+        .len()
+        .checked_mul(2)
+        .and_then(|size| u32::try_from(size).ok())
+        .ok_or_else(|| anyhow!("PCM data too large for WAV"))?;
+    let riff_size = data_size
+        .checked_add(36)
+        .ok_or_else(|| anyhow!("PCM data too large for WAV"))?;
+    let byte_rate = audio
+        .sample_rate
+        .checked_mul(channels)
+        .and_then(|rate| rate.checked_mul(2))
+        .ok_or_else(|| anyhow!("WAV byte rate overflows"))?;
+    let block_align = audio
+        .channels
+        .checked_mul(2)
+        .ok_or_else(|| anyhow!("WAV block alignment overflows"))?;
+
+    let mut wav = Vec::with_capacity(44 + data_size as usize);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff_size.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&audio.channels.to_le_bytes());
+    wav.extend_from_slice(&audio.sample_rate.to_le_bytes());
+    wav.extend_from_slice(&byte_rate.to_le_bytes());
+    wav.extend_from_slice(&block_align.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_size.to_le_bytes());
+    for &sample in &audio.samples {
+        // A full-scale negative sample maps to the true i16::MIN rather than clipping a step
+        // short of it, since the positive and negative ranges of i16 are not symmetric.
+        let pcm = if sample <= -1.0 {
+            i16::MIN
+        } else {
+            (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
+        };
+        wav.extend_from_slice(&pcm.to_le_bytes());
     }
+    Ok(wav)
+}
+
+const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;
+
+/// Fold anything wider than stereo down using the ITU-R BS.775 weights: front channels at unity,
+/// center and surrounds at -3 dB, LFE dropped. Channel order is WAVE (FL,FR[,FC,LFE],RL,RR), so
+/// quad and 5.1 are handled by name; other counts keep the front pair. Compacted in place: the
+/// write cursor (stride 2) never catches up to the read cursor (stride N >= 4).
+fn downmix_to_stereo(decoded: &mut Decoded) {
+    let channels = decoded.channels as usize;
+    if channels <= 2 {
+        return;
+    }
+    let frames = decoded.samples.len() / channels;
+    let samples = &mut decoded.samples;
+    for i in 0..frames {
+        let base = i * channels;
+        let (l, r) = match channels {
+            4 => (
+                samples[base] + SQRT_HALF * samples[base + 2],
+                samples[base + 1] + SQRT_HALF * samples[base + 3],
+            ),
+            6 => (
+                samples[base] + SQRT_HALF * (samples[base + 2] + samples[base + 4]),
+                samples[base + 1] + SQRT_HALF * (samples[base + 2] + samples[base + 5]),
+            ),
+            _ => (samples[base], samples[base + 1]),
+        };
+        samples[2 * i] = l.clamp(-1.0, 1.0);
+        samples[2 * i + 1] = r.clamp(-1.0, 1.0);
+    }
+    samples.truncate(frames * 2);
+    decoded.channels = 2;
 }
 
 /// OggVorbis via symphonia. Loop points come from the `LoopStart`/`LoopEnd` Vorbis comments,
@@ -125,4 +213,54 @@ fn decode_hca(data: &[u8]) -> Result<Decoded> {
         loop_start,
         loop_end,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wav_header_matches_the_pcm_it_wraps() {
+        let audio = Decoded {
+            samples: vec![0.0, 1.0, -1.0, 0.5],
+            channels: 2,
+            sample_rate: 44100,
+            loop_start: None,
+            loop_end: None,
+        };
+        let wav = encode_wav(&audio).unwrap();
+
+        let u32_at =
+            |offset: usize| u32::from_le_bytes(wav[offset..offset + 4].try_into().unwrap());
+        let u16_at =
+            |offset: usize| u16::from_le_bytes(wav[offset..offset + 2].try_into().unwrap());
+
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(u32_at(4), 44);
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u32_at(16), 16);
+        assert_eq!(u16_at(20), 1);
+        assert_eq!(u16_at(22), 2);
+        assert_eq!(u32_at(24), 44100);
+        assert_eq!(u32_at(28), 44100 * 2 * 2);
+        assert_eq!(u16_at(32), 4);
+        assert_eq!(u16_at(34), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32_at(40), 8);
+        assert_eq!(wav.len(), 44 + 8);
+
+        let pcm: Vec<i16> = wav[44..]
+            .chunks_exact(2)
+            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]))
+            .collect();
+        assert_eq!(
+            pcm,
+            vec![
+                0,
+                i16::MAX,
+                i16::MIN,
+                (0.5 * f32::from(i16::MAX)).round() as i16
+            ]
+        );
+    }
 }

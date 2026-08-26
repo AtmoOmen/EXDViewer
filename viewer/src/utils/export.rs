@@ -137,12 +137,22 @@ impl<'a> Choice<'a> {
     }
 }
 
+/// Where `menu` remembers the last failure for the control at this exact spot in the tree, so it
+/// can show it without the caller wiring anything through its own promise: egui's own per-id temp
+/// storage already survives across frames the way the promise it hands back does not.
+fn error_slot(ui: &egui::Ui) -> egui::Id {
+    ui.id().with("export-error")
+}
+
 /// Draws the control and, once a choice is picked, starts it: a plain button standing for the one
 /// choice on offer, or `button` opening a menu of several (`hover` names it, for a button that is
 /// only a glyph). Returns the promise a click started, for the caller to hold in its own
 /// `Option<TrackedPromise<()>>` field; that field's own `take_if` is what clears it again; this
 /// only ever returns `Some` on the frame a choice was picked, and it returns `None` if there is
 /// nothing to export.
+///
+/// A failed export shows here too, as a warning glyph with the reason on hover, so it is not only
+/// `log::error!` that hears about it.
 pub fn menu<'a>(
     ui: &mut egui::Ui,
     button: impl Into<WidgetText>,
@@ -156,6 +166,7 @@ pub fn menu<'a>(
     if busy {
         ui.spinner();
     }
+    let error_id = error_slot(ui);
     let mut spawned = None;
     ui.add_enabled_ui(!busy, |ui| {
         if choices.len() == 1 {
@@ -168,7 +179,7 @@ pub fn menu<'a>(
                 response = response.on_disabled_hover_text(why);
             }
             if response.clicked() {
-                spawned = Some(start(choice));
+                spawned = Some(start(choice, ui.ctx().clone(), error_id));
             }
         } else {
             let opened = ui.menu_button(button, |ui| {
@@ -187,7 +198,7 @@ pub fn menu<'a>(
                         response = response.on_disabled_hover_text(why);
                     }
                     if response.clicked() {
-                        spawned = Some(start(choice));
+                        spawned = Some(start(choice, ui.ctx().clone(), error_id));
                         ui.close();
                     }
                 }
@@ -197,10 +208,14 @@ pub fn menu<'a>(
             }
         }
     });
+    if let Some(message) = ui.data(|data| data.get_temp::<String>(error_id)) {
+        ui.colored_label(egui::Color32::LIGHT_RED, "⚠")
+            .on_hover_text(message);
+    }
     spawned
 }
 
-fn start(choice: Choice<'_>) -> TrackedPromise<()> {
+fn start(choice: Choice<'_>, ctx: egui::Context, error_id: egui::Id) -> TrackedPromise<()> {
     let Choice {
         dialog_title,
         filter,
@@ -213,6 +228,8 @@ fn start(choice: Choice<'_>) -> TrackedPromise<()> {
             Ok(named) => named,
             Err(error) => {
                 log::error!("Failed to export {dialog_title}: {error:?}");
+                ctx.memory_mut(|memory| memory.data.insert_temp(error_id, error.to_string()));
+                ctx.request_repaint();
                 return;
             }
         };
@@ -225,9 +242,16 @@ fn start(choice: Choice<'_>) -> TrackedPromise<()> {
         }
         if let Some(file) = dialog.save_file().await {
             match file.write(&data).await {
-                Ok(()) => log::info!("Exported {file_name} successfully"),
-                Err(error) => log::error!("Failed to write {file_name}: {error}"),
+                Ok(()) => {
+                    log::info!("Exported {file_name} successfully");
+                    ctx.memory_mut(|memory| memory.data.remove_temp::<String>(error_id));
+                }
+                Err(error) => {
+                    log::error!("Failed to write {file_name}: {error}");
+                    ctx.memory_mut(|memory| memory.data.insert_temp(error_id, error.to_string()));
+                }
             }
+            ctx.request_repaint();
         }
     })
 }

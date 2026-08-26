@@ -371,6 +371,26 @@ mod tests {
         bytes
     }
 
+    /// A real 3D LUT (16x16x16 `Bgrx8Unorm`, one mip). `image_dds`'s own RGBA8 surface decoder
+    /// does not implement `B8G8R8X8_UNorm`, so this checks the header and the passthrough body
+    /// directly rather than round-tripping through it; the body is the exact bytes
+    /// `tex_loader::decode_stack` already decodes on screen for this same file.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_volume_lut_dds_is_a_header_over_the_untouched_body() {
+        let bytes = read_local("common/graphics/texture/-output_lut_p.tex");
+        let tex = tex::Texture::read(ReadCursor::new(bytes)).unwrap();
+        assert_eq!(tex.kind(), TextureKind::D3);
+
+        let dds_bytes = dds(&tex).unwrap();
+        let file = Dds::read(&mut ReadCursor::new(dds_bytes)).unwrap();
+        assert_eq!(file.get_dxgi_format(), Some(DxgiFormat::B8G8R8X8_UNorm));
+        assert_eq!(file.get_width(), u32::from(tex.width()));
+        assert_eq!(file.get_height(), u32::from(tex.height()));
+        assert_eq!(file.get_depth(), u32::from(tex.depth()));
+        assert_eq!(file.data, tex.mip_data(0).unwrap());
+    }
+
     /// A real BC1 cube (six faces, eight mip levels), covering the same reorder code path as the
     /// `D2Array` test below plus the cubemap header flags (`is_cubemap`, `Caps2::CUBEMAP`).
     #[test]

@@ -253,3 +253,127 @@ enum Hair {
     Hidden,
     Trimmed(&'static [&'static str]),
 }
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use ironworks::file::{File, eqp, gmp};
+
+    use super::*;
+    use crate::character::Gear;
+
+    /// A single-block .eqp/.gmp file holding one entry at set 1, the same shape `eqp`'s and `gmp`'s
+    /// own fixtures use.
+    fn block(entry: u64) -> Vec<u8> {
+        let mut entries = vec![0u64; 160];
+        entries[0] = 1;
+        entries[1] = entry;
+        entries
+            .iter()
+            .flat_map(|entry| entry.to_le_bytes())
+            .collect()
+    }
+
+    fn worn(head: u64) -> Worn {
+        Worn(
+            eqp::EquipmentParameter::read(Cursor::new(block(head))).unwrap(),
+            gmp::GimmickParameter::read(Cursor::new(block(0))).unwrap(),
+        )
+    }
+
+    /// The head word sits at bit 40 of a set's entry, after body, legs, hands and feet.
+    const fn head_bit(bit: u32) -> u64 {
+        1 << (40 + bit)
+    }
+
+    const ENABLED: u64 = 0; // hide_scalp/hide_hair/show_hair_override are bits 1..3
+    const HIDE_SCALP: u32 = 1;
+    const HIDE_HAIR: u32 = 2;
+    const SHOW_OVERRIDE: u32 = 3;
+    const SHOW_ON_HROTHGAR: u32 = 16;
+    const SHOW_ON_VIERA: u32 = 17;
+
+    fn head(bits: &[u32]) -> u64 {
+        bits.iter()
+            .fold(head_bit(ENABLED as u32), |held, bit| held | head_bit(*bit))
+    }
+
+    fn wearing_head(worn: &Worn, race: u32) -> BTreeSet<&'static str> {
+        let mut outfit = Outfit::default();
+        outfit[Slot::Head as usize] = Some(Gear { set: 1, variant: 1 });
+        worn.covers(&outfit, race)
+    }
+
+    #[test]
+    fn kind_zero_leaves_the_hair_alone() {
+        let worn = worn(head(&[]));
+        assert!(worn.keeps_hair(1, 1));
+        assert!(!wearing_head(&worn, 1).contains(HAIR_KAM));
+    }
+
+    #[test]
+    fn kind_one_trims_the_kam() {
+        let worn = worn(head(&[HIDE_SCALP]));
+        assert!(worn.keeps_hair(1, 1));
+        assert_eq!(wearing_head(&worn, 1), BTreeSet::from([HAIR_KAM]));
+    }
+
+    #[test]
+    fn kind_two_hides_the_hair_except_on_miqote() {
+        let worn = worn(head(&[HIDE_HAIR]));
+        assert!(!worn.keeps_hair(1, 1));
+        assert!(worn.keeps_hair(1, 4));
+        assert_eq!(wearing_head(&worn, 4), BTreeSet::from([HAIR_KAM, HAIR_STA]));
+    }
+
+    #[test]
+    fn kind_four_reads_the_same_as_kind_two() {
+        let worn = worn(head(&[SHOW_OVERRIDE]));
+        assert!(!worn.keeps_hair(1, 1));
+        assert!(worn.keeps_hair(1, 4));
+    }
+
+    #[test]
+    fn kind_three_hides_the_hair_on_every_race() {
+        let worn = worn(head(&[HIDE_SCALP, HIDE_HAIR]));
+        assert!(!worn.keeps_hair(1, 1));
+        assert!(!worn.keeps_hair(1, 4));
+    }
+
+    #[test]
+    fn kind_five_is_a_hat_that_does_not_fit_hrothgar_or_viera() {
+        let worn = worn(head(&[HIDE_SCALP, SHOW_OVERRIDE]));
+        assert!(worn.keeps_hair(1, 7));
+        assert!(wearing_head(&worn, 7).is_empty());
+        assert_eq!(wearing_head(&worn, 1), BTreeSet::from([HAIR_KAM]));
+    }
+
+    #[test]
+    fn kind_six_trims_the_kam_and_the_bak() {
+        let worn = worn(head(&[HIDE_HAIR, SHOW_OVERRIDE]));
+        assert!(worn.keeps_hair(1, 1));
+        assert_eq!(wearing_head(&worn, 1), BTreeSet::from([HAIR_KAM, HAIR_BAK]));
+    }
+
+    #[test]
+    fn a_hat_stated_for_neither_leaves_hrothgar_and_viera_alone() {
+        let worn = worn(head(&[HIDE_HAIR])); // kind 2, hides hair on every other race
+        assert!(worn.keeps_hair(1, 7));
+        assert!(worn.keeps_hair(1, 8));
+    }
+
+    #[test]
+    fn a_hat_stated_for_hrothgar_applies_its_kind() {
+        let worn = worn(head(&[HIDE_HAIR, SHOW_ON_HROTHGAR]));
+        assert!(!worn.keeps_hair(1, 7));
+        assert!(worn.keeps_hair(1, 8));
+    }
+
+    #[test]
+    fn a_hat_stated_for_viera_applies_its_kind() {
+        let worn = worn(head(&[HIDE_HAIR, SHOW_ON_VIERA]));
+        assert!(!worn.keeps_hair(1, 8));
+        assert!(worn.keeps_hair(1, 7));
+    }
+}

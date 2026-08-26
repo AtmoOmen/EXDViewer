@@ -387,6 +387,10 @@ struct Pack {
     label: String,
 }
 
+/// A rig's own bones, each one's parent, and the matrix that carries a bind-pose vertex into that
+/// bone's own rest frame.
+pub type RigInfo = (Vec<String>, Vec<Option<usize>>, Vec<Mat4>);
+
 /// What plays a model: the skeleton it is skinned to, the motions laid over it, and the clock.
 pub struct Animation {
     /// The `c0101` of the model's own path, which everything it plays is filed under.
@@ -475,7 +479,7 @@ impl Animation {
 
     /// The rig everything is posed on, once it has landed: its bones, each one's parent, and the
     /// matrix that carries a bind-pose vertex into that bone's own rest frame.
-    pub fn rig(&self) -> Option<(Vec<String>, Vec<Option<usize>>, Vec<Mat4>)> {
+    pub fn rig(&self) -> Option<RigInfo> {
         let skin = self.skin.borrow();
         let skin = skin.as_ref()?;
         let parents = (0..skin.rig.bones())

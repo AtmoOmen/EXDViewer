@@ -140,6 +140,7 @@ blocking = "1"
 env_logger = "0.11"
 poll-promise = { version = "0.3", features = ["smol"] }
 rodio = { version = "0.22", default-features = false, features = ["playback"] }
+rustfft = "6"
 ureq = "3"
 
 # web:

@@ -181,20 +181,32 @@ fn is_plain_16bit(format: tex::Format) -> bool {
     matches!(format, tex::Format::R16Unorm | tex::Format::Rg16Unorm)
 }
 
-/// PNG export for the formats a PNG can hold exactly: 8-bit for the plain integer formats, 16-bit
-/// for `R16Unorm`/`Rg16Unorm`. `None` for block-compressed and float formats, where `dds` is the
-/// lossless option instead. A cube, array or volume comes back as one PNG per face, layer or
-/// slice, packaged into a zip; a plain 2D texture is a single PNG.
+/// The unorm/uint BC variants decode to RGBA8 exactly -- that mapping is the format's own defined
+/// meaning, not a range compression -- so a PNG built from them is as lossless as the compressed
+/// source. `Bc6hFloat` is excluded: it holds HDR values `decode_stack` clamps into display range
+/// the same as the other float formats, which is not lossless.
+fn is_unorm_bc(format: tex::Format) -> bool {
+    use tex::Format;
+    matches!(
+        format,
+        Format::Bc1Unorm
+            | Format::Bc2Unorm
+            | Format::Bc3Unorm
+            | Format::Bc4Unorm
+            | Format::Bc5Unorm
+            | Format::Bc7Unorm
+    )
+}
+
+/// PNG export for the formats a PNG can hold exactly: 8-bit for the plain integer formats and the
+/// unorm BC variants, 16-bit for `R16Unorm`/`Rg16Unorm`. `None` for float and `Bc6hFloat`, where
+/// `dds` is the lossless option instead. A cube, array or volume comes back as one PNG per face,
+/// layer or slice, packaged into a zip; a plain 2D texture is a single PNG.
 pub fn png(texture: &tex::Texture, level: u8, path: &str) -> Result<Option<PackagedImages>> {
     let format = texture.format();
     let layers = texture.layers(level);
 
-    if is_plain_16bit(format) {
-        if layers > 1 {
-            // Never observed in the corpus: every 16-bit-unorm texture on record is a plain 2D
-            // one. DDS still exports this losslessly; a 16-bit zip is not worth building untested.
-            return Ok(None);
-        }
+    if layers == 1 && is_plain_16bit(format) {
         let (width, height) = texture.mip_size(level);
         let data = texture
             .mip_data(level)
@@ -207,7 +219,9 @@ pub fn png(texture: &tex::Texture, level: u8, path: &str) -> Result<Option<Packa
         )?)));
     }
 
-    if !is_plain_8bit(format) {
+    // Never observed in the corpus: every 16-bit-unorm texture on record is a plain 2D one.
+    // DDS still exports a layered one losslessly; a 16-bit zip is not worth building untested.
+    if is_plain_16bit(format) || !(is_plain_8bit(format) || is_unorm_bc(format)) {
         return Ok(None);
     }
 
@@ -353,8 +367,29 @@ mod tests {
     }
 
     #[test]
-    fn a_bc_format_has_no_png_but_has_a_dds_mapping() {
+    fn a_unorm_bc_format_gets_a_png_too() {
+        // Bc1Unorm, one all-zero 4x4 block.
         let tex = texture(0b0000010, 0x3420, 4, 4, 1, 0, &vec![0u8; 8]);
+        let PackagedImages::Single(png_bytes) = png(&tex, 0, "test").unwrap().unwrap() else {
+            panic!("a single BC1 image should not zip");
+        };
+        assert_eq!(&png_bytes[..8], b"\x89PNG\r\n\x1a\n");
+        assert!(dxgi_format(tex.format()).is_some());
+    }
+
+    #[test]
+    fn a_float_format_has_no_png_but_has_a_dds_mapping() {
+        // R32Float, 4x4, 4 bytes/pixel.
+        let tex = texture(0b0000010, 0x2150, 4, 4, 1, 0, &vec![0u8; 4 * 4 * 4]);
+        assert!(png(&tex, 0, "test").unwrap().is_none());
+        assert!(dxgi_format(tex.format()).is_some());
+    }
+
+    #[test]
+    fn bc6h_float_has_no_png_despite_being_a_bc_format() {
+        // Bc6hFloat, one 16-byte 4x4 block: HDR, so decode_stack's clamp-to-display-range makes a
+        // PNG lossy the way it does not for the unorm BC variants.
+        let tex = texture(0b0000010, 0x6330, 4, 4, 1, 0, &vec![0u8; 16]);
         assert!(png(&tex, 0, "test").unwrap().is_none());
         assert!(dxgi_format(tex.format()).is_some());
     }
@@ -453,6 +488,29 @@ mod tests {
                 "mip {level}"
             );
         }
+
+        let PackagedImages::Zip(zip_bytes) = png(&tex, 0, path).unwrap().unwrap() else {
+            panic!("six faces should zip");
+        };
+        let mut archive = zip::ZipArchive::new(ReadCursor::new(zip_bytes)).unwrap();
+        assert_eq!(archive.len(), 6);
+        let stack = tex_loader::decode_stack(&tex, 0, path).unwrap().to_rgba8();
+        let (width, slice_height) = tex.mip_size(0);
+        for face in 0..6u32 {
+            let mut member = archive.by_name(&format!("face{face}.png")).unwrap();
+            let mut png_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut member, &mut png_bytes).unwrap();
+            let decoded = image::load_from_memory(&png_bytes).unwrap().to_rgba8();
+            let expected = image::imageops::crop_imm(
+                &stack,
+                0,
+                face * u32::from(slice_height),
+                u32::from(width),
+                u32::from(slice_height),
+            )
+            .to_image();
+            assert_eq!(decoded.as_raw(), expected.as_raw(), "face {face}");
+        }
     }
 
     /// A real BC7 `D2Array` (the reorder code path also used for `Cube`), run manually (`cargo
@@ -479,6 +537,29 @@ mod tests {
                 expected.to_rgba8().as_raw(),
                 "mip {level}"
             );
+        }
+
+        let PackagedImages::Zip(zip_bytes) = png(&tex, 0, path).unwrap().unwrap() else {
+            panic!("64 layers should zip");
+        };
+        let mut archive = zip::ZipArchive::new(ReadCursor::new(zip_bytes)).unwrap();
+        assert_eq!(archive.len(), 64);
+        let stack = tex_loader::decode_stack(&tex, 0, path).unwrap().to_rgba8();
+        let (width, slice_height) = tex.mip_size(0);
+        for layer in [0u32, 31, 63] {
+            let mut member = archive.by_name(&format!("layer{layer}.png")).unwrap();
+            let mut png_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut member, &mut png_bytes).unwrap();
+            let decoded = image::load_from_memory(&png_bytes).unwrap().to_rgba8();
+            let expected = image::imageops::crop_imm(
+                &stack,
+                0,
+                layer * u32::from(slice_height),
+                u32::from(width),
+                u32::from(slice_height),
+            )
+            .to_image();
+            assert_eq!(decoded.as_raw(), expected.as_raw(), "layer {layer}");
         }
     }
 }

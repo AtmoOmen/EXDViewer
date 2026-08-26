@@ -18,8 +18,8 @@ use crate::{
     excel::provider::{ExcelHeader, ExcelProvider, ExcelRow, ExcelSheet},
     settings::{SHEET_FILTER_OPTIONS, SHEET_FILTERS, SORTED_BY_OFFSET, TEMP_HIGHLIGHTED_ROW},
     sheet::{
-        ComplexFilter, FilterInput, FilterInputType, filter::CompiledFilterInput,
-        should_ignore_clicks,
+        ComplexFilter, FilterInput, FilterInputType, event_icon_type, filter::CompiledFilterInput,
+        schema_column::SchemaColumnMeta, should_ignore_clicks,
     },
     stopwatch::{
         Stopwatch,
@@ -171,7 +171,14 @@ impl SheetTable {
                 let path = path.clone();
                 TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
             });
-            if icon_modal(ui.ctx(), icon_id, icon, &mut self.modal_export, excel, &path) {
+            if icon_modal(
+                ui.ctx(),
+                icon_id,
+                icon,
+                &mut self.modal_export,
+                excel,
+                &path,
+            ) {
                 self.modal_image = None;
             }
         }
@@ -716,16 +723,41 @@ impl TableDelegate for SheetTable {
             .inner_margin(Margin::symmetric(4, 2))
             .show(ui, |ui| {
                 if let Some(column_idx) = column_idx {
-                    let cell = if sorted_by_offset {
-                        self.context.cell_by_offset(row_data, column_idx as u32)
+                    let offset_idx = if sorted_by_offset {
+                        column_idx as u32
                     } else {
-                        self.context.cell_by_index(row_data, column_idx as u32)
+                        self.context
+                            .convert_column_index_to_offset_index(column_idx as u32)
+                            .unwrap_or(column_idx as u32)
                     };
-                    match cell {
-                        Ok(cell) => cell.show(ui),
-                        Err(e) => {
-                            log::error!("Failed to get column {column_idx}: {e:?}");
-                            InnerResponse::new(CellResponse::None, ui.label(""))
+                    let is_event_icon_type =
+                        self.context.get_column_by_offset(offset_idx).is_ok_and(
+                            |(schema_column, _)| {
+                                matches!(schema_column.meta(), SchemaColumnMeta::Link(sheets) if event_icon_type::links_here(sheets))
+                            },
+                        );
+                    if is_event_icon_type {
+                        let resolved = event_icon_type::resolve(&self.context, offset_idx, row_data);
+                        let clicked = event_icon_type::ui(ui, self.context.global(), &resolved);
+                        let resp = match clicked {
+                            Some(icon_id) if !should_ignore_clicks(ui) => {
+                                CellResponse::Icon(icon_id)
+                            }
+                            _ => CellResponse::None,
+                        };
+                        InnerResponse::new(resp, ui.response())
+                    } else {
+                        let cell = if sorted_by_offset {
+                            self.context.cell_by_offset(row_data, column_idx as u32)
+                        } else {
+                            self.context.cell_by_index(row_data, column_idx as u32)
+                        };
+                        match cell {
+                            Ok(cell) => cell.show(ui),
+                            Err(e) => {
+                                log::error!("Failed to get column {column_idx}: {e:?}");
+                                InnerResponse::new(CellResponse::None, ui.label(""))
+                            }
                         }
                     }
                 } else {

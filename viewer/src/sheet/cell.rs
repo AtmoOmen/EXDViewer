@@ -16,6 +16,7 @@ use crate::{
     settings::{ALWAYS_HIRES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, TEXT_MAX_LINES},
     sheet::{
         compact_sestring::CompactSeString,
+        event_icon_type,
         schema_column::{ResolvedTableContext, SheetLink},
         should_ignore_clicks, string_label_wrapped, wrap_string_lines_estimate,
     },
@@ -230,7 +231,13 @@ impl<'a> Cell<'a> {
                 SchemaColumnMeta::Icon => 32.0,
                 SchemaColumnMeta::ModelId => self.size_text(ui),
                 SchemaColumnMeta::Color => self.size_text(ui),
-                SchemaColumnMeta::Link(sheets) => self.size_internal_link(ui, Some(sheets))?,
+                SchemaColumnMeta::Link(sheets) => {
+                    if event_icon_type::links_here(sheets) {
+                        event_icon_type::cell_height(ui)
+                    } else {
+                        self.size_internal_link(ui, Some(sheets))?
+                    }
+                }
                 SchemaColumnMeta::ConditionalLink { column_idx, links } => {
                     let (_, switch_column) =
                         self.table_context.get_column_by_offset(*column_idx)?;

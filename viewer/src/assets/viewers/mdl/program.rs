@@ -3415,7 +3415,8 @@ impl Buffer {
         let wind = view.transform_vector3(scene.wind.heading * scene.wind.reach);
         put(waving, "m_WindVector", wind.to_array().to_vec());
         put(waving, "m_UpVector", view.transform_vector3(Vec3::Y).to_array().to_vec());
-        put(waving, "m_WavingParam", vec![1.0, 1.0, 0.0, 0.0]);
+        // The .zw a capture states, kept though no waving shader reads past .xy.
+        put(waving, "m_WavingParam", vec![1.0, 1.0, 0.2, 1.0]);
 
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.

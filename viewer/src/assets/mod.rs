@@ -46,7 +46,7 @@ const EXISTS_DELAY: Duration = Duration::from_millis(250);
 /// Width the extension menu is held to.
 const EXTENSION_MENU_WIDTH: f32 = 50.0;
 /// Widest the details panel beside a preview may stand.
-const DETAILS_WIDTH: f32 = 400.0;
+pub(crate) const DETAILS_WIDTH: f32 = 400.0;
 const SEARCH_ID: &str = "asset_search";
 
 /// One entry in the flattened view of the tree that is currently on screen.

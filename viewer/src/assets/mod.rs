@@ -53,7 +53,7 @@ const TREE_WIDTH: f32 = 360.0;
 const TREE_MIN_WIDTH: f32 = 200.0;
 /// Widest the details panel beside a preview may stand.
 pub(crate) const DETAILS_WIDTH: f32 = 400.0;
-const DETAILS_MIN_WIDTH: f32 = 220.0;
+const DETAILS_MIN_WIDTH: f32 = 200.0;
 const SEARCH_ID: &str = "asset_search";
 
 /// One entry in the flattened view of the tree that is currently on screen.

@@ -28,7 +28,7 @@ const FILTER_ID: &str = "zone_filter";
 const LIST_WIDTH: f32 = 320.0;
 const LIST_MIN_WIDTH: f32 = 160.0;
 const DETAILS_WIDTH: f32 = 400.0;
-const DETAILS_MIN_WIDTH: f32 = 220.0;
+const DETAILS_MIN_WIDTH: f32 = 200.0;
 
 /// `TerritoryType`'s Name, Bg and PlaceName columns, as byte offsets. Schema field order is offset
 /// order, not raw exh column order; verified against the schema and a live sweep.

@@ -868,7 +868,7 @@ fn assemble(scene: &Scene, baked: &[BakedMaterial]) -> Result<Vec<u8>> {
 /// Writes one node per bone and returns every one of their indices, in the model's own bone
 /// order: `JOINTS_0`/`JOINTS_1` reference a skin's `joints` array positionally, and that array is
 /// built straight from this order, so a caller must not reorder or filter it down to roots alone.
-/// The second return is just the roots, for hanging the rig off the scene's own root node.
+/// The second return is the roots alone, for hanging the rig off the scene's own root node.
 fn skeleton_nodes(skeleton: &Skeleton, nodes: &mut Vec<Value>) -> (Vec<u32>, Vec<u32>) {
     let base = nodes.len() as u32;
     let indices: Vec<u32> = (0..skeleton.names.len() as u32).map(|at| base + at).collect();
@@ -1303,6 +1303,90 @@ mod tests {
 
         let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
         let out = std::path::Path::new(&dir).join("c0101b0001.glb");
+        std::fs::write(&out, &bytes).unwrap();
+        println!("wrote {}", out.display());
+    }
+
+    /// A body worn with a hairstyle: two pieces, two skeletons merged into one rig (the hair's own
+    /// bones hang off the body's, per `est-extra-skeletons`), and a hair material whose family
+    /// takes a different bake path than the body's. Exercises `Scene::pieces` actually holding more
+    /// than one piece, which the single-piece test above cannot.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_body_and_hair_export_as_two_pieces_on_one_rig() {
+        let body_path = "chara/human/c0101/obj/body/b0001/model/c0101b0001_top.mdl";
+        let hair_path = "chara/human/c0101/obj/hair/h0001/model/c0101h0001_hir.mdl";
+        let rendered = super::super::compose(&[
+            super::super::Source {
+                path: body_path.to_owned(),
+                bytes: read_local(body_path),
+                variant: 0,
+                deform: None,
+                skin: None,
+            },
+            super::super::Source {
+                path: hair_path.to_owned(),
+                bytes: read_local(hair_path),
+                variant: 0,
+                deform: None,
+                skin: None,
+            },
+        ])
+        .unwrap();
+
+        let backend = block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(SQPACK.to_owned()),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .unwrap();
+
+        let ctx = egui::Context::default();
+        for _ in 0..800 {
+            crate::utils::tick_promises(&ctx);
+            let _ = ctx.run_ui(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| rendered.poll(ui, &backend));
+            });
+            let ready = rendered
+                .slots
+                .borrow()
+                .iter()
+                .all(|slot| matches!(slot, Some(super::Slot::Ready(_))));
+            if ready && rendered.animation.rig().is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        rendered.animation.rig().expect("the skeleton never landed");
+        assert!(
+            rendered.slots.borrow().iter().all(|slot| matches!(slot, Some(super::Slot::Ready(_)))),
+            "not every material finished loading"
+        );
+
+        let scene = gather(&rendered).expect("gather");
+        assert_eq!(scene.pieces.len(), 2, "one node per piece");
+        for piece in &scene.pieces {
+            assert!(!piece.primitives.is_empty(), "every piece should draw something");
+            for primitive in &piece.primitives {
+                assert!(primitive.joints0.is_some(), "both the body and this hairstyle carry bone data");
+            }
+        }
+        let bones = scene.skeleton.as_ref().unwrap();
+        println!(
+            "pieces: {:?}, joints (body + hair's own merged in): {}, materials: {}",
+            scene.pieces.iter().map(|p| (p.name.clone(), p.primitives.len())).collect::<Vec<_>>(),
+            bones.names.len(),
+            scene.materials.len(),
+        );
+        // The est merge appends the hair's own bones after the body's 106, so a hairstyle with
+        // extra bones of its own should grow the rig past the body-only run's count.
+        assert!(bones.names.len() >= 106);
+
+        let files = crate::data::sqpack::SqpackFileProvider::new(SQPACK);
+        let bytes = block_on(finish(scene, &files)).expect("finish");
+        println!("glb size: {} bytes", bytes.len());
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
+        let out = std::path::Path::new(&dir).join("c0101_body_hair.glb");
         std::fs::write(&out, &bytes).unwrap();
         println!("wrote {}", out.display());
     }

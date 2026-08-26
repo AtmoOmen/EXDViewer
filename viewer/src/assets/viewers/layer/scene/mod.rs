@@ -35,15 +35,15 @@ use anyhow::Result;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use half::f16;
-use ironworks::file::layer::{
-    Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, SceneAnimation, SceneGlow, SceneSpin,
-    SceneTimeline, ShadowMode, Transform,
-};
-use ironworks::file::tmb;
 use ironworks::file::avfx::Avfx;
+use ironworks::file::layer::{
+    Colour, Glow, InstanceData, Lane, LayerGroup, LightKind, Rgba, SceneAnimation, SceneGlow,
+    SceneSpin, SceneTimeline, ShadowMode, Transform,
+};
 use ironworks::file::mdl::ModelContainer;
 use ironworks::file::shpk::ShaderPackage;
 use ironworks::file::spm::ShaderParameters;
+use ironworks::file::tmb;
 use ironworks::file::{
     File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera,
 };
@@ -581,13 +581,14 @@ struct Vfx {
     path: String,
     layer: usize,
     key: (u32, [u8; 4]),
-    /// Multiplies every particle's color. White at `alpha == 0`: a zeroed colour is the tool's
-    /// "not set" rather than "tint to black".
     tint: Vec4,
-    /// Distances over which the effect ramps from invisible to full opacity. The far pair
-    /// (`fade_far`) is not applied: its own ordering does not hold widely enough across placed
-    /// instances to read a fade curve out of it, so a far cutoff is left undrawn rather than guessed.
+    /// Distances over which the effect ramps in near the camera and back out far from it. Only 10
+    /// of 7,654 corpus placements open a real near range (almost always starting at 0, the camera's
+    /// own near clip), against 3,554 with a real far one, so the far pair is where a cull actually
+    /// happens; `no_far_clip` turns it off regardless of what the pair states.
     fade_near: [f32; 2],
+    fade_far: [f32; 2],
+    no_far_clip: bool,
 }
 
 /// Linear ramp from invisible at `near[0]` to full opacity at `near[1]`, or always visible where
@@ -600,17 +601,23 @@ fn near_fade(distance: f32, near: [f32; 2]) -> f32 {
     }
 }
 
-/// The placement's colour override, or white where it is unset: `alpha == 0` is read as the
-/// sentinel rather than as transparent black.
-fn vfx_tint(colour: Colour) -> Vec4 {
-    if colour.alpha() == 0 {
-        return Vec4::ONE;
+/// Linear ramp from full opacity at `far[0]` down to invisible at `far[1]`, or always visible where
+/// the pair does not open a real range.
+fn far_fade(distance: f32, far: [f32; 2]) -> f32 {
+    let [start, end] = far;
+    match end > start {
+        true => (1.0 - (distance - start) / (end - start)).clamp(0.0, 1.0),
+        false => 1.0,
     }
-    let scale = colour.intensity();
+}
+
+/// The placement's colour override, which the corpus leaves at opaque white on 72.1% of
+/// placements: that is already the identity multiply, so no sentinel case is needed.
+fn vfx_tint(colour: Rgba) -> Vec4 {
     Vec4::new(
-        colour.red() as f32 / 255.0 * scale,
-        colour.green() as f32 / 255.0 * scale,
-        colour.blue() as f32 / 255.0 * scale,
+        colour.red() as f32 / 255.0,
+        colour.green() as f32 / 255.0,
+        colour.blue() as f32 / 255.0,
         colour.alpha() as f32 / 255.0,
     )
 }
@@ -1484,6 +1491,8 @@ impl Scene {
                                 key: reach(key, depth, instance.id()),
                                 tint: vfx_tint(vfx.colour()),
                                 fade_near: vfx.fade_near(),
+                                fade_far: vfx.fade_far(),
+                                no_far_clip: vfx.no_far_clip(),
                             });
                         }
                         InstanceData::Sound(placed_sound) => {
@@ -2029,7 +2038,12 @@ impl Scene {
                     let (scale, rotation, translation) =
                         vfx.placement.to_scale_rotation_translation();
                     let scale = scale.abs().max_element().max(0.001);
-                    let fade = near_fade(eye.distance(translation), vfx.fade_near);
+                    let distance = eye.distance(translation);
+                    let far = match vfx.no_far_clip {
+                        true => 1.0,
+                        false => far_fade(distance, vfx.fade_far),
+                    };
+                    let fade = near_fade(distance, vfx.fade_near) * far;
                     let tint = vfx.tint * Vec4::new(1.0, 1.0, 1.0, fade);
                     drawn.extend(
                         base.iter()
@@ -4108,10 +4122,10 @@ impl Scene {
         });
         // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
         // its package is translated, and answering with that one would pin the sampler to it.
-        let bind = |path: &str| match self.stacked.get_key_value(path) {
+        let bind = |path: &str, aniso: f32| match self.stacked.get_key_value(path) {
             Some((held, Stack::Ready)) => Some(mdl::gpu::Bound::Stacked(held.clone())),
             _ => match self.textures.get(path) {
-                Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id())),
+                Some(Texture::Ready(handle)) => Some(mdl::gpu::Bound::Plane(handle.id(), aniso)),
                 _ => None,
             },
         };
@@ -4128,7 +4142,7 @@ impl Scene {
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()
-                    .map(|(id, path)| (id, bind(path)))
+                    .map(|(id, path)| (id, bind(path, material.anisotropic(id))))
                     .collect(),
             });
         gpu::Surface {

@@ -22,7 +22,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use egui::{
-    CentralPanel, Color32, Popup, RectAlign, RichText, ScrollArea, TextEdit,
+    Align, CentralPanel, Color32, Layout, Popup, RectAlign, RichText, ScrollArea, TextEdit,
     containers::panel::Panel,
 };
 use glam::Vec3;
@@ -459,17 +459,28 @@ impl CharacterBuilder {
     pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend, icons: &IconManager) {
         self.poll(ui.ctx(), backend);
         self.side_panel(ui, backend, icons);
-        CentralPanel::default().show(ui, |ui| match &self.model {
-            Some(Ok(model)) => mdl::ui(ui, model, backend),
-            Some(Err(why)) => {
-                ui.centered_and_justified(|ui| {
-                    ui.colored_label(Color32::LIGHT_RED, why);
+        CentralPanel::default().show(ui, |ui| {
+            if CollapsibleSidePanel::is_collapsed(ui.ctx(), "character_pick") {
+                Panel::top("character_reexpand").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        CollapsibleSidePanel::draw_arrow(ui, "character_pick", Side::Left);
+                    });
+                    ui.add_space(4.0);
                 });
             }
-            None => {
-                ui.centered_and_justified(|ui| {
-                    ui.spinner();
-                });
+            match &self.model {
+                Some(Ok(model)) => mdl::ui(ui, model, backend),
+                Some(Err(why)) => {
+                    ui.centered_and_justified(|ui| {
+                        ui.colored_label(Color32::LIGHT_RED, why);
+                    });
+                }
+                None => {
+                    ui.centered_and_justified(|ui| {
+                        ui.spinner();
+                    });
+                }
             }
         });
     }
@@ -1818,8 +1829,10 @@ impl CharacterBuilder {
                 Panel::top("character_header").show(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "character_pick", Side::Left);
-                        ui.heading("Character");
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "character_pick", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("Character"));
+                        });
                     });
                     ui.add_space(4.0);
                 });

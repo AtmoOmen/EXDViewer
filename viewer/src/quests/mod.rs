@@ -737,11 +737,8 @@ impl QuestBrowser {
                 Panel::top("quest_info_header").show(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "quest_info", Side::Right);
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            // Balances the arrow, so the heading centers on the panel rather than
-                            // on the space left over beside it.
-                            ui.add_space(ui.spacing().indent);
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "quest_info", Side::Right);
                             ui.vertical_centered_justified(|ui| {
                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                                 ui.heading(title);

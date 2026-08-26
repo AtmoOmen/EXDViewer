@@ -196,6 +196,13 @@ The two blit faults are gone too. Measured at `b965b62`, before
 | `ERROR: [egui_glow] GL error` | 306 | 2 | 0 |
 | total messages | 623 | 19 | 0 |
 
+**`the preview frame changed after game shaders were turned on and off again`, passing `--model=`
+a `chara/...` path.** Not a GL fault: every character model plays an idle animation, `settled()`
+gives up after 20 tries whether or not the frame ever held still, and the two preview shots this
+compares land on different points of that animation's timeline regardless. The default `--model=`
+is a static background piece for exactly this reason; a character model fails this specific check
+by construction and always will until the comparison accounts for the clock.
+
 ## Probing one model
 
 `probe.sh` walks a list of models under the game shaders and shoots each one, about two minutes a
@@ -214,6 +221,23 @@ model against the gate's twenty. It exists for reading a render back, not for pa
 
 `--mark` is how a temporary `console.log` in the renderer gets read back, which is what turned the
 sampler bindings into a table during the task #55 investigation.
+
+## Standing a scene where a TitleEdit preset was captured
+
+`look.ts` opens a path against a running server and shoots whatever is on screen after a wait; no
+gate, no decode check, no pass/fail. `--preset=<file>` pastes a TitleEdit preset into the level
+viewer's own paste box, which is the only way from outside to put the camera, weather and hour
+where a capture was taken from.
+
+```
+CHROMIUM=$(...) bun smoke/look.ts --origin=http://127.0.0.1:9080 --preset=capture.json <path.lvb>
+```
+
+`preset.rs`'s JSON shape has two traps neither the plugin nor anything else documents:
+
+- `TerritoryPath` is the level path with the `bg/` prefix and `.lvb` suffix both stripped, e.g.
+  `"ex1/01_roc_r2/twn/r2t1/level/r2t1"` for `bg/ex1/01_roc_r2/twn/r2t1/level/r2t1.lvb`.
+- `Point` fields (`Position`, `CameraPosition`, `FixOnPos`, ...) are PascalCase: `X`, `Y`, `Z`.
 
 ## Measuring a frame against the game's own
 

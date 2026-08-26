@@ -172,9 +172,6 @@ impl SoundStage {
             return;
         };
 
-        // A placement past its own outer radius is silent under the curve below regardless, so
-        // `no_far_clip` only buys it a seat ahead of the distance cut rather than a floor on its
-        // gain: nothing measured says what, if anything, should keep it audible past that.
         let mut ranked: Vec<(bool, f32, usize)> = self
             .placements
             .iter()
@@ -185,6 +182,10 @@ impl SoundStage {
                     placement.position.distance(eye),
                     index,
                 )
+            })
+            .filter(|&(_, distance, index)| {
+                let placement = &self.placements[index];
+                placement.no_far_clip || distance <= placement.outer_radius
             })
             .collect();
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
@@ -204,7 +205,7 @@ impl SoundStage {
                 placement.outer_radius,
                 placement.volume_a,
                 placement.volume_b,
-            ) * self.volume;
+            );
             match self.decode.get(&placement.path) {
                 Some(Decode::Ready(audio)) => {
                     let audio = audio.clone();

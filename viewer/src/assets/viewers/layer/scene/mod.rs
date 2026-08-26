@@ -600,9 +600,8 @@ fn near_fade(distance: f32, near: [f32; 2]) -> f32 {
     }
 }
 
-/// The placement's colour override, or white where it is unset. `alpha == 0` is the corpus's only
-/// state (every placed `Vfx` leaves it there), so it is read as the sentinel rather than as
-/// transparent black.
+/// The placement's colour override, or white where it is unset: `alpha == 0` is read as the
+/// sentinel rather than as transparent black.
 fn vfx_tint(colour: Colour) -> Vec4 {
     if colour.alpha() == 0 {
         return Vec4::ONE;

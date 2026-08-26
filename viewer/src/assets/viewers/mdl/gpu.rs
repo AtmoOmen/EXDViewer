@@ -16,7 +16,7 @@ use glow::HasContext;
 use super::deferred::{self, Layered, Linked, TARGETS, TYPES, build_pair, dwords, sampler};
 use super::grid::{Grid, Ground};
 use super::material::Family;
-use super::{Vertex, program};
+use super::{Table, Vertex, program};
 
 pub use super::deferred::{
     Dead, Exposure, Glare, LIT, Lighting, Occlusion, Reflection, Smoothing, bury, graveyard,
@@ -242,7 +242,7 @@ struct Game {
     /// One palette per mesh, since a mesh's blend indices name its own bone table.
     joints: Vec<glow::Texture>,
     programs: BTreeMap<(usize, bool, usize), Linked>,
-    tables: BTreeMap<usize, glow::Texture>,
+    tables: BTreeMap<usize, (glow::Texture, Table)>,
     /// The array these shaders bind their attributes into. An array holds the enable flags and the
     /// pointers, and a mesh's own array holds the layout the preview path was uploaded with, so
     /// laying a shader's own semantics over it would leave the preview reading the wrong fields.
@@ -608,19 +608,26 @@ impl Game {
         Ok(held)
     }
 
-    /// The material's color table, in the layout its own shaders address it in.
+    /// The material's color table, in the layout its own shaders address it in. Re-uploaded
+    /// whenever `held` names a different table than the one already resident, which is what makes a
+    /// changed dye visible: the table itself is otherwise cached forever, by material index alone.
     fn table(
         &mut self,
         gl: &glow::Context,
         material: usize,
-        held: &(Vec<u16>, usize, usize),
+        held: &Table,
     ) -> Result<glow::Texture, String> {
-        if let Some(texture) = self.tables.get(&material) {
+        if let Some((texture, resident)) = self.tables.get(&material)
+            && Arc::ptr_eq(resident, held)
+        {
             return Ok(*texture);
         }
-        let (values, columns, rows) = held;
+        let (values, columns, rows) = &**held;
         unsafe {
-            let texture = gl.create_texture()?;
+            let texture = match self.tables.remove(&material) {
+                Some((texture, _)) => texture,
+                None => gl.create_texture()?,
+            };
             gl.bind_texture(glow::TEXTURE_2D, Some(texture));
             gl.tex_image_2d(
                 glow::TEXTURE_2D,
@@ -644,7 +651,7 @@ impl Game {
             ] {
                 gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
             }
-            self.tables.insert(material, texture);
+            self.tables.insert(material, (texture, held.clone()));
             Ok(texture)
         }
     }
@@ -1131,7 +1138,7 @@ impl Game {
 impl Drop for Game {
     fn drop(&mut self) {
         let mut dead = graveyard().lock().unwrap();
-        dead.extend(self.tables.values().copied().map(Dead::Texture));
+        dead.extend(self.tables.values().map(|(texture, _)| Dead::Texture(*texture)));
         dead.extend(
             std::mem::take(&mut self.joints)
                 .into_iter()

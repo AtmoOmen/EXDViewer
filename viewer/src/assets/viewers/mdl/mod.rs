@@ -14,6 +14,7 @@
 
 pub(super) mod deferred;
 mod deform;
+pub mod dye;
 mod export;
 pub(super) mod gpu;
 mod grid;
@@ -22,11 +23,13 @@ pub(super) mod program;
 mod skin;
 
 pub use deform::{Deform, Deformers};
+pub use dye::Templates as DyeTemplates;
 pub use program::Customize;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -431,6 +434,13 @@ pub struct Rendered {
     settings: Cell<bool>,
     /// The color table in the game's own layout, by material.
     tables: RefCell<BTreeMap<usize, Table>>,
+    /// The staining templates a wearer's dye picks read from, handed over once by the character tab.
+    dye_templates: RefCell<Option<Rc<dye::Templates>>>,
+    /// The stains worn in each piece's slot, by piece index, and the color table each material last
+    /// dyed itself into for them: recomputed only where the stains a piece carries change, so a frame
+    /// with nothing newly picked costs a lookup rather than a rebuild.
+    stains: RefCell<Vec<[Option<u8>; 2]>>,
+    dyed: RefCell<BTreeMap<usize, ([Option<u8>; 2], Table)>>,
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
@@ -517,6 +527,9 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         look: Cell::new(program::Look::default()),
         settings: Cell::new(false),
         tables: Default::default(),
+        dye_templates: Default::default(),
+        stains: Default::default(),
+        dyed: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
         customize: Cell::new(program::Customize::default()),
@@ -2129,7 +2142,9 @@ impl Rendered {
                         shadow: None,
                         resolve: passes.resolve.clone(),
                         sheer: passes.sheer.clone(),
-                        table: tables.get(&mesh.material).cloned(),
+                        table: tables
+                            .get(&mesh.material)
+                            .map(|base| self.dyed_table(mesh, material, base)),
                         textures: material
                             .bound()
                             .map(|(id, path)| (id, sampled(path)))
@@ -2900,6 +2915,44 @@ impl Rendered {
         }
     }
 
+    /// What the wearer picked to stain each worn piece with, by piece index in the same order the
+    /// character tab built its parts. Cheap enough to hand over on every frame: a piece the stains
+    /// have not changed for costs the cache lookup in [`Self::dyed_table`] and nothing more.
+    pub fn dye(&self, templates: Option<Rc<dye::Templates>>, stains: Vec<[Option<u8>; 2]>) {
+        *self.dye_templates.borrow_mut() = templates;
+        *self.stains.borrow_mut() = stains;
+    }
+
+    /// The color table one mesh's material draws with: the base table a stain replaces nothing in,
+    /// or, where the piece it came from carries one, that table with the wearer's picks applied.
+    fn dyed_table(&self, mesh: &Mesh, material: &material::Material, base: &Table) -> Table {
+        let stains = self
+            .stains
+            .borrow()
+            .get(mesh.piece)
+            .copied()
+            .unwrap_or_default();
+        if stains == [None, None] {
+            return base.clone();
+        }
+        if let Some((held, table)) = self.dyed.borrow().get(&mesh.material)
+            && *held == stains
+        {
+            return table.clone();
+        }
+        let built = self
+            .dye_templates
+            .borrow()
+            .as_deref()
+            .zip(material.held().color_table())
+            .and_then(|(templates, colors)| dye::table(base, colors, templates, stains))
+            .unwrap_or_else(|| base.clone());
+        self.dyed
+            .borrow_mut()
+            .insert(mesh.material, (stains, built.clone()));
+        built
+    }
+
     /// How far a raised visor has turned, one angle per bone it hinges on.
     pub fn hinged(&self, visor: [f32; 3]) {
         self.animation.hinged(visor);
@@ -2977,6 +3030,9 @@ impl Rendered {
         let mut slots = self.slots.borrow_mut();
         let mut translated = self.translated.borrow_mut();
         let mut tables = self.tables.borrow_mut();
+        // Keyed by material index alone, and a rebuild renumbers materials same as everything else
+        // matched by path above; kept, it would hand a stain a stranger's table.
+        self.dyed.borrow_mut().clear();
         let was = std::mem::take(&mut self.level.borrow_mut().materials);
         let mut held: BTreeMap<String, Kept> = was
             .into_iter()

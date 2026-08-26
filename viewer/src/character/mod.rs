@@ -57,6 +57,7 @@ const SHOWN: usize = 10;
 /// How wide the picker panel may grow. A panel takes the width its widest row asks for and keeps
 /// it, so a piece name long enough to run on would otherwise take the view beside it for good.
 const PANEL_WIDTH: f32 = 380.0;
+const PANEL_MIN_WIDTH: f32 = 220.0;
 
 /// Which customisation each of the creator's menus drives, as `Customize` numbers them. Every one
 /// of these is measured from `CharaMakeType` rather than named by any file.
@@ -1593,12 +1594,11 @@ impl CharacterBuilder {
             .show_rows(ui, step, matched.len(), |ui, rows| {
                 for at in rows {
                     let index = matched[at];
-                    let button = egui::Button::selectable(
-                        self.npc == Some(index),
-                        &self.npcs[index].name,
-                    )
-                    .min_size(egui::vec2(ui.available_width(), row));
-                    if ui.add(button).clicked() {
+                    let name = &self.npcs[index].name;
+                    let button = egui::Button::selectable(self.npc == Some(index), name.as_str())
+                        .truncate()
+                        .min_size(egui::vec2(ui.available_width(), row));
+                    if ui.add(button).on_hover_text(name).clicked() {
                         picked = Some(Pick::Npc(index));
                     }
                 }
@@ -1793,6 +1793,7 @@ impl CharacterBuilder {
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend, icons: &IconManager) {
         let listing = self.listing.clone();
         let picked = CollapsibleSidePanel::new("character_pick", Side::Left)
+            .min_width(PANEL_MIN_WIDTH)
             .max_width(PANEL_WIDTH)
             .show(ui, |ui, is_open| {
                 let mut picked = None;
@@ -1808,13 +1809,18 @@ impl CharacterBuilder {
                     ui.add_space(4.0);
                 });
                 ScrollArea::vertical().show(ui, |ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     ui.label(RichText::new("Race").strong());
                     for race in self.creator.races.keys() {
                         if !self.creator.bodies.iter().any(|body| body.race == *race) {
                             continue;
                         }
                         let name = menus::Creator::named(&self.creator.races, *race, self.female);
-                        if ui.selectable_label(self.race == *race, name).clicked() {
+                        if ui
+                            .selectable_label(self.race == *race, &name)
+                            .on_hover_text(&name)
+                            .clicked()
+                        {
                             picked = Some(Pick::Race(*race));
                         }
                     }
@@ -1827,14 +1833,15 @@ impl CharacterBuilder {
                         let name =
                             menus::Creator::named(&self.creator.tribes, body.tribe, self.female);
                         if ui
-                            .selectable_label(self.tribe == body.tribe, name)
+                            .selectable_label(self.tribe == body.tribe, &name)
+                            .on_hover_text(&name)
                             .clicked()
                         {
                             picked = Some(Pick::Tribe(body.tribe));
                         }
                     }
                     ui.add_space(8.0);
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         for (female, name) in [(false, "Male"), (true, "Female")] {
                             if ui.selectable_label(self.female == female, name).clicked() {
                                 picked = Some(Pick::Gender(female));
@@ -1850,7 +1857,7 @@ impl CharacterBuilder {
                     });
                     ui.add_space(8.0);
                     ui.label(RichText::new("Attire").strong());
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         for (attire, name) in [
                             (Attire::Race, "Race"),
                             (Attire::Job, "Job"),
@@ -1864,7 +1871,11 @@ impl CharacterBuilder {
                     });
                     if self.attire == Attire::Job {
                         for (at, job) in self.creator.jobs.iter().enumerate() {
-                            if ui.selectable_label(self.job == at, &job.name).clicked() {
+                            if ui
+                                .selectable_label(self.job == at, &job.name)
+                                .on_hover_text(&job.name)
+                                .clicked()
+                            {
                                 picked = Some(Pick::Job(at));
                             }
                         }

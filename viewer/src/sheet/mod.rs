@@ -2,6 +2,7 @@ mod cell;
 mod cell_iter;
 mod compact_sestring;
 mod csv;
+mod event_icon_type;
 mod filter;
 mod global_context;
 mod schema_column;

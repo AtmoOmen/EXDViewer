@@ -1,26 +1,27 @@
 //! Baseline glTF export: the geometry, materials and skeleton of a model exactly as it currently
 //! draws, posed to whatever the animation tab has it standing in.
 //!
-//! Split into a sync core (`gather`, `bake`, `assemble`) and a thin async wrapper (`export`) so the
+//! Split into a sync core (`gather`, `bake`, `assemble`) and a thin async wrapper (`finish`) so the
 //! geometry and GLB-writing logic can be exercised without a `Backend`.
 
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, bail};
 use glam::{Mat4, Vec3};
-use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage, imageops::FilterType};
+use image::imageops::{self, FilterType};
+use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
 use ironworks::file::mdl::VertexAttributeKind;
 use serde_json::{Value, json};
 
 use super::material::{Family, Material, Role};
 use super::{Rendered, Slot, Vertex, build, detail, draws};
-use crate::backend::Backend;
+use crate::data::FileProvider;
 
 /// The long edge a baked material texture is capped to. A dressed character bakes up to four of
 /// these per material, and wasm's 32-bit address space is the tighter of the two limits.
 const MAX_TEXTURE_DIM: u32 = 1024;
 
-struct Scene {
+pub(super) struct Scene {
     pieces: Vec<PieceMesh>,
     materials: Vec<MaterialInfo>,
     skeleton: Option<Skeleton>,
@@ -69,7 +70,7 @@ struct Skeleton {
 /// Gathers geometry, materials and the current pose off a model exactly as its own side panel has
 /// it: the detail level on screen, the parts the user has toggled, whatever shape keys are active.
 /// Touches no network; a material this reads has already had to finish loading to be drawn at all.
-fn gather(rendered: &Rendered) -> Result<Scene> {
+pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
     if rendered.animation.rides().is_some() {
         bail!("exporting a mounted character is not supported");
     }
@@ -636,8 +637,6 @@ fn repack_normal(raw: [u8; 4]) -> [u8; 4] {
     ]
 }
 
-use image::imageops;
-
 /// Every texture path a scene's materials name, for the caller to fetch before baking.
 fn texture_paths(scene: &Scene) -> Vec<String> {
     let mut paths: Vec<String> = scene
@@ -1030,12 +1029,13 @@ fn write_glb(document: &Value, bin: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Fetches every texture a scene's materials name at full resolution, bakes them and writes the
-/// result. The only part of the export that touches the network.
-pub async fn export(rendered: &Rendered, backend: &Backend) -> Result<Vec<u8>> {
-    let scene = gather(rendered)?;
+/// result. The only part of the export that touches the network, so it is what runs after
+/// `gather` has already taken everything else it needs off the model, letting the caller hold no
+/// reference to it across the wait.
+pub(super) async fn finish(scene: Scene, files: &dyn FileProvider) -> Result<Vec<u8>> {
     let mut images = BTreeMap::new();
     for path in texture_paths(&scene) {
-        match backend.files().read_texture(&path, None).await {
+        match files.read_texture(&path, None).await {
             Ok(decoded) => {
                 images.insert(path, DynamicImage::ImageRgba8(decoded.image));
             }

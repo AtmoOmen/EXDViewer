@@ -1262,7 +1262,6 @@ impl Renderer {
                 None => self.buffers.unshade(),
             }
             self.buffers.resolve(gl, lighting, &scene, &frame.lamps)?;
-            self.sheer(gl, painter, frame, &scene, &offsets, lighting)?;
             // Before the exposure, which reads the whole frame: a black hole where the sky belongs
             // measures as a far darker scene than it is.
             if let Some(skybox) = frame.skybox.as_ref() {
@@ -1318,6 +1317,9 @@ impl Renderer {
                     self.buffers.fog(gl, haze, &scene)?;
                 }
             }
+            // Over the sky, the water and the fog: a fringe pixel is one the opaque pass left
+            // uncovered, and drawing it any earlier leaves the sky free to paint over it.
+            self.sheer(gl, painter, frame, &scene, &offsets, lighting)?;
             // Before the exposure, since a halo belongs to the frame the lighting left rather than
             // to what a curve made of it.
             if let Some(glare) = frame.glare.as_ref() {

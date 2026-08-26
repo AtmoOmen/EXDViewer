@@ -4214,7 +4214,8 @@ impl Scene {
                         Vec::new()
                     }
                 };
-                let promise = export::menu(ui, "Export preset", None, self.saving.is_some(), choices);
+                let promise =
+                    export::menu(ui, "Export preset", None, self.saving.is_some(), choices);
                 if promise.is_some() {
                     self.saving = promise;
                 }

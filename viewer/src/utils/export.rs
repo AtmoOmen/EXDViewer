@@ -2,11 +2,25 @@
 //! save a file, a dropdown when there are several, one spinner and one disabled state while a save
 //! is running, and a file dialog once the bytes are ready.
 
+use std::io::{Cursor, Write};
+
 use anyhow::Result;
 use egui::WidgetText;
 use futures_util::future::LocalBoxFuture;
+use zip::{ZipWriter, write::SimpleFileOptions};
 
 use super::TrackedPromise;
+
+/// Bundles named files into a zip, for a choice that only makes sense once there is genuinely more
+/// than one output file.
+pub fn zip(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
+    let mut archive = ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, data) in files {
+        archive.start_file(name, SimpleFileOptions::default())?;
+        archive.write_all(data)?;
+    }
+    Ok(archive.finish()?.into_inner())
+}
 
 /// One way to save the file on show. `build` runs synchronously, at the moment this choice is
 /// picked: a producer needing a live borrow (a model gathering its current scene, say) does that
@@ -94,13 +108,15 @@ impl<'a> Choice<'a> {
 }
 
 /// Draws the control and, once a choice is picked, starts it: a plain button standing for the one
-/// choice on offer, or `button` opening a menu of several. Returns the promise a click started, for
-/// the caller to hold in its own `Option<TrackedPromise<()>>` field; that field's own `take_if` is
-/// what clears it again; this only ever returns `Some` on the frame a choice was picked, and it
-/// returns `None` if there is nothing to export.
+/// choice on offer, or `button` opening a menu of several (`hover` names it, for a button that is
+/// only a glyph). Returns the promise a click started, for the caller to hold in its own
+/// `Option<TrackedPromise<()>>` field; that field's own `take_if` is what clears it again; this
+/// only ever returns `Some` on the frame a choice was picked, and it returns `None` if there is
+/// nothing to export.
 pub fn menu<'a>(
     ui: &mut egui::Ui,
     button: impl Into<WidgetText>,
+    hover: Option<&str>,
     busy: bool,
     mut choices: Vec<Choice<'a>>,
 ) -> Option<TrackedPromise<()>> {
@@ -115,8 +131,8 @@ pub fn menu<'a>(
         if choices.len() == 1 {
             let choice = choices.pop().expect("checked len() == 1 above");
             let mut response = ui.add_enabled(choice.enabled, egui::Button::new(&choice.label));
-            if let Some(hover) = &choice.hover {
-                response = response.on_hover_text(hover);
+            if let Some(text) = choice.hover.as_deref().or(hover) {
+                response = response.on_hover_text(text);
             }
             if let Some(why) = &choice.disabled_hover {
                 response = response.on_disabled_hover_text(why);
@@ -125,14 +141,17 @@ pub fn menu<'a>(
                 spawned = Some(start(choice));
             }
         } else {
-            ui.menu_button(button, |ui| {
+            let opened = ui.menu_button(button, |ui| {
                 for choice in choices {
-                    let (enabled, hover, disabled_hover) =
-                        (choice.enabled, choice.hover.clone(), choice.disabled_hover.clone());
+                    let (enabled, item_hover, disabled_hover) = (
+                        choice.enabled,
+                        choice.hover.clone(),
+                        choice.disabled_hover.clone(),
+                    );
                     let mut response =
                         ui.add_enabled(enabled, egui::Button::new(choice.label.clone()));
-                    if let Some(hover) = &hover {
-                        response = response.on_hover_text(hover);
+                    if let Some(text) = &item_hover {
+                        response = response.on_hover_text(text);
                     }
                     if let Some(why) = &disabled_hover {
                         response = response.on_disabled_hover_text(why);
@@ -143,6 +162,9 @@ pub fn menu<'a>(
                     }
                 }
             });
+            if let Some(text) = hover {
+                opened.response.on_hover_text(text);
+            }
         }
     });
     spawned

@@ -15,6 +15,14 @@ mod shortcuts;
 use combined_log::CombinedLogger;
 use viewer::App;
 
+// Must match the `.desktop` file's basename: Wayland has no client-side window-icon protocol in
+// general use, so compositors resolve the taskbar/launcher icon by matching this app_id against an
+// installed .desktop entry. Kept equal to the `run_native` app name below (not reverse-DNS)
+// because eframe derives the persistence directory from this same string when it is set; anything
+// else would silently move existing users' saved window state to a new folder.
+#[cfg(not(target_arch = "wasm32"))]
+const APP_ID: &str = "XIViewer";
+
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
@@ -35,7 +43,8 @@ fn main() -> eframe::Result {
             .with_icon(
                 eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon.png")[..])
                     .expect("Failed to load icon"),
-            ),
+            )
+            .with_app_id(APP_ID),
         ..Default::default()
     };
     eframe::run_native(

@@ -131,13 +131,16 @@ async function main() {
                 // lands between two of a loading zone's frames is simply lost. Loading the same
                 // preset twice costs nothing.
                 const text = readFileSync(preset, "utf8").trim();
-                for (let step = 0; step < 3; step++) {
-                    const at = { x: WIDTH - 200, y: 182, button: "left", clickCount: 1, buttons: 1 };
+                const click = async (x: number, y: number) => {
+                    const at = { x, y, button: "left" as const, clickCount: 1, buttons: 1 };
                     await cdp.send("Input.dispatchMouseEvent", { ...at, type: "mouseMoved", buttons: 0 });
                     await sleep(60);
                     await cdp.send("Input.dispatchMouseEvent", { ...at, type: "mousePressed" });
                     await sleep(40);
                     await cdp.send("Input.dispatchMouseEvent", { ...at, type: "mouseReleased", buttons: 0 });
+                };
+                for (let step = 0; step < 3; step++) {
+                    await click(WIDTH - 200, 113);
                     await sleep(400);
                     // The box keeps what the last press put in it, so a second insert nests one
                     // preset inside another and the parse fails without saying which press did it.
@@ -148,11 +151,8 @@ async function main() {
                     }
                     await cdp.send("Input.insertText", { text });
                     await sleep(400);
-                    for (const type of ["keyDown", "keyUp"]) {
-                        await cdp.send("Input.dispatchKeyEvent", {
-                            type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r",
-                        });
-                    }
+                    // Clicks "Load pasted" rather than sending Enter.
+                    await click(WIDTH - 257, 135);
                     await sleep(2500);
                 }
             }

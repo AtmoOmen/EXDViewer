@@ -19,6 +19,7 @@ pub mod lgb;
 pub mod lvb;
 pub mod scene;
 pub mod sgb;
+pub mod sound;
 
 /// Space each level of the tree is set in by.
 /// The sheet a scene filter names a territory of.
@@ -199,14 +200,22 @@ pub struct Rendered {
     /// Where the open rows and the selected one are kept, since drawing takes the file by
     /// reference.
     state: egui::Id,
-    /// Whether the tree or the scene is showing, and the scene itself once it has been asked for.
-    /// The scene owns GL objects and fetches of its own, so it is built on the first switch rather
-    /// than with the file.
-    placed: Cell<bool>,
+    /// Which of the tree, the scene or the flattened sound list is showing. The scene and the
+    /// sound list each own fetches of their own, so they are built on the first switch rather than
+    /// with the file.
+    view: Cell<View>,
     scene: RefCell<Option<scene::Scene>>,
+    sounds: RefCell<Option<sound::Sounds>>,
     /// Whether the scene view is offered at all. A `.lvb` opens with it off, since the Assets tab
     /// no longer places one; `show_scene` turns it on for the Zones tab, which does.
     scene_enabled: Cell<bool>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    Tree,
+    Scene,
+    Sounds,
 }
 
 fn axes(values: [f32; 3]) -> String {
@@ -752,8 +761,9 @@ fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Sourc
         rows,
         kinds,
         state: egui::Id::new(path).with("layer_tree"),
-        placed: Cell::new(false),
+        view: Cell::new(View::Tree),
         scene: RefCell::new(None),
+        sounds: RefCell::new(None),
         scene_enabled: Cell::new(scene_enabled),
     }
 }
@@ -764,27 +774,48 @@ pub fn ui(
     deps: &mut Deps,
     backend: &Backend,
 ) -> Option<String> {
-    if file.scene_enabled.get() {
-        ui.horizontal(|ui| {
-            for (placed, label) in [(false, "Tree"), (true, "Scene")] {
-                if ui
-                    .selectable_label(file.placed.get() == placed, label)
-                    .clicked()
-                {
-                    file.placed.set(placed);
-                }
-            }
-        });
-        ui.add_space(4.0);
-    }
-    if file.placed.get() {
-        let mut held = file.scene.borrow_mut();
-        scene::ui(
-            ui,
-            held.get_or_insert_with(|| scene::Scene::new(&file.path, &file.source)),
-            backend,
-        );
-        return None;
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(file.view.get() == View::Tree, "Tree")
+            .clicked()
+        {
+            file.view.set(View::Tree);
+        }
+        if file.scene_enabled.get()
+            && ui
+                .selectable_label(file.view.get() == View::Scene, "Scene")
+                .clicked()
+        {
+            file.view.set(View::Scene);
+        }
+        if ui
+            .selectable_label(file.view.get() == View::Sounds, "Sounds")
+            .clicked()
+        {
+            file.view.set(View::Sounds);
+        }
+    });
+    ui.add_space(4.0);
+
+    match file.view.get() {
+        View::Scene => {
+            let mut held = file.scene.borrow_mut();
+            scene::ui(
+                ui,
+                held.get_or_insert_with(|| scene::Scene::new(&file.path, &file.source)),
+                backend,
+            );
+            return None;
+        }
+        View::Sounds => {
+            let mut held = file.sounds.borrow_mut();
+            return sound::ui(
+                ui,
+                held.get_or_insert_with(|| sound::Sounds::new(&file.source)),
+                backend,
+            );
+        }
+        View::Tree => {}
     }
 
     let mut follow = None;
@@ -959,7 +990,7 @@ impl Rendered {
     /// specifically to show it. Also what turns the scene view on in the first place for a `.lvb`.
     pub fn show_scene(&self) {
         self.scene_enabled.set(true);
-        self.placed.set(true);
+        self.view.set(View::Scene);
     }
 
     fn open(&self, ui: &egui::Ui) -> HashSet<usize> {
@@ -1092,7 +1123,7 @@ impl Rendered {
         deps: &mut Deps,
         backend: &Backend,
     ) {
-        if self.placed.get()
+        if self.view.get() == View::Scene
             && let Some(scene) = self.scene.borrow_mut().as_mut()
         {
             scene.details_ui(ui, follow, deps, backend);

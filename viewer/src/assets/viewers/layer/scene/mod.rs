@@ -432,6 +432,9 @@ struct Placement {
     glow: Option<Glow>,
     /// Whether the sun's own pass draws this at all, which the instance states for itself.
     casts: bool,
+    /// Where a `.ggd` placement starts in the wind cycle, over `0.0..=1.0`. Nothing but grass states
+    /// this, so a layer group placement carries none and the instance falls back to a guess.
+    wind_phase: Option<f32>,
 }
 
 enum State {
@@ -928,8 +931,16 @@ fn blade(placement: &ggd::Placement, into: &mut Vec<gpu::Corner>) {
         let at = foot + across * side + up * height;
         into.push(gpu::Corner {
             position: half([at.x, at.y, at.z, 0.0]),
-            uv: half([u, v, 0.0, 0.0]),
-            color1: half([column, 0.0, 0.0, 0.0]),
+            // .z is the bend weight the waving shader multiplies by `1 - v.y`; the game's own blade
+            // subdivides that weight across three rows, but a flat quad has only the one, so it is
+            // left at full rather than zero, which would leave the blade standing still regardless
+            // of everything else.
+            uv: half([u, v, 1.0, 0.0]),
+            // .y is the phase the waving shader starts this blade's sway at, in radians: grass.shpk
+            // adds it straight into a sine with no 2pi of its own, unlike bg.shpk's waving shader. A
+            // whole grid shares one clock, so this is the only thing keeping neighbouring blades out
+            // of step.
+            color1: half([column, placement.wind_phase() * std::f32::consts::TAU, 0.0, 0.0]),
             // Nought weight, so the albedo is the color map's own texel: the map the tint would be
             // read off is the engine's and no file names it.
             color: [0; 4],
@@ -1398,6 +1409,7 @@ impl Scene {
                                 key: reach(key, depth, instance.id()),
                                 glow,
                                 casts: part.world_light_shadow_mode() != ShadowMode::ForceOff,
+                                wind_phase: None,
                             });
                         }
                         InstanceData::SharedGroup(shared)
@@ -1590,6 +1602,7 @@ impl Scene {
                 key: (0, [0; 4]),
                 glow: None,
                 casts: true,
+                wind_phase: None,
             });
         }
         self.dirty = true;
@@ -1733,6 +1746,7 @@ impl Scene {
                         key: (0, [0; 4]),
                         glow: None,
                         casts: true,
+                        wind_phase: Some(placement.wind_phase()),
                     });
                 }
             }
@@ -1939,6 +1953,7 @@ impl Scene {
                     let (color, power) = cycled(lane, self.clock);
                     color.extend(power)
                 }),
+                wind_phase: placement.wind_phase,
             });
         }
         self.casts = placed
@@ -3818,6 +3833,7 @@ impl Scene {
                 clock: self.clock / TICKS,
                 wind: self.ambient.wind().unwrap_or(program::Wind {
                     reach: 0.0,
+                    layers: [program::WindLayer::default(); 2],
                     ..Default::default()
                 }),
                 sky: program::Sky {

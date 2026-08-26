@@ -373,6 +373,12 @@ pub const GRASS: &str = "shader/sm5/shpk/grass.shpk";
 /// covered; paired here with the default vertex shader, which stands those same pixels up.
 const GRASS_NORMAL: u32 = 0x5cf2_9b55;
 
+/// `ApplyWavingAnimation`, and the value that sways a blade rather than standing it still. The
+/// package's own default is `_Nothing`; `_Shigemi` is a third geometry class this viewer never
+/// builds.
+const APPLY_WAVING_ANIMATION: u32 = 0x764a_ece7;
+const APPLY_WAVING_ANIMATION_AUTO_PLACEMENT: u32 = 0x7dda_17b6;
+
 /// Which way a blade faces, at half of itself plus a half, which is how the channel holding it is
 /// read. No file states one.
 const GRASS_UP: [f32; 4] = [0.5, 1.0, 0.5, 0.0];
@@ -907,6 +913,9 @@ pub struct Instance {
     /// The colour a scene cycles its material's emissive to and the strength it is taken at, where
     /// one of the scene's animation handlers names the instance.
     pub emissive: Option<Vec4>,
+    /// Where a `.ggd` placement starts in the wind cycle, over `0.0..=1.0`. `None` where the
+    /// instance carries no such field, which falls back to a position hash.
+    pub wind_phase: Option<f32>,
 }
 
 impl Default for Instance {
@@ -915,6 +924,7 @@ impl Default for Instance {
             transform: Mat4::IDENTITY,
             sky_visibility: 1.0,
             emissive: None,
+            wind_phase: None,
         }
     }
 }
@@ -1658,10 +1668,23 @@ pub struct Reflect {
     pub texel: Vec2,
 }
 
-/// What a leaf is swayed by, which is all three registers `g_WavingParam` holds. The heading and the
-/// reach come out of the weather's wind set; the rate does not, since the shader takes its whole
-/// phase from the engine and no file states how fast one sway runs. A mesh weights the reach by its
-/// own stream, which reaches a tenth at most, so the stated strength is already in world units.
+/// One layer of a weather's wind set, as it is stated rather than collapsed into a single heading.
+#[derive(Clone, Copy, Default)]
+pub struct WindLayer {
+    /// Which way this layer leans, in world space.
+    pub heading: Vec3,
+    /// The reach a texture sample of 1.0 stands for.
+    pub max_strength: f32,
+    /// The reach a texture sample of 0.0 stands for.
+    pub min_strength: f32,
+}
+
+/// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
+/// hold both wind layers already summed; `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength
+/// per layer instead, which `layers` carries apart for it. The rate is invented for both: the shader
+/// takes its whole phase from the engine and no file states how fast one sway runs. A mesh weights
+/// the reach by its own stream, which reaches a tenth at most, so the stated strength is already in
+/// world units.
 #[derive(Clone, Copy)]
 pub struct Wind {
     /// Which way a leaf leans, in world space.
@@ -1670,16 +1693,20 @@ pub struct Wind {
     pub reach: f32,
     /// Radians of phase a second.
     pub rate: f32,
+    /// The two layers `heading` and `reach` are summed from, apart.
+    pub layers: [WindLayer; 2],
 }
 
 /// What a lone model is shown under, since nothing outside a zone names an environment to take a
 /// wind out of. The panel spells all three out.
 impl Default for Wind {
     fn default() -> Self {
+        let heading = Vec3::new(0.92, 0.0, 0.38);
         Self {
-            heading: Vec3::new(0.92, 0.0, 0.38),
+            heading,
             reach: 4.0,
             rate: 1.6,
+            layers: [WindLayer { heading, max_strength: 2.0, min_strength: 0.0 }; 2],
         }
     }
 }
@@ -2259,7 +2286,9 @@ impl Program {
     ) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
         let [technique, subview] = package.technique_subview();
-        let held = |technique| pair(&package, &[], &[], Pass::Buffer.id(), technique, subview);
+        // The default node stands every blade still; only the AutoPlacement variant reads a wind.
+        let set = [(APPLY_WAVING_ANIMATION, APPLY_WAVING_ANIMATION_AUTO_PLACEMENT)];
+        let held = |technique| pair(&package, &[], &set, Pass::Buffer.id(), technique, subview);
         let (vs, ps) = held(technique).ok_or("the grass package holds no default node")?;
         let ps = match normal {
             true => held(GRASS_NORMAL).ok_or("the grass package holds no such technique")?.1,
@@ -2764,6 +2793,36 @@ impl Buffer {
         if self.name == "g_GrassGridParam" {
             let held = model.w_axis;
             write(&mut out, 0, &[held.x, held.y, held.z, 0.0]);
+            return out;
+        }
+        // The phase grass.shpk adds to a blade's own `COLOR1.y` before the sine, in the same radians
+        // as everything else the wind turns. No previous-frame history is tracked, so the buffer
+        // meant for one reads the same value; the shader only reads it for a motion vector this
+        // viewer does not draw.
+        if self.name == "g_WindParam" || self.name == "g_PreviousWindParam" {
+            write(&mut out, 0, &[0.0, 0.0, 0.0, scene.clock * scene.wind.rate]);
+            return out;
+        }
+        // Two layers, each a heading, and a strength between the reflection's `windPowerMin` and
+        // `windPowerMin + windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex`.
+        // Nothing here binds those textures, so a shader reading past `windPowerMin`/`windPower`
+        // samples the deferred pass's own flat stand-in rather than a real one, which is why the
+        // reach still varies by weather and layer but not yet by world position. `windViewDir` is
+        // read by no vertex shader this viewer runs, so it is left at nought like `uvOffset` and
+        // `worldScale`, whose world-to-texel conversion the wind texture's own tiling would have to
+        // settle.
+        if self.name == "g_WindInfo" {
+            for (at, layer) in scene.wind.layers.iter().enumerate() {
+                for base in [at * 3, at * 3 + 6] {
+                    write(&mut out, base, &[
+                        layer.heading.x,
+                        layer.heading.y,
+                        layer.heading.z,
+                        layer.max_strength,
+                    ]);
+                    write(&mut out, base + 1, &[0.0, 0.0, 0.0, layer.min_strength]);
+                }
+            }
             return out;
         }
         // A whole matrix, one register per row, for a buffer the reflection gives no members.
@@ -3272,6 +3331,10 @@ impl Buffer {
         put(grass, "m_Param", vec![0.0, 0.0, 0.0, 1.0]);
         put(grass, "m_SSAOMaskMin", vec![1.0]);
         put(grass, "m_SSAOMaskMax", vec![1.0]);
+        // Both scale the wind displacement before anything else does; left at one rather than the
+        // nought the buffer would otherwise sit at, which silently stands every blade still.
+        put(grass, "m_GrassWindSpeedScale", vec![1.0]);
+        put(grass, "m_BushWindSpeedScale", vec![1.0]);
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
         // Declared by all five character packages; only `character`'s own G pass reads the first
         // lane, scaling the fur march by it. A capture confirms the game writes the same identity
@@ -3603,11 +3666,15 @@ impl Buffer {
             );
             put(at, "m_SkyVisibility", &[instance.sky_visibility]);
             put(at, "m_DitherAlpha", &[1.0]);
-            // The phase one object sways at. Its own place sets where in the cycle it starts, so a
-            // stand of the same plant does not lean as one; the noise is the same offset again,
-            // which is all the vertical bob reads it for.
-            let (x, z) = (instance.transform.w_axis.x, instance.transform.w_axis.z);
-            let offset = (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU);
+            // The phase one object sways at. A `.ggd` placement states where in the cycle it starts;
+            // nothing else does, so a layer group placement falls back to a guess off its own place,
+            // which at least keeps a stand of the same plant from leaning as one. The noise is the
+            // same offset again, which is all the vertical bob reads it for.
+            let offset = std::f32::consts::TAU
+                * instance.wind_phase.unwrap_or_else(|| {
+                    let (x, z) = (instance.transform.w_axis.x, instance.transform.w_axis.z);
+                    (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
+                });
             put(at, "m_WavingAnimTime", &[scene.clock * scene.wind.rate + offset]);
             put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
             // The blend is what carries the colour: the shading lerps from the material's own

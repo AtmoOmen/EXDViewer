@@ -494,24 +494,37 @@ impl Ambient {
     }
 
     /// What a leaf is swayed by, and nothing where the weather states no wind set. The set names two
-    /// layers, each a heading and a strength; the shader's buffer holds one heading, so the two sum.
+    /// layers, each a heading and a strength; `bg.shpk`'s own buffer holds one heading, so the two
+    /// sum there, but `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength per layer, so
+    /// [`layers`](program::Wind::layers) carries them apart as well.
     ///
-    /// Each layer's `min_strength` and `wavelength` go unread. They read like a gust running between
-    /// the two strengths over the span, but nothing states that the span is a time at all, and a
-    /// calm weather names a minimum of nought: taken that way the wind stops dead for three seconds
-    /// of every seventeen, which is worse than not gusting.
+    /// Each layer's `wavelength` goes unread: it is grass.shpk's own world-to-texel scale for
+    /// sampling `bgcommon/nature/wind/texture/wind_0{1,2}.tex`, decompiled off the shader itself, but
+    /// nothing states the texture's own tiling, so the conversion from world units to that scale is
+    /// not derived. `min_strength` is read now that it has a real consumer (the same texture sample,
+    /// squared, lerped between it and `max_strength`) rather than the naive time-based gust an
+    /// earlier reading tried and reverted for freezing solid every cycle.
     pub fn wind(&self) -> Option<program::Wind> {
         let held = self.keyframes(WIND)?;
         let layer = |which: usize| {
             let of = |field: &str| scalar(held, &format!("layer_{which}_{field}"), 0.0);
             let heading = of("azimuth_degrees").to_radians();
-            glam::Vec2::new(heading.sin(), heading.cos()) * of("max_strength")
+            program::WindLayer {
+                heading: Vec3::new(heading.sin(), 0.0, heading.cos()),
+                max_strength: of("max_strength"),
+                min_strength: of("min_strength"),
+            }
         };
-        let held = layer(0) + layer(1);
+        let layers = [layer(0), layer(1)];
+        let vector = |held: program::WindLayer| {
+            glam::Vec2::new(held.heading.x, held.heading.z) * held.max_strength
+        };
+        let held = vector(layers[0]) + vector(layers[1]);
         Some(program::Wind {
             heading: Vec3::new(held.x, 0.0, held.y).normalize_or_zero(),
             reach: held.length(),
             rate: self.rate,
+            layers,
         })
     }
 

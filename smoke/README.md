@@ -1,4 +1,32 @@
-# Browser smoke gate
+# Smoke gates
+
+Two gates exist, and neither replaces the other:
+
+```
+smoke/native.sh   # fast default: native app, offscreen, local sqpack, no network
+smoke/run.sh      # the browser gate: real wasm build in real headless chromium
+```
+
+`native.sh` is what to run for an ordinary change: it builds the native `viewer` binary (dev
+profile, so `debug_assertions` stays on for `egui_glow`'s `check_for_gl_error`), drives it against
+`/home/asriel/.xlcore/ffxiv/game/sqpack` under Xvfb with no browser and no HTTP, and fails on a
+panic, an ERROR-level log, or a step that never decodes. It is roughly **3-4x faster wall-clock**
+than the browser gate over the same asset list (model + two scenes: ~36s native vs ~93s browser,
+measured), because it skips the wasm build, the chromium launch, and every asset fetch.
+
+**It is not a replacement for the browser gate.** Three GL faults have shipped that only the
+browser gate would have caught: `egui_glow::CallbackFn` needing `Send + Sync` (a wasm *compile*
+error, invisible to both gates; `cargo check --target wasm32-unknown-unknown` is what catches
+that one), `get_parameter_framebuffer` panicking on wasm because glow cannot map a WebGL object it
+did not create, and `blitFramebuffer` into a multisampled default framebuffer being
+`INVALID_OPERATION` (the canvas there is 4x multisampled, and wasm is 32-bit; native has neither
+property). See "What only the browser gate catches" below before trusting a green `native.sh` run
+over a red `run.sh` one.
+
+Run `smoke/run.sh` before anything that touches the shader pipeline, the wasm/JS boundary, or
+offset arithmetic on file data. Run `smoke/native.sh` as the everyday fast check.
+
+## Browser smoke gate
 
 Runs the real wasm build in a real browser and fails on any GL error, panic or `ERROR`-level log.
 
@@ -212,3 +240,86 @@ links the deferred lighting programs. A pass in that mode says nothing either wa
 
 It needs the network: the app reads from `https://xiviewer.app`, and the run uses the live API
 so that the real decode path is what gets exercised.
+
+## Native smoke gate
+
+```
+smoke/native.sh [--no-build]
+```
+
+Builds `viewer` (dev profile) and runs it with `--smoke <sqpack> <out-dir> <step>...`, a mode
+`viewer/src/main.rs` adds alongside the ordinary native and wasm entry points. `viewer/src/smoke.rs`
+drives the real `App`: it seeds `BACKEND_CONFIG` with a local `InstallLocation::Sqpack` before the
+first frame (bypassing the setup screen, the same way a saved config does), seeds the router's
+history with `/?redirect=/assets/<path>` (the same query param a real deep link bounces through),
+waits for the `assets/preview: ` log line that says a viewer actually decoded its bytes, clicks
+"Game shaders" or the "Scene" tab at a coordinate calibrated the same way `smoke.ts`'s are, waits
+for the frame to settle, and takes a screenshot with `egui::ViewportCommand::Screenshot`. A
+`log::Log` wrapper (`smoke::CountingLogger`) counts ERROR-level records as they are emitted, so a
+run fails the instant one fires rather than idling out to its step timeout on top of it. Every run
+writes `report.json` and one PNG per step to `smoke/native-shots/` (gitignored).
+
+Offscreen rendering needs a real display, not a headless flag: `eframe::NativeOptions` has no
+"don't open a window" mode, so the harness gives it a normal `ViewportBuilder::with_visible(false)`
+window and points it at an [Xvfb](https://www.x.org/releases/X11R7.6/doc/man/man1/Xvfb.1.xhtml)
+X server via `DISPLAY`, which never draws a window on any real screen. **This was measured, not
+assumed, because the two ways to get a display here differ in a way that would have shipped a gate
+that always passes:** an invisible window against the user's live Wayland session renders a real
+GPU frame for a couple of frames and then the compositor stops delivering frame-done callbacks to
+the invisible surface, so `request_repaint()` never fires again and the process hangs forever
+rather than progressing or failing. Xvfb keeps delivering frames to an invisible window
+indefinitely (through Mesa's software `llvmpipe`, confirmed via `GL_RENDERER`) and a real panic
+inside `App::ui` still reaches the terminal as `panicked at ...` with a nonzero exit: winit's
+Linux backend has no `catch_unwind` around the event loop (unlike its macOS and Windows backends),
+so nothing swallows it.
+
+### What it catches that the browser gate also catches
+- A panic anywhere in the app, including inside the model, scene or level viewer.
+- Any `log::error!`, including a real `egui_glow` GL error surfaced through
+  `check_for_gl_error!` (native keeps `debug_assertions` on in a dev build; a release build would
+  not run this check at all, so `native.sh` never builds `--release`).
+- A step that never decodes (a wrong path, a broken read, a decode that panics quietly into a
+  promise that never resolves).
+- The deferred/"Game shaders" G-buffer path actually linking, binding and drawing (confirmed by
+  eye: a model shot with the toggle on shows the shaded, textured frame, not the debug-normals
+  view it opens on).
+- A scene's or level's instanced draws actually landing (confirmed by eye: a `.lgb`/`.lvb` shot
+  after the settle shows real geometry, not the black frame taken before instancing starts).
+
+### What only the browser gate catches
+- **`egui_glow::CallbackFn` needing `Send + Sync`.** This is a wasm *compile* error; native never
+  even reaches it. Neither smoke gate is the check for this one; `cargo check -p viewer --target
+  wasm32-unknown-unknown --lib` is, and it already runs as one of the four required gates.
+- **`get_parameter_framebuffer` panicking on wasm.** glow cannot map a WebGL object it did not
+  create; native's GL context has no such restriction, so a native run cannot exercise this path
+  at all, faulty or not.
+- **`blitFramebuffer` into a multisampled default framebuffer.** The wasm canvas is 4x
+  multisampled by the browser; `native.sh`'s window asks for `multisampling: 0` like the ordinary
+  native entry point does, so this class of bug has nothing to reproduce against here. A change
+  that only breaks under multisampling will pass `native.sh` and fail `run.sh`.
+- **32-bit overflow in offset/size arithmetic on file data.** wasm32 is a 32-bit target; native is
+  64-bit. A parser bug that overflows `usize` in the browser cannot overflow the same way natively.
+- Anything JS-boundary-shaped: `wasm-bindgen` glue, worker messaging, browser-only APIs.
+- Whatever a model, scene or effect looks like on screen beyond "something drew and no error
+  fired." `native.sh` takes screenshots but does not diff them against anything; a rendering
+  regression that still avoids a GL error and still draws *something* passes both gates. `frame.ts`
+  (above) is the tool that checks correctness, and only for a zone a capture exists of.
+- Coverage is narrower by default: `native.sh` runs one model and two scene/level assets, not the
+  nine `.avfx` effects the browser gate's full run walks. Nothing stops `--smoke` from taking more
+  steps; `smoke/native.sh` just does not ask for more yet.
+
+### Comparability with the browser gate
+Both gates can be pointed at the same assets: `native.sh`'s `steps` array and `smoke.ts`'s
+`MODEL`/`SCENE`/`LEVEL` defaults were kept in sync (`bg/ex1/01_roc_r2/dun/r2d1/...`) for exactly
+this reason, so a red run in one is checkable against the other on identical input. Measured on this
+machine (`fourier`), both under software rendering (`native.sh`'s Xvfb runs Mesa's `llvmpipe`,
+`run.sh` runs SwiftShader): opening the model, toggling game shaders, and opening both the `.lgb`
+and the `.lvb` took **~36s** end-to-end natively versus **~93s** for the browser gate's model +
+shaders + channel sweep + scene + level phases (before any `.avfx` effect). `native.sh` run against
+the machine's real GPU instead of Xvfb (an invisible window on the live desktop session, not
+something the script does by default) took the same shape of time; the 3-4x gap is the wasm
+build, the browser launch and the network fetches `native.sh` skips, not the renderer. The wasm
+build itself (trunk, dev profile) took ~41s on top of the browser gate's run time once; `native.sh`'s
+own dev build took ~6s incrementally or ~42s clean, so on a clean checkout the two are closer than
+the run-time numbers alone suggest, and the gap grows every time either gate runs again without a
+rebuild.

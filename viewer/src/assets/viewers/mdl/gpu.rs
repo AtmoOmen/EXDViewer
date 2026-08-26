@@ -113,14 +113,16 @@ impl Shaded {
 /// anything with slices is in the graph's own store, since egui holds nothing but planes.
 #[derive(Clone)]
 pub enum Bound {
-    Plane(TextureId),
+    /// The anisotropy the material's own sampler asks for, since egui's texture manager owns the
+    /// object and has no field for it; `0.0` asks for none.
+    Plane(TextureId, f32),
     Stacked(Arc<str>),
 }
 
 impl Bound {
-    pub fn plane(&self) -> Option<TextureId> {
+    pub fn plane(&self) -> Option<(TextureId, f32)> {
         match self {
-            Self::Plane(held) => Some(*held),
+            Self::Plane(held, aniso) => Some((*held, *aniso)),
             Self::Stacked(_) => None,
         }
     }
@@ -128,7 +130,7 @@ impl Bound {
     pub fn stacked(&self) -> Option<&str> {
         match self {
             Self::Stacked(held) => Some(held),
-            Self::Plane(_) => None,
+            Self::Plane(..) => None,
         }
     }
 }
@@ -1097,14 +1099,16 @@ impl Game {
         };
         let mut unit = 0;
         for texture in &held.textures {
+            let mut aniso = 0.0;
             let bound = match texture.kind {
                 program::Kind::Plane => {
                     let held = match texture.id {
                         TABLE => table,
-                        id => shaded
-                            .bound(id)
-                            .and_then(Bound::plane)
-                            .and_then(|held| painter.texture(held)),
+                        id => {
+                            let plane = shaded.bound(id).and_then(Bound::plane);
+                            aniso = plane.map_or(0.0, |(_, aniso)| aniso);
+                            plane.and_then(|(held, _)| painter.texture(held))
+                        }
                     };
                     match held {
                         Some(held) => held,
@@ -1127,6 +1131,7 @@ impl Game {
                 unit,
                 bound,
                 deferred::target(texture.kind),
+                aniso,
             );
             unit += 1;
         }

@@ -28,14 +28,17 @@ fn chunks(root: &str) -> Vec<PathBuf> {
 fn main() {
     let mut arguments = std::env::args().skip(1);
     let Some(root) = arguments.next() else {
-        eprintln!("usage: coverage <dir> [reasons]");
+        eprintln!("usage: coverage <dir> [reasons] [perfile]");
         return;
     };
-    let reasons = arguments.next().is_some();
+    let flags: Vec<String> = arguments.collect();
+    let reasons = flags.iter().any(|held| held == "reasons");
+    let perfile = flags.iter().any(|held| held == "perfile");
 
     let (mut whole, mut partial, mut unread, mut broken) = (0usize, 0, 0, 0);
     let (mut read, mut raw) = (0usize, 0);
-    let mut why = BTreeMap::<String, usize>::new();
+    let mut by_function = BTreeMap::<String, usize>::new();
+    let mut by_line = BTreeMap::<String, usize>::new();
     let files = chunks(&root);
 
     for file in &files {
@@ -53,18 +56,25 @@ fn main() {
         let held = luadec::decompile(&chunk);
         read += held.functions;
         raw += held.disassembled;
+        if perfile {
+            println!("{}\t{}\t{}", file.display(), held.functions, held.disassembled);
+        }
         match (held.functions, held.disassembled) {
             (_, 0) => whole += 1,
             (0, _) => unread += 1,
             _ => partial += 1,
         }
         if reasons {
-            // What a reason costs is the block of instructions it leaves commented, so the lines
-            // are counted rather than the functions.
+            // A function that fails to read leaves one leading "not read as source" line, so that
+            // is what is counted per function; the rest of the block is lines, counted too because
+            // that says how much of the output a reason costs.
             let mut open: Option<String> = None;
             for line in &held.lines {
                 match line.split("-- -- not read as source: ").nth(1) {
-                    Some(reason) => open = Some(reason.to_owned()),
+                    Some(reason) => {
+                        *by_function.entry(reason.to_owned()).or_default() += 1;
+                        open = Some(reason.to_owned());
+                    }
                     None => {
                         if !line.trim_start().starts_with("--") {
                             open = None;
@@ -72,7 +82,7 @@ fn main() {
                     }
                 }
                 if let Some(reason) = &open {
-                    *why.entry(reason.clone()).or_default() += 1;
+                    *by_line.entry(reason.clone()).or_default() += 1;
                 }
             }
         }
@@ -85,11 +95,12 @@ fn main() {
     println!("  broken   {broken}");
     println!("functions {} of {} read as source", read, read + raw);
     if reasons {
-        let mut ordered: Vec<_> = why.into_iter().collect();
+        let mut ordered: Vec<_> = by_function.into_iter().collect();
         ordered.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
-        println!("\ncommented lines each reason leaves:");
+        println!("\nfunctions each reason leaves as bytecode (with commented lines that costs):");
         for (reason, count) in ordered {
-            println!("  {count:>7}  {reason}");
+            let lines = by_line.get(&reason).copied().unwrap_or_default();
+            println!("  {count:>7} functions, {lines:>7} lines  {reason}");
         }
     }
 }

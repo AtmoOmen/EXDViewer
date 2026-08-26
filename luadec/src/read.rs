@@ -56,6 +56,10 @@ struct Reader<'a> {
     upvalues: Vec<String>,
     /// Registers below this hold locals; the rest are the expression under construction.
     active: usize,
+    /// Whether the instruction being read is the function's very first. `luaK_nil` skips the
+    /// `LOADNIL` a fresh register would otherwise need there, trusting the call convention's own
+    /// guarantee that every register up to the stack size starts out nil.
+    entry: bool,
     declared: usize,
     /// Where a call left a run of results whose length only the reader of them knows.
     open: Option<usize>,
@@ -193,6 +197,7 @@ fn function(
         names: parameter_names(held),
         upvalues,
         active: parameters,
+        entry: true,
         declared: 0,
         open: None,
         until: None,
@@ -340,7 +345,7 @@ fn touches(held: Instruction, reads: &mut Vec<usize>) -> Option<usize> {
             reads.extend(a + 1..=a + b.max(1));
             None
         }
-        Opcode::Vararg => Some(a + c.saturating_sub(1)),
+        Opcode::Vararg => Some(a + b.saturating_sub(2)),
         Opcode::Jmp | Opcode::Close | Opcode::Unknown(_) => None,
     }
 }
@@ -745,12 +750,19 @@ impl<'a> Reader<'a> {
             .skip(register + 1)
             .any(|slot| !matches!(slot, Slot::Empty))
         {
-            self.declare(register + 1)?;
+            // Further pieces of the same call or vararg go with it into the one declaration, or the
+            // registers nothing ever named would be left as a `Rest` no later read resolves.
+            let mut top = register + 1;
+            while matches!(self.slots.get(top), Some(Slot::Rest)) {
+                top += 1;
+            }
+            self.declare(top)?;
             return self.named(register);
         }
         match self.slots.get_mut(register) {
             Some(slot) => match std::mem::take(slot) {
                 Slot::Value(held) => Ok(held),
+                Slot::Empty if self.entry => Ok(Expr::Nil),
                 _ => Err("an instruction reads a register that holds nothing"),
             },
             None => Err("an instruction reads a register outside the stack"),
@@ -1009,6 +1021,7 @@ impl<'a> Reader<'a> {
         if let Some((count, false_target)) = choose(&tests)
             && false_target == end + 1
             && tests.get(count - 1).is_some_and(|test| test.after <= end)
+            && !until_tail(&tests, pc)
         {
             let condition = self.condition(&tests, count, pc)?;
             let body = self.block(tests[count - 1].after, end, escape, None)?;
@@ -1245,6 +1258,11 @@ impl<'a> Reader<'a> {
     ) -> Reading<usize> {
         let held = self.tests(pc, hi);
         let tests = &held[..self.unbroken(&held)];
+        if let Some(head) = until
+            && until_tail(tests, head)
+        {
+            return self.until_condition(&held, pc, head);
+        }
         let Some((count, false_target)) = choose(tests) else {
             // The chain runs backwards, which is how a `repeat` says where its body began.
             return match until {
@@ -1511,10 +1529,15 @@ impl<'a> Reader<'a> {
         let a = usize::from(instruction.a());
         let (b, c) = (instruction.b(), instruction.c());
         let next = self.after(pc);
+        self.entry = pc == 0;
 
         match instruction.opcode() {
             Opcode::Move => {
-                if matches!(self.slots.get(usize::from(b)), Some(Slot::Rest)) {
+                // A spread always starts from the top of the run its call or vararg left, working
+                // down; a register with a further one still waiting above it is read on its own.
+                if matches!(self.slots.get(usize::from(b)), Some(Slot::Rest))
+                    && !matches!(self.slots.get(usize::from(b) + 1), Some(Slot::Rest))
+                {
                     return self.spread(pc, usize::from(b));
                 }
                 let held = self.take(usize::from(b))?;
@@ -1888,6 +1911,16 @@ impl<'a> Reader<'a> {
         }
         Ok(closure(held, upvalues, self.depth + 1, &mut self.counts))
     }
+}
+
+/// Whether a chain runs, with no real statement breaking it, all the way to a jump back to `head` --
+/// the shape a `repeat`'s own `until` takes, however short a prefix `choose` can otherwise explain as
+/// an unrelated `if` or `while` guard. Contiguity is what tells the two apart: an unrelated jump that
+/// only happens to collapse onto the head sits behind real body code, while an `until`'s own tests run
+/// straight into one another.
+fn until_tail(tests: &[Test], head: usize) -> bool {
+    tests.last().is_some_and(|test| test.target == head)
+        && tests.windows(2).all(|pair| pair[0].after == pair[1].test)
 }
 
 /// How many conditionals of a chain belong to one condition, and where failing it lands. The longest

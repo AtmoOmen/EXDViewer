@@ -319,11 +319,11 @@ const STAR_PARAM_0: [f32; 3] = [0.000_554, 0.000_985, 1.418_846];
 pub const STAR_TWINKLE_RATE: f32 = 1.0;
 
 /// `cParam[2].x`: the horizon fade's own scale, `saturate(x * dot(cWorldMatrix.row1, position) + 1)`.
-/// Constant at 10 across two frames of x6f1 - but a third capture, Ultima Thule, reads 0 here
-/// instead, which a fixed engine constant cannot: this is very likely envb-sourced too, off a field
-/// this project has not placed. Kept at x6f1's own reading, which is right for that zone and wrong
-/// for at least Ultima Thule's own, where the term evaluates to `saturate(0 + 1) = 1` everywhere -
-/// no fade at all, which is plausible for a zone with no real horizon.
+/// Not envb: the exe carries this on the star object itself, next to [`STAR_TWINKLE_RATE`], as a
+/// literal `10.0` default and a boolean beside it that zeroes it instead. Nothing in this project
+/// places what sets that boolean, so this stays the engine's own default - right for every zone
+/// sampled but Ultima Thule, where the flag is set and the term evaluates to `saturate(0 + 1) = 1`
+/// everywhere: no fade at all, which is plausible for a zone with no real horizon.
 const STAR_HORIZON: f32 = 10.0;
 
 /// `cParam[3]`, read by neither shader tier 0 runs and not even constant across zones (Ultima Thule

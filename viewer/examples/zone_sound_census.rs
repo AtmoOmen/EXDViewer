@@ -16,6 +16,9 @@ use ironworks::{
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
 const PATHS: &str = "/home/asriel/Code/ironworks-formats/paths.txt";
 
+/// The env kind that names ambient sound assets. See `ironworks::file::envs`.
+const AMBIENT_SOUND_PATHS_KIND: u32 = 20;
+
 fn visit(
     group: &LayerGroup,
     tally: &mut Tally,
@@ -111,7 +114,11 @@ fn main() {
     let lvb_paths: Vec<&str> = list.lines().filter(|path| path.ends_with(".lvb")).collect();
     println!("{} .lvb paths in the list", lvb_paths.len());
 
-    let mut essb_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    // A scene names its ambient bed's `.essb` once for the whole zone (`environments()`); an
+    // `EnvSpace` instance names a second, region-local one. Kept apart: summing them conflates two
+    // different altitudes of "referenced by".
+    let mut essb_scene_refs: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut essb_envspace_refs: HashMap<String, HashSet<String>> = HashMap::new();
     let mut lvb_ok = 0;
     let mut lvb_absent = 0;
     let mut lvb_parse_error = 0;
@@ -135,7 +142,7 @@ fn main() {
         for environment in scene.environments() {
             let sound_path = environment.sound_asset_path();
             if !sound_path.is_empty() {
-                essb_refs
+                essb_scene_refs
                     .entry(sound_path.clone())
                     .or_default()
                     .insert(path.to_owned());
@@ -143,33 +150,52 @@ fn main() {
         }
 
         for group in scene.layer_groups() {
-            visit(group, &mut tally, &ironworks, path, &mut essb_refs, true);
+            visit(group, &mut tally, &ironworks, path, &mut essb_envspace_refs, true);
         }
         for lgb_path in scene.layer_group_paths() {
             if let Ok(file) = ironworks.file::<lgb::LayerGroupFile>(lgb_path) {
-                visit(file.group(), &mut tally, &ironworks, path, &mut essb_refs, false);
+                visit(file.group(), &mut tally, &ironworks, path, &mut essb_envspace_refs, false);
             }
         }
     }
 
     println!("lvb parsed ok {lvb_ok}, absent from install {lvb_absent}, parse error on real bytes {lvb_parse_error}");
-    println!(
-        "essb referenced by at least one lvb: {}",
-        essb_refs.len()
-    );
-    let shared = essb_refs.values().filter(|lvbs| lvbs.len() > 1).count();
-    println!("essb referenced by more than one lvb: {shared}");
-    for (path, lvbs) in essb_refs.iter().filter(|(_, lvbs)| lvbs.len() > 1) {
-        println!("  {path}  x{}", lvbs.len());
+    for (label, refs) in [
+        ("a scene's own environment list", &essb_scene_refs),
+        ("an EnvSpace instance", &essb_envspace_refs),
+    ] {
+        let shared = refs.values().filter(|lvbs| lvbs.len() > 1).count();
+        println!(
+            "essb named by {label}: {} distinct, {shared} named by more than one lvb",
+            refs.len()
+        );
+        for (path, lvbs) in refs.iter().filter(|(_, lvbs)| lvbs.len() > 1) {
+            println!("  {path}  x{}", lvbs.len());
+        }
     }
 
     let essb_paths: Vec<&str> = list.lines().filter(|path| path.ends_with(".essb")).collect();
     let mut essb_ok = 0;
     let mut essb_absent = 0;
     let mut essb_parse_error = 0;
+    let mut ambient_scd: HashSet<String> = HashSet::new();
     for path in &essb_paths {
         match ironworks.file::<essb::SoundEnvironmentFile>(path) {
-            Ok(_) => essb_ok += 1,
+            Ok(file) => {
+                essb_ok += 1;
+                for weather in file.environments().weathers() {
+                    for set in weather.sets() {
+                        if set.kind() != AMBIENT_SOUND_PATHS_KIND {
+                            continue;
+                        }
+                        for keyframe in set.keyframes() {
+                            ambient_scd.extend(
+                                keyframe.paths().filter(|path| !path.is_empty()).map(str::to_owned),
+                            );
+                        }
+                    }
+                }
+            }
             Err(_) => match ironworks.file::<Vec<u8>>(path) {
                 Ok(_) => essb_parse_error += 1,
                 Err(_) => essb_absent += 1,
@@ -180,6 +206,30 @@ fn main() {
         "\n.essb total in path list {}, parse ok {essb_ok}, absent from install {essb_absent}, parse error on real bytes {essb_parse_error}",
         essb_paths.len()
     );
+
+    println!(
+        "\ndistinct .scd named by an essb's Ambient sound paths set: {}",
+        ambient_scd.len()
+    );
+    let mut ambient_ok = 0;
+    let mut ambient_missing = 0;
+    let mut ambient_codec: BTreeMap<String, usize> = BTreeMap::new();
+    for path in &ambient_scd {
+        match ironworks.file::<SoundContainer>(path) {
+            Ok(container) => {
+                ambient_ok += 1;
+                for entry in container.entries() {
+                    *ambient_codec.entry(format!("{:?}", entry.format())).or_default() += 1;
+                }
+            }
+            Err(_) => ambient_missing += 1,
+        }
+    }
+    println!("  resolved: {ambient_ok}  missing: {ambient_missing}");
+    println!("  codec of every stream inside those .scd:");
+    for (codec, count) in &ambient_codec {
+        println!("    {codec}: {count}");
+    }
 
     println!("\nEnvSpace instances placed: {}", tally.env_spaces);
     for (shape, count) in &tally.env_space_shape {

@@ -791,8 +791,8 @@ fn assemble(scene: &Scene, baked: &[BakedMaterial]) -> Result<Vec<u8>> {
 
     let has_skin = match &scene.skeleton {
         Some(skeleton) => {
-            let mut joints = skeleton_nodes(skeleton, &mut nodes);
-            root_children.extend(joints.iter().copied());
+            let (mut joints, roots) = skeleton_nodes(skeleton, &mut nodes);
+            root_children.extend(roots);
             let fallback_node = nodes.len() as u32;
             nodes.push(json!({ "name": "export_identity" }));
             root_children.push(fallback_node);
@@ -865,7 +865,11 @@ fn assemble(scene: &Scene, baked: &[BakedMaterial]) -> Result<Vec<u8>> {
     write_glb(&document, &writer.bin)
 }
 
-fn skeleton_nodes(skeleton: &Skeleton, nodes: &mut Vec<Value>) -> Vec<u32> {
+/// Writes one node per bone and returns every one of their indices, in the model's own bone
+/// order: `JOINTS_0`/`JOINTS_1` reference a skin's `joints` array positionally, and that array is
+/// built straight from this order, so a caller must not reorder or filter it down to roots alone.
+/// The second return is just the roots, for hanging the rig off the scene's own root node.
+fn skeleton_nodes(skeleton: &Skeleton, nodes: &mut Vec<Value>) -> (Vec<u32>, Vec<u32>) {
     let base = nodes.len() as u32;
     let indices: Vec<u32> = (0..skeleton.names.len() as u32).map(|at| base + at).collect();
     let mut children: Vec<Vec<u32>> = vec![Vec::new(); skeleton.names.len()];
@@ -889,7 +893,7 @@ fn skeleton_nodes(skeleton: &Skeleton, nodes: &mut Vec<Value>) -> Vec<u32> {
             "matrix": local.to_cols_array(),
         }));
     }
-    roots
+    (indices, roots)
 }
 
 fn primitive_json(primitive: &Primitive, writer: &mut Writer) -> Value {

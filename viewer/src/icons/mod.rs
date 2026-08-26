@@ -27,6 +27,10 @@ use refs::{IconRefs, Progress, Use};
 
 const ZOOM_STEPS: [f32; 6] = [32.0, 40.0, 48.0, 64.0, 80.0, 96.0];
 const TREE_WIDTH: f32 = 320.0;
+const TREE_MIN_WIDTH: f32 = 160.0;
+const DETAILS_WIDTH: f32 = 320.0;
+/// Set by the Copy / Export PNG buttons beside each other; narrower and they overflow.
+const DETAILS_MIN_WIDTH: f32 = 220.0;
 /// How many cells the grid adds each time the scroll reaches the end.
 const PAGE: usize = 360;
 /// How many decoded icons the grid will let egui hold before it starts giving them back.
@@ -312,6 +316,7 @@ impl IconBrowser {
 
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) {
         CollapsibleSidePanel::new("icon_tree", Side::Left)
+            .min_width(TREE_MIN_WIDTH)
             .max_width(TREE_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
@@ -356,7 +361,9 @@ impl IconBrowser {
             ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
                 let mut category = self.category.clone();
                 let mut select = |ui: &mut egui::Ui, what: Category, label: String| {
-                    if Button::selectable(category == what, label).ui(ui).clicked() {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let response = Button::selectable(category == what, label.as_str()).ui(ui);
+                    if response.on_hover_text(&label).clicked() {
                         category = what;
                     }
                 };
@@ -718,6 +725,8 @@ impl IconBrowser {
         let mut nav = std::mem::take(&mut self.nav);
         CollapsibleSidePanel::new("icon_info", Side::Right)
             .collapsed_width(0.0)
+            .min_width(DETAILS_MIN_WIDTH)
+            .max_width(DETAILS_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;
@@ -800,13 +809,16 @@ impl IconBrowser {
         }
 
         ui.add_space(4.0);
-        ui.label(
-            RichText::new(match size {
-                Some([w, h]) => format!("{w} × {h} · {path}"),
-                None => path.clone(),
-            })
-            .weak()
-            .small(),
+        ui.add(
+            egui::Label::new(
+                RichText::new(match size {
+                    Some([w, h]) => format!("{w} × {h} · {path}"),
+                    None => path.clone(),
+                })
+                .weak()
+                .small(),
+            )
+            .truncate(),
         );
 
         ui.add_space(4.0);

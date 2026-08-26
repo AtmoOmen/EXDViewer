@@ -940,10 +940,15 @@ fn pixel_size(ctx: &egui::Context, source: &egui::ImageSource<'static>) -> Optio
     }
 }
 
-/// Draw an icon centered in `rect` at its own aspect. `Image::paint_at` fills whatever rect it is
-/// given, which stretches everything that is not square.
+/// Draw an icon centered in `rect` at its own aspect, shrinking it to fit but never enlarging it
+/// past its own pixels. `Image::paint_at` fills whatever rect it is given, which stretches
+/// everything that is not square; the default `Fraction` fit instead grows an icon smaller than
+/// `rect` to fill it, which is what blew up the grid's small icons at high zoom.
 pub(crate) fn fit_into(ui: &egui::Ui, source: egui::ImageSource<'static>, rect: egui::Rect) {
-    let image = egui::Image::new(source).maintain_aspect_ratio(true);
+    let image = egui::Image::new(source)
+        .maintain_aspect_ratio(true)
+        .fit_to_original_size(1.0)
+        .max_size(rect.size());
     let size = image
         .load_and_calc_size(ui, rect.size())
         .unwrap_or(rect.size());

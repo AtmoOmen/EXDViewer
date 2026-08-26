@@ -40,6 +40,10 @@ pub struct Player {
     started_at: f64,
     seek_req: SeekCell,
     generation: Generation,
+    /// Whether the current track claims OS media-session integration (lock-screen/hardware-key
+    /// controls, the focus-token anchor). Set by [`Self::play`]; a one-shot preview never sets it.
+    announce: bool,
+    session_ready: bool,
     _handlers: Vec<Closure<dyn FnMut()>>,
     _seek_handlers: Vec<Closure<dyn FnMut(MediaSessionActionDetails)>>,
     _ended_handler: Option<Closure<dyn FnMut()>>,
@@ -60,10 +64,38 @@ impl Player {
             .connect_with_audio_node(&context.destination())
             .map_err(js("connect analyser"))?;
 
-        let mut handlers = Vec::new();
+        let seek_req: SeekCell = Rc::new(RefCell::new(None));
+
+        Ok(Self {
+            context,
+            gain,
+            analyser,
+            anchor: None,
+            source: Rc::new(RefCell::new(None)),
+            buffer: None,
+            loop_region: None,
+            duration: 0.0,
+            started_at: 0.0,
+            seek_req,
+            generation: Rc::new(std::cell::Cell::new(0)),
+            announce: false,
+            session_ready: false,
+            _handlers: Vec::new(),
+            _seek_handlers: Vec::new(),
+            _ended_handler: None,
+        })
+    }
+
+    /// Wires the lock-screen/hardware-key surface the first time a track claims it, so a preview
+    /// player that never plays an announced track never touches `navigator.mediaSession` at all.
+    fn ensure_session(&mut self) {
+        if self.session_ready {
+            return;
+        }
+        self.session_ready = true;
         let anchor = match focus_token() {
             Ok(anchor) => {
-                handlers.extend(bind_anchor(&context, &anchor));
+                self._handlers.extend(bind_anchor(&self.context, &anchor));
                 Some(anchor)
             }
             Err(error) => {
@@ -71,29 +103,13 @@ impl Player {
                 None
             }
         };
-
-        let source: SourceCell = Rc::new(RefCell::new(None));
-        handlers.extend(register_media_session(&context, &source, anchor.as_ref()));
-
-        let seek_req: SeekCell = Rc::new(RefCell::new(None));
-        let seek_handlers = register_seek_handlers(&seek_req);
-
-        Ok(Self {
-            context,
-            gain,
-            analyser,
-            anchor,
-            source,
-            buffer: None,
-            loop_region: None,
-            duration: 0.0,
-            started_at: 0.0,
-            seek_req,
-            generation: Rc::new(std::cell::Cell::new(0)),
-            _handlers: handlers,
-            _seek_handlers: seek_handlers,
-            _ended_handler: None,
-        })
+        self._handlers.extend(register_media_session(
+            &self.context,
+            &self.source,
+            anchor.as_ref(),
+        ));
+        self._seek_handlers = register_seek_handlers(&self.seek_req);
+        self.anchor = anchor;
     }
 
     pub fn spectrum(&self, out: &mut [u8]) {
@@ -112,7 +128,9 @@ impl Player {
         }
     }
 
-    pub fn play(&mut self, audio: Decoded) -> Result<()> {
+    /// `announce` claims OS media-session integration (lock-screen/hardware-key controls) for
+    /// this playback; only a looping track played from the Music tab should pass `true`.
+    pub fn play(&mut self, audio: Decoded, announce: bool) -> Result<()> {
         self.stop();
 
         let channels = audio.channels as usize;
@@ -143,13 +161,19 @@ impl Player {
             .zip(audio.loop_end)
             .map(|(start, end)| (f64::from(start) / rate, f64::from(end) / rate));
         self.buffer = Some(buffer);
+        self.announce = announce;
+        if announce {
+            self.ensure_session();
+        }
 
         self.start_source(0.0)?;
         let _ = self.context.resume();
-        if let Some(anchor) = &self.anchor {
-            let _ = anchor.play();
+        if self.announce {
+            if let Some(anchor) = &self.anchor {
+                let _ = anchor.play();
+            }
+            set_playback_state(MediaSessionPlaybackState::Playing);
         }
-        set_playback_state(MediaSessionPlaybackState::Playing);
         self.publish_position();
         Ok(())
     }
@@ -201,15 +225,18 @@ impl Player {
             let attached_at = generation.get();
             let cell = self.source.clone();
             let anchor = self.anchor.clone();
+            let announce = self.announce;
             let handler = Closure::<dyn FnMut()>::new(move || {
                 if generation.get() != attached_at {
                     return;
                 }
                 cell.borrow_mut().take();
-                if let Some(anchor) = &anchor {
-                    let _ = anchor.pause();
+                if announce {
+                    if let Some(anchor) = &anchor {
+                        let _ = anchor.pause();
+                    }
+                    set_playback_state(MediaSessionPlaybackState::None);
                 }
-                set_playback_state(MediaSessionPlaybackState::None);
             });
             #[allow(deprecated)]
             source.set_onended(Some(handler.as_ref().unchecked_ref()));
@@ -237,6 +264,9 @@ impl Player {
     }
 
     pub fn set_metadata(&self, title: &str) {
+        if !self.announce {
+            return;
+        }
         if let Some(session) = media_session()
             && let Ok(metadata) = MediaMetadata::new()
         {
@@ -246,31 +276,45 @@ impl Player {
     }
 
     pub fn pause(&self) {
-        if let Some(anchor) = &self.anchor {
+        if self.announce
+            && let Some(anchor) = &self.anchor
+        {
             let _ = anchor.pause();
         }
         let _ = self.context.suspend();
-        set_playback_state(MediaSessionPlaybackState::Paused);
+        if self.announce {
+            set_playback_state(MediaSessionPlaybackState::Paused);
+        }
     }
 
     pub fn resume(&self) {
-        if let Some(anchor) = &self.anchor {
+        if self.announce
+            && let Some(anchor) = &self.anchor
+        {
             let _ = anchor.play();
         }
         let _ = self.context.resume();
-        set_playback_state(MediaSessionPlaybackState::Playing);
+        if self.announce {
+            set_playback_state(MediaSessionPlaybackState::Playing);
+        }
         self.publish_position();
     }
 
     pub fn stop(&mut self) {
         self.discard_source();
-        if let Some(anchor) = &self.anchor {
-            let _ = anchor.pause();
+        if self.announce {
+            if let Some(anchor) = &self.anchor {
+                let _ = anchor.pause();
+            }
+            set_playback_state(MediaSessionPlaybackState::None);
+            if let Some(session) = media_session() {
+                session.set_metadata(None);
+            }
         }
         self.buffer = None;
         self.loop_region = None;
         self.duration = 0.0;
-        set_playback_state(MediaSessionPlaybackState::None);
+        self.announce = false;
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -286,7 +330,7 @@ impl Player {
     }
 
     fn publish_position(&self) {
-        if self.duration <= 0.0 {
+        if !self.announce || self.duration <= 0.0 {
             return;
         }
         if let Some(session) = media_session() {

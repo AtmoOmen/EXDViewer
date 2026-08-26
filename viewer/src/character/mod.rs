@@ -736,7 +736,18 @@ impl CharacterBuilder {
                 .filter(|path| !self.held.contains_key(*path))
                 .cloned()
                 .collect();
-            match missing.is_empty() {
+            // A worn piece's own imc says which material_id its variant actually draws with, which
+            // can differ from the variant itself. Fetched alongside so it is already in hand the
+            // first time this piece is dressed, and tolerantly: a missing or unreadable imc just
+            // leaves the variant number to stand for its own material_id, same as it did before.
+            let missing_imc: Vec<String> = self
+                .worn
+                .iter()
+                .filter(|(_, variant)| *variant != 0)
+                .filter_map(|(path, _)| mdl::imc_path(path))
+                .filter(|path| !self.held.contains_key(path))
+                .collect();
+            match missing.is_empty() && missing_imc.is_empty() {
                 true => self.dress(),
                 false => {
                     let files = backend.files().clone();
@@ -745,6 +756,11 @@ impl CharacterBuilder {
                         for path in missing {
                             let bytes = files.read(&path).await?;
                             read.push((path, bytes));
+                        }
+                        for path in missing_imc {
+                            if let Ok(bytes) = files.read(&path).await {
+                                read.push((path, bytes));
+                            }
                         }
                         Ok(read)
                     }));
@@ -1156,10 +1172,18 @@ impl CharacterBuilder {
                         })
                         .clone()
                 });
+                let material = mdl::material::resolve_variant(
+                    path,
+                    *variant,
+                    mdl::imc_path(path)
+                        .and_then(|imc| self.held.get(&imc))
+                        .map(Vec::as_slice),
+                );
                 Some(mdl::Source {
                     path: path.clone(),
                     bytes: self.held.get(path)?.clone(),
                     variant: *variant,
+                    material,
                     deform,
                     skin: self.skin,
                 })
@@ -1948,6 +1972,7 @@ impl CharacterBuilder {
                     self.choices = held.choices.iter().copied().collect();
                     self.attire = Attire::Npc;
                     self.chosen = [None; 10];
+                    self.stains = held.stains;
                     self.stood = false;
                 }
             }
@@ -2332,7 +2357,17 @@ fn numbered(ui: &mut egui::Ui, choice: &Choice, selected: bool, why: &str) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::resolve;
+    use super::{Gear, resolve};
+
+    /// Tataru's own `ModelHead` quad: set 5 (`e0005`), variant 224. The dye that goes with it is a
+    /// separate `ENpcBase` column, not packed into this word.
+    #[test]
+    fn gear_reads_set_and_variant() {
+        let gear = Gear::read(0x00E0_0005).unwrap();
+        assert_eq!(gear.set, 5);
+        assert_eq!(gear.variant, 224);
+        assert!(Gear::read(0).is_none());
+    }
 
     /// A clan and gender name the body they are built on, and the variant says how grown it is.
     #[test]

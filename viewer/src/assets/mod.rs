@@ -27,7 +27,7 @@ use crate::data::listing::{Listed, Listing};
 use crate::excel::provider::ExcelProvider;
 use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::{LANGUAGE, api_base};
-use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise, empty_view};
+use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise, empty_view, export};
 
 use pathlist::{PathList, Presence};
 
@@ -823,6 +823,8 @@ pub struct AssetBrowser {
     sniffed: Option<Format>,
     /// Rendered view of `bytes`, decoded once per selection.
     preview: Option<Preview>,
+    /// An export in flight, or what the last one finished as.
+    export: Option<TrackedPromise<()>>,
     /// Assets the current preview references, such as a material's textures.
     deps: deps::Deps,
     /// Set when the selection is an unnamed file, which has to be read by hash rather than by path.
@@ -865,6 +867,7 @@ impl Default for AssetBrowser {
             sniffed: None,
             deps: deps::Deps::default(),
             preview: None,
+            export: None,
             selected_unnamed: None,
             mip: 0,
             slice: 0,
@@ -1619,6 +1622,7 @@ impl AssetBrowser {
     }
 
     fn detail_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
+        self.export.take_if(|promise| promise.try_get().is_some());
         // A material links through to the textures it binds, so the panel can ask for a new
         // selection the same way the tree does.
         let mut follow = None;
@@ -1678,6 +1682,21 @@ impl AssetBrowser {
                             // nothing to choose between.
                             if !empty {
                                 self.viewer_picker(ui, &path);
+                            }
+                            if !empty
+                                && let Load::Ready((_, bytes)) = &self.bytes
+                            {
+                                let viewer = self.viewer.unwrap_or(self.recommended(&path));
+                                let name = crate::utils::file_name(&path);
+                                let mut choices = vec![export::Choice::raw(bytes, name)];
+                                if let Some(preview) = &self.preview {
+                                    choices.extend(preview.export_choices(viewer, bytes, ui.ctx()));
+                                }
+                                let busy = self.export.is_some();
+                                let promise = export::menu(ui, "Export", None, busy, choices);
+                                if promise.is_some() {
+                                    self.export = promise;
+                                }
                             }
                             match Kind::of(&path) {
                                 Kind::Sheet => {

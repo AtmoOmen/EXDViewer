@@ -1,6 +1,4 @@
-use std::cell::RefCell;
-use std::io::{Cursor, Seek, Write};
-use std::rc::Rc;
+use std::io::Cursor;
 
 use anyhow::{Result, anyhow};
 use ironworks::file::scd::{Codec, SoundEntry};
@@ -54,26 +52,6 @@ pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
     Ok(decoded)
 }
 
-/// A `Write + Seek` sink `hound::WavWriter` can own while this function keeps its own handle to
-/// read the bytes back out, since `WavWriter` has no way to hand its writer back.
-#[derive(Clone)]
-struct SharedSink(Rc<RefCell<Cursor<Vec<u8>>>>);
-
-impl Write for SharedSink {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.borrow_mut().write(buf)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.borrow_mut().flush()
-    }
-}
-
-impl Seek for SharedSink {
-    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
-        self.0.borrow_mut().seek(pos)
-    }
-}
-
 /// Encode decoded PCM as a 16-bit PCM WAV file.
 pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
     let spec = hound::WavSpec {
@@ -82,8 +60,8 @@ pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let sink = SharedSink(Rc::new(RefCell::new(Cursor::new(Vec::new()))));
-    let mut writer = hound::WavWriter::new(sink.clone(), spec)?;
+    let mut buffer = Cursor::new(Vec::new());
+    let mut writer = hound::WavWriter::new(&mut buffer, spec)?;
     for &sample in &audio.samples {
         // A full-scale negative sample maps to the true i16::MIN rather than clipping a step
         // short of it, since the positive and negative ranges of i16 are not symmetric.
@@ -95,7 +73,7 @@ pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
         writer.write_sample(pcm)?;
     }
     writer.finalize()?;
-    Ok(sink.0.borrow().get_ref().clone())
+    Ok(buffer.into_inner())
 }
 
 const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;

@@ -196,6 +196,7 @@ mod tests {
     }
 
     enum Value {
+        Nil,
         Number(f64),
         Text(&'static str),
         Bool(bool),
@@ -213,6 +214,7 @@ mod tests {
             into.word(u32::try_from(self.constants.len()).unwrap());
             for constant in &self.constants {
                 match constant {
+                    Value::Nil => into.bytes.push(0),
                     Value::Number(held) => {
                         into.bytes.push(3);
                         into.bytes.extend(held.to_le_bytes());
@@ -525,6 +527,31 @@ mod tests {
         assert_eq!(
             source(held),
             "local v0 = true\nwhile v0 do\n\tlocal v1 = f()\n\tif v1 then\n\t\tg()\n\tend\nend"
+        );
+    }
+
+    /// An `or` of two tests guarding a `repeat`'s own backward jump is that loop's `until`, not a
+    /// truncated `while` guard -- even though the first test alone, read on its own, satisfies the
+    /// same rule a `while` head is chosen by.
+    #[test]
+    fn a_repeat_with_an_or_until_reads_as_one() {
+        let held = Proto {
+            code: vec![
+                abx(GETGLOBAL, 0, 0),
+                abc(CALL, 0, 1, 3),
+                abc(EQ, 1, 1, 0x101),
+                asbx(JMP, 0, 2),
+                abc(EQ, 0, 0x102, 1),
+                asbx(JMP, 0, -6),
+                abc(RETURN, 0, 1, 0),
+            ],
+            constants: vec![Value::Text("f"), Value::Nil, Value::Number(0.0)],
+            stack: 2,
+            ..Proto::default()
+        };
+        assert_eq!(
+            source(held),
+            "repeat\n\tlocal v0, v1 = f()\nuntil v1 == nil or 0 == v1"
         );
     }
 

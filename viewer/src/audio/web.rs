@@ -580,7 +580,11 @@ impl<K: Eq + Hash> Mixer<K> {
         let frames = audio.samples.len() / channels.max(1);
         let buffer = self
             .context
-            .create_buffer(audio.channels as u32, frames as u32, audio.sample_rate as f32)
+            .create_buffer(
+                audio.channels as u32,
+                frames as u32,
+                audio.sample_rate as f32,
+            )
             .map_err(js("create_buffer"))?;
         let mut channel = vec![0f32; frames];
         for ch in 0..channels {
@@ -616,7 +620,13 @@ impl<K: Eq + Hash> Mixer<K> {
             .map_err(js("connect source"))?;
         source.start().map_err(js("start"))?;
 
-        self.voices.insert(key, Voice { source, gain: node_gain });
+        self.voices.insert(
+            key,
+            Voice {
+                source,
+                gain: node_gain,
+            },
+        );
         Ok(())
     }
 

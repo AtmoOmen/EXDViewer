@@ -180,14 +180,20 @@ impl SoundStage {
             .iter()
             .enumerate()
             .map(|(index, placement)| {
-                (!placement.no_far_clip, placement.position.distance(eye), index)
+                (
+                    !placement.no_far_clip,
+                    placement.position.distance(eye),
+                    index,
+                )
             })
             .collect();
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
         ranked.truncate(MAX_VOICES);
 
-        let keep: HashSet<Key> =
-            ranked.iter().map(|&(_, _, index)| self.placements[index].key).collect();
+        let keep: HashSet<Key> = ranked
+            .iter()
+            .map(|&(_, _, index)| self.placements[index].key)
+            .collect();
         mixer.retain(|key| keep.contains(key));
 
         for (_, distance, index) in ranked {

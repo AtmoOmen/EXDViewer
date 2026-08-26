@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use anyhow::Result;
 use half::f16;
-use ironworks::file::{File, mtrl};
+use ironworks::file::{File, imc, mtrl};
 
 use super::gpu::TABLE_COLUMNS;
 
@@ -336,4 +336,23 @@ pub fn path(name: &str, variant: u16, skin: Option<u16>) -> Option<String> {
         _ => return None,
     };
     Some(format!("{directory}/{name}"))
+}
+
+/// The material variant a worn piece's `.imc` says `variant` actually draws with. Several variants
+/// commonly share one material to avoid duplicate files, so the folder a piece's material sits in
+/// is not always its own variant number. Falls back to `variant` wherever there is no imc to ask, it
+/// will not read, or it is silent about this one: that is the folder `variant` alone already named.
+pub fn resolve_variant(path: &str, variant: u16, imc_bytes: Option<&[u8]>) -> u16 {
+    if variant == 0 {
+        return variant;
+    }
+    let Some(bytes) = imc_bytes else {
+        return variant;
+    };
+    let Ok(image_change) = imc::ImageChange::read(Cursor::new(bytes.to_vec())) else {
+        return variant;
+    };
+    image_change
+        .entry(super::imc_part(path), variant)
+        .map_or(variant, |entry| u16::from(entry.material_id()))
 }

@@ -3,6 +3,7 @@ mod cloneable_error;
 mod collapsible_side_panel;
 mod color_theme;
 mod convertible_promise;
+pub mod export;
 mod icon_export;
 mod icon_loader;
 mod icon_manager;

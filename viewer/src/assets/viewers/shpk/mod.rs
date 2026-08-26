@@ -5,7 +5,6 @@ mod keys;
 mod list;
 mod merged;
 mod params;
-mod render;
 
 use std::collections::{HashMap, HashSet};
 
@@ -182,23 +181,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 }
 
 pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8]) {
-    let slot = package.state.with("drawing");
-    let mut drawing = ui.data(|data| data.get_temp::<bool>(slot)).unwrap_or(false);
-    ui.horizontal(|ui| {
-        if ui.selectable_label(!drawing, "Shaders").clicked() {
-            drawing = false;
-        }
-        if ui.selectable_label(drawing, "Render").clicked() {
-            drawing = true;
-        }
-    });
-    ui.data_mut(|data| data.insert_temp(slot, drawing));
-    match drawing {
-        // No scroll area around this: the list and the code each carry their own, and an outer one
-        // leaves the code unable to tell how much of the panel is left for it.
-        false => list::ui(ui, package, bytes),
-        true => render::ui(ui, package, bytes),
-    }
+    list::ui(ui, package, bytes);
 }
 
 /// Everything about the package that is not a shader. It sits beside the code rather than above it,

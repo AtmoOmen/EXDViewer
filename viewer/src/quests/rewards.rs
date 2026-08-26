@@ -190,13 +190,12 @@ fn item_row(
     hq: bool,
 ) -> Option<Action> {
     let mut action = None;
+    let resolved = name_icon(&catalog.item, item_id);
+    let icon_id = resolved.as_ref().map_or(0, |(_, icon_id)| *icon_id);
+    let name = resolved.map_or_else(|| format!("Item #{item_id}"), |(name, _)| name);
     ui.horizontal(|ui| {
-        icon(ui, index, item_id, ICON_SIZE);
+        icon(ui, index, icon_id, ICON_SIZE);
         let name_width = (ui.available_width() - TRAILING_WIDTH).max(40.0);
-        let name = match name_icon(&catalog.item, item_id) {
-            Some((name, _)) => name,
-            None => format!("Item #{item_id}"),
-        };
         action = link_label(ui, &name, name_width, "Item", item_id);
         if count > 1 {
             ui.label(format!("×{count}"));

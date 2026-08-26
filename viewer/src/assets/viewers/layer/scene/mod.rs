@@ -548,6 +548,14 @@ struct Light {
     glow: Option<Glow>,
 }
 
+/// A placed `.avfx` glow. Collected, not drawn: nothing in the scene fetches or steps it yet.
+struct Vfx {
+    placement: Mat4,
+    path: String,
+    layer: usize,
+    key: (u32, [u8; 4]),
+}
+
 /// A file the scene names beside itself and reads once: the boxes its lights are clipped against,
 /// how much of the sky reaches each of its parts, and the game's own textures its shaders read.
 enum Aside {
@@ -734,6 +742,7 @@ pub struct Scene {
     look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
+    effects: Vec<Vfx>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
     clips: HashMap<(u32, [u8; 4]), (Vec3, Vec3)>,
     clip: Aside,
@@ -996,6 +1005,7 @@ impl Scene {
             look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
+            effects: Vec::new(),
             clips: HashMap::new(),
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
@@ -1368,6 +1378,14 @@ impl Scene {
                                 ),
                                 key: reach(key, depth, instance.id()),
                                 glow,
+                            });
+                        }
+                        InstanceData::Vfx(vfx) if !vfx.asset_path().is_empty() => {
+                            self.effects.push(Vfx {
+                                placement: here,
+                                path: vfx.asset_path().clone(),
+                                layer: at,
+                                key: reach(key, depth, instance.id()),
                             });
                         }
                         _ => {}
@@ -3586,6 +3604,7 @@ impl Scene {
             step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
+            effects: self.effects.len(),
             casting: self.casts.iter().flatten().sum(),
             models: format!(
                 "{} of {}",
@@ -4024,6 +4043,7 @@ impl Scene {
                             "Lights",
                             format!("{} of {}", self.lamps().len(), self.lights.len()),
                         ),
+                        ("Effects placed, none drawn", self.effects.len().to_string()),
                         ("Wind", {
                             let count = self.models.iter().filter(|model| model.waving).count();
                             let plural = match count {

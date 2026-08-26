@@ -1,19 +1,19 @@
 //! Every (vertex, pixel) pair a drawing package's node table can select, translated to GLSL ES
-//! 3.00 and run through `glslangValidator`. This is the corpus this repo's own decompiler backend
-//! can build; a real driver (ANGLE on D3D11, which Firefox and Edge both use on Windows) validates
-//! and compiles far more strictly than the software rasterizers this repo's smoke gates run on, so
-//! a failure here can be invisible to both `smoke/native.sh` and `smoke/run.sh`.
+//! 3.00 and run through `glslangValidator`, batched into as few processes as argv allows: one
+//! shader per `glslangValidator` invocation costs ~17ms of process-spawn overhead alone (measured
+//! 2026-08-26), against ~0.1ms `glslangValidator` spends actually validating one file inside a
+//! batch of a thousand. Spawning per shader is what made a single package take 17 minutes;
+//! batching is what makes the whole corpus tractable in the foreground.
 //!
 //! `shpk_glsl_gate [sqpack dir] [package name ...]`
 //!
-//! The default package list (31 names) took 17 minutes for `character` alone measured
-//! 2026-08-26, so a whole-corpus run is a background job, not a quick check. A single argument is
-//! the sqpack dir, not a package name: `shpk_glsl_gate character` reads no such install, sweeps
-//! nothing and still exits clean. Name the packages after it: `shpk_glsl_gate
+//! A single argument is the sqpack dir, not a package name: `shpk_glsl_gate character` reads no
+//! such install, sweeps nothing and still exits clean. Name the packages after it: `shpk_glsl_gate
 //! /home/asriel/.xlcore/ffxiv/game/sqpack character hair`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use dxbc::chunks::ChunkData;
@@ -22,6 +22,10 @@ use ironworks::file::shpk::{self, ShaderPackage, Stage};
 use ironworks::sqpack::{Install, SqPack};
 
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+/// How many file arguments one `glslangValidator` invocation takes. Comfortably under Linux's
+/// `ARG_MAX` even at the longest paths this writes.
+const BATCH: usize = 3000;
 
 /// The packages a model can draw with, plus the fixed screen passes the model viewer runs over the
 /// whole frame. Read without their bytecode a package still carries its node table, so any of these
@@ -162,25 +166,53 @@ fn pages(outputs: &[u32], attachments: usize) -> Vec<Vec<u32>> {
         .collect()
 }
 
-fn validate(stage: &str, source: &str) -> Option<String> {
-    let extension = match stage {
-        "vs" => "vert",
-        _ => "frag",
-    };
-    let path =
-        std::env::temp_dir().join(format!("shpk_glsl_gate.{}.{extension}", std::process::id()));
-    std::fs::write(&path, source).ok()?;
-    let output = Command::new("glslangValidator")
-        .arg("-S")
-        .arg(extension)
-        .arg(&path)
-        .output()
-        .ok()?;
-    let _ = std::fs::remove_file(&path);
-    match output.status.success() {
-        true => None,
-        false => Some(String::from_utf8_lossy(&output.stdout).into_owned()),
+/// One shader written to disk, waiting for a batched `glslangValidator` pass.
+struct Queued {
+    path: PathBuf,
+    package: String,
+    vs: u32,
+    ps: u32,
+    stage: &'static str,
+}
+
+/// Runs every queued file through `glslangValidator`, `BATCH` at a time, and reads back which ones
+/// it rejected. A file absent from its own invocation's failing set is one glslangValidator moved
+/// past without an `ERROR` line, whether or not the batch as a whole exited clean.
+fn validate_all(queued: &[Queued]) -> Vec<Option<String>> {
+    let mut results: Vec<Option<String>> = vec![None; queued.len()];
+    let indexed: Vec<(usize, &Queued)> = queued.iter().enumerate().collect();
+    for chunk in indexed.chunks(BATCH) {
+        let args: Vec<&Path> = chunk.iter().map(|(_, q)| q.path.as_path()).collect();
+        let Ok(output) = Command::new("glslangValidator").args(&args).output() else {
+            continue;
+        };
+        if output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let headers: Vec<String> = chunk
+            .iter()
+            .map(|(_, q)| q.path.display().to_string())
+            .collect();
+        let mut current: Option<usize> = None;
+        let mut blocks: Vec<Vec<&str>> = vec![Vec::new(); chunk.len()];
+        for line in text.lines() {
+            if let Some(local) = headers.iter().position(|held| held == line) {
+                current = Some(local);
+                continue;
+            }
+            if let Some(local) = current {
+                blocks[local].push(line);
+            }
+        }
+        for (local, lines) in blocks.into_iter().enumerate() {
+            if lines.iter().any(|line| line.starts_with("ERROR")) {
+                let (global, _) = chunk[local];
+                results[global] = Some(lines.join("\n").trim().to_owned());
+            }
+        }
     }
+    results
 }
 
 fn main() {
@@ -189,7 +221,7 @@ fn main() {
 
     let asked: Vec<String> = std::env::args().skip(2).collect();
     let wanted: &[String] = match asked.is_empty() {
-        true => &NAMES
+        true => NAMES
             .iter()
             .map(|held| (*held).to_owned())
             .collect::<Vec<_>>()
@@ -205,36 +237,40 @@ fn main() {
         println!("glslangValidator not found on PATH; translating only, not validating");
     }
 
+    let out_dir = std::env::temp_dir().join(format!("shpk_glsl_gate.{}", std::process::id()));
+    std::fs::create_dir_all(&out_dir).expect("create output dir");
+
     let previous_hook = panic::take_hook();
     panic::set_hook(Box::new(|_| {}));
 
-    let (mut read_ok, mut read_missed) = (0usize, 0usize);
-    let mut pairs_seen = 0usize;
+    let mut missed: Vec<String> = Vec::new();
+    let mut per_package_pairs: HashMap<String, usize> = HashMap::new();
     let mut translate_failed: Vec<(String, u32, u32, String)> = Vec::new();
     let mut translate_panicked: Vec<(String, u32, u32, String)> = Vec::new();
-    let mut validate_failed: Vec<(String, u32, u32, &str, String)> = Vec::new();
-    let mut validated_ok = 0usize;
+    let mut queued: Vec<Queued> = Vec::new();
+    let mut written = 0usize;
 
     for name in wanted {
         let path = format!("shader/sm5/shpk/{name}.shpk");
         let bytes: Vec<u8> = match ironworks.file(&path) {
             Ok(bytes) => bytes,
             Err(_) => {
-                read_missed += 1;
+                missed.push(name.clone());
                 continue;
             }
         };
         let package = match ShaderPackage::parse(&bytes) {
             Ok(package) => package,
             Err(_) => {
-                read_missed += 1;
+                missed.push(name.clone());
                 continue;
             }
         };
-        read_ok += 1;
+        let held = pairs(&package);
+        per_package_pairs.insert(name.clone(), held.len());
+        println!("== {name}: {} pairs", held.len());
 
-        for (vs, ps) in pairs(&package) {
-            pairs_seen += 1;
+        for (vs, ps) in held {
             let result = panic::catch_unwind(AssertUnwindSafe(|| {
                 let vertex = program(&bytes, &package, vs)
                     .ok_or_else(|| "no vertex shader in the blob".to_owned())?;
@@ -282,20 +318,29 @@ fn main() {
             match result {
                 Ok(Ok(mut built)) => {
                     built.dedup();
-                    for (vertex_src, fragment_src) in built {
+                    for (at, (vertex_src, fragment_src)) in built.into_iter().enumerate() {
                         if !has_validator {
                             continue;
                         }
-                        if let Some(why) = validate("vs", &vertex_src) {
-                            validate_failed.push((name.clone(), vs, ps, "vertex", why));
-                        } else {
-                            validated_ok += 1;
-                        }
-                        if let Some(why) = validate("ps", &fragment_src) {
-                            validate_failed.push((name.clone(), vs, ps, "fragment", why));
-                        } else {
-                            validated_ok += 1;
-                        }
+                        let vert_path = out_dir.join(format!("{name}.{vs}.{ps}.{at}.vert"));
+                        let frag_path = out_dir.join(format!("{name}.{vs}.{ps}.{at}.frag"));
+                        std::fs::write(&vert_path, &vertex_src).expect("write shader");
+                        std::fs::write(&frag_path, &fragment_src).expect("write shader");
+                        written += 2;
+                        queued.push(Queued {
+                            path: vert_path,
+                            package: name.clone(),
+                            vs,
+                            ps,
+                            stage: "vertex",
+                        });
+                        queued.push(Queued {
+                            path: frag_path,
+                            package: name.clone(),
+                            vs,
+                            ps,
+                            stage: "fragment",
+                        });
                     }
                 }
                 Ok(Err(why)) => translate_failed.push((name.clone(), vs, ps, why)),
@@ -313,8 +358,50 @@ fn main() {
 
     panic::set_hook(previous_hook);
 
-    println!("read {read_ok} packages ({read_missed} missing or unparsable)");
-    println!("{pairs_seen} distinct (vertex, pixel) pairs across them");
+    println!("\n{written} shader files written to {}", out_dir.display());
+    let outcomes = match has_validator {
+        true => validate_all(&queued),
+        false => Vec::new(),
+    };
+
+    let mut per_package_ok: HashMap<String, usize> = HashMap::new();
+    let mut per_package_failed: HashMap<String, usize> = HashMap::new();
+    let mut validate_failed: Vec<(String, u32, u32, &str, String)> = Vec::new();
+    for (queued, outcome) in queued.iter().zip(&outcomes) {
+        match outcome {
+            None => *per_package_ok.entry(queued.package.clone()).or_default() += 1,
+            Some(why) => {
+                *per_package_failed
+                    .entry(queued.package.clone())
+                    .or_default() += 1;
+                validate_failed.push((
+                    queued.package.clone(),
+                    queued.vs,
+                    queued.ps,
+                    queued.stage,
+                    why.clone(),
+                ));
+            }
+        }
+    }
+    // Clean up whatever passed; a file behind a failure stays for inspection.
+    for (queued, outcome) in queued.iter().zip(&outcomes) {
+        if outcome.is_none() {
+            let _ = std::fs::remove_file(&queued.path);
+        }
+    }
+    if validate_failed.is_empty() {
+        let _ = std::fs::remove_dir(&out_dir);
+    }
+
+    println!(
+        "\n{} packages read, {} missing or unparsable",
+        per_package_pairs.len(),
+        missed.len()
+    );
+    if !missed.is_empty() {
+        println!("  missing: {}", missed.join(", "));
+    }
     println!(
         "translate: {} failed, {} panicked",
         translate_failed.len(),
@@ -326,9 +413,22 @@ fn main() {
     for (name, vs, ps, why) in &translate_panicked {
         println!("  {name} vs{vs}/ps{ps}: panicked: {why}");
     }
+
     if has_validator {
+        println!("\nglslangValidator, per package:");
+        let mut names: Vec<&String> = per_package_pairs.keys().collect();
+        names.sort();
+        for name in names {
+            let ok = per_package_ok.get(name).copied().unwrap_or(0);
+            let failed = per_package_failed.get(name).copied().unwrap_or(0);
+            println!(
+                "  {name}: {} pairs, {ok} shaders ok, {failed} shaders failed",
+                per_package_pairs.get(name).copied().unwrap_or(0)
+            );
+        }
         println!(
-            "glslangValidator: {validated_ok} ok, {} failed",
+            "\nglslangValidator total: {} ok, {} failed",
+            queued.len() - validate_failed.len(),
             validate_failed.len()
         );
         for (name, vs, ps, stage, why) in &validate_failed {

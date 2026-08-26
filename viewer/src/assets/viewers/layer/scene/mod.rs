@@ -39,6 +39,7 @@ use ironworks::file::layer::{
     SceneTimeline, ShadowMode, Transform,
 };
 use ironworks::file::tmb;
+use ironworks::file::avfx::Avfx;
 use ironworks::file::mdl::ModelContainer;
 use ironworks::file::shpk::ShaderPackage;
 use ironworks::file::spm::ShaderParameters;
@@ -46,6 +47,7 @@ use ironworks::file::{
     File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera,
 };
 
+use super::super::avfx;
 use super::super::mdl;
 use super::super::{facts, link, section};
 use super::Source;
@@ -571,12 +573,26 @@ struct Light {
     glow: Option<Glow>,
 }
 
-/// A placed `.avfx` glow. Collected, not drawn: nothing in the scene fetches or steps it yet.
+/// A placed `.avfx` glow: where it stands, and which file names it.
 struct Vfx {
     placement: Mat4,
     path: String,
     layer: usize,
     key: (u32, [u8; 4]),
+}
+
+enum EffectState {
+    Wanted,
+    Fetching(TrackedPromise<Result<Vec<u8>>>),
+    Ready(avfx::sim::Effect, avfx::sim::State),
+    Failed,
+}
+
+/// A `.avfx` some placement names, read and stepped once regardless of how many instances place it:
+/// the particles it steps are the same wherever a copy of the file stands.
+struct Effect {
+    path: String,
+    state: EffectState,
 }
 
 /// A file the scene names beside itself and reads once: the boxes its lights are clipped against,
@@ -766,6 +782,12 @@ pub struct Scene {
     ambient: ambient::Ambient,
     lights: Vec<Light>,
     effects: Vec<Vfx>,
+    effect_files: Vec<Effect>,
+    effect_at: HashMap<String, usize>,
+    /// The two apricot packages every effect is drawn with, fetched once for the whole scene.
+    effect_shape: Option<avfx::Package>,
+    effect_model: Option<avfx::Package>,
+    effect_packages: Arc<avfx::gpu::Packages>,
     /// The box each light is clipped against, by the key its `.lcb` entry uses.
     clips: HashMap<(u32, [u8; 4]), (Vec3, Vec3)>,
     clip: Aside,
@@ -1029,6 +1051,11 @@ impl Scene {
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             effects: Vec::new(),
+            effect_files: Vec::new(),
+            effect_at: HashMap::new(),
+            effect_shape: None,
+            effect_model: None,
+            effect_packages: Arc::new(avfx::gpu::Packages::default()),
             clips: HashMap::new(),
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
@@ -1919,6 +1946,54 @@ impl Scene {
             .collect()
     }
 
+    /// Every placed effect that has arrived and is textured, merged into one batch set a file no
+    /// matter how many placements share it: the particles a shared simulation stepped, each copy
+    /// carried into the world by its own placement's rotation, offset and scale.
+    fn effect_draws(&self, view: Mat4, eye: Vec3) -> Vec<gpu::EffectDraw> {
+        let axes = Mat3::from_mat4(view).transpose();
+        let (right, up) = (axes.x_axis, axes.y_axis);
+        self.effect_files
+            .iter()
+            .filter_map(|effect| {
+                let EffectState::Ready(parsed, live) = &effect.state else {
+                    return None;
+                };
+                // Held back rather than drawn white: a texture still fetching would otherwise bind
+                // no sampler at all, and an additive quad with none reads as flat white.
+                let ready = parsed.textures.iter().all(|path| {
+                    matches!(self.textures.get(path.as_str()), Some(Texture::Ready(_)))
+                });
+                if !ready {
+                    return None;
+                }
+                let bound: Vec<Option<egui::TextureId>> = parsed
+                    .textures
+                    .iter()
+                    .map(|path| match self.textures.get(path) {
+                        Some(Texture::Ready(handle)) => Some(handle.id()),
+                        _ => None,
+                    })
+                    .collect();
+                let base = parsed.drawn(live);
+                let mut drawn = Vec::new();
+                for vfx in self.effects.iter().filter(|vfx| vfx.path == effect.path) {
+                    let (scale, rotation, translation) =
+                        vfx.placement.to_scale_rotation_translation();
+                    let scale = scale.abs().max_element().max(0.001);
+                    drawn.extend(
+                        base.iter()
+                            .map(|held| held.placed(rotation, translation, scale)),
+                    );
+                }
+                let batches = avfx::batches(parsed, drawn, &bound, view, eye, right, up);
+                (!batches.is_empty()).then_some(gpu::EffectDraw {
+                    path: effect.path.clone(),
+                    batches,
+                })
+            })
+            .collect()
+    }
+
     /// The files read once beside the scene, as they arrive: the boxes its lights are clipped
     /// against, how much of the sky reaches each of its parts, and the game's own textures its
     /// shaders read.
@@ -2098,6 +2173,121 @@ impl Scene {
         }
     }
 
+    /// Reads each `.avfx` a placement names, once no matter how many placements share it, and steps
+    /// every one that has arrived to where the clock now stands.
+    fn load_effects(&mut self, backend: &Backend) {
+        for path in self
+            .effects
+            .iter()
+            .map(|vfx| vfx.path.clone())
+            .collect::<Vec<_>>()
+        {
+            if self.effect_at.contains_key(&path) {
+                continue;
+            }
+            self.effect_at.insert(path.clone(), self.effect_files.len());
+            self.effect_files.push(Effect {
+                path,
+                state: EffectState::Wanted,
+            });
+        }
+
+        for effect in &mut self.effect_files {
+            if !matches!(effect.state, EffectState::Wanted) {
+                continue;
+            }
+            let files = backend.files().clone();
+            let path = effect.path.clone();
+            effect.state = EffectState::Fetching(TrackedPromise::spawn_local(async move {
+                files.read(&path).await
+            }));
+        }
+
+        for effect in &mut self.effect_files {
+            let EffectState::Fetching(promise) = &effect.state else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            effect.state = match result
+                .as_ref()
+                .map_err(ToString::to_string)
+                .and_then(|bytes| {
+                    Avfx::read(Cursor::new(bytes.clone())).map_err(|why| why.to_string())
+                }) {
+                Ok(file) => {
+                    let mut parsed = avfx::sim::Effect::read(&file);
+                    let models = std::mem::take(&mut parsed.models);
+                    self.renderer
+                        .lock()
+                        .unwrap()
+                        .queue_effect(effect.path.clone(), models);
+                    self.dirty = true;
+                    EffectState::Ready(parsed, avfx::sim::State::default())
+                }
+                Err(why) => {
+                    log::error!("assets/layer: {}: {why}", effect.path);
+                    EffectState::Failed
+                }
+            };
+        }
+
+        let frame = self.clock as i32;
+        for effect in &mut self.effect_files {
+            let EffectState::Ready(parsed, live) = &mut effect.state else {
+                continue;
+            };
+            parsed.seek(live, frame.rem_euclid(parsed.length.max(1)));
+        }
+    }
+
+    /// The two apricot packages an effect is drawn with, fetched once the zone places any at all.
+    fn load_effect_packages(&mut self, backend: &Backend) {
+        if self.effects.is_empty() {
+            return;
+        }
+        for (held, path) in [
+            (&mut self.effect_shape, avfx::program::SHAPE),
+            (&mut self.effect_model, avfx::program::MODEL),
+        ] {
+            if held.is_none() {
+                let files = backend.files().clone();
+                *held = Some(avfx::Package::Fetching(TrackedPromise::spawn_local(
+                    async move { files.read(path).await },
+                )));
+            }
+        }
+
+        let mut arrived = false;
+        for held in [&mut self.effect_shape, &mut self.effect_model] {
+            let Some(avfx::Package::Fetching(promise)) = held else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            arrived = true;
+            *held = Some(match result {
+                Ok(bytes) => avfx::Package::Ready(bytes.clone()),
+                Err(why) => {
+                    log::error!("assets/layer: apricot: {why}");
+                    avfx::Package::Failed
+                }
+            });
+        }
+        if arrived {
+            let held = |package: &Option<avfx::Package>| match package {
+                Some(avfx::Package::Ready(bytes)) => Some(bytes.clone()),
+                _ => None,
+            };
+            self.effect_packages = Arc::new(avfx::gpu::Packages {
+                shape: held(&self.effect_shape),
+                model: held(&self.effect_model),
+            });
+        }
+    }
+
     /// Asks for whatever the scene still needs and takes in whatever arrived. Runs every frame.
     fn poll(&mut self, ui: &egui::Ui, backend: &Backend) {
         let step = ui.input(|input| input.stable_dt).min(0.5);
@@ -2105,6 +2295,8 @@ impl Scene {
         self.load_terrain(backend);
         self.load_grass(backend);
         self.load_asides(backend);
+        self.load_effects(backend);
+        self.load_effect_packages(backend);
         self.ambient.poll(backend);
         self.expand(backend, until);
         if self.fitted == 0 && !self.placements.is_empty() {
@@ -2130,6 +2322,10 @@ impl Scene {
                 .models
                 .iter()
                 .any(|model| matches!(model.state, State::Decoding(..)))
+            || self
+                .effect_files
+                .iter()
+                .any(|effect| matches!(effect.state, EffectState::Fetching(_)))
         {
             ui.ctx().request_repaint();
         }
@@ -3289,6 +3485,10 @@ impl Scene {
             // samplers no other package declares.
             .flat_map(|material| material.bound().map(|(_, path)| path.to_owned()))
             .chain(maps.iter().cloned())
+            .chain(self.effect_files.iter().flat_map(|effect| match &effect.state {
+                EffectState::Ready(parsed, _) => parsed.textures.clone(),
+                _ => Vec::new(),
+            }))
             .filter(|path| !self.textures.contains_key(path) && !sliced.contains(path))
             .collect();
         for path in wanted {
@@ -3447,10 +3647,15 @@ impl Scene {
         // A timeline states where its node stands rather than how far it has moved, so what a frame
         // draws follows the clock rather than the frame before it. The placements themselves are
         // already worked out; only where the moving ones stand is done again.
-        if !self.motions.is_empty() || self.cycling {
+        let animated = !self.motions.is_empty() || self.cycling;
+        // An effect steps off the same clock but never touches a placement, so it asks for the
+        // clock and a repaint without asking for the whole scene's placements to be redone.
+        if animated || !self.effects.is_empty() {
             self.clock += ui.input(|input| input.stable_dt).min(0.25) * TICKS;
-            self.dirty = true;
             ui.ctx().request_repaint();
+        }
+        if animated {
+            self.dirty = true;
         }
         if self.dirty {
             self.rebuild();
@@ -3497,6 +3702,8 @@ impl Scene {
         let (light, color) = self.ambient.light();
         let blades = self.sown();
         self.standing = blades.iter().map(|held| self.turf[held.turf].blades).sum();
+        let effects = self.effect_draws(view, eye);
+        let effects_drawn = effects.iter().map(|held| held.batches.len()).sum();
         let frame = gpu::Frame {
             scene: program::Scene {
                 view,
@@ -3574,6 +3781,8 @@ impl Scene {
             batches,
             grass: self.sward.clone(),
             blades,
+            effects,
+            effect_packages: self.effect_packages.clone(),
         };
 
         // A click picks whatever the pointer runs through, and a click on nothing lets go of what
@@ -3604,11 +3813,16 @@ impl Scene {
             })),
         });
         self.outline(ui, rect, projection * view);
-        self.state(rect, ui.ctx().pixels_per_point(), ui.input(|input| input.stable_dt));
+        self.state(
+            rect,
+            ui.ctx().pixels_per_point(),
+            ui.input(|input| input.stable_dt),
+            effects_drawn,
+        );
     }
 
     /// Publishes what this frame was drawn from, for a harness measuring it against a capture.
-    fn state(&self, rect: egui::Rect, scale: f32, step: f32) {
+    fn state(&self, rect: egui::Rect, scale: f32, step: f32, effects_drawn: usize) {
         let (exposure, measured) = match self.exposure.is_some() {
             true => {
                 let held = self.renderer.lock().unwrap();
@@ -3639,6 +3853,7 @@ impl Scene {
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
             effects: self.effects.len(),
+            effects_drawn,
             casting: self.casts.iter().flatten().sum(),
             models: format!(
                 "{} of {}",
@@ -4094,7 +4309,17 @@ impl Scene {
                             "Lights",
                             format!("{} of {}", self.lamps().len(), self.lights.len()),
                         ),
-                        ("Effects placed, none drawn", self.effects.len().to_string()),
+                        (
+                            "Effects",
+                            format!(
+                                "{} of {}",
+                                self.effect_files
+                                    .iter()
+                                    .filter(|effect| matches!(effect.state, EffectState::Ready(..)))
+                                    .count(),
+                                self.effect_files.len()
+                            ),
+                        ),
                         ("Wind", {
                             let count = self.models.iter().filter(|model| model.waving).count();
                             let plural = match count {

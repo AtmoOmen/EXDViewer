@@ -2897,6 +2897,12 @@ impl Buffers {
         self.bare
     }
 
+    /// The live frame the composite resolved into, standing on the depth itself: sun, moon and an
+    /// effect's own glow all draw here, since none of them sample it back.
+    pub fn lit(&self) -> Option<glow::Framebuffer> {
+        self.lit.map(|(frame, _)| frame)
+    }
+
     /// Refreshes that copy from what the frame currently holds.
     pub fn cut(&self, gl: &glow::Context) -> Result<(), String> {
         let (frame, _) = self.lit.ok_or("no lit frame")?;

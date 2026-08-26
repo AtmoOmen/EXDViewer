@@ -35,9 +35,9 @@ use crate::utils::TrackedPromise;
 use crate::{settings::AVFX_FRAME_RATE, utils::file_name};
 
 mod curve;
-mod gpu;
-mod program;
-mod sim;
+pub(crate) mod gpu;
+pub(crate) mod program;
+pub(crate) mod sim;
 
 use curve::Curve;
 
@@ -62,7 +62,7 @@ enum Texture {
 }
 
 /// A shader package, from the moment it is asked for to the moment it can be translated.
-enum Package {
+pub(crate) enum Package {
     Fetching(TrackedPromise<Result<Vec<u8>>>),
     Ready(Vec<u8>),
     Failed,
@@ -1033,6 +1033,7 @@ impl Rendered {
             },
             batches: self.batches(view, eye, axes.x_axis, axes.y_axis),
             packages: self.resolved.borrow().clone(),
+            tested: false,
         };
 
         // The context is taken from the painter rather than captured: `glow::Context` is neither
@@ -1062,68 +1063,15 @@ impl Rendered {
                 _ => None,
             })
             .collect();
-
-        let mut groups: BTreeMap<_, Vec<(f32, sim::Drawn)>> = BTreeMap::new();
-        for drawn in self.effect.drawn(&self.live.borrow()) {
-            let center = Vec3::from(drawn.center);
-            let depth = (view * Vec4::from((center, 1.0))).z;
-            groups
-                .entry((drawn.def, drawn.shape, drawn.blend))
-                .or_default()
-                .push((depth, drawn));
-        }
-
-        let mut batches: Vec<(f32, gpu::Batch)> = groups
-            .into_iter()
-            .filter_map(|((def, shape, blend), mut held)| {
-                held.sort_by(|(a, _), (b, _)| a.total_cmp(b));
-                let mean = held.iter().map(|(depth, _)| depth).sum::<f32>() / held.len() as f32;
-                let mut vertices = Vec::new();
-                let mut instances = Vec::new();
-                for (_, drawn) in &held {
-                    match shape {
-                        sim::Shape::Sprite => {
-                            let (across, down) = facing(drawn, eye, right, up);
-                            gpu::quad(
-                                Vec3::from(drawn.center),
-                                across,
-                                down,
-                                drawn.color,
-                                &drawn.uv,
-                                &mut vertices,
-                            );
-                        }
-                        sim::Shape::Model(_) if instances.len() < MODELS => {
-                            instances.push(program::Instance {
-                                transform: Mat4::from_scale_rotation_translation(
-                                    Vec3::from(drawn.scale),
-                                    glam::Quat::from_array(drawn.turn),
-                                    Vec3::from(drawn.center),
-                                ),
-                                color: Vec4::from(drawn.color),
-                                uv: drawn.uv,
-                                ..program::Instance::default()
-                            });
-                        }
-                        sim::Shape::Model(_) => {}
-                    }
-                }
-                Some((
-                    mean,
-                    gpu::Batch {
-                        shape,
-                        textures: bound.clone(),
-                        blend,
-                        def,
-                        shading: self.effect.shading(def)?,
-                        vertices,
-                        instances,
-                    },
-                ))
-            })
-            .collect();
-        batches.sort_by(|(a, _), (b, _)| a.total_cmp(b));
-        batches.into_iter().map(|(_, batch)| batch).collect()
+        batches(
+            &self.effect,
+            self.effect.drawn(&self.live.borrow()),
+            &bound,
+            view,
+            eye,
+            right,
+            up,
+        )
     }
 
     pub fn details_ui(&self, ui: &mut egui::Ui, follow: &mut Option<String>) {
@@ -1230,6 +1178,81 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
         }
         sim::Facing::Screen => spun(right, up),
     }
+}
+
+/// One batch per particle definition, shape and blend, furthest group first since blending reads
+/// what is already there. Takes already-placed draws: a zone merges every instance of the same file
+/// into one set before calling this, so a placement costs a transform rather than a draw of its own.
+pub(crate) fn batches(
+    effect: &sim::Effect,
+    drawn: impl IntoIterator<Item = sim::Drawn>,
+    textures: &[Option<egui::TextureId>],
+    view: Mat4,
+    eye: Vec3,
+    right: Vec3,
+    up: Vec3,
+) -> Vec<gpu::Batch> {
+    let mut groups: BTreeMap<_, Vec<(f32, sim::Drawn)>> = BTreeMap::new();
+    for drawn in drawn {
+        let center = Vec3::from(drawn.center);
+        let depth = (view * Vec4::from((center, 1.0))).z;
+        groups
+            .entry((drawn.def, drawn.shape, drawn.blend))
+            .or_default()
+            .push((depth, drawn));
+    }
+
+    let mut batches: Vec<(f32, gpu::Batch)> = groups
+        .into_iter()
+        .filter_map(|((def, shape, blend), mut held)| {
+            held.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+            let mean = held.iter().map(|(depth, _)| depth).sum::<f32>() / held.len() as f32;
+            let mut vertices = Vec::new();
+            let mut instances = Vec::new();
+            for (_, drawn) in &held {
+                match shape {
+                    sim::Shape::Sprite => {
+                        let (across, down) = facing(drawn, eye, right, up);
+                        gpu::quad(
+                            Vec3::from(drawn.center),
+                            across,
+                            down,
+                            drawn.color,
+                            &drawn.uv,
+                            &mut vertices,
+                        );
+                    }
+                    sim::Shape::Model(_) if instances.len() < MODELS => {
+                        instances.push(program::Instance {
+                            transform: Mat4::from_scale_rotation_translation(
+                                Vec3::from(drawn.scale),
+                                glam::Quat::from_array(drawn.turn),
+                                Vec3::from(drawn.center),
+                            ),
+                            color: Vec4::from(drawn.color),
+                            uv: drawn.uv,
+                            ..program::Instance::default()
+                        });
+                    }
+                    sim::Shape::Model(_) => {}
+                }
+            }
+            Some((
+                mean,
+                gpu::Batch {
+                    shape,
+                    textures: textures.to_vec(),
+                    blend,
+                    def,
+                    shading: effect.shading(def)?,
+                    vertices,
+                    instances,
+                },
+            ))
+        })
+        .collect();
+    batches.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+    batches.into_iter().map(|(_, batch)| batch).collect()
 }
 
 /// One curve: the plot, what it does either side of its keys, and every key it holds.

@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use glow::HasContext;
 use half::f16;
 
+use super::super::super::avfx::{gpu as avfxgpu, program as avfxprogram, sim as avfxsim};
 use super::super::super::mdl::deferred::{
     self, Buffers, Dead, LIT, Layered, Linked, TYPES, bury, graveyard, sampler,
 };
@@ -202,6 +203,13 @@ pub struct Batch {
     pub surfaces: Vec<Surface>,
 }
 
+/// Every placement of one `.avfx` file, already merged into batches: the particles a shared
+/// simulation stepped, each copy carried into the world by its own placement's transform.
+pub struct EffectDraw {
+    pub path: String,
+    pub batches: Vec<avfxgpu::Batch>,
+}
+
 pub struct Frame {
     pub scene: program::Scene,
     /// The passes that light the G-buffer, once their packages have arrived.
@@ -234,6 +242,10 @@ pub struct Frame {
     /// The zone's own grass, once its package has arrived, and the grids it stands over.
     pub grass: Option<Arc<Grass>>,
     pub blades: Vec<Blades>,
+    /// Every placed effect that has arrived, textured and stepped to where the clock stands.
+    pub effects: Vec<EffectDraw>,
+    /// The two apricot packages every one of them is drawn with.
+    pub effect_packages: Arc<avfxgpu::Packages>,
 }
 
 pub struct Renderer {
@@ -263,6 +275,10 @@ pub struct Renderer {
     shadow_instances: Option<glow::Buffer>,
     alignment: i32,
     failure: Option<String>,
+    /// One entry per unique effect file, uploaded once and drawn once per frame under however many
+    /// placements share it.
+    effects: BTreeMap<String, avfxgpu::Particles>,
+    pending_effects: Vec<(String, Vec<avfxsim::Mesh>)>,
 }
 
 impl Renderer {
@@ -284,6 +300,8 @@ impl Renderer {
             shadow_instances: None,
             alignment: ALIGNMENT,
             failure: None,
+            effects: BTreeMap::new(),
+            pending_effects: Vec::new(),
         }))
     }
 
@@ -350,6 +368,12 @@ impl Renderer {
         self.types = Some(values);
     }
 
+    /// A newly parsed `.avfx`'s own models, once for whichever path names it: a placement that
+    /// shares the path draws the same upload again rather than asking for a second one.
+    pub fn queue_effect(&mut self, path: String, models: Vec<avfxsim::Mesh>) {
+        self.pending_effects.push((path, models));
+    }
+
     pub fn draw(
         &mut self,
         gl: &glow::Context,
@@ -380,6 +404,11 @@ impl Renderer {
                 }
                 Err(why) => log::error!("assets/layer: model {at}: {why}"),
             }
+        }
+        for (path, models) in std::mem::take(&mut self.pending_effects) {
+            self.effects
+                .entry(path)
+                .or_insert_with(|| avfxgpu::Particles::new_plain(models));
         }
         for sown in std::mem::take(&mut self.sown) {
             let at = sown.turf;
@@ -696,6 +725,55 @@ impl Renderer {
             gl.depth_mask(false);
         }
         self.leg(gl, painter, frame, scene, offsets, false, false)?;
+        unsafe {
+            gl.depth_func(glow::LESS);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+        }
+        Ok(())
+    }
+
+    /// Every placed effect, one draw per unique file no matter how many placements share it. Tested
+    /// against the depth the opaque and blended passes left standing rather than a copy: apricot's
+    /// own shaders never sample it back, so the live attachment is enough.
+    fn effects(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        if frame.effects.is_empty() {
+            return Ok(());
+        }
+        let into = self.buffers.lit().ok_or("no lit frame")?;
+        let size = self.buffers.size();
+        let effect_scene = avfxprogram::Scene {
+            view: scene.view,
+            projection: scene.projection,
+            size: (size.0 as f32, size.1 as f32),
+            light: scene.light,
+            diffuse: scene.diffuse,
+            ..avfxprogram::Scene::default()
+        };
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.viewport(0, 0, size.0, size.1);
+            gl.color_mask(true, true, true, true);
+        }
+        for effect in &frame.effects {
+            let Some(particles) = self.effects.get_mut(&effect.path) else {
+                continue;
+            };
+            let held = avfxgpu::Frame {
+                scene: effect_scene,
+                batches: effect.batches.clone(),
+                packages: frame.effect_packages.clone(),
+                tested: true,
+            };
+            particles.draw(gl, painter, &held);
+        }
         unsafe {
             gl.depth_func(glow::LESS);
             gl.disable(glow::BLEND);
@@ -1317,6 +1395,9 @@ impl Renderer {
                 // After both, which is what it fades the far distance toward, and before the
                 // exposure, which measures the frame the fog leaves rather than the one under it.
                 self.blended(gl, painter, frame, &scene, &offsets, lighting)?;
+                // Blended too: an effect's glow is drawn the same additive way as any other
+                // translucent surface, and the fog after it fades a distant one the same way.
+                self.effects(gl, painter, frame, &scene)?;
                 if let Some(haze) = frame.haze.as_ref() {
                     self.buffers.fog(gl, haze, &scene)?;
                 }

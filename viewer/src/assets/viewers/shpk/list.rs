@@ -22,7 +22,7 @@ const LIST_ROWS: usize = 8;
 ///
 /// A merged source stands for one stage of one pass, so both chip rows have to name one thing. The
 /// control is on screen either way, and this is what it says when it cannot be pressed.
-fn mergeable(package: &Rendered, stage: usize, pass: usize) -> Result<usize, String> {
+pub(super) fn mergeable(package: &Rendered, stage: usize, pass: usize) -> Result<usize, String> {
     let named = stage
         .checked_sub(1)
         .and_then(|index| package.stages.get(index))

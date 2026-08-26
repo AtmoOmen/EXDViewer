@@ -43,7 +43,7 @@ def buf_name(buf):
     return n
 
 images, views, sets, draws, passes, pipelines = {}, {}, {}, [], [], {}
-bufmem, memblob, bufsize, shadermodules = {}, {}, {}, {}
+bufmem, memblob, bufsize, shadermodules, samplers = {}, {}, {}, {}, {}
 cur_pass, cur_pipe, cur_cull, bound = None, None, None, {}
 events = []
 
@@ -84,6 +84,24 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
         rid = named(elem, 'ShaderModule'); code = named(elem, 'pCode')
         if rid is not None and code is not None:
             shadermodules[rid.text.strip()] = code.text.strip()
+    elif n == 'vkCreateSampler':
+        rid = named(elem, 'Sampler')
+        ci = next((e for e in elem.iter() if e.get('typename')=='VkSamplerCreateInfo'), None)
+        if rid is not None and ci is not None:
+            def enumstr(field):
+                e = named(ci, field)
+                return e.get('string') if e is not None else None
+            def val(field):
+                e = named(ci, field)
+                return e.text.strip() if e is not None else None
+            samplers[rid.text.strip()] = {
+                'u': enumstr('addressModeU'), 'v': enumstr('addressModeV'), 'w': enumstr('addressModeW'),
+                'bias': float(val('mipLodBias') or 0), 'aniso': int(val('anisotropyEnable') or 0),
+                'maxaniso': float(val('maxAnisotropy') or 0),
+                'minlod': float(val('minLod') or 0), 'maxlod': float(val('maxLod') or 0),
+                'mipmap': enumstr('mipmapMode'), 'minfilter': enumstr('minFilter'), 'magfilter': enumstr('magFilter'),
+                'border': enumstr('borderColor'),
+            }
     elif n == 'Internal::Initial Contents':
         t = named(elem,'type').get('string')
         rid = named(elem,'id').text.strip()
@@ -96,9 +114,11 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
                 if s.tag=='struct' and s.get('typename')=='DescriptorSetSlot':
                     ty = named(s,'type').get('string').replace('VK_DESCRIPTOR_TYPE_','')
                     res = named(s,'resource'); off = named(s,'offset'); rng = named(s,'range')
+                    smp = named(s,'sampler')
                     slots.append({'t':ty,'r':res.text.strip() if res is not None else None,
                         'o':int(off.text) if off is not None else None,
-                        'n':int(rng.text) if rng is not None else None})
+                        'n':int(rng.text) if rng is not None else None,
+                        's':smp.text.strip() if smp is not None else None})
             sets[rid] = slots
     elif n == 'vkUpdateDescriptorSets':
         for w in elem.iter():
@@ -116,6 +136,8 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
                     if s.tag=='struct' and s.get('typename')=='VkDescriptorImageInfo':
                         iv = named(s,'imageView')
                         if iv is not None: rec['r']=iv.text.strip()
+                        smp = named(s,'sampler')
+                        if smp is not None: rec['s']=smp.text.strip()
                 slots[at] = rec
     elif n == 'vkCreateGraphicsPipelines':
         rid = named(elem,'Pipeline')
@@ -156,7 +178,8 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
     elem.clear()
 
 json.dump({'images':images,'views':views,'sets':sets,'draws':draws,'passes':passes,
-           'pipelines':pipelines,'bufmem':bufmem,'memblob':memblob,'bufsize':bufsize}, open(OUT,'w'))
+           'pipelines':pipelines,'bufmem':bufmem,'memblob':memblob,'bufsize':bufsize,
+           'samplers':samplers}, open(OUT,'w'))
 named_shaders = sum(1 for s in pipelines.values() for e in s if e[3])
 total_shaders = sum(len(s) for s in pipelines.values())
 print(len(draws),'draws',len(sets),'sets',len(memblob),'memory blobs',len(pipelines),'pipelines',

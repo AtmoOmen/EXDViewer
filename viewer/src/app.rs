@@ -59,7 +59,8 @@ use crate::{
     shortcuts::{GOTO_ROW, GOTO_SHEET, PALETTE},
     utils::{
         CodeTheme, CollapsibleSidePanel, ColorTheme, ConvertiblePromise, FuzzyMatcher, IconManager,
-        Side, TrackedPromise, empty_view, install_tex_loader, opt_slider, shortcut, tick_promises,
+        Side, TrackedPromise, empty_view, export, install_tex_loader, opt_slider, shortcut,
+        tick_promises,
     },
     zones,
 };
@@ -1108,7 +1109,6 @@ impl App {
     fn draw_sheet_data(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         self.export_promise.take_if(|p| p.try_get().is_some());
-        let mut export_request = None;
 
         egui::CentralPanel::default()
             .frame(
@@ -1354,30 +1354,37 @@ impl App {
                                 }
                             });
 
-                            let exporting = self.export_promise.is_some();
-                            if exporting {
-                                ui.spinner();
+                            let file_name =
+                                format!("{}.csv", table.context().sheet().name().replace('/', "_"));
+                            let context = table.context().clone();
+                            let promise = export::menu(
+                                ui,
+                                "Export",
+                                None,
+                                self.export_promise.is_some(),
+                                vec![
+                                    export::Choice::new(
+                                        "As CSV",
+                                        file_name.clone(),
+                                        {
+                                            let context = context.clone();
+                                            move || Box::pin(export_csv(context, true))
+                                        },
+                                    )
+                                    .title("Export CSV")
+                                    .hover("Links export as display values")
+                                    .filter("CSV", &["csv"]),
+                                    export::Choice::new("As CSV (Raw)", file_name, move || {
+                                        Box::pin(export_csv(context, false))
+                                    })
+                                    .title("Export CSV")
+                                    .hover("Links export as raw values")
+                                    .filter("CSV", &["csv"]),
+                                ],
+                            );
+                            if promise.is_some() {
+                                self.export_promise = promise;
                             }
-                            ui.add_enabled_ui(!exporting, |ui| {
-                                ui.menu_button("Export", |ui| {
-                                    if ui
-                                        .button("As CSV")
-                                        .on_hover_text("Links export as display values")
-                                        .clicked()
-                                    {
-                                        export_request = Some((table.context().clone(), true));
-                                        ui.close();
-                                    }
-                                    if ui
-                                        .button("As CSV (Raw)")
-                                        .on_hover_text("Links export as raw values")
-                                        .clicked()
-                                    {
-                                        export_request = Some((table.context().clone(), false));
-                                        ui.close();
-                                    }
-                                });
-                            });
 
                             let filter_error = table.get_filter_error();
 
@@ -1456,10 +1463,6 @@ impl App {
                     }
                 }
             });
-
-        if let Some((context, resolve_display_field)) = export_request {
-            self.command_export_csv(context, resolve_display_field);
-        }
     }
 
     fn on_setup(&mut self, ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
@@ -1832,33 +1835,6 @@ impl App {
             .filter_map(|(name, schema)| schema.as_ref().ok().map(|s| (name, s)))
             .filter(|(_, schema)| schema.is_modified())
             .collect()
-    }
-
-    fn command_export_csv(&mut self, context: TableContext, resolve_display_field: bool) {
-        let file_name = format!("{}.csv", context.sheet().name().replace('/', "_"));
-
-        self.export_promise = Some(TrackedPromise::spawn_local(async move {
-            let data = match export_csv(context, resolve_display_field).await {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("Failed to export CSV: {e:?}");
-                    return;
-                }
-            };
-
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title("Export CSV")
-                .set_file_name(file_name)
-                .save_file()
-                .await
-            {
-                if let Err(e) = file.write(&data).await {
-                    log::error!("Failed to write CSV: {e}");
-                } else {
-                    log::info!("Exported CSV successfully");
-                }
-            }
-        }));
     }
 
     fn command_save_all_schemas(&mut self) {

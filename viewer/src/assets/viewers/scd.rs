@@ -14,17 +14,12 @@ use super::{Preview, facts, headers, section};
 use crate::assets::Bytes;
 use crate::audio::{self, Player};
 use crate::utils::TrackedPromise;
+use crate::utils::export;
 
 enum PlayState {
     Idle,
     Decoding(usize, TrackedPromise<Result<audio::Decoded>>),
     Playing(usize),
-}
-
-#[derive(Clone, Copy)]
-enum ExportKind {
-    Native,
-    Wav,
 }
 
 thread_local! {
@@ -82,29 +77,29 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
     ui.horizontal(|ui| {
         section(ui, "Streams");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
-            if exporting {
-                ui.spinner();
+            let promise = export::menu(
+                ui,
+                "Export",
+                None,
+                exporting,
+                vec![
+                    export::Choice::named_bytes("Native streams", || {
+                        let entries = file.container.entries().to_vec();
+                        audio::package(audio::export_native(&entries), &file.name)
+                    })
+                    .title("Export Audio")
+                    .hover("Each entry's own codec bytes"),
+                    export::Choice::named_bytes("Decoded WAV", || {
+                        let entries = file.container.entries().to_vec();
+                        audio::package(audio::export_wav(&entries)?, &file.name)
+                    })
+                    .title("Export Audio")
+                    .hover("Every channel the entry holds, undownmixed"),
+                ],
+            );
+            if promise.is_some() {
+                *file.export.borrow_mut() = promise;
             }
-            ui.add_enabled_ui(!exporting, |ui| {
-                ui.menu_button("Export", |ui| {
-                    if ui
-                        .button("Native streams")
-                        .on_hover_text("Each entry's own codec bytes")
-                        .clicked()
-                    {
-                        file.export(ExportKind::Native);
-                        ui.close();
-                    }
-                    if ui
-                        .button("Decoded WAV")
-                        .on_hover_text("Every channel the entry holds, undownmixed")
-                        .clicked()
-                    {
-                        file.export(ExportKind::Wav);
-                        ui.close();
-                    }
-                });
-            });
         });
     });
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -244,38 +239,6 @@ impl Rendered {
         if matches!(&*state, PlayState::Playing(_)) && !still_playing {
             *state = PlayState::Idle;
         }
-    }
-
-    fn export(&self, kind: ExportKind) {
-        let entries = self.container.entries().to_vec();
-        let name = self.name.clone();
-        let promise = TrackedPromise::spawn_local(async move {
-            let files = match kind {
-                ExportKind::Native => Ok(audio::export_native(&entries)),
-                ExportKind::Wav => audio::export_wav(&entries),
-            };
-            let packaged = files.and_then(|files| audio::package(files, &name));
-            let (file_name, data) = match packaged {
-                Ok(packaged) => packaged,
-                Err(error) => {
-                    log::error!("scd export failed: {error}");
-                    return;
-                }
-            };
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title("Export Audio")
-                .set_file_name(file_name)
-                .save_file()
-                .await
-            {
-                if let Err(error) = file.write(&data).await {
-                    log::error!("scd export failed: {error}");
-                } else {
-                    log::info!("scd exported successfully");
-                }
-            }
-        });
-        *self.export.borrow_mut() = Some(promise);
     }
 
     fn poll_export(&self) {

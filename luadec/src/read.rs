@@ -49,7 +49,7 @@ struct Reader<'a> {
     /// Words that are operands of the instruction before them rather than instructions themselves.
     pseudo: Vec<bool>,
     /// Where the value a word writes has to be a local, and up to which register.
-    sticky: Vec<Option<usize>>,
+    sticky: Vec<Option<(usize, usize)>>,
     slots: Vec<Slot>,
     /// Name of the local each register holds, for registers below [`Self::active`].
     names: Vec<String>,
@@ -495,14 +495,15 @@ fn settles(held: Instruction) -> bool {
     ) || (held.opcode() == Opcode::Call && held.c() == 1)
 }
 
-/// Where a value has to be a local rather than a temporary, keyed by the word that wrote it.
+/// Where a value has to be a local rather than a temporary, keyed by the word that wrote it, with
+/// the furthest point reading it forced that conclusion.
 ///
 /// A temporary is read once, by the instruction the compiler emitted next to consume it. Anything
 /// read twice, or read on the far side of a jump, sat in the register while something else ran, and
 /// only a local does that.
-fn sticky(held: &Function, pseudo: &[bool], labels: &[bool]) -> Vec<Option<usize>> {
+fn sticky(held: &Function, pseudo: &[bool], labels: &[bool]) -> Vec<Option<(usize, usize)>> {
     let code = held.code();
-    let mut sticky = vec![None; code.len()];
+    let mut sticky: Vec<Option<(usize, usize)>> = vec![None; code.len()];
     let mut written: Vec<Option<(usize, usize)>> = vec![None; 256];
     let mut era = 0usize;
     let mut active = usize::from(held.parameters()) + usize::from(held.has_arg());
@@ -551,7 +552,10 @@ fn sticky(held: &Function, pseudo: &[bool], labels: &[bool]) -> Vec<Option<usize
                 }
             }
             if let Some(slot) = sticky.get_mut(at) {
-                *slot = Some(slot.map_or(register, |held: usize| held.max(register)));
+                *slot = Some(match *slot {
+                    Some((top, read)) => (top.max(register), read.max(pc)),
+                    None => (register, pc),
+                });
             }
         }
         // At the start of a statement the next free register is where the locals stop, so a word
@@ -568,7 +572,10 @@ fn sticky(held: &Function, pseudo: &[bool], labels: &[bool]) -> Vec<Option<usize
                     if let Some(Some((at, _))) = written.get(register).copied()
                         && let Some(slot) = sticky.get_mut(at)
                     {
-                        *slot = Some(slot.map_or(register, |held: usize| held.max(register)));
+                        *slot = Some(match *slot {
+                            Some((top, read)) => (top.max(register), read.max(pc)),
+                            None => (register, pc),
+                        });
                     }
                 }
                 active = first;
@@ -662,8 +669,10 @@ fn sticky(held: &Function, pseudo: &[bool], labels: &[bool]) -> Vec<Option<usize
             && let Some(slot) = sticky.get_mut(found)
         {
             *slot = Some(match (*slot, mark) {
-                (Some(held), Some(mark)) => held.max(mark),
-                (held, mark) => held.or(mark).unwrap_or(usize::from(register)),
+                (Some((top, read)), Some((mark_top, mark_read))) => {
+                    (top.max(mark_top), read.max(mark_read))
+                }
+                (held, mark) => held.or(mark).unwrap_or((usize::from(register), pc)),
             });
         }
     }
@@ -777,10 +786,28 @@ impl<'a> Reader<'a> {
     }
 
     /// Two operands, taken from the top of the stack down so neither is read past the other.
+    ///
+    /// `C` is not always the higher register -- an instruction reads whichever operand its own
+    /// register numbering put on top first, or a read of the lower one would still find the
+    /// higher one's value sitting there and mistake it for a temporary that outlived its
+    /// statement.
     fn operands(&mut self, b: u16, c: u16) -> Reading<(Expr, Expr)> {
-        let right = self.operand(c)?;
-        let left = self.operand(b)?;
-        Ok((left, right))
+        let c_first = !matches!(
+            (Operand::from(b), Operand::from(c)),
+            (Operand::Register(b), Operand::Register(c)) if b > c
+        );
+        Ok(match c_first {
+            true => {
+                let right = self.operand(c)?;
+                let left = self.operand(b)?;
+                (left, right)
+            }
+            false => {
+                let left = self.operand(b)?;
+                let right = self.operand(c)?;
+                (left, right)
+            }
+        })
     }
 
     // -- locals ------------------------------------------------------------------------------
@@ -1156,7 +1183,7 @@ impl<'a> Reader<'a> {
                 .get(pc)
                 .copied()
                 .flatten()
-                .is_some_and(|top| top >= self.active)
+                .is_some_and(|(top, _)| top >= self.active)
         };
         match tests
             .windows(2)
@@ -1249,6 +1276,93 @@ impl<'a> Reader<'a> {
         combine(tests, &mut held, 0, count, true_target, false_target)
     }
 
+    /// Where `register` was last written before `pc`, skipping words that are operands rather
+    /// than instructions.
+    fn last_write(&self, register: usize, pc: usize) -> Option<usize> {
+        let mut at = pc;
+        while at > 0 {
+            at -= 1;
+            if self.pseudo.get(at).copied().unwrap_or(false) {
+                continue;
+            }
+            let instruction = self.code().get(at).copied()?;
+            let mut reads = Vec::new();
+            if let Some(written) = touches(instruction, &mut reads)
+                && usize::from(instruction.a()) <= register
+                && register <= written
+            {
+                return Some(at);
+            }
+        }
+        None
+    }
+
+    /// A write whose value a later point reads at or past `hi` has to become a local before the
+    /// conditional starting at `pc` is even evaluated, rather than reactively inside the arm it is
+    /// about to read -- a block's own `close()` always rolls its scope back when it finishes, so a
+    /// promotion made inside it is lost the moment the arm ends, and the condition's own read of
+    /// such a register would otherwise consume it right there. `sticky` already knows how far a
+    /// write's furthest read reaches; a mark whose reach stops short of `hi` is some inner
+    /// conditional's own escape, already handled where it happens.
+    ///
+    /// The write itself may sit inside the arm (a reassignment the merge point reads back), or
+    /// earlier still, in a register already live when the conditional starts (a value the
+    /// condition's own operands read, that a nested conditional inside the arm also outlives).
+    fn anchor(&mut self, pc: usize, hi: usize) -> Reading<()> {
+        let mut top = None;
+        for at in pc..hi {
+            if self.pseudo.get(at).copied().unwrap_or(false) {
+                continue;
+            }
+            if let Some(Some((register, read))) = self.sticky.get(at).copied()
+                && read >= hi
+                && register >= self.active
+            {
+                top = Some(top.map_or(register, |held: usize| held.max(register)));
+            }
+        }
+        for register in self.active..self.slots.len() {
+            if matches!(self.slots.get(register), Some(Slot::Value(_)))
+                && let Some(at) = self.last_write(register, pc)
+                && let Some(Some((_, read))) = self.sticky.get(at).copied()
+                && read >= hi
+            {
+                top = Some(top.map_or(register, |held| held.max(register)));
+            }
+        }
+        // A run whose own opening register already became a local on its own leaves only the
+        // further results of that same call still marked `Rest`, holding no value of their own to
+        // declare with -- promoting just the tail here would silently give it `nil` instead of
+        // what the call actually returned there. Left alone, the read that needs it falls back to
+        // disassembly exactly as it did before, which is the safe outcome.
+        if matches!(self.slots.get(self.active), Some(Slot::Rest)) {
+            return Ok(());
+        }
+        match top {
+            Some(register) => self.declare(register + 1),
+            None => Ok(()),
+        }
+    }
+
+    /// Where an `else` reached by falling out of the body ends, if the jump just before
+    /// `false_target` goes past it rather than out of the loop the conditional is in.
+    fn otherwise_end(
+        &self,
+        body_at: usize,
+        false_target: usize,
+        hi: usize,
+        escape: Option<usize>,
+    ) -> Reading<Option<usize>> {
+        if false_target <= body_at
+            || self.at(false_target - 1).map(Instruction::opcode) != Ok(Opcode::Jmp)
+            || self.pseudo.get(false_target - 1).copied().unwrap_or(false)
+        {
+            return Ok(None);
+        }
+        let over = self.threaded(self.target(false_target - 1)?, hi);
+        Ok((over > false_target && over <= hi && escape != Some(over)).then_some(over))
+    }
+
     fn branch(
         &mut self,
         pc: usize,
@@ -1289,6 +1403,7 @@ impl<'a> Reader<'a> {
             if !self.escapes(false_target, escape) {
                 return Err("a conditional leaves the block it is in");
             }
+            self.anchor(pc, hi)?;
             let condition = self.condition(tests, count, pc)?;
             self.flush()?;
             let body = self.block(body_at, hi, escape, None)?;
@@ -1296,6 +1411,8 @@ impl<'a> Reader<'a> {
                 .push(Stat::If(vec![(condition, body)], Some(vec![Stat::Break])));
             return Ok(hi);
         }
+        let over = self.otherwise_end(body_at, false_target, hi, escape)?;
+        self.anchor(pc, over.unwrap_or(false_target))?;
         let condition = self.condition(tests, count, pc)?;
         self.flush()?;
 
@@ -1303,17 +1420,11 @@ impl<'a> Reader<'a> {
         let mut arms = Vec::new();
         let mut otherwise = None;
         let mut end = false_target;
-        if false_target > body_at
-            && self.at(false_target - 1).map(Instruction::opcode) == Ok(Opcode::Jmp)
-            && !self.pseudo.get(false_target - 1).copied().unwrap_or(false)
-        {
-            let over = self.threaded(self.target(false_target - 1)?, hi);
-            if over > false_target && over <= hi && escape != Some(over) {
-                let body = self.block(body_at, false_target - 1, escape, None)?;
-                arms.push((condition.clone(), body));
-                otherwise = Some(self.block(false_target, over, escape, None)?);
-                end = over;
-            }
+        if let Some(over) = over {
+            let body = self.block(body_at, false_target - 1, escape, None)?;
+            arms.push((condition.clone(), body));
+            otherwise = Some(self.block(false_target, over, escape, None)?);
+            end = over;
         }
         if arms.is_empty() {
             arms.push((condition, self.block(body_at, false_target, escape, None)?));
@@ -1518,7 +1629,7 @@ impl<'a> Reader<'a> {
         let next = self.walk(pc)?;
         // What the word left behind is a local rather than a temporary wherever the pass that
         // measured the registers said so.
-        if let Some(Some(top)) = self.sticky.get(pc).copied() {
+        if let Some(Some((top, _))) = self.sticky.get(pc).copied() {
             self.declare(top + 1)?;
         }
         Ok(next)

@@ -9,6 +9,7 @@ use ironworks::file::shcd::{self, Stage};
 use super::shader::{self, Naming, ResourceRow, Shader, code};
 use super::{Preview, facts, section};
 use crate::assets::Bytes;
+use crate::utils::export;
 
 /// A shader, decoded and ready to draw.
 pub struct Rendered {
@@ -105,6 +106,21 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, bytes: &[u8]) {
     );
 }
 
+/// Beyond the raw file: the one shader's two readings. A `.shcd` never runs more than one, so
+/// there is nothing to zip and no pass to merge, unlike its `.shpk` sibling.
+pub fn export_choices<'a>(file: &'a Rendered, bytes: &'a [u8]) -> Vec<export::Choice<'a>> {
+    [(true, "hlsl", "HLSL"), (false, "asm", "Assembly")]
+        .into_iter()
+        .map(|(hlsl_reading, extension, label)| {
+            export::Choice::bytes(label, format!("shader.{extension}"), move || {
+                let (lines, _) = code::text(&file.shader, &file.naming, bytes, hlsl_reading)
+                    .ok_or_else(|| anyhow::anyhow!("no shader program in this blob"))?;
+                Ok(lines.join("\n").into_bytes())
+            })
+        })
+        .collect()
+}
+
 impl Rendered {
     pub fn details_ui(&self, ui: &mut egui::Ui) {
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
@@ -121,5 +137,60 @@ impl Rendered {
                     });
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A real posteffect shader, run manually against the local install and `dxc` (`cargo test -p
+    /// viewer --lib -- --ignored shcd::tests --nocapture`, with `dxc` on `PATH`): what the HLSL
+    /// export choice would write actually compiles.
+    #[test]
+    #[ignore = "reads the real local FFXIV install and shells out to dxc"]
+    fn the_hlsl_choice_compiles_under_dxc() {
+        use ironworks::sqpack::{Install, SqPack};
+        use std::io::Read;
+
+        let path = "shader/sm5/posteffect/ToneAdjust.shcd";
+        let pack = SqPack::new(Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"));
+        let mut stream = pack.file(path).expect("the shader is in the local install");
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+
+        let preview = super::decode(path, &bytes).expect("a real .shcd decodes");
+        let super::Preview::Shcd(file) = preview else {
+            panic!("decode() of a .shcd did not return Preview::Shcd");
+        };
+        let choices = super::export_choices(&file, &bytes);
+        assert_eq!(choices.len(), 2, "a .shcd offers HLSL and Assembly, nothing else");
+
+        let target = match file.shader.stage {
+            "Vertex" => "vs_6_0",
+            "Pixel" => "ps_6_0",
+            "Geometry" => "gs_6_0",
+            "Hull" => "hs_6_0",
+            "Domain" => "ds_6_0",
+            "Compute" => "cs_6_0",
+            other => panic!("no dxc target for stage {other}"),
+        };
+        let (lines, _) = super::code::text(&file.shader, &file.naming, &bytes, true)
+            .expect("this shader has a program");
+        let source = lines.join("\n");
+        println!("{} lines of HLSL, stage {}", lines.len(), file.shader.stage);
+
+        let dir = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| ".".to_owned());
+        let out = std::path::Path::new(&dir).join("shcd_export_check.hlsl");
+        std::fs::write(&out, &source).unwrap();
+
+        let check = std::process::Command::new("dxc")
+            .args(["-T", target, "-E", "main", "-Fo", "/dev/null"])
+            .arg(&out)
+            .output()
+            .expect("dxc must be on PATH to run this check");
+        assert!(
+            check.status.success(),
+            "dxc rejected the exported HLSL:\n{}",
+            String::from_utf8_lossy(&check.stderr)
+        );
     }
 }

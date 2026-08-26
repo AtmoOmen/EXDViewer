@@ -8,7 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
 use egui::{RichText, ScrollArea, Sense, Vec2, collapsing_header::paint_default_icon, vec2};
-use ironworks::file::layer::{Colour, Instance, InstanceData, LayerGroup, Scene, TriggerBox};
+use ironworks::file::layer::{Colour, Instance, InstanceData, LayerGroup, Rgba, Scene, TriggerBox};
 use ironworks::file::{lgb::LayerGroupFile, lvb::LevelFile, sgb::SharedGroupFile};
 
 use super::{facts, link, section};
@@ -244,6 +244,16 @@ fn color(colour: Colour) -> String {
     )
 }
 
+fn rgba(colour: Rgba) -> String {
+    format!(
+        "{}, {}, {}, {}",
+        colour.red(),
+        colour.green(),
+        colour.blue(),
+        colour.alpha()
+    )
+}
+
 /// How much room a volume covers. Nothing in the payload of a range states its size; the instance
 /// is a unit shape and its scale is what gives it one.
 fn extent(scale: [f32; 3]) -> String {
@@ -400,7 +410,7 @@ fn payload(instance: &Instance) -> Rows {
         }
         InstanceData::Vfx(vfx) => {
             rows.path("Effect", vfx.asset_path());
-            rows.text("Color", color(vfx.colour()));
+            rows.text("Color", rgba(vfx.colour()));
             rows.text(
                 "Soft particle fade",
                 format!("{:.2}", vfx.soft_particle_fade_range()),
@@ -409,6 +419,7 @@ fn payload(instance: &Instance) -> Rows {
             rows.text("No far clip", on(vfx.no_far_clip()));
             rows.text("Fade near", span(vfx.fade_near()));
             rows.text("Fade far", span(vfx.fade_far()));
+            rows.text("Z correct", format!("{:.3}", vfx.z_correct()));
         }
         InstanceData::PositionMarker(marker) => {
             rows.text("Marker", format!("{:?}", marker.kind()));

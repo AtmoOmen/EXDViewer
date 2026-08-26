@@ -50,23 +50,7 @@ pub fn ui(
     let lines = match cached {
         Some((held, lines)) if held == at => Some(lines),
         _ => {
-            let fresh = bytes
-                .get(shader.blob.clone())
-                .and_then(|blob| Some((program(blob)?, blob)))
-                .map(|(program, blob)| {
-                    Arc::new(match source {
-                        true => {
-                            let read = hlsl::decompile(&program, &names(naming, shader, blob));
-                            (read.lines, read.body)
-                        }
-                        // The assembly names nothing itself, so what a line touches goes in a
-                        // comment beside it. It declares as it goes, so there is nothing to fold.
-                        false => (
-                            annotate(naming, shader, &dxbc::shex::format_program(&program)),
-                            0,
-                        ),
-                    })
-                });
+            let fresh = text(shader, naming, bytes, source).map(Arc::new);
             if let Some(lines) = &fresh {
                 ui.data_mut(|data| data.insert_temp(slot, (at, Arc::clone(lines))));
             }
@@ -120,6 +104,31 @@ pub fn ui(
             false => "DXBC",
         },
     );
+}
+
+/// A shader's text either reading, and where its declarations end: `None` where its blob holds no
+/// program. The one path both the interactive viewer and an export producer read a shader through,
+/// so a save always matches what the panel would have shown for the same shader and reading.
+pub fn text(
+    shader: &Shader,
+    naming: &Naming,
+    bytes: &[u8],
+    hlsl_reading: bool,
+) -> Option<(Vec<String>, usize)> {
+    let blob = bytes.get(shader.blob.clone())?;
+    let program = program(blob)?;
+    Some(match hlsl_reading {
+        true => {
+            let read = hlsl::decompile(&program, &names(naming, shader, blob));
+            (read.lines, read.body)
+        }
+        // The assembly names nothing itself, so what a line touches goes in a comment beside it. It
+        // declares as it goes, so there is nothing to fold.
+        false => (
+            annotate(naming, shader, &dxbc::shex::format_program(&program)),
+            0,
+        ),
+    })
 }
 
 /// The code itself, numbered from `from` and drawn on the theme's own surface.

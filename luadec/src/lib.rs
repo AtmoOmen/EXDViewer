@@ -257,6 +257,7 @@ mod tests {
     const CALL: u32 = 28;
     const RETURN: u32 = 30;
     const EQ: u32 = 23;
+    const LT: u32 = 24;
     const JMP: u32 = 22;
     const LOADBOOL: u32 = 2;
     const SELF: u32 = 11;
@@ -740,5 +741,106 @@ mod tests {
             source(held),
             "local v0, v1, v2, v3, v4, v5 = ...\nself:OnTalk_ItemSupply00000(a1, a2, true, v4)\nif v4 == 1 then\n\tself:OnTalk_Tutorial00001(a1, a2)\nend"
         );
+    }
+
+    /// `LT`'s `C` operand can hold the lower register while `B` holds the higher one still waiting
+    /// -- reading `C` first then finds `B`'s value still there and mistakes it for a temporary
+    /// that outlived its statement, wrongly promoting a register a later method lookup then lands
+    /// on.
+    #[test]
+    fn a_comparison_whose_c_operand_is_the_lower_register_reads_as_one() {
+        let held = Proto {
+            parameters: 1,
+            code: vec![
+                abx(GETGLOBAL, 1, 0),
+                abx(GETGLOBAL, 2, 1),
+                abc(LT, 1, 2, 1),
+                asbx(JMP, 0, 2),
+                abc(SELF, 1, 0, 0x102),
+                abc(CALL, 1, 1, 1),
+                abc(RETURN, 0, 1, 0),
+            ],
+            constants: vec![Value::Text("x"), Value::Text("y"), Value::Text("m")],
+            stack: 3,
+            ..Proto::default()
+        };
+        assert_eq!(source(held), "if not (y < x) then\n\tself:m()\nend");
+    }
+
+    const GETTABLE: u32 = 6;
+    const LOADNIL: u32 = 3;
+
+    /// A value copied before an `if`, reassigned inside its body, and read again after it closes
+    /// has to become a local before the `if` is even evaluated; a promotion made reactively inside
+    /// the arm's own `block()` is lost the moment that block closes and rolls its scope back.
+    #[test]
+    fn a_value_reassigned_inside_an_if_and_read_after_it_closes_reads_as_one() {
+        let held = Proto {
+            parameters: 2,
+            code: vec![
+                abc(SELF, 2, 1, 0x100),
+                abx(LOADK, 4, 1),
+                abc(CALL, 2, 3, 2),
+                abc(SELF, 3, 1, 0x100),
+                abx(LOADK, 5, 2),
+                abc(CALL, 3, 3, 2),
+                abc(MOVE, 4, 2, 0),
+                abc(LT, 0, 4, 3),
+                asbx(JMP, 0, 1),
+                abc(MOVE, 4, 3, 0),
+                abc(RETURN, 4, 2, 0),
+                abc(RETURN, 0, 1, 0),
+            ],
+            constants: vec![
+                Value::Text("GetClassLevelMax"),
+                Value::Number(29.0),
+                Value::Number(30.0),
+            ],
+            stack: 6,
+            ..Proto::default()
+        };
+        assert_eq!(
+            source(held),
+            "local v0 = a1:GetClassLevelMax(29)\nlocal v1 = a1:GetClassLevelMax(30)\nlocal v2 = v0\nif v2 < v1 then\n\tv2 = v1\nend\nreturn v2"
+        );
+    }
+
+    /// A two-result call whose primary register already became a local on its own leaves only the
+    /// second result marked `Rest`; anchoring that leftover alone ahead of a later `if` would hand
+    /// it `nil` instead of what the call actually returned, so the function stays disassembly
+    /// rather than print a value the bytecode never gave it.
+    #[test]
+    fn a_second_call_result_promoted_alone_stays_disassembly() {
+        let held = Proto {
+            parameters: 3,
+            code: vec![
+                abc(GETTABLE, 3, 0, 0x100),
+                abc(EQ, 0, 3, 0x101),
+                asbx(JMP, 0, 2),
+                abc(LOADNIL, 3, 4, 0),
+                abc(RETURN, 3, 3, 0),
+                abc(SELF, 3, 0, 0x100),
+                abc(MOVE, 5, 1, 0),
+                abc(MOVE, 6, 2, 0),
+                abc(CALL, 3, 4, 3),
+                abc(EQ, 0, 4, 0x102),
+                asbx(JMP, 0, 1),
+                abx(LOADK, 4, 3),
+                abc(MOVE, 5, 3, 0),
+                abc(MOVE, 6, 4, 0),
+                abc(RETURN, 5, 3, 0),
+                abc(RETURN, 0, 1, 0),
+            ],
+            constants: vec![
+                Value::Text("GetTodoArgs"),
+                Value::Nil,
+                Value::Number(0.0),
+                Value::Number(1.0),
+            ],
+            stack: 7,
+            ..Proto::default()
+        };
+        let text = source(held);
+        assert!(text.contains("not read as source"), "{text}");
     }
 }

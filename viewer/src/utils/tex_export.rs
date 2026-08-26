@@ -391,6 +391,46 @@ mod tests {
         assert_eq!(file.data, tex.mip_data(0).unwrap());
     }
 
+    /// The zip-of-PNGs branch, on the same real volume: 16 depth slices, each an 8-bit `Bgrx8Unorm`
+    /// PNG whose pixels match the on-screen `decode_stack` band for that slice exactly.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_volume_pngs_zip_one_slice_per_layer_matching_the_on_screen_decode() {
+        let path = "common/graphics/texture/-output_lut_p.tex";
+        let bytes = read_local(path);
+        let tex = tex::Texture::read(ReadCursor::new(bytes)).unwrap();
+        let layers = tex.layers(0);
+        assert_eq!(layers, 16);
+
+        let PackagedImages::Zip(zip_bytes) = png(&tex, 0, path).unwrap().unwrap() else {
+            panic!("16 depth slices should zip");
+        };
+        let mut archive = zip::ZipArchive::new(ReadCursor::new(zip_bytes)).unwrap();
+        assert_eq!(archive.len(), usize::from(layers));
+
+        let stack = tex_loader::decode_stack(&tex, 0, path).unwrap().to_rgba8();
+        let (width, slice_height) = tex.mip_size(0);
+        for index in 0..layers {
+            let mut member = archive.by_name(&format!("slice{index}.png")).unwrap();
+            let mut png_bytes = Vec::new();
+            std::io::Read::read_to_end(&mut member, &mut png_bytes).unwrap();
+            let decoded = image::load_from_memory(&png_bytes).unwrap().to_rgba8();
+            assert_eq!(decoded.width(), u32::from(width));
+            assert_eq!(decoded.height(), u32::from(slice_height));
+
+            let top = u32::from(index) * u32::from(slice_height);
+            let expected = image::imageops::crop_imm(
+                &stack,
+                0,
+                top,
+                u32::from(width),
+                u32::from(slice_height),
+            )
+            .to_image();
+            assert_eq!(decoded.as_raw(), expected.as_raw(), "slice {index}");
+        }
+    }
+
     /// A real BC1 cube (six faces, eight mip levels), covering the same reorder code path as the
     /// `D2Array` test below plus the cubemap header flags (`is_cubemap`, `Caps2::CUBEMAP`).
     #[test]

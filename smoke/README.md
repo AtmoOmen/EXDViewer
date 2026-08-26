@@ -85,13 +85,23 @@ coverage counters are what catch a model that failed to load.
 ## Known red
 
 **`Feedback loop formed between Framebuffer and active Texture`, in the scene and level phases.**
-Measured on an unmodified tree with no edits: 374 occurrences at `20fc1c2c`, 512 at `90ff3ced`,
-firing on the scene phase's first draw. The model phase is clean in both runs, so it lives in the
-shared G-buffer machinery rather than in any one viewer. A texture is being sampled while still
-attached to the bound framebuffer, which is undefined behaviour. Not yet diagnosed.
+RESOLVED. `blended()`'s resolve leg (`viewer/src/assets/viewers/layer/scene/gpu.rs`) and the model
+viewer's own `resolve()`/`sheer()` (`viewer/src/assets/viewers/mdl/gpu.rs`) all drew into
+`self.lit`, whose depth attachment is the live G-buffer depth, while a surface there can also
+sample that same texture as `DEPTH`/`DEPTH_PLANE` through `engine()` - water and hair fringe both
+do. `self.lit` already had a sibling for exactly this, `self.bare`, a framebuffer over the same
+color texture but a copy of the depth (`cutoff`) rather than the depth itself, already used by
+`fog()` and `shade()`; none of the three resolve legs were wired to it. Found by wrapping WebGL2 to
+name every texture and framebuffer bound at the moment `gl.getError()` came back non-zero after a
+draw, which named the offending framebuffer's `DEPTH_ATTACHMENT` as the exact texture bound at unit
+0. Measured at 376x on this tree with `smoke/run.sh`'s own counting; a full run (scene, level, all
+nine avfx effects) is clean after the fix.
 
-One `.avfx` effect triggered it in the first run and a different effect did not in the second, so
-there is a separate effect-specific trigger on top of the structural one.
+The avfx effects were never part of the 376x: on this tree they were clean before the fix too, and
+`viewer/src/assets/viewers/avfx/gpu.rs` draws through its own small buffer set rather than
+`mdl::deferred::Buffers`, so it cannot reach this aliasing at all. The earlier note that one avfx
+effect had triggered it was never reproduced here and stays unexplained; if it recurs it is a
+separate cause.
 
 `the preview frame changed after game shaders were turned on and off again` used to fire on a
 `--orbit` run and needed **both** halves of the mechanism to show. "Reset view" sits immediately

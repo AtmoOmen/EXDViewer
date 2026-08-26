@@ -675,7 +675,10 @@ impl Renderer {
         // The reflection chain took its own copy before it ran and laid its answer back over the
         // frame afterward, so what stands behind a surface here is neither of those two.
         self.buffers.keep(gl)?;
-        let into = self.buffers.frame().ok_or("no lit frame")?;
+        // Tested against a copy of the depth rather than the depth itself: a surface here also
+        // samples it, and the live one is the framebuffer's own attachment.
+        self.buffers.cut(gl)?;
+        let into = self.buffers.bare().ok_or("no lit frame")?;
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);

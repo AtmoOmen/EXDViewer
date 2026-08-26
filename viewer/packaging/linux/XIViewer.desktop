@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=XIViewer
+Comment=Browse and inspect FFXIV internal data directly from your browser
+Exec=@BIN@
+Icon=xiviewer
+Categories=Utility;
+Terminal=false
+StartupWMClass=XIViewer

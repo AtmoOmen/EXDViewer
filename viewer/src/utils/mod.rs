@@ -28,7 +28,7 @@ pub use cloneable_error::CloneableResult;
 pub use collapsible_side_panel::{CollapsibleSidePanel, Side};
 pub use color_theme::ColorTheme;
 pub use convertible_promise::{ConvertiblePromise, PromiseKind};
-pub use icon_export::{icon_export_choice, resolve_icon_pixels, spawn_icon_copy};
+pub use icon_export::{icon_context_menu, icon_export_choices, resolve_icon_pixels, spawn_icon_copy};
 pub use icon_loader::install_tex_loader;
 pub use icon_manager::{IconManager, ManagedIcon};
 pub use icon_modal::icon_modal;

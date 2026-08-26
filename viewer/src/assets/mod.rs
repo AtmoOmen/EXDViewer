@@ -1700,7 +1700,7 @@ impl AssetBrowser {
                                     ));
                                 }
                                 let busy = self.export.is_some();
-                                let promise = export::menu(ui, "Export", None, busy, choices);
+                                let promise = export::menu(ui, "Export", None, busy, choices, egui::Vec2::ZERO);
                                 if promise.is_some() {
                                     self.export = promise;
                                 }

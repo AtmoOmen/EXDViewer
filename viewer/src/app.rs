@@ -427,6 +427,10 @@ impl App {
         self.update_fonts(&ctx);
         self.update_sheet_languages(&ctx);
         self.github.poll(&ctx);
+        self.icon_manager.poll_actions();
+        if let Some(icon_id) = self.icon_manager.take_open_request() {
+            self.navigate(format!("/icons/{icon_id}"));
+        }
         about::draw(&ctx, &mut self.about_open);
         self.draw_menubar(ui, tab);
         crate::report::draw_window(ui.ctx(), self.backend.as_ref());
@@ -1383,6 +1387,7 @@ impl App {
                                     .hover("Links export as raw values")
                                     .filter("CSV", &["csv"]),
                                 ],
+                                egui::Vec2::ZERO,
                             );
                             if promise.is_some() {
                                 self.export_promise = promise;

@@ -15,6 +15,7 @@ use crate::{
         Load,
         derive::{self, Param},
         index::Index,
+        requirements,
         rewards::{self, Catalog},
         script::{self, Script},
     },
@@ -33,23 +34,14 @@ const IDENTITY: &[&str] = &[
     "EventIconType",
 ];
 
+/// Requirement fields `requirements::ui` does not resolve to something more specific, shown plainly
+/// by the generic `fields()` renderer.
 const REQUIREMENTS: &[&str] = &[
-    "ClassJobCategory0",
-    "ClassJobLevel[0]",
-    "ClassJobCategory1",
-    "ClassJobLevel[1]",
     "LevelMax",
     "QuestLevelOffset",
     "ClassJobRequired",
     "ClassJobUnlock",
-    "GrandCompany",
-    "GrandCompanyRank",
-    "BeastTribe",
-    "BeastReputationRank",
-    "BeastReputationValue",
-    "MountRequired",
     "Festival",
-    "IsHouseRequired",
 ];
 
 const FLOW: &[&str] = &[
@@ -221,12 +213,14 @@ impl Detail {
         );
 
         action = action.or(section(ui, "Requirements", false, |ui| {
-            fields(
+            let mut action = requirements::ui(ui, index, row);
+            action = action.or(fields(
                 ui,
                 index,
                 row,
                 REQUIREMENTS.iter().map(|n| (*n).to_string()),
-            )
+            ));
+            action
         }));
         action = action.or(section(ui, "Progression", false, |ui| {
             fields(ui, index, row, FLOW.iter().map(|n| (*n).to_string()))
@@ -364,6 +358,18 @@ fn section(
         .flatten()
 }
 
+/// A `CellResponse` as the `Action` a click on it should take, the way every generic field row
+/// already resolves one.
+pub(crate) fn link_action(response: CellResponse) -> Option<Action> {
+    match response {
+        CellResponse::Link((sheet, (row_id, subrow))) => Some(Action::Navigate(match subrow {
+            Some(subrow) => format!("/sheet/{sheet}#R{row_id}.{subrow}"),
+            None => format!("/sheet/{sheet}#R{row_id}"),
+        })),
+        _ => None,
+    }
+}
+
 fn fields(
     ui: &mut egui::Ui,
     index: &Index,
@@ -391,11 +397,8 @@ fn fields(
                 Label::new(RichText::new(&name).weak()),
             )
             .on_hover_text(&name);
-            if let CellResponse::Link((sheet, (row_id, subrow))) = cell.show(ui).inner {
-                action = Some(Action::Navigate(match subrow {
-                    Some(subrow) => format!("/sheet/{sheet}#R{row_id}.{subrow}"),
-                    None => format!("/sheet/{sheet}#R{row_id}"),
-                }));
+            if let Some(new_action) = link_action(cell.show(ui).inner) {
+                action = Some(new_action);
             }
         });
     }

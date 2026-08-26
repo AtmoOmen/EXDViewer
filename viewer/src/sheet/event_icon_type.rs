@@ -10,7 +10,7 @@ use crate::{
         schema_column::{ResolvedTableContext, SchemaColumnMeta, SheetLink},
         table_context::TableContext,
     },
-    utils::{ManagedIcon, TrackedPromise},
+    utils::{ManagedIcon, TrackedPromise, icon_context_menu},
 };
 
 /// Whether a `Link` targets the `EventIconType` sheet specifically, rather than any other link.
@@ -136,12 +136,16 @@ fn thumb(
 ) -> Option<u32> {
     let path = get_icon_path(global.backend().icons(), icon_id, false, global.language());
     let excel = global.backend().excel().clone();
-    let source = global
-        .icon_manager()
-        .get_or_insert_icon(&path, ui.ctx(), || {
-            let path = path.clone();
-            TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
-        });
+    let icon_mgr = global.icon_manager();
+    let source = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
+        let excel = excel.clone();
+        let path = path.clone();
+        TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
+    });
+    let loaded = match &source {
+        ManagedIcon::Loaded(image) => Some(image.clone()),
+        _ => None,
+    };
 
     ui.vertical(|ui| {
         let (rect, response) = ui.allocate_exact_size(Vec2::splat(THUMB), Sense::click());
@@ -152,9 +156,17 @@ fn thumb(
             }
             ManagedIcon::Failed(_) => {}
         }
-        let clicked = response
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked();
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let clicked = response.clicked();
+        icon_context_menu(
+            &response,
+            icon_mgr,
+            excel.clone(),
+            global.backend().files().clone(),
+            icon_id,
+            &path,
+            loaded,
+        );
         ui.label(RichText::new(label).weak().small())
             .on_hover_text(format!(
                 "Id: {icon_id}\nPath: {path}\nIconRange: {range} (additional variants not shown)"

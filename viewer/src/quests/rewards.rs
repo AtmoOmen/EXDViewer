@@ -8,11 +8,12 @@ use crate::{
     excel::provider::{ExcelProvider, ExcelRow, ExcelSheet},
     quests::{
         detail::Action,
+        glyph,
         index::{Fields, Index, integer, text},
     },
     sheet::read_integer,
     settings::ALWAYS_HIRES,
-    utils::{ManagedIcon, TrackedPromise},
+    utils::{ManagedIcon, TrackedPromise, icon_context_menu},
 };
 
 /// How many ranks `BeastRankBonus.ItemQuantity` carries, from `Neutral` to `AlliedBloodsworn`.
@@ -116,7 +117,7 @@ fn stain_color(fields: &Fields, row_id: u32) -> Option<(String, Color32)> {
 
 /// `read_integer` only handles the integer `ColumnKind`s; the HQ flags in this sheet are plain
 /// `Bool` columns, which it errors on and this would silently read as 0 without the special case.
-fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
+pub(crate) fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
     let Some(at) = index.column(name) else {
         return 0;
     };
@@ -130,30 +131,46 @@ fn read(index: &Index, row: ExcelRow<'_>, name: &str) -> i64 {
     read_integer::<i64>(row, offset, column.kind()).unwrap_or(0)
 }
 
-fn icon(ui: &mut egui::Ui, index: &Index, icon_id: u32, size: f32) {
+pub(crate) fn icon(ui: &mut egui::Ui, index: &Index, icon_id: u32, size: f32) {
     if icon_id == 0 {
         ui.add_space(size);
         return;
     }
     let global = index.table.global();
+    let icon_mgr = global.icon_manager();
     let hires = ALWAYS_HIRES.get(ui.ctx());
     let path = get_icon_path(global.backend().icons(), icon_id, hires, global.language());
     let excel = global.backend().excel().clone();
-    let source = global.icon_manager().get_or_insert_icon(&path, ui.ctx(), || {
+    let source = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
+        let excel = excel.clone();
         let path = path.clone();
         TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
-    match source {
+    let loaded = match &source {
+        ManagedIcon::Loaded(image) => Some(image.clone()),
+        _ => None,
+    };
+    let response = match source {
         ManagedIcon::Loaded(image) => {
-            ui.add(egui::Image::new(image).fit_to_exact_size(Vec2::splat(size)));
+            ui.add(egui::Image::new(image).sense(Sense::click()).fit_to_exact_size(Vec2::splat(size)))
         }
         ManagedIcon::Loading | ManagedIcon::NotLoaded => {
-            ui.add(egui::Spinner::new().size(size));
+            ui.add(egui::Spinner::new().size(size))
         }
         ManagedIcon::Failed(_) => {
-            ui.add_space(size);
+            let (_, response) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+            response
         }
-    }
+    };
+    icon_context_menu(
+        &response,
+        icon_mgr,
+        excel,
+        global.backend().files().clone(),
+        icon_id,
+        &path,
+        loaded,
+    );
 }
 
 /// A swatch constrained to its own small rect - `draw_color` otherwise claims the rest of the row.
@@ -174,10 +191,12 @@ fn link_label(ui: &mut egui::Ui, label: &str, width: f32, sheet: &str, row_id: u
     response.clicked().then(|| Action::Navigate(format!("/sheet/{sheet}#R{row_id}")))
 }
 
-const ICON_SIZE: f32 = 20.0;
+pub(crate) const ICON_SIZE: f32 = 20.0;
 /// Space reserved for the count, stain swatch and HQ badge trailing an item row, so the name gets
 /// the rest of the line instead of a fixed split that clips long names.
 const TRAILING_WIDTH: f32 = 96.0;
+/// Gil's own row in `Item`, which the reward computation already special-cases the same way.
+const GIL_ITEM_ID: u32 = 1;
 
 #[allow(clippy::too_many_arguments)]
 fn item_row(
@@ -194,7 +213,16 @@ fn item_row(
     let icon_id = resolved.as_ref().map_or(0, |(_, icon_id)| *icon_id);
     let name = resolved.map_or_else(|| format!("Item #{item_id}"), |(name, _)| name);
     ui.horizontal(|ui| {
-        icon(ui, index, icon_id, ICON_SIZE);
+        // Gil's own coin glyph is already in the font, so showing it costs nothing an icon fetch
+        // would: no spinner, no texture.
+        if item_id == GIL_ITEM_ID {
+            ui.add_sized(
+                Vec2::splat(ICON_SIZE),
+                Label::new(RichText::new(glyph::GIL.to_string()).size(ICON_SIZE)),
+            );
+        } else {
+            icon(ui, index, icon_id, ICON_SIZE);
+        }
         let name_width = (ui.available_width() - TRAILING_WIDTH).max(40.0);
         action = link_label(ui, &name, name_width, "Item", item_id);
         if count > 1 {
@@ -206,7 +234,8 @@ fn item_row(
             swatch(ui, color, 14.0).on_hover_text(stain_name);
         }
         if hq {
-            ui.label(RichText::new("HQ").strong().small());
+            ui.label(RichText::new(glyph::HIGH_QUALITY.to_string()).size(16.0))
+                .on_hover_text("High Quality");
         }
     });
     action

@@ -33,6 +33,13 @@ struct IconManagerImpl {
     /// index changes is a miss rather than a stale hit.
     cache: HashMap<String, ConvertibleIconPromise>,
     loaded_handles: Vec<TextureHandle>,
+    /// Copy/export fetches an icon's own context menu started, from wherever it was drawn. Held
+    /// here rather than by the drawing site, most of which have no `&mut self` to park one in; a
+    /// promise dropped mid-flight cancels its future.
+    actions: Vec<TrackedPromise<()>>,
+    /// An icon a context menu asked to see in the Icons tab, for the app to route to once per
+    /// frame.
+    open_request: Option<u32>,
 }
 
 impl IconManager {
@@ -53,6 +60,26 @@ impl IconManager {
         self.0
             .lock()
             .get_or_insert_icon_promise(path, context, promise_creator)
+    }
+
+    /// Keep a copy/export fetch alive past the frame that started it.
+    pub fn spawn_action(&self, promise: TrackedPromise<()>) {
+        self.0.lock().actions.push(promise);
+    }
+
+    /// Drop the ones that have finished, once a frame.
+    pub fn poll_actions(&self) {
+        self.0.lock().actions.retain(|p| p.try_get().is_none());
+    }
+
+    /// A context menu asked to see `icon_id` in the Icons tab.
+    pub fn request_open(&self, icon_id: u32) {
+        self.0.lock().open_request = Some(icon_id);
+    }
+
+    /// The last open request, if the app has not routed it yet this frame.
+    pub fn take_open_request(&self) -> Option<u32> {
+        self.0.lock().open_request.take()
     }
 }
 

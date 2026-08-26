@@ -269,6 +269,10 @@ struct Layer {
     /// skeleton rests, which is what a file being inspected shows.
     motion: Cell<Option<usize>>,
     time: Cell<f32>,
+    /// Paths still to try, in order, if the one loading now lands without `opening`'s motion. A
+    /// name and its file disagree often enough that a guess has to be verified rather than
+    /// trusted on sight.
+    retry: RefCell<Vec<String>>,
 }
 
 impl Layer {
@@ -277,13 +281,42 @@ impl Layer {
         *self.pack.borrow_mut() = None;
         *self.then.borrow_mut() = then.map(ToOwned::to_owned);
         *self.opening.borrow_mut() = motion.map(ToOwned::to_owned);
+        *self.retry.borrow_mut() = Vec::new();
         self.motion.set(None);
         self.time.set(0.0);
     }
 
-    /// Takes up the pack once it lands, opening on the motion asked for. A pack that never
-    /// arrives gives way to whatever was queued behind it: not every race ships the motion an
-    /// emote starts with.
+    /// Loads the first of `candidates` opening on `motion`, keeping the rest to try in turn if it
+    /// lands without that motion. An empty list leaves the layer at rest.
+    fn seek(&self, mut candidates: Vec<String>, motion: &str) {
+        match candidates.is_empty() {
+            true => self.load("", None, None),
+            false => {
+                let first = candidates.remove(0);
+                self.load(&first, Some(motion), None);
+                *self.retry.borrow_mut() = candidates;
+            }
+        }
+    }
+
+    /// Whether the layer has run out of candidates without landing on `opening`'s motion,
+    /// however it got there: nothing was ever wanted, or every candidate `seek` was given has
+    /// landed and none of them named it.
+    fn spent(&self) -> bool {
+        if self.wanted.borrow().is_empty() {
+            return true;
+        }
+        let landed = matches!(
+            self.pack.borrow().as_ref(),
+            Some(Fetch::Ready(_)) | Some(Fetch::Failed(_))
+        );
+        landed && self.retry.borrow().is_empty() && self.motion.get().is_none()
+    }
+
+    /// Takes up the pack once it lands, opening on the motion asked for. A pack that lands
+    /// without it, or never arrives at all, gives way to the next candidate `seek` queued, or
+    /// what was queued behind it once that runs out too: not every race ships the motion an
+    /// emote starts with, and a file's name is not always its content.
     fn poll(&self, backend: &Backend) {
         let wanted = self.wanted.borrow().clone();
         let mut held = self.pack.borrow_mut();
@@ -291,15 +324,28 @@ impl Layer {
             return;
         }
         Fetch::poll(&mut held, backend, &wanted, Motions::read);
-        let motion = held
-            .as_ref()
-            .and_then(Fetch::ready)
-            .and_then(|motions| match self.opening.borrow().as_deref() {
-                Some(name) => motions.named.iter().position(|(held, _)| held == name),
-                None => motions.standing(),
-            });
+        let ready = held.as_ref().and_then(Fetch::ready);
+        let opening = self.opening.borrow().clone();
+        let motion = ready.and_then(|motions| match opening.as_deref() {
+            Some(name) => motions.named.iter().position(|(held, _)| held == name),
+            None => motions.standing(),
+        });
         let failed = matches!(held.as_ref(), Some(Fetch::Failed(_)));
+        let missed = opening.is_some() && ready.is_some() && motion.is_none();
         drop(held);
+        if failed || missed {
+            let next = {
+                let mut retry = self.retry.borrow_mut();
+                (!retry.is_empty()).then(|| retry.remove(0))
+            };
+            if let Some(next) = next {
+                next.clone_into(&mut self.wanted.borrow_mut());
+                *self.pack.borrow_mut() = None;
+                self.motion.set(None);
+                self.time.set(0.0);
+                return;
+            }
+        }
         self.motion.set(motion);
         if failed {
             let then = self.then.borrow_mut().take();
@@ -417,6 +463,109 @@ impl<T> Fetch<T> {
     }
 }
 
+/// The `cfxf_` names a pap's own animation table states, regardless of whether its own timeline
+/// also names a companion.
+fn pose_names(bytes: &[u8]) -> Result<Vec<String>> {
+    let file = AnimationPack::read(Cursor::new(bytes.to_vec()))?;
+    Ok(file
+        .animations()
+        .iter()
+        .filter_map(|animation| animation.name().strip_prefix("cfxf_").map(ToOwned::to_owned))
+        .collect())
+}
+
+/// What a lookup against [`Poses`] found.
+enum PoseLookup {
+    /// The index is still being built; ask again once more of it has landed.
+    Pending,
+    Found(String),
+    /// The index finished without ever seeing the name.
+    Miss,
+}
+
+/// Every `.pap` under a face's own tree, read one at a time and kept for the rest of the
+/// session. Built only once a pose neither the filename guess nor the shared library could
+/// confirm asks for it, since walking the whole tree costs hundreds of fetches a face rarely
+/// needs.
+#[derive(Default)]
+enum Poses {
+    #[default]
+    Unbuilt,
+    Building {
+        queue: Vec<String>,
+        current: Option<String>,
+        fetch: Option<Fetch<Vec<String>>>,
+        found: HashMap<String, String>,
+    },
+    Ready(HashMap<String, String>),
+}
+
+impl Poses {
+    /// Looks `name` up, advancing the walk by one fetch if it has not been seen yet. `paths` is
+    /// only read on the first call, to seed the walk from the listing already fetched.
+    fn advance(&mut self, backend: &Backend, paths: Vec<String>, name: &str) -> PoseLookup {
+        if matches!(self, Self::Unbuilt) {
+            let mut queue = paths;
+            queue.reverse();
+            *self = Self::Building {
+                queue,
+                current: None,
+                fetch: None,
+                found: HashMap::new(),
+            };
+        }
+        loop {
+            match self {
+                Self::Ready(found) => {
+                    return match found.get(name) {
+                        Some(path) => PoseLookup::Found(path.clone()),
+                        None => PoseLookup::Miss,
+                    };
+                }
+                Self::Building {
+                    queue,
+                    current,
+                    fetch,
+                    found,
+                } => {
+                    if let Some(path) = found.get(name) {
+                        return PoseLookup::Found(path.clone());
+                    }
+                    let path = match current.clone() {
+                        Some(path) => path,
+                        None => match queue.pop() {
+                            Some(next) => {
+                                *current = Some(next.clone());
+                                next
+                            }
+                            None => {
+                                let found = std::mem::take(found);
+                                *self = Self::Ready(found);
+                                continue;
+                            }
+                        },
+                    };
+                    Fetch::poll(fetch, backend, &path, pose_names);
+                    match fetch.take() {
+                        Some(Fetch::Ready(names)) => {
+                            for pose in names {
+                                found.entry(pose).or_insert_with(|| path.clone());
+                            }
+                            *current = None;
+                        }
+                        Some(Fetch::Failed(_)) => *current = None,
+                        other => {
+                            *fetch = other;
+                            return PoseLookup::Pending;
+                        }
+                    }
+                }
+                Self::Unbuilt => unreachable!(),
+            }
+        }
+    }
+}
+
 /// One pack a model can be played from, as the listing names it.
 struct Pack {
     path: String,
@@ -460,6 +609,12 @@ pub struct Animation {
     /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
     /// is what asks for another rather than every frame re-loading the same pack.
     linked: RefCell<Option<String>>,
+    /// A pose `express` or the body's own companion asked for that neither the filename guess
+    /// nor the shared library could confirm, waiting on `poses` to be built far enough to answer.
+    pending: RefCell<Option<String>>,
+    /// Every `.pap` under the face's own tree, read one at a time and kept for the session: the
+    /// last resort once a pose's name and its likely files disagree.
+    poses: RefCell<Poses>,
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
     /// How far a raised visor has turned, one angle per bone it hinges on.
@@ -494,6 +649,8 @@ impl Animation {
             },
             face: Default::default(),
             linked: RefCell::new(None),
+            pending: RefCell::new(None),
+            poses: Default::default(),
             bust: Cell::new(Vec3::ONE),
             visor: Cell::new([0.0; 3]),
             running: Cell::new(true),
@@ -575,6 +732,7 @@ impl Animation {
         }
         self.poll_ordering(backend);
         self.poll_companion();
+        self.poll_pose(backend);
         if self.running.get() {
             let step = ctx.input(|input| input.stable_dt);
             for layer in self.layers() {
@@ -739,39 +897,41 @@ impl Animation {
             false => &self.body,
         }
         .load(path, None, then);
+        // Forces the next poll to re-read the companion rather than see the same name it had
+        // last time and assume nothing changed, which is what left a re-picked emote's face
+        // stuck on whatever frame it was already at.
+        *self.linked.borrow_mut() = None;
         self.running.set(true);
     }
 
-    /// Puts an expression on the face the character wears, out of whichever pack the listing files
-    /// it under: most are a pack of their own, the rest motions of the one a face keeps resident.
-    /// A name filed nowhere leaves the face as it rests, which is the game's own neutral pose.
+    /// Puts an expression on the face the character wears. A file's own name is only a guess at
+    /// what it holds, so every candidate is opened on the `cfxf_` name itself and skipped if it
+    /// does not carry it: the filename match first, since most poses are a pack of their own,
+    /// then the one a face keeps resident, then the rest of the face's own tree if neither knew
+    /// it. A name filed nowhere leaves the face as it rests, which is the game's own neutral pose.
     pub fn express(&self, name: &str) {
         let Some(root) = self.face_root() else {
             return;
         };
         let file = format!("{name}.pap");
-        let found = self.packs.borrow().as_ref().and_then(|packs| {
-            let found = packs
-                .as_ref()
-                .ok()?
+        let mut candidates: Vec<String> = match self.packs.borrow().as_ref() {
+            Some(Ok(packs)) => packs
                 .iter()
-                .find(|pack| pack.path.starts_with(&root) && file_name(&pack.path) == file)?;
-            Some(found.path.clone())
-        });
-        match found {
-            Some(path) => self.face.load(&path, None, None),
-            None => self.face.load(
-                &format!("{root}resident/face.pap"),
-                Some(&format!("cfxf_{name}")),
-                None,
-            ),
-        }
+                .filter(|pack| pack.path.starts_with(&root) && file_name(&pack.path) == file)
+                .map(|pack| pack.path.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        candidates.push(format!("{root}resident/face.pap"));
+        self.face.seek(candidates, &format!("cfxf_{name}"));
+        *self.pending.borrow_mut() = Some(name.to_owned());
         self.running.set(true);
     }
 
     /// Drives the face from the `cfxf_` companion the body's own motion names, the way an emote
     /// like Joy carries its own expression rather than leaving the creator to pick one. A change of
-    /// companion is what asks for another; a body pack with none leaves the face as it was.
+    /// companion is what asks for another; a body pack with none resets the face to rest rather
+    /// than leaving it holding whatever it played last.
     fn poll_companion(&self) {
         let wanted = self.body.companion();
         if wanted == *self.linked.borrow() {
@@ -779,6 +939,7 @@ impl Animation {
         }
         let Some(name) = &wanted else {
             *self.linked.borrow_mut() = wanted;
+            self.face.load("", None, None);
             return;
         };
         let Some(root) = self.face_root() else {
@@ -792,20 +953,56 @@ impl Animation {
             .strip_suffix(".pap")
             .unwrap_or_default()
             .to_owned();
-        let candidates = [
+        let candidates: Vec<String> = [
             format!("{root}nonresident/{name}.pap"),
             format!("{root}nonresident/emot/{tail}.pap"),
             format!("{root}resident/face.pap"),
-        ];
-        let Some(path) = candidates
-            .into_iter()
-            .find(|candidate| packs.iter().any(|pack| pack.path == *candidate))
-        else {
+        ]
+        .into_iter()
+        .filter(|candidate| packs.iter().any(|pack| pack.path == *candidate))
+        .collect();
+        drop(held);
+        self.face.seek(candidates, &format!("cfxf_{name}"));
+        *self.pending.borrow_mut() = Some(name.clone());
+        *self.linked.borrow_mut() = wanted;
+    }
+
+    /// Falls back to the lazily-built name index for a pose `express` or `poll_companion` could
+    /// not confirm any faster way, once the face layer has run out of candidates to try on its
+    /// own.
+    fn poll_pose(&self, backend: &Backend) {
+        let Some(name) = self.pending.borrow().clone() else {
             return;
         };
+        if self.face.motion.get().is_some() {
+            *self.pending.borrow_mut() = None;
+            return;
+        }
+        if !self.face.spent() {
+            return;
+        }
+        let Some(root) = self.face_root() else {
+            *self.pending.borrow_mut() = None;
+            return;
+        };
+        let held = self.packs.borrow();
+        let Some(Ok(packs)) = held.as_ref() else {
+            return;
+        };
+        let paths: Vec<String> = packs
+            .iter()
+            .filter(|pack| pack.path.starts_with(&root) && pack.path.ends_with(".pap"))
+            .map(|pack| pack.path.clone())
+            .collect();
         drop(held);
-        self.face.load(&path, Some(&format!("cfxf_{name}")), None);
-        *self.linked.borrow_mut() = wanted;
+        match self.poses.borrow_mut().advance(backend, paths, &name) {
+            PoseLookup::Pending => {}
+            PoseLookup::Found(path) => {
+                self.face.load(&path, Some(&format!("cfxf_{name}")), None);
+                *self.pending.borrow_mut() = None;
+            }
+            PoseLookup::Miss => *self.pending.borrow_mut() = None,
+        }
     }
 
     /// Where the packs of the face the character wears are filed.

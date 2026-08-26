@@ -28,6 +28,7 @@ use crate::utils::{
 
 const FILTER_ID: &str = "music_filter";
 const LIST_WIDTH: f32 = 340.0;
+const LIST_MIN_WIDTH: f32 = 160.0;
 
 #[derive(Deserialize, Default)]
 struct SongInfo {
@@ -529,6 +530,7 @@ impl MusicPlayer {
         let mut clicked = None;
         let mut nav = std::mem::take(&mut self.nav);
         CollapsibleSidePanel::new("music_list", Side::Left)
+            .min_width(LIST_MIN_WIDTH)
             .max_width(LIST_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {

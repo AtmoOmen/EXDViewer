@@ -36,6 +36,7 @@ const PLACE_NAME: u32 = 32;
 
 /// One `TerritoryType` row that names a level.
 struct Zone {
+    row_id: u32,
     place_name: u32,
     /// The internal short code, e.g. `s1t1`. Falls in for a row `PlaceName` leaves unnamed.
     name: String,
@@ -554,7 +555,12 @@ impl ZoneBrowser {
 
 async fn load_index(excel: CachedProvider) -> Result<Vec<Zone>> {
     let sheet = excel.get_sheet("TerritoryType", Language::None).await?;
-    let mut zones = Vec::new();
+    let mut zones: Vec<Zone> = Vec::new();
+    let mut by_path: HashMap<String, usize> = HashMap::new();
+    // Many rows resolve to the same `.lvb` (instanced duties, phased variants, unused copies); keep
+    // one, preferring a row that names a usable PlaceName and, among those, the lowest row id, so
+    // the pick is stable between runs.
+    let rank = |zone: &Zone| (zone.place_name != 0, std::cmp::Reverse(zone.row_id));
     for row_id in sheet.get_row_ids() {
         let Ok(row) = sheet.get_row(row_id) else {
             continue;
@@ -571,11 +577,21 @@ async fn load_index(excel: CachedProvider) -> Result<Vec<Zone>> {
             .map(|s| String::from_utf8_lossy(s.as_bytes()).into_owned())
             .unwrap_or_default();
         let place_name = row.read::<u16>(PLACE_NAME).unwrap_or_default();
-        zones.push(Zone {
+        let path = format!("bg/{bg}.lvb");
+        let zone = Zone {
+            row_id,
             place_name: u32::from(place_name),
             name,
-            path: format!("bg/{bg}.lvb"),
-        });
+            path: path.clone(),
+        };
+        match by_path.get(&path).copied() {
+            Some(at) if rank(&zone) > rank(&zones[at]) => zones[at] = zone,
+            Some(_) => {}
+            None => {
+                by_path.insert(path, zones.len());
+                zones.push(zone);
+            }
+        }
     }
     Ok(zones)
 }

@@ -17,6 +17,7 @@ use shaders::names;
 use super::shader::{self, Naming, ResourceRow, Shader};
 use super::{Preview, facts, section};
 use crate::assets::Bytes;
+use crate::utils::export;
 use keys::Keys;
 use params::{COMPONENTS, Component, ParamRow};
 
@@ -182,6 +183,130 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 
 pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8]) {
     list::ui(ui, package, bytes);
+}
+
+/// One of the two readings a shader's text comes in, and what an exported file calls it.
+#[derive(Clone, Copy)]
+struct Reading {
+    hlsl: bool,
+    extension: &'static str,
+    label: &'static str,
+}
+
+const HLSL: Reading = Reading {
+    hlsl: true,
+    extension: "hlsl",
+    label: "HLSL",
+};
+const ASSEMBLY: Reading = Reading {
+    hlsl: false,
+    extension: "asm",
+    label: "Assembly",
+};
+
+/// Beyond the raw file: every shader's chosen reading, zipped together where there is more than one
+/// to write, and the pass the shader list's chips currently name as a merged source, if they name
+/// exactly one of each. Reading `ctx`'s memory this way is one frame behind the chips themselves,
+/// the same way `merged::reading` already is.
+pub fn export_choices<'a>(
+    package: &'a Rendered,
+    bytes: &'a [u8],
+    ctx: &egui::Context,
+) -> Vec<export::Choice<'a>> {
+    let mut choices = vec![
+        shaders_choice(package, bytes, HLSL),
+        shaders_choice(package, bytes, ASSEMBLY),
+    ];
+    if let Some(target) = merge_target(ctx, package) {
+        choices.push(merged_choice(bytes, &target, HLSL));
+        choices.push(merged_choice(bytes, &target, ASSEMBLY));
+    }
+    choices
+}
+
+fn shaders_choice<'a>(
+    package: &'a Rendered,
+    bytes: &'a [u8],
+    reading: Reading,
+) -> export::Choice<'a> {
+    let single = package.shaders.len() == 1;
+    let file_name = match single {
+        true => format!("shader.{}", reading.extension),
+        false => format!("shaders_{}.zip", reading.extension),
+    };
+    export::Choice::bytes(format!("All shaders, {}", reading.label), file_name, move || {
+        let files: Vec<(String, Vec<u8>)> = package
+            .shaders
+            .iter()
+            .enumerate()
+            .filter_map(|(index, shader)| {
+                let (lines, _) = shader::code::text(shader, &package.naming, bytes, reading.hlsl)?;
+                Some((
+                    format!("{index:04}_{}.{}", shader.stage, reading.extension),
+                    lines.join("\n").into_bytes(),
+                ))
+            })
+            .collect();
+        match single {
+            true => files
+                .into_iter()
+                .next()
+                .map(|(_, data)| data)
+                .ok_or_else(|| anyhow::anyhow!("no shader program in this package")),
+            false => export::zip(&files),
+        }
+    })
+}
+
+/// The 0..4 stage index `shadermerge::pass` takes, its stage name, the pass id, and how many
+/// shaders merging it would read.
+struct MergeTarget {
+    stage: usize,
+    stage_name: &'static str,
+    pass: u32,
+    count: usize,
+}
+
+/// Where the shader list's two chip rows currently name exactly one stage and one pass.
+fn merge_target(ctx: &egui::Context, package: &Rendered) -> Option<MergeTarget> {
+    let (chip_stage, chip_pass, _) =
+        ctx.data(|data| data.get_temp::<(usize, usize, usize)>(package.state))?;
+    let count = list::mergeable(package, chip_stage, chip_pass).ok()?;
+    let (stage_name, ..) = package.stages.get(chip_stage.checked_sub(1)?)?;
+    let stage = match *stage_name {
+        "Vertex" => 0,
+        "Pixel" => 1,
+        "Hull" => 2,
+        "Domain" => 3,
+        "Geometry" => 4,
+        _ => return None,
+    };
+    let pass = package.keys.passes.get(chip_pass.checked_sub(1)?)?.id;
+    Some(MergeTarget {
+        stage,
+        stage_name,
+        pass,
+        count,
+    })
+}
+
+fn merged_choice<'a>(
+    bytes: &'a [u8],
+    target: &MergeTarget,
+    reading: Reading,
+) -> export::Choice<'a> {
+    let file_name = format!("merged_{}.{}", target.stage_name, reading.extension);
+    let (stage, pass) = (target.stage, target.pass);
+    export::Choice::bytes(format!("Merged pass, {}", reading.label), file_name, move || {
+        let package = shpk::ShaderPackage::parse(bytes)?;
+        let merged = shadermerge::pass(&package, bytes, stage, pass).map_err(anyhow::Error::from)?;
+        let lines = match reading.hlsl {
+            true => merged.lines,
+            false => merged.asm,
+        };
+        Ok(lines.join("\n").into_bytes())
+    })
+    .hover(format!("{} shaders", target.count))
 }
 
 /// Everything about the package that is not a shader. It sits beside the code rather than above it,

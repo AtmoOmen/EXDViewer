@@ -444,9 +444,11 @@ async function main() {
         console.log(`   renderer: ${booted.renderer}`);
         console.log(`   samples: ${booted.samples}  antialias: ${booted.antialias}`);
         console.log(`   canvas depth: ${booted.depth}  bits: ${booted.depthBits}`);
+        console.log(`   max draw buffers: ${booted.maxDrawBuffers}`);
         report.renderer = booted.renderer;
         report.samples = booted.samples;
         report.depthBits = booted.depthBits;
+        report.maxDrawBuffers = booted.maxDrawBuffers;
 
         if (!booted.samples || booted.samples < 2) {
             throw new Error(

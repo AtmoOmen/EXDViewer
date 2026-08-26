@@ -1050,6 +1050,7 @@ impl<'a> Reader<'a> {
             && tests.get(count - 1).is_some_and(|test| test.after <= end)
             && !until_tail(&tests, pc)
         {
+            self.anchor(pc, end + 1)?;
             let condition = self.condition(&tests, count, pc)?;
             let body = self.block(tests[count - 1].after, end, escape, None)?;
             self.out.push(Stat::While(condition, body));
@@ -1057,6 +1058,7 @@ impl<'a> Reader<'a> {
         }
 
         if end > 0 && conditional(self.at(end - 1)?.opcode()) {
+            self.anchor(pc, end + 1)?;
             let body = self.block(pc, end + 1, escape, Some(pc))?;
             let condition = self
                 .until
@@ -1066,6 +1068,7 @@ impl<'a> Reader<'a> {
             return Ok(end + 1);
         }
 
+        self.anchor(pc, end + 1)?;
         let body = self.block(pc, end, escape, None)?;
         self.out.push(Stat::While(Expr::Bool(true), body));
         Ok(end + 1)

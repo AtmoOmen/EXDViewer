@@ -35,6 +35,7 @@ pub struct Sprite {
 }
 
 /// Everything drawn under one particle definition and one blend at once.
+#[derive(Clone)]
 pub struct Batch {
     pub shape: Shape,
     /// The effect's textures, in the order it lists them.
@@ -54,6 +55,10 @@ pub struct Frame {
     pub batches: Vec<Batch>,
     /// The packages the batches resolve against, once they have been fetched.
     pub packages: Arc<Packages>,
+    /// Tested against whatever depth the caller already bound, rather than disabled outright: the
+    /// standalone preview draws into a frame with none, and a zone draws into the one its own
+    /// geometry left, so a glow standing behind a wall does not show through it.
+    pub tested: bool,
 }
 
 /// The two apricot packages an effect is drawn with.
@@ -94,7 +99,13 @@ pub struct Particles {
 
 impl Particles {
     pub fn new(models: Vec<Mesh>) -> Arc<Mutex<Self>> {
-        Arc::new(Mutex::new(Self {
+        Arc::new(Mutex::new(Self::new_plain(models)))
+    }
+
+    /// Unwrapped, for a caller that already runs behind its own lock: a zone's renderer holds one
+    /// per placed file directly rather than through a second one of its own.
+    pub(crate) fn new_plain(models: Vec<Mesh>) -> Self {
+        Self {
             pending: Some(models),
             models: Vec::new(),
             stream: None,
@@ -102,7 +113,7 @@ impl Particles {
             programs: BTreeMap::new(),
             blocks: Vec::new(),
             failure: None,
-        }))
+        }
     }
 
     pub fn failure(&self) -> Option<&str> {
@@ -136,7 +147,13 @@ impl Particles {
         // which anything downstream of a viewer reads. What egui hands the callback may be
         // multisampled, so nothing is attached to it and the write goes nowhere.
         unsafe {
-            gl.disable(glow::DEPTH_TEST);
+            match frame.tested {
+                true => {
+                    gl.enable(glow::DEPTH_TEST);
+                    gl.depth_func(glow::LEQUAL);
+                }
+                false => gl.disable(glow::DEPTH_TEST),
+            }
             gl.depth_mask(false);
             gl.disable(glow::CULL_FACE);
         }
@@ -435,7 +452,9 @@ impl Drop for Particles {
 }
 
 /// How a blend's source and destination are weighted. Both packages hand over a color the shader has
-/// not scaled by its own opacity, so the source factor carries it.
+/// not scaled by its own opacity, so the source factor carries it. The destination alpha is left
+/// alone rather than blended into: in a zone that channel is the share of a pixel the composite
+/// counted as glare, and a particle drawn over it must not rewrite that mask.
 fn blend(gl: &glow::Context, blend: Blend) {
     unsafe {
         gl.blend_equation(match blend {
@@ -447,10 +466,21 @@ fn blend(gl: &glow::Context, blend: Blend) {
                 gl.disable(glow::BLEND);
                 return;
             }
-            Blend::Alpha => gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
-            Blend::Multiply => gl.blend_func(glow::DST_COLOR, glow::ZERO),
-            Blend::Screen => gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_COLOR),
-            Blend::Subtract | Blend::Add => gl.blend_func(glow::SRC_ALPHA, glow::ONE),
+            Blend::Alpha => gl.blend_func_separate(
+                glow::SRC_ALPHA,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ZERO,
+                glow::ONE,
+            ),
+            Blend::Multiply => {
+                gl.blend_func_separate(glow::DST_COLOR, glow::ZERO, glow::ZERO, glow::ONE)
+            }
+            Blend::Screen => {
+                gl.blend_func_separate(glow::ONE, glow::ONE_MINUS_SRC_COLOR, glow::ZERO, glow::ONE)
+            }
+            Blend::Subtract | Blend::Add => {
+                gl.blend_func_separate(glow::SRC_ALPHA, glow::ONE, glow::ZERO, glow::ONE)
+            }
         }
         gl.enable(glow::BLEND);
     }

@@ -1288,9 +1288,12 @@ pub const TILT: f32 = 30.0;
 /// How far down the view the sun's own depth maps reach where no level file states it.
 pub const SHADOW_REACH: f32 = 400.0;
 
-/// Depth maps the sun draws, stacked into one image. A pixel is read against the nearest whose own
-/// box still holds it.
+/// Depth maps the sun draws, into one image as a grid rather than a single column: a column of
+/// five tiles at full resolution would ask for a texture taller than WebGL2 guarantees a device
+/// can hold. A pixel is read against the nearest whose own box still holds it.
 pub const SPLITS: usize = 5;
+pub const ATLAS_COLUMNS: usize = 3;
+pub const ATLAS_ROWS: usize = SPLITS.div_ceil(ATLAS_COLUMNS);
 
 /// How far down the view the split at `at` reaches, of the whole the sun's maps cover. The game
 /// hands each split a share of the whole in the ratio one, two, four and so on doubling, which
@@ -2998,14 +3001,18 @@ impl Buffer {
         // only those two take the half that turns a clip coordinate into a texture one.
         if self.name == DIRECTIONAL_SHADOW_PARAM {
             let (sun, onto) = shadow_camera(scene.light, view, projection, scene.reach, scene.split);
-            // The splits are stacked into one image, so the half that turns a clip coordinate into a
-            // texture one also takes the second lane into this split's own band of it.
-            let band = 1.0 / SPLITS as f32;
+            // The splits sit in a grid of one image, so the half that turns a clip coordinate into
+            // a texture one also takes both lanes into this split's own cell of it.
+            let (columns, grid_rows) = (ATLAS_COLUMNS as f32, ATLAS_ROWS as f32);
+            let (column, row) = (
+                (scene.split % ATLAS_COLUMNS) as f32,
+                (scene.split / ATLAS_COLUMNS) as f32,
+            );
             let half = Mat4::from_cols(
-                Vec4::new(0.5, 0.0, 0.0, 0.0),
-                Vec4::new(0.0, 0.5 * band, 0.0, 0.0),
+                Vec4::new(0.5 / columns, 0.0, 0.0, 0.0),
+                Vec4::new(0.0, 0.5 / grid_rows, 0.0, 0.0),
                 Vec4::new(0.0, 0.0, 1.0, 0.0),
-                Vec4::new(0.5, (scene.split as f32 + 0.5) * band, 0.0, 1.0),
+                Vec4::new((column + 0.5) / columns, (row + 0.5) / grid_rows, 0.0, 1.0),
             );
             put(
                 DIRECTIONAL_SHADOW_PARAM,

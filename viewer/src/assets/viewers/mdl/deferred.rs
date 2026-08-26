@@ -1410,8 +1410,8 @@ impl Buffers {
                 glow::TEXTURE_2D,
                 0,
                 glow::DEPTH_COMPONENT16 as i32,
-                SHADOW,
-                SHADOW * program::SPLITS as i32,
+                SHADOW * program::ATLAS_COLUMNS as i32,
+                SHADOW * program::ATLAS_ROWS as i32,
                 0,
                 glow::DEPTH_COMPONENT,
                 glow::UNSIGNED_SHORT,
@@ -2895,6 +2895,12 @@ impl Buffers {
     /// from.
     pub fn bare(&self) -> Option<glow::Framebuffer> {
         self.bare
+    }
+
+    /// The live frame the composite resolved into, standing on the depth itself: sun, moon and an
+    /// effect's own glow all draw here, since none of them sample it back.
+    pub fn lit(&self) -> Option<glow::Framebuffer> {
+        self.lit.map(|(frame, _)| frame)
     }
 
     /// Refreshes that copy from what the frame currently holds.

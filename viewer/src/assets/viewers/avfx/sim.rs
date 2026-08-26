@@ -813,6 +813,7 @@ impl Default for State {
 }
 
 /// One thing to draw, in the effect's own space.
+#[derive(Clone, Copy)]
 pub struct Drawn {
     pub center: [f32; 3],
     pub scale: [f32; 3],
@@ -829,6 +830,18 @@ pub struct Drawn {
     pub blend: Blend,
     /// Which of the effect's particles this is one of, which is what its shading is read off.
     pub def: usize,
+}
+
+impl Drawn {
+    /// Carried into a placement external to the effect itself: a zone stands its own copy wherever
+    /// an instance says, so what the emitters ran out in their own space is turned by the
+    /// placement's rotation and scale before it is offset into the world.
+    pub(crate) fn placed(mut self, rotation: Quat, offset: Vec3, scale: f32) -> Self {
+        self.center = (offset + rotation * (Vec3::from(self.center) * scale)).to_array();
+        self.turn = (rotation * Quat::from_array(self.turn)).to_array();
+        self.scale = (Vec3::from(self.scale) * scale).to_array();
+        self
+    }
 }
 
 pub struct Effect {

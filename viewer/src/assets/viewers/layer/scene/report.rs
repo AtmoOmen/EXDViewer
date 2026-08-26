@@ -28,7 +28,11 @@ pub struct Frame<'a> {
     pub step: f32,
     pub placed: usize,
     pub drawn: usize,
+    /// Placements collected, whether or not their file has arrived yet.
     pub effects: usize,
+    /// Batches actually issued this frame, summed over every effect whose file and textures had
+    /// arrived: proof a draw happened rather than only that a placement was collected.
+    pub effects_drawn: usize,
     /// How many of those the sun's own pass draws, the rest stating that they cast nothing.
     pub casting: usize,
     pub models: String,

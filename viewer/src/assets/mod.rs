@@ -17,6 +17,7 @@ use egui::{
     text::{CCursor, LayoutJob, TextFormat},
     vec2,
 };
+use ironworks::excel::Language;
 use nucleo_matcher::pattern::Pattern;
 use regex_lite::{Regex, RegexBuilder};
 
@@ -25,7 +26,7 @@ use crate::data::IconIndex;
 use crate::data::listing::{Listed, Listing};
 use crate::excel::provider::ExcelProvider;
 use crate::goto::{ListNav, Palette, SUGGESTIONS};
-use crate::settings::api_base;
+use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise, empty_view};
 
 use pathlist::{PathList, Presence};
@@ -847,6 +848,10 @@ pub struct AssetBrowser {
     selected: Option<String>,
     pending: Option<String>,
     redirect: Option<String>,
+    /// The Zones tab's own resolution of a `.lvb` to its display name, reused for the companion
+    /// button rather than reading `TerritoryType` and `PlaceName` a second time.
+    zone_names: Load<HashMap<String, String>>,
+    zone_names_lang: Option<Language>,
 }
 
 impl Default for AssetBrowser {
@@ -877,6 +882,8 @@ impl Default for AssetBrowser {
             selected: None,
             pending: None,
             redirect: None,
+            zone_names: Load::Idle,
+            zone_names_lang: None,
         }
     }
 }
@@ -910,6 +917,8 @@ impl AssetBrowser {
         self.selected_unnamed = None;
         self.scan = None;
         self.pending = self.pending.take().or(self.selected.take());
+        self.zone_names = Load::Idle;
+        self.zone_names_lang = None;
     }
 
     /// Apply a deep link, once there is an index to place it in.
@@ -1580,6 +1589,31 @@ impl AssetBrowser {
         ctx.request_repaint();
     }
 
+    /// The name the Zones tab would show for a `.lvb`, fetched the same way it does. `None` until
+    /// the sheets have loaded or where the zone names neither a place nor itself.
+    fn zone_name(&mut self, ctx: &egui::Context, backend: &Backend, lvb: &str) -> Option<String> {
+        let language = LANGUAGE.get(ctx);
+        if self.zone_names_lang != Some(language) && !matches!(self.zone_names, Load::Loading(_)) {
+            self.zone_names_lang = Some(language);
+            let excel = backend.excel().clone();
+            self.zone_names = Load::Loading(TrackedPromise::spawn_local(async move {
+                crate::zones::resolve_names(excel, language).await
+            }));
+        }
+        if let Load::Loading(promise) = &self.zone_names
+            && let Some(result) = promise.try_get()
+        {
+            self.zone_names = match result {
+                Ok(names) => Load::Ready(names.clone()),
+                Err(error) => Load::Failed(error.to_string()),
+            };
+        }
+        match &self.zone_names {
+            Load::Ready(names) => names.get(lvb).cloned(),
+            _ => None,
+        }
+    }
+
     fn detail_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
         // A material links through to the textures it binds, so the panel can ask for a new
         // selection the same way the tree does.
@@ -1659,7 +1693,12 @@ impl AssetBrowser {
                                     let label = match lvb == path {
                                         true => "Open the Zones tab".to_owned(),
                                         false => {
-                                            format!("Open “{}” in Zones", crate::utils::file_name(&lvb))
+                                            let name = self
+                                                .zone_name(ui.ctx(), backend, &lvb)
+                                                .unwrap_or_else(|| {
+                                                    crate::utils::file_name(&lvb).to_owned()
+                                                });
+                                            format!("Open “{name}” in Zones")
                                         }
                                     };
                                     if ui.button(label).clicked() {

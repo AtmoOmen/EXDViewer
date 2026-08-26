@@ -7,6 +7,7 @@
         antialias: null,
         depthBits: null,
         depth: null,
+        maxDrawBuffers: null,
         draws: 0,
         instanced: 0,
         blits: 0,
@@ -54,6 +55,9 @@
                 // test against: eframe asks for no attributes, so this is the WebGL default.
                 counters.depthBits = gl.getParameter(gl.DEPTH_BITS);
                 counters.depth = gl.getContextAttributes().depth;
+                // A model's G-buffer pages to this many attachments until asked, so a gate whose
+                // context answers 4 never exercises the page split a wider answer would ask for.
+                counters.maxDrawBuffers = gl.getParameter(gl.MAX_DRAW_BUFFERS);
                 const info = gl.getExtension("WEBGL_debug_renderer_info");
                 counters.renderer = info
                     ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL)

@@ -170,3 +170,174 @@ pub fn table(
     }
     dyed.then(|| Arc::new((values, *columns, *rows)))
 }
+
+#[cfg(test)]
+mod test {
+    use std::io::Cursor;
+
+    use half::f16;
+    use ironworks::file::{mtrl, stm, File};
+
+    use super::{table, Templates};
+
+    fn scalar(value: f32) -> Vec<u8> {
+        f16::from_f32(value).to_le_bytes().into()
+    }
+
+    fn color(value: f32) -> Vec<u8> {
+        [value, value + 1.0, value + 2.0]
+            .into_iter()
+            .flat_map(scalar)
+            .collect()
+    }
+
+    /// A staining template file with one modern, nine-scalar template.
+    fn stm_bytes(key: u32, columns: &[Vec<u8>]) -> Vec<u8> {
+        let mut body = Vec::new();
+        let mut end = 0;
+        for column in columns {
+            end += column.len();
+            body.extend(u16::try_from(end / 2).unwrap().to_le_bytes());
+        }
+        body.extend(columns.concat());
+
+        let mut bytes = Vec::new();
+        bytes.extend(0x534Du16.to_le_bytes());
+        bytes.extend(0x0201u16.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend([3, 9]);
+        bytes.extend(key.to_le_bytes());
+        bytes.extend(0u32.to_le_bytes());
+        bytes.extend(body);
+        bytes
+    }
+
+    fn templates(key: u32) -> Templates {
+        // diffuse, specular, emissive, then the nine scalars in template order.
+        let columns = [
+            color(0.4),
+            color(0.04),
+            Vec::new(),
+            scalar(0.3),  // scalar3
+            scalar(0.8),  // metalness
+            scalar(0.5),  // roughness
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ];
+        let good = stm::StainingTemplates::read(Cursor::new(stm_bytes(key, &columns))).unwrap();
+        let empty = stm::StainingTemplates::read(Cursor::new(stm_bytes(9999, &vec![Vec::new(); 12])))
+            .unwrap();
+        Templates {
+            regular: empty,
+            good,
+        }
+    }
+
+    /// A material carrying nothing but a full-size extended color table, every row zero, and a
+    /// dye table naming the rows in `dye` by index.
+    fn extended_material(dye: &[(u16, u8, u16)]) -> Vec<u8> {
+        let mut table = vec![0u16; 32 * 32];
+        for &(template, channel, fields) in dye {
+            let bits = u32::from(fields) | (u32::from(template) << 16) | (u32::from(channel) << 27);
+            table.extend([bits as u16, (bits >> 16) as u16]);
+        }
+        material(0x53, &table)
+    }
+
+    /// The same, at the legacy table's own size, with one dyed row.
+    fn legacy_material(dye: u16) -> Vec<u8> {
+        let mut table = vec![0u16; 16 * 16];
+        table.push(dye);
+        material(0x00, &table)
+    }
+
+    fn material(logs: u32, table: &[u16]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend(0x0103_0000u32.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        bytes.extend(u16::try_from(table.len() * 2).unwrap().to_le_bytes());
+        bytes.extend(1u16.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        bytes.extend([0, 0, 0, 4]);
+        bytes.push(0);
+        bytes.extend((0xC | (logs << 4)).to_le_bytes());
+        bytes.extend(table.iter().flat_map(|half| half.to_le_bytes()));
+        bytes.extend([0; 12]);
+        bytes
+    }
+
+    fn colors(bytes: Vec<u8>) -> mtrl::Material {
+        mtrl::Material::read(Cursor::new(bytes)).unwrap()
+    }
+
+    fn half_at(values: &[u16], at: usize) -> f32 {
+        f16::from_bits(values[at]).to_f32()
+    }
+
+    /// A literal, rounded the way `apply` rounds it, so an assertion compares what a half can
+    /// state rather than the f32 the test wrote down.
+    fn rounded(value: f32) -> f32 {
+        f16::from_f32(value).to_f32()
+    }
+
+    #[test]
+    fn dyes_the_fields_an_extended_row_names() {
+        let templates = templates(1100);
+        let held = colors(extended_material(&[(1100, 0, 0x19)]));
+        let colors = held.color_table().unwrap();
+        let base = std::sync::Arc::new((vec![0u16; 32 * 32], 8, 32));
+
+        let dyed = table(&base, colors, &templates, [Some(3), None]).unwrap();
+        assert_eq!(half_at(&dyed.0, 0), rounded(0.4));
+        assert_eq!(half_at(&dyed.0, 1), rounded(1.4));
+        assert_eq!(half_at(&dyed.0, 2), rounded(2.4));
+        assert_eq!(half_at(&dyed.0, 3), rounded(0.3));
+        assert_eq!(half_at(&dyed.0, 18), rounded(0.8));
+        // The row past the dyed one, and every field the row's own bits leave alone, are untouched.
+        assert_eq!(half_at(&dyed.0, 32), 0.0);
+        assert_eq!(half_at(&dyed.0, 4), 0.0);
+    }
+
+    #[test]
+    fn a_channel_the_wearer_left_undyed_keeps_the_base_row() {
+        let templates = templates(1100);
+        let held = colors(extended_material(&[(1100, 1, 0x1)]));
+        let colors = held.color_table().unwrap();
+        let base = std::sync::Arc::new((vec![0u16; 32 * 32], 8, 32));
+
+        assert!(table(&base, colors, &templates, [Some(3), None]).is_none());
+        let dyed = table(&base, colors, &templates, [None, Some(3)]).unwrap();
+        assert_eq!(half_at(&dyed.0, 0), rounded(0.4));
+    }
+
+    /// A legacy row's second scalar is the specular mask, which sits at half 3 before the row is
+    /// widened and lands on extended half 7, not the modern metalness slot.
+    #[test]
+    fn a_legacy_row_dyes_the_widened_specular_mask_not_metalness() {
+        let templates = templates(100);
+        let held = colors(legacy_material((100 << 5) | 0x19));
+        let colors = held.color_table().unwrap();
+        let base = std::sync::Arc::new((vec![0u16; 32 * 32], 8, 32));
+
+        let dyed = table(&base, colors, &templates, [Some(3), None]).unwrap();
+        // The doubled pair of widened rows both take the dye.
+        for row in [0, 1] {
+            assert_eq!(half_at(&dyed.0, row * 32 + 3), rounded(0.3), "row {row} scalar3");
+            assert_eq!(half_at(&dyed.0, row * 32 + 7), rounded(0.8), "row {row} metalness->specular mask");
+            assert_eq!(half_at(&dyed.0, row * 32 + 18), 0.0, "row {row} modern metalness untouched");
+        }
+    }
+
+    #[test]
+    fn nothing_picked_leaves_the_table_alone() {
+        let templates = templates(1100);
+        let held = colors(extended_material(&[(1100, 0, 0x1)]));
+        let colors = held.color_table().unwrap();
+        let base = std::sync::Arc::new((vec![0u16; 32], 8, 1));
+        assert!(table(&base, colors, &templates, [None, None]).is_none());
+    }
+}

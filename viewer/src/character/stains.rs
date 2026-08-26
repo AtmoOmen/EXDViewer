@@ -1,6 +1,6 @@
 //! The dyes the game names, out of `Stain`.
 //!
-//! A row's own id is the stain a `.stm` template reads a colour by, so the sheet exists only to
+//! A row's own id is the stain a `.stm` template reads a color by, so the sheet exists only to
 //! name and swatch what a template already carries a value for.
 
 use anyhow::Result;
@@ -10,7 +10,7 @@ use ironworks::excel::Language;
 use crate::backend::Backend;
 use crate::excel::provider::{ExcelProvider, ExcelSheet};
 
-/// `Stain`'s name and colour, as byte offsets. The colour's leading byte is unused; the other three
+/// `Stain`'s name and color, as byte offsets. The color's leading byte is unused; the other three
 /// are red, green and blue in file order, and the sheet states no alpha.
 const NAME: u32 = 4;
 const COLOR: u32 = 8;

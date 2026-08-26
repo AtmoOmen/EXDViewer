@@ -144,7 +144,7 @@ impl Rendered {
         if ui.add_enabled(playable, egui::Button::new(glyph)).clicked() {
             self.toggle(index);
         }
-        ui.label(index.to_string());
+        ui.label(entry.slot().to_string());
         ui.label(codec_name(entry.format()));
         ui.label(entry.channel_count().to_string());
         ui.label(format!("{} Hz", entry.sample_rate()));

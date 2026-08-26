@@ -1451,7 +1451,8 @@ mod tests {
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
-        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, skeleton_path,
+        Extra, Fetch, Layer, PoseLookup, Poses, Skin, code, extra, facial, found, ordering,
+        pack_path, pack_root, skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -1678,5 +1679,183 @@ mod tests {
             vec![format!("{root}a0001/wp_common/resident/weapon.pap")],
         );
         assert_eq!(packs[0].label, "resident/weapon");
+    }
+
+    #[test]
+    fn seek_queues_the_rest_as_retries() {
+        let layer = Layer::default();
+        layer.seek(vec!["a.pap".to_owned(), "b.pap".to_owned()], "cfxf_salute");
+        assert_eq!(*layer.wanted.borrow(), "a.pap");
+        assert_eq!(*layer.retry.borrow(), vec!["b.pap".to_owned()]);
+        assert_eq!(layer.opening.borrow().as_deref(), Some("cfxf_salute"));
+    }
+
+    #[test]
+    fn seek_with_nothing_to_try_rests() {
+        let layer = Layer::default();
+        layer.seek(Vec::new(), "cfxf_salute");
+        assert!(layer.wanted.borrow().is_empty());
+        assert!(layer.opening.borrow().is_none());
+    }
+
+    #[test]
+    fn spent_waits_for_a_landing_with_nothing_left_to_try() {
+        let layer = Layer::default();
+        assert!(layer.spent(), "nothing wanted yet");
+        layer.seek(vec!["a.pap".to_owned()], "cfxf_salute");
+        assert!(!layer.spent(), "still fetching, no candidates behind it");
+        *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
+        assert!(
+            layer.spent(),
+            "landed with nothing left to try and no motion found"
+        );
+    }
+
+    #[test]
+    fn spent_stays_false_while_a_retry_is_queued() {
+        let layer = Layer::default();
+        layer.seek(vec!["a.pap".to_owned(), "b.pap".to_owned()], "cfxf_salute");
+        *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
+        assert!(!layer.spent(), "b.pap is still queued behind a.pap");
+    }
+
+    /// Polls a future to completion on the current thread with no real waker, which is enough for
+    /// the local install's own I/O: nothing here needs to run concurrently with anything else.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::Wake;
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(value) => return value,
+                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    fn local_backend() -> crate::backend::Backend {
+        block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(SQPACK.to_owned()),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .unwrap()
+    }
+
+    /// Drives a layer's own polling loop against a real backend until it lands on a motion, runs
+    /// out of candidates, or the budget below runs out.
+    fn settle(layer: &Layer, backend: &crate::backend::Backend) {
+        let ctx = egui::Context::default();
+        for _ in 0..500 {
+            crate::utils::tick_promises(&ctx);
+            layer.poll(backend);
+            if layer.spent() || layer.motion.get().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// `salute.pap` really carries `cfxf_bow`, per `dump`ing the real file: exactly the case the
+    /// filename-first bug got wrong. Seeking it first with `resident/face.pap` behind it, which
+    /// does carry `cfxf_salute`, should miss the filename guess and land on the fallback instead.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_filename_guess_that_lands_on_the_wrong_pose_falls_back() {
+        let backend = local_backend();
+        let root = "chara/human/c0101/animation/f0206/";
+        let layer = Layer::default();
+        layer.seek(
+            vec![
+                format!("{root}nonresident/emot/salute.pap"),
+                format!("{root}resident/face.pap"),
+            ],
+            "cfxf_salute",
+        );
+        settle(&layer, &backend);
+        assert_eq!(
+            *layer.wanted.borrow(),
+            format!("{root}resident/face.pap"),
+            "the wrong-named guess should have been abandoned"
+        );
+        assert!(
+            layer.motion.get().is_some(),
+            "the fallback names cfxf_salute and should have landed on it"
+        );
+    }
+
+    /// `nonresident/comeon.pap` (not the `emot/` one) is self-consistent: its name really matches
+    /// its own `cfxf_comeon`. The filename guess should be kept rather than spent on the fallback.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_filename_guess_that_matches_is_kept() {
+        let backend = local_backend();
+        let root = "chara/human/c0101/animation/f0206/";
+        let layer = Layer::default();
+        layer.seek(
+            vec![
+                format!("{root}nonresident/comeon.pap"),
+                format!("{root}resident/face.pap"),
+            ],
+            "cfxf_comeon",
+        );
+        settle(&layer, &backend);
+        assert_eq!(
+            *layer.wanted.borrow(),
+            format!("{root}nonresident/comeon.pap"),
+            "the matching guess should never have been abandoned"
+        );
+        assert!(layer.motion.get().is_some());
+        assert_eq!(
+            layer.retry.borrow().len(),
+            1,
+            "resident/face.pap should still be queued, not yet fetched"
+        );
+    }
+
+    /// The lazy index has to walk past files that do not carry the name it is after before it
+    /// reaches the one that does, and has to come back with a clean miss for a name in none of
+    /// them: `act_emot27` names `cfxf_emot_eeh`, which only `nonresident/eeh.pap` carries, while
+    /// `loop_emot32_loop`'s `cfxf_lookback_l` is nowhere in the tree at all.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn the_pose_index_walks_past_misses_to_a_real_hit_and_reports_a_true_one() {
+        let backend = local_backend();
+        let root = "chara/human/c0101/animation/f0206/";
+        let paths: Vec<String> = [
+            "nonresident/angry.pap",
+            "nonresident/bow.pap",
+            "nonresident/eeh.pap",
+            "nonresident/kiss.pap",
+        ]
+        .into_iter()
+        .map(|tail| format!("{root}{tail}"))
+        .collect();
+
+        let mut poses = Poses::default();
+        let found = loop {
+            match poses.advance(&backend, paths.clone(), "emot_eeh") {
+                PoseLookup::Found(path) => break path,
+                PoseLookup::Miss => panic!("emot_eeh is really in nonresident/eeh.pap"),
+                PoseLookup::Pending => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        };
+        assert_eq!(found, format!("{root}nonresident/eeh.pap"));
+
+        let mut poses = Poses::default();
+        loop {
+            match poses.advance(&backend, paths.clone(), "lookback_l") {
+                PoseLookup::Found(path) => panic!("lookback_l should not exist, found in {path}"),
+                PoseLookup::Miss => break,
+                PoseLookup::Pending => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
     }
 }

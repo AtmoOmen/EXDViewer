@@ -57,7 +57,7 @@ const SHOWN: usize = 10;
 /// How wide the picker panel may grow. A panel takes the width its widest row asks for and keeps
 /// it, so a piece name long enough to run on would otherwise take the view beside it for good.
 const PANEL_WIDTH: f32 = 380.0;
-const PANEL_MIN_WIDTH: f32 = 220.0;
+const PANEL_MIN_WIDTH: f32 = 180.0;
 
 /// Which customisation each of the creator's menus drives, as `Customize` numbers them. Every one
 /// of these is measured from `CharaMakeType` rather than named by any file.
@@ -1816,11 +1816,7 @@ impl CharacterBuilder {
                             continue;
                         }
                         let name = menus::Creator::named(&self.creator.races, *race, self.female);
-                        if ui
-                            .selectable_label(self.race == *race, &name)
-                            .on_hover_text(&name)
-                            .clicked()
-                        {
+                        if ui.selectable_label(self.race == *race, name).clicked() {
                             picked = Some(Pick::Race(*race));
                         }
                     }
@@ -1833,8 +1829,7 @@ impl CharacterBuilder {
                         let name =
                             menus::Creator::named(&self.creator.tribes, body.tribe, self.female);
                         if ui
-                            .selectable_label(self.tribe == body.tribe, &name)
-                            .on_hover_text(&name)
+                            .selectable_label(self.tribe == body.tribe, name)
                             .clicked()
                         {
                             picked = Some(Pick::Tribe(body.tribe));
@@ -1871,11 +1866,7 @@ impl CharacterBuilder {
                     });
                     if self.attire == Attire::Job {
                         for (at, job) in self.creator.jobs.iter().enumerate() {
-                            if ui
-                                .selectable_label(self.job == at, &job.name)
-                                .on_hover_text(&job.name)
-                                .clicked()
-                            {
+                            if ui.selectable_label(self.job == at, &job.name).clicked() {
                                 picked = Some(Pick::Job(at));
                             }
                         }

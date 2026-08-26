@@ -1781,6 +1781,17 @@ impl Rendered {
         }
 
         let sliced = self.sliced(&slots);
+        // A color table row index, not a color, so filtering it linearly would blend two rows'
+        // indices into a third one that names neither. Point sampled and never mipmapped, the
+        // same reasoning `deferred::ENGINE` gives for the subsurface kernel.
+        let index_paths: BTreeSet<&str> = slots
+            .iter()
+            .flatten()
+            .filter_map(|slot| match slot {
+                Slot::Ready(material) => material.texture(Role::Index).map(String::as_str),
+                _ => None,
+            })
+            .collect();
         let mut stacks = self.stacks.borrow_mut();
         for path in &sliced {
             let held = stacks.entry(path.as_str().into()).or_insert_with(|| {
@@ -1796,10 +1807,14 @@ impl Rendered {
             let Some(result) = promise.try_get() else {
                 continue;
             };
+            let filter = match index_paths.contains(path.as_str()) {
+                true => glow::NEAREST,
+                false => glow::LINEAR,
+            };
             *held = match result
                 .as_ref()
                 .map_err(ToString::to_string)
-                .and_then(|bytes| layered(bytes, path, glow::LINEAR).map_err(|why| why.to_string()))
+                .and_then(|bytes| layered(bytes, path, filter).map_err(|why| why.to_string()))
             {
                 Ok(decoded) => {
                     level
@@ -1871,16 +1886,25 @@ impl Rendered {
                     // Model UVs tile, and a texture bound to a surface is minified far more often
                     // than it is magnified, so this is the one place the browser wants mipmaps and
                     // repeat rather than the crisp clamped sampling a texture preview wants.
-                    Texture::Ready(ui.ctx().load_texture(
-                        format!("mdl:{path}"),
-                        image,
-                        TextureOptions {
+                    //
+                    // Except a color table row index: a mip is `glGenerateMipmap`'s box filter
+                    // over indices, which is not itself an index, so this one goes unmipmapped
+                    // rather than blended within or across levels.
+                    let options = match index_paths.contains(path.as_str()) {
+                        true => TextureOptions {
+                            magnification: egui::TextureFilter::Nearest,
+                            minification: egui::TextureFilter::Nearest,
+                            wrap_mode: egui::TextureWrapMode::Repeat,
+                            mipmap_mode: None,
+                        },
+                        false => TextureOptions {
                             magnification: egui::TextureFilter::Linear,
                             minification: egui::TextureFilter::Linear,
                             wrap_mode: egui::TextureWrapMode::Repeat,
                             mipmap_mode: Some(egui::TextureFilter::Linear),
                         },
-                    ))
+                    };
+                    Texture::Ready(ui.ctx().load_texture(format!("mdl:{path}"), image, options))
                 }
                 Err(why) => {
                     log::error!("assets/mdl: {path}: {why}");

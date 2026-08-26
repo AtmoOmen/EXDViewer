@@ -542,6 +542,7 @@ struct Translated {
     depth: Option<Arc<program::Program>>,
     shadow: Option<Arc<program::Program>>,
     resolve: Option<Arc<program::Program>>,
+    sheer: Option<(Arc<program::Program>, Arc<program::Program>)>,
 }
 
 /// One light the zone places. The box it is clipped against is stated in its own space, so the
@@ -3096,6 +3097,16 @@ impl Scene {
                     attachments,
                 ),
             };
+            // Only where the material states a clip the semi-transparent pass's own reaches under.
+            // Below that the two passes cover the same fragments, and the resolve drops every one
+            // the opaque half already drew.
+            let sheer = (!blended && material.clip() > program::SHEER_CLIP)
+                .then(|| {
+                    page(program::Pass::Blended, 0).and_then(|held| {
+                        Ok((Arc::new(held), Arc::new(page(program::Pass::CompositeBlended, 0)?)))
+                    })
+                })
+                .and_then(Result::ok);
             // The same depth pass as the light sees it. A package that answers no shadow subview
             // casts none, which is what the flag on a placed instance says anyway. One that answers
             // it and then fails to translate is a fault, and is reported rather than dropped.
@@ -3160,6 +3171,7 @@ impl Scene {
                     depth: depth.ok().map(Arc::new),
                     shadow: shadow.map(Arc::new),
                     resolve,
+                    sheer,
                 },
             );
             if let Some((values, columns, rows)) =
@@ -3839,7 +3851,7 @@ impl Scene {
                 depth: held.depth.clone(),
                 shadow: held.shadow.clone(),
                 resolve: held.resolve.clone(),
-                sheer: None,
+                sheer: held.sheer.clone(),
                 table: self.tables.get(&slot).cloned(),
                 textures: material
                     .bound()

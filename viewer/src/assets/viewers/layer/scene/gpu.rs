@@ -40,6 +40,10 @@ const SUN: usize = usize::MAX;
 /// The material slot the grass readings are keyed under, which no material of a zone reaches.
 const TURF: usize = usize::MAX;
 
+/// The pages a fringe leg is keyed under, past any the G-buffer or its resolve take.
+const SHEER_BUFFER: usize = deferred::REFLECTED + 1;
+const SHEER_RESOLVE: usize = SHEER_BUFFER + 1;
+
 /// The color map a blade is cut out of, which the zone's own grass file names per auto layer.
 const COLOR_MAP: u32 = 0x6e1d_f4a2;
 
@@ -669,7 +673,7 @@ impl Renderer {
                 gl.viewport(0, 0, size.0, size.1);
                 gl.color_mask(true, true, true, true);
             }
-            self.leg(gl, painter, frame, scene, offsets, true)?;
+            self.leg(gl, painter, frame, scene, offsets, true, false)?;
             self.buffers.relight(gl, lighting, scene, &frame.lamps)?;
         }
         // The reflection chain took its own copy before it ran and laid its answer back over the
@@ -687,7 +691,55 @@ impl Renderer {
             gl.enable(glow::DEPTH_TEST);
             gl.depth_mask(false);
         }
-        self.leg(gl, painter, frame, scene, offsets, false)?;
+        self.leg(gl, painter, frame, scene, offsets, false, false)?;
+        unsafe {
+            gl.depth_func(glow::LESS);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+        }
+        Ok(())
+    }
+
+    /// The half of a surface the buffer pass clipped away, drawn through a buffer of its own: the
+    /// fringe of a strand of hair the opaque half never draws, lit again and blended over the frame
+    /// against the depth that half settled.
+    fn sheer(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        scene: &program::Scene,
+        offsets: &[(i32, i32, i32)],
+        lighting: &Lighting,
+    ) -> Result<(), String> {
+        let any = frame
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.surfaces)
+            .filter_map(|surface| surface.shaded.as_ref())
+            .any(|shaded| shaded.sheer.is_some());
+        if !any {
+            return Ok(());
+        }
+        let size = self.buffers.size();
+        self.buffers.sheer(gl)?;
+        unsafe {
+            gl.viewport(0, 0, size.0, size.1);
+            gl.color_mask(true, true, true, true);
+        }
+        self.leg(gl, painter, frame, scene, offsets, true, true)?;
+        self.buffers.relight(gl, lighting, scene, &frame.lamps)?;
+        self.buffers.cut(gl)?;
+        let into = self.buffers.bare().ok_or("no lit frame")?;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.viewport(0, 0, size.0, size.1);
+            gl.color_mask(true, true, true, true);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+        }
+        self.leg(gl, painter, frame, scene, offsets, false, true)?;
         unsafe {
             gl.depth_func(glow::LESS);
             gl.disable(glow::BLEND);
@@ -697,7 +749,9 @@ impl Renderer {
     }
 
     /// One leg of that: the buffer each of them fills for itself, or what each answers into the
-    /// frame with.
+    /// frame with. A fringe leg is the same shape over the pair a hair-like material clips away
+    /// instead: its own buffer, and what blends that over the frame the opaque half left.
+    #[allow(clippy::too_many_arguments)]
     fn leg(
         &mut self,
         gl: &glow::Context,
@@ -706,6 +760,7 @@ impl Renderer {
         scene: &program::Scene,
         offsets: &[(i32, i32, i32)],
         filling: bool,
+        fringe: bool,
     ) -> Result<(), String> {
         let instances = self.instances.ok_or("no instance buffer")?;
         let stand_in = self.buffers.stand_in(gl)?;
@@ -727,9 +782,11 @@ impl Renderer {
                 let Some(shaded) = &surface.shaded else {
                     continue;
                 };
-                let held = match filling {
-                    true => filled(shaded),
-                    false => shaded.resolve.as_ref(),
+                let held = match (filling, fringe) {
+                    (true, false) => filled(shaded),
+                    (false, false) => shaded.resolve.as_ref(),
+                    (true, true) => shaded.sheer.as_ref().map(|(buffer, _)| buffer),
+                    (false, true) => shaded.sheer.as_ref().map(|(_, resolve)| resolve),
                 };
                 let Some(held) = held else {
                     continue;
@@ -741,9 +798,11 @@ impl Renderer {
                         surface.material,
                         surface.waving,
                         false,
-                        match filling {
-                            true => 0,
-                            false => LIT,
+                        match (filling, fringe) {
+                            (true, false) => 0,
+                            (false, false) => LIT,
+                            (true, true) => SHEER_BUFFER,
+                            (false, true) => SHEER_RESOLVE,
                         },
                     ),
                     held,
@@ -1258,6 +1317,9 @@ impl Renderer {
                     self.buffers.fog(gl, haze, &scene)?;
                 }
             }
+            // Over the sky, the water and the fog: a fringe pixel is one the opaque pass left
+            // uncovered, and drawing it any earlier leaves the sky free to paint over it.
+            self.sheer(gl, painter, frame, &scene, &offsets, lighting)?;
             // Before the exposure, since a halo belongs to the frame the lighting left rather than
             // to what a curve made of it.
             if let Some(glare) = frame.glare.as_ref() {

@@ -3233,10 +3233,9 @@ impl Buffer {
         put(grass, "m_SSAOMaskMin", vec![1.0]);
         put(grass, "m_SSAOMaskMax", vec![1.0]);
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
-        // Declared by the five character packages and read by none of them: nothing in `character`,
-        // `characterlegacy`, `hair`, `iris` or `skin` touches it once. Left at the identity because
-        // a package outside those five may yet read it, and one costs nothing where nought would be
-        // the lane that switches a thing off.
+        // Declared by all five character packages; only `character`'s own G pass reads the first
+        // lane, scaling the fur march by it. A capture confirms the game writes the same identity
+        // here.
         put(INSTANCE, "m_Param", vec![1.0]);
         // One record an eye, picked by the vertex color. The first two lanes scale the coordinate an
         // eye's textures are read at and the third warps it toward the pupil, so ones leave that

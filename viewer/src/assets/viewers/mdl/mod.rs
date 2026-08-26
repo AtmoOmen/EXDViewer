@@ -2573,16 +2573,20 @@ impl Rendered {
     /// The passes that light the G-buffer, translated once their packages have arrived. They are the
     /// same whatever is being drawn, so they are built once and kept.
     fn lighting(&self, attachments: usize) -> Option<Arc<gpu::Lighting>> {
-        let current = self
-            .lighting
-            .borrow()
-            .as_ref()
-            .filter(|(held, _)| *held == attachments)
-            .map(|(_, built)| built.clone());
-        if let Some(built) = current {
+        let matches = |held: &Option<(usize, Arc<gpu::Lighting>)>| {
+            held.as_ref().is_some_and(|(held, _)| *held == attachments)
+        };
+        if matches(&self.lighting.borrow()) {
+            // Read again after these: each replaces `self.lighting` with a fur or subsurface pass
+            // added, and returning the clone taken before them would hand the caller a frame short
+            // of whichever just landed.
             self.soften(attachments);
             self.scatter(attachments);
-            return Some(built);
+            return self
+                .lighting
+                .borrow()
+                .as_ref()
+                .map(|(_, built)| built.clone());
         }
         let packages = self.packages.borrow();
         let held = |path: &str, pass| {

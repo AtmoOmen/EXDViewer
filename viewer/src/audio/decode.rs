@@ -155,9 +155,9 @@ pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
 const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 /// Fold anything wider than stereo down using the ITU-R BS.775 weights: front channels at unity,
-/// center and surrounds at -3 dB, LFE dropped. Channel order is WAVE (FL,FR[,FC,LFE],RL,RR), so
-/// quad and 5.1 are handled by name; other counts keep the front pair. Compacted in place: the
-/// write cursor (stride 2) never catches up to the read cursor (stride N >= 4).
+/// center and surrounds at -3 dB, LFE dropped. Channel order is WAVE (FL,FR[,FC,LFE],RL,RR); quad
+/// and 5.1 are handled by name, other counts keep the front pair. Compacted in place: the write
+/// cursor (stride 2) never catches up to the read cursor (stride N >= 4).
 fn downmix_to_stereo(decoded: &mut Decoded) {
     let channels = decoded.channels as usize;
     if channels <= 2 {
@@ -178,11 +178,25 @@ fn downmix_to_stereo(decoded: &mut Decoded) {
             ),
             _ => (samples[base], samples[base + 1]),
         };
-        samples[2 * i] = l.clamp(-1.0, 1.0);
-        samples[2 * i + 1] = r.clamp(-1.0, 1.0);
+        samples[2 * i] = soft_limit(l);
+        samples[2 * i + 1] = soft_limit(r);
     }
     samples.truncate(frames * 2);
     decoded.channels = 2;
+}
+
+const LIMIT_KNEE: f32 = 0.9;
+
+/// Identity below the knee; above it, saturates smoothly toward +-1 instead of clipping. The
+/// ITU-R BS.775 weights assume a mix mastered with downmix headroom, which real FFXIV BGM is not,
+/// so the fold routinely oversums past +-1; a hard clamp there was audible as clipping distortion
+/// on exactly the multichannel tracks a stereo mix never reaches.
+fn soft_limit(x: f32) -> f32 {
+    if x.abs() <= LIMIT_KNEE {
+        return x;
+    }
+    let over = (x.abs() - LIMIT_KNEE) / (1.0 - LIMIT_KNEE);
+    x.signum() * (LIMIT_KNEE + (1.0 - LIMIT_KNEE) * over.tanh())
 }
 
 /// Anything symphonia probes, named by the extension its container would carry. Loop points
@@ -375,7 +389,7 @@ mod tests {
     fn downmix_applies_the_itu_r_bs775_weights_and_drops_lfe() {
         // One 5.1 frame: FL, FR, FC, LFE, RL, RR. FC is zero so each output isolates its own
         // front/rear pair; LFE is a large, otherwise-unused value that would push the result past
-        // the values asserted below (and past the +-1 clamp) if it leaked in.
+        // the values asserted below (and past the soft limiter's knee) if it leaked in.
         let mut decoded = Decoded {
             samples: vec![0.2, 0.3, 0.0, 0.9, 0.4, 0.5],
             channels: 6,
@@ -390,6 +404,42 @@ mod tests {
         let half = std::f32::consts::FRAC_1_SQRT_2;
         assert!((decoded.samples[0] - (0.2 + half * 0.4)).abs() < 1e-6, "FL + sqrt(1/2)*RL");
         assert!((decoded.samples[1] - (0.3 + half * 0.5)).abs() < 1e-6, "FR + sqrt(1/2)*RR");
+    }
+
+    /// A real 5.1/quad fold can oversum past +-1 (front at unity plus center and both surrounds
+    /// at -3 dB); the limiter has to absorb that without ever producing a sample a player would
+    /// clip on.
+    #[test]
+    fn soft_limit_never_exceeds_unity() {
+        for x in [0.0, 0.5, 0.9, 0.95, 1.0, 1.5, 2.414, -2.414, 10.0, -10.0] {
+            let y = soft_limit(x);
+            assert!(y.abs() <= 1.0, "soft_limit({x}) = {y}");
+        }
+    }
+
+    #[test]
+    fn soft_limit_is_identity_below_the_knee() {
+        assert_eq!(soft_limit(0.3), 0.3);
+        assert_eq!(soft_limit(-0.7), -0.7);
+    }
+
+    /// Downmixing only ever changes channel count and sample count; the loop region is already
+    /// expressed in frame indices by the time it reaches here, so folding six channels to two
+    /// must not shift where a loop starts or ends.
+    #[test]
+    fn downmix_preserves_frame_count_and_loop_points() {
+        let mut decoded = Decoded {
+            samples: vec![0.1; 6 * 10],
+            channels: 6,
+            sample_rate: 44100,
+            loop_start: Some(2),
+            loop_end: Some(8),
+        };
+        downmix_to_stereo(&mut decoded);
+        assert_eq!(decoded.channels, 2);
+        assert_eq!(decoded.samples.len(), 2 * 10);
+        assert_eq!(decoded.loop_start, Some(2));
+        assert_eq!(decoded.loop_end, Some(8));
     }
 }
 
@@ -452,5 +502,25 @@ mod real_scd {
         let mut archive = zip::ZipArchive::new(ReadCursor::new(zipped)).unwrap();
         assert_eq!(archive.len(), 16);
         assert!(archive.by_name("SE_10thMG_00.adpcm.wav").is_ok());
+    }
+
+    /// A real 6-channel BGM track (Ogg Vorbis, WAVE-ordered per an independent ffmpeg decode):
+    /// playback folds it to stereo without any sample clipping, and export keeps every channel.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_six_channel_track_folds_without_clipping_and_exports_every_channel() {
+        let bytes = read_local("music/ex5/movie/DAWNTRAIL_Loop_en.scd");
+        let container = SoundContainer::read(ReadCursor::new(bytes)).unwrap();
+        let entry = container.entries().first().unwrap();
+        assert_eq!(entry.channel_count(), 6);
+        assert_eq!(entry.format(), Codec::OggVorbis);
+
+        let played = decode(entry).unwrap();
+        assert_eq!(played.channels, 2);
+        assert!(played.samples.iter().all(|s| s.abs() <= 1.0));
+
+        let exported = decode_full(entry).unwrap();
+        assert_eq!(exported.channels, 6);
+        assert_eq!(exported.samples.len() % 6, 0);
     }
 }

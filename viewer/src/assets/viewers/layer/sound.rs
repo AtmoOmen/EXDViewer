@@ -120,8 +120,8 @@ impl Sounds {
             PlayState::Decoding(index, promise) => match promise.try_take() {
                 Ok(Ok(decoded)) => {
                     log::info!("assets/layer/sound: decoded, playing index {index}");
-                    let played =
-                        PLAYER.with_borrow_mut(|player| player.as_mut().map(|p| p.play(decoded)));
+                    let played = PLAYER
+                        .with_borrow_mut(|player| player.as_mut().map(|p| p.play(decoded, false)));
                     match played {
                         Some(Ok(())) => PlayState::Playing(index),
                         Some(Err(error)) => {

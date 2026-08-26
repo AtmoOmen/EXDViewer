@@ -315,6 +315,8 @@ pub struct CharacterBuilder {
     mounts: Vec<mounts::Mount>,
     reading_mounts: Option<TrackedPromise<Result<Vec<mounts::Mount>>>>,
     mount: Option<usize>,
+    /// Which of the mount's own seats the character rides in, for one that seats more than one.
+    mount_seat: usize,
     mount_search: String,
     mounts_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The models each set is worn as under the current code, by slot. A set number means one
@@ -396,6 +398,7 @@ impl Default for CharacterBuilder {
             mounts: Vec::new(),
             reading_mounts: None,
             mount: None,
+            mount_seat: 0,
             mount_search: String::new(),
             mounts_matched: Default::default(),
             sets: RefCell::new(BTreeMap::new()),
@@ -438,6 +441,7 @@ impl CharacterBuilder {
         self.mounts.clear();
         self.reading_mounts = None;
         self.mount = None;
+        self.mount_seat = 0;
         self.mounts_matched.take();
         self.stood = false;
         self.body.clear();
@@ -737,7 +741,18 @@ impl CharacterBuilder {
                 .filter(|path| !self.held.contains_key(*path))
                 .cloned()
                 .collect();
-            match missing.is_empty() {
+            // A worn piece's own imc says which material_id its variant actually draws with, which
+            // can differ from the variant itself. Fetched alongside so it is already in hand the
+            // first time this piece is dressed, and tolerantly: a missing or unreadable imc just
+            // leaves the variant number to stand for its own material_id, same as it did before.
+            let missing_imc: Vec<String> = self
+                .worn
+                .iter()
+                .filter(|(_, variant)| *variant != 0)
+                .filter_map(|(path, _)| mdl::imc_path(path))
+                .filter(|path| !self.held.contains_key(path))
+                .collect();
+            match missing.is_empty() && missing_imc.is_empty() {
                 true => self.dress(),
                 false => {
                     let files = backend.files().clone();
@@ -746,6 +761,11 @@ impl CharacterBuilder {
                         for path in missing {
                             let bytes = files.read(&path).await?;
                             read.push((path, bytes));
+                        }
+                        for path in missing_imc {
+                            if let Ok(bytes) = files.read(&path).await {
+                                read.push((path, bytes));
+                            }
                         }
                         Ok(read)
                     }));
@@ -778,6 +798,7 @@ impl CharacterBuilder {
             let (customize, hidden, shapes, stature, bust) = self.made();
             model.made(customize, hidden, shapes, stature, bust);
             model.hinged(self.raised());
+            model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
         }
     }
@@ -1157,10 +1178,18 @@ impl CharacterBuilder {
                         })
                         .clone()
                 });
+                let material = mdl::material::resolve_variant(
+                    path,
+                    *variant,
+                    mdl::imc_path(path)
+                        .and_then(|imc| self.held.get(&imc))
+                        .map(Vec::as_slice),
+                );
                 Some(mdl::Source {
                     path: path.clone(),
                     bytes: self.held.get(path)?.clone(),
                     variant: *variant,
+                    material,
                     deform,
                     skin: self.skin,
                 })
@@ -1691,7 +1720,7 @@ impl CharacterBuilder {
 
     /// The mounts the game names, one of which the character rides. A mount is a body of its own
     /// and names the same bones a rider does, so the two are posed apart and the rider is carried
-    /// to the seat the mount's own skeleton names.
+    /// to whichever seat its own skeleton names is picked, for the ones that seat more than one.
     fn mounts_ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -1712,7 +1741,7 @@ impl CharacterBuilder {
         );
         let query = self.mount_search.clone();
         let matched = self.mounts_matching(&query);
-        listed(
+        let picked = listed(
             ui,
             backend,
             icons,
@@ -1724,7 +1753,32 @@ impl CharacterBuilder {
                 (mount.name.as_str(), mount.icon)
             },
         )
-        .map(|index| Pick::Mount((self.mount != Some(index)).then_some(index)))
+        .map(|index| Pick::Mount((self.mount != Some(index)).then_some(index)));
+        if picked.is_none()
+            && let Some(mount) = self.mount.and_then(|at| self.mounts.get(at))
+            && mount.extra_seats > 0
+        {
+            return self.seat_ui(ui, mount.extra_seats);
+        }
+        picked
+    }
+
+    /// Which of a mount's own seats the character rides in, for one seating more than one. Seat
+    /// zero is the one the mount's skeleton names first, whatever the game calls it in its own UI.
+    fn seat_ui(&self, ui: &mut egui::Ui, extra_seats: u8) -> Option<Pick> {
+        let mut picked = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Seat").strong());
+            for seat in 0..=usize::from(extra_seats) {
+                if ui
+                    .selectable_label(self.mount_seat == seat, (seat + 1).to_string())
+                    .clicked()
+                {
+                    picked = Some(Pick::Seat(seat));
+                }
+            }
+        });
+        picked
     }
 
     /// Which mounts a search names, kept the way a slot's own list is.
@@ -1963,6 +2017,7 @@ impl CharacterBuilder {
                     self.choices = held.choices.iter().copied().collect();
                     self.attire = Attire::Npc;
                     self.chosen = [None; 10];
+                    self.stains = held.stains;
                     self.stood = false;
                 }
             }
@@ -1979,7 +2034,11 @@ impl CharacterBuilder {
                     }
                 }
             }
-            Some(Pick::Mount(mount)) => self.mount = mount,
+            Some(Pick::Mount(mount)) => {
+                self.mount = mount;
+                self.mount_seat = 0;
+            }
+            Some(Pick::Seat(seat)) => self.mount_seat = seat,
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }
@@ -2011,6 +2070,8 @@ enum Pick {
     Emote(usize),
     /// A mount to seat the character on, or none to stand it on the ground again.
     Mount(Option<usize>),
+    /// Which of the mount's own seats to ride in.
+    Seat(usize),
     Npc(usize),
 }
 
@@ -2371,7 +2432,17 @@ fn numbered(ui: &mut egui::Ui, choice: &Choice, selected: bool, why: &str) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::resolve;
+    use super::{Gear, resolve};
+
+    /// Tataru's own `ModelHead` quad: set 5 (`e0005`), variant 224. The dye that goes with it is a
+    /// separate `ENpcBase` column, not packed into this word.
+    #[test]
+    fn gear_reads_set_and_variant() {
+        let gear = Gear::read(0x00E0_0005).unwrap();
+        assert_eq!(gear.set, 5);
+        assert_eq!(gear.variant, 224);
+        assert!(Gear::read(0).is_none());
+    }
 
     /// A clan and gender name the body they are built on, and the variant says how grown it is.
     #[test]

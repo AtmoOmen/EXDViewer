@@ -897,6 +897,20 @@ fn reach(key: (u32, [u8; 4]), depth: u8, id: u32) -> (u32, [u8; 4]) {
     (key.0, held)
 }
 
+/// A `.lcb`/`.svb` key that finds nothing may still be inside a shared group the file only states
+/// one answer for as a whole: sky visibility and a light's clip box apply to everything a group
+/// places unless a deeper entry overrides part of it. A miss steps back through the membership path
+/// one shared group at a time, ending at the root's own key, before giving up.
+fn reached<V>(map: &HashMap<(u32, [u8; 4]), V>, mut key: (u32, [u8; 4])) -> Option<&V> {
+    loop {
+        if let Some(value) = map.get(&key) {
+            return Some(value);
+        }
+        let at = key.1.iter().rposition(|byte| *byte != 0)?;
+        key.1[at] = 0;
+    }
+}
+
 /// How far a light carries, which no field states: the brightest channel and the power the record
 /// attenuates by solve it, and the light's own pass drops every pixel past it. The colour is the one
 /// the file states, not the one an animation cycles it to.
@@ -1948,7 +1962,7 @@ impl Scene {
             };
             into[placement.model][level].push(program::Instance {
                 transform: self.posed(&placement),
-                sky_visibility: self.visibility.get(&placement.key).copied().unwrap_or(1.0),
+                sky_visibility: reached(&self.visibility, placement.key).copied().unwrap_or(1.0),
                 emissive: placement.glow.map(|lane| {
                     let (color, power) = cycled(lane, self.clock);
                     color.extend(power)
@@ -1992,7 +2006,7 @@ impl Scene {
             .map(|(_, light)| {
                 // A light the `.lcb` states no box for keeps one of this viewer's own, since the
                 // pass clips against whatever stands here and a light's whole reach can be a zone.
-                let (min, max) = self.clips.get(&light.key).copied().unwrap_or((
+                let (min, max) = reached(&self.clips, light.key).copied().unwrap_or((
                     Vec3::splat(-REACH.min(light.reach)),
                     Vec3::splat(REACH.min(light.reach)),
                 ));
@@ -4021,7 +4035,7 @@ impl Scene {
                 "Sky",
                 format!(
                     "{:.3}",
-                    self.visibility.get(&placement.key).copied().unwrap_or(1.0)
+                    reached(&self.visibility, placement.key).copied().unwrap_or(1.0)
                 ),
             ),
             (
@@ -4498,7 +4512,7 @@ impl Scene {
                                 "{} of {} placed",
                                 self.placements
                                     .iter()
-                                    .filter(|held| self.visibility.contains_key(&held.key))
+                                    .filter(|held| reached(&self.visibility, held.key).is_some())
                                     .count(),
                                 self.placements.len()
                             ),
@@ -4670,6 +4684,17 @@ mod tests {
         assert_eq!(phase(180, 0, 1, 270.0), 0.5);
         assert_eq!(phase(180, 0, 1, 360.0), 0.0);
         assert_eq!(phase(60, 30, 1, 20.0), 0.0);
+    }
+
+    #[test]
+    fn a_missed_key_steps_back_to_its_own_group() {
+        let mut map = HashMap::new();
+        map.insert((9, [0, 0, 0, 0]), 0.5_f32);
+        map.insert((9, [1, 2, 0, 0]), 0.1_f32);
+        assert_eq!(reached(&map, (9, [1, 2, 3, 0])), Some(&0.1));
+        assert_eq!(reached(&map, (9, [1, 0, 0, 0])), Some(&0.5));
+        assert_eq!(reached(&map, (9, [4, 0, 0, 0])), Some(&0.5));
+        assert_eq!(reached(&map, (7, [1, 0, 0, 0])), None);
     }
 
     #[test]

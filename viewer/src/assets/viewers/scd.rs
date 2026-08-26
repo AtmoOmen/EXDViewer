@@ -144,7 +144,7 @@ impl Rendered {
         if ui.add_enabled(playable, egui::Button::new(glyph)).clicked() {
             self.toggle(index);
         }
-        ui.label(index.to_string());
+        ui.label(entry.slot().to_string());
         ui.label(codec_name(entry.format()));
         ui.label(entry.channel_count().to_string());
         ui.label(format!("{} Hz", entry.sample_rate()));
@@ -223,7 +223,7 @@ impl Rendered {
                 // `toggle` already created the player before spawning this decode.
                 Ok(decoded) => {
                     let played = PLAYER.with_borrow_mut(|player| {
-                        player.as_mut().map(|player| player.play(decoded))
+                        player.as_mut().map(|player| player.play(decoded, false))
                     });
                     match played {
                         Some(Ok(())) => *self.state.borrow_mut() = PlayState::Playing(index),

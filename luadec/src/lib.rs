@@ -843,4 +843,50 @@ mod tests {
         let text = source(held);
         assert!(text.contains("not read as source"), "{text}");
     }
+
+    /// A value written fresh inside a `while` body and read again after the loop ends has to
+    /// become a local before the loop is even entered, the same rollback risk `branch()`'s
+    /// `anchor()` already covers for an `if`: `loop_body()`'s own `block()` for the body wipes
+    /// the register the moment the loop closes.
+    #[test]
+    fn a_value_written_inside_a_while_body_and_read_after_it_ends_reads_as_one() {
+        let held = Proto {
+            parameters: 2,
+            code: vec![
+                abc(LT, 0, 0, 1),
+                asbx(JMP, 0, 2),
+                abc(MOVE, 2, 0, 0),
+                asbx(JMP, 0, -4),
+                abc(RETURN, 2, 2, 0),
+                abc(RETURN, 0, 1, 0),
+            ],
+            stack: 3,
+            ..Proto::default()
+        };
+        assert_eq!(
+            source(held),
+            "local v0\nwhile a0 < a1 do\n\tv0 = a0\nend\nreturn v0"
+        );
+    }
+
+    /// The same escape, for a `repeat`'s body rather than a `while`'s.
+    #[test]
+    fn a_value_written_inside_a_repeat_body_and_read_after_it_ends_reads_as_one() {
+        let held = Proto {
+            parameters: 2,
+            code: vec![
+                abc(MOVE, 2, 0, 0),
+                abc(LT, 0, 0, 1),
+                asbx(JMP, 0, -3),
+                abc(RETURN, 2, 2, 0),
+                abc(RETURN, 0, 1, 0),
+            ],
+            stack: 3,
+            ..Proto::default()
+        };
+        assert_eq!(
+            source(held),
+            "local v0\nrepeat\n\tv0 = a0\nuntil a0 < a1\nreturn v0"
+        );
+    }
 }

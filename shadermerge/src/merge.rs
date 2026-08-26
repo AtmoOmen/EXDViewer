@@ -614,6 +614,13 @@ fn naming(
             );
         }
     }
+    // Depth has no slot of its own, so it never appears in `built.table.outputs`; `dcl_output oDepth`
+    // is the same predicate the struct field has to track.
+    if built.depth {
+        names
+            .outputs
+            .insert(u32::MAX, hlsl::Semantic::new("SV_Depth", 0, 0, 1));
+    }
     names
 }
 

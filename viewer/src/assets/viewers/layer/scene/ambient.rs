@@ -60,6 +60,13 @@ const MOON_FADE: f32 = 0.4;
 /// its whole phase from the engine, and nothing in the set is a rate.
 const RATE: f32 = 1.6;
 
+/// Multiplies `grass.shpk`'s own `1.0 / wavelength` world-to-UV scale. Neutral until the wind
+/// texture's own tiling is confirmed against a capture.
+const GUST_SCALE: f32 = 1.0;
+
+/// World units a gust texture is advected a second. No file states this at all.
+const GUST_SCROLL: f32 = 2.0;
+
 /// The slot of the level file's general block holding how far the sun's shadows reach.
 const SHADOW_REACH: usize = 9;
 
@@ -211,6 +218,10 @@ pub struct Ambient {
     pub reach: f32,
     /// How fast one sway runs, which no file states.
     pub rate: f32,
+    /// Multiplies `grass.shpk`'s own world-to-UV scale, which no file confirms either.
+    pub gust_scale: f32,
+    /// World units a gust texture is advected a second, which no file states.
+    pub scroll: f32,
     /// How far up the frame the moon reaches, which no file states either.
     pub moon: f32,
     /// The moon's own day, `1..=32`, which no file states either: a date to stand the panel at
@@ -258,6 +269,8 @@ impl Ambient {
             tilt,
             reach,
             rate: RATE,
+            gust_scale: GUST_SCALE,
+            scroll: GUST_SCROLL,
             moon: MOON,
             day: FULL,
             spaces: Vec::new(),
@@ -498,12 +511,14 @@ impl Ambient {
     /// sum there, but `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength per layer, so
     /// [`layers`](program::Wind::layers) carries them apart as well.
     ///
-    /// Each layer's `wavelength` goes unread: it is grass.shpk's own world-to-texel scale for
-    /// sampling `bgcommon/nature/wind/texture/wind_0{1,2}.tex`, decompiled off the shader itself, but
-    /// nothing states the texture's own tiling, so the conversion from world units to that scale is
-    /// not derived. `min_strength` is read now that it has a real consumer (the same texture sample,
-    /// squared, lerped between it and `max_strength`) rather than the naive time-based gust an
-    /// earlier reading tried and reverted for freezing solid every cycle.
+    /// Each layer's `wavelength` feeds `grass.shpk`'s own world-to-texel scale for sampling
+    /// `bgcommon/nature/wind/texture/wind_0{1,2}.tex`, `1.0 / wavelength` at [`gust_scale`
+    /// ](program::Wind::gust_scale) of `1.0`. That texture visibly tiles several cycles across its
+    /// own width, so the gust a player actually sees may run coarser than this by that same factor;
+    /// nothing states which the engine intends, which is why `gust_scale` stays a slider rather than
+    /// folding a measured correction in. `min_strength` is read now that it has a real consumer (the
+    /// same texture sample, squared, lerped between it and `max_strength`) rather than the naive
+    /// time-based gust an earlier reading tried and reverted for freezing solid every cycle.
     pub fn wind(&self) -> Option<program::Wind> {
         let held = self.keyframes(WIND)?;
         let layer = |which: usize| {
@@ -513,6 +528,7 @@ impl Ambient {
                 heading: Vec3::new(heading.sin(), 0.0, heading.cos()),
                 max_strength: of("max_strength"),
                 min_strength: of("min_strength"),
+                wavelength: of("wavelength"),
             }
         };
         let layers = [layer(0), layer(1)];
@@ -525,6 +541,8 @@ impl Ambient {
             reach: held.length(),
             rate: self.rate,
             layers,
+            gust_scale: self.gust_scale,
+            scroll: self.scroll,
         })
     }
 
@@ -787,6 +805,14 @@ impl Ambient {
             ui.label(RichText::new(format!("Sway rate  {:.2} rad/s", self.rate)).weak());
             changed |= ui
                 .add(egui::Slider::new(&mut self.rate, 0.0..=6.0).show_value(false))
+                .changed();
+            ui.label(RichText::new(format!("Gust scale  {:.2}x", self.gust_scale)).weak());
+            changed |= ui
+                .add(egui::Slider::new(&mut self.gust_scale, 0.1..=4.0).show_value(false))
+                .changed();
+            ui.label(RichText::new(format!("Gust scroll  {:.2} u/s", self.scroll)).weak());
+            changed |= ui
+                .add(egui::Slider::new(&mut self.scroll, 0.0..=20.0).show_value(false))
                 .changed();
         }
         if self.moonlight().w > 0.0 {

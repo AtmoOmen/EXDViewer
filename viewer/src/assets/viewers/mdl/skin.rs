@@ -15,7 +15,7 @@
 //! already names.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
 use std::rc::Rc;
 
@@ -51,8 +51,10 @@ const BUST: [&str; 2] = ["j_mune_l", "j_mune_r"];
 /// gimmick states for the set. A head that names none of them raises nothing.
 const VISOR: [&str; 3] = ["j_ex_met_va", "j_ex_met_vb", "j_ex_met_vc"];
 
-/// The bone a mount seats its rider on. Every body the game names a mount carries one, and nothing
-/// else does.
+/// The bone a mount seats its rider on, and the ones an extra rider is seated on beyond it. A
+/// mount names them `n_mount`, then `n_mount_second` for a second seat or `n_mount_a`,
+/// `n_mount_b`, ... for a third and beyond; both spellings are real, so a seat is anything
+/// starting with this rather than one fixed suffix.
 const SEAT: &str = "n_mount";
 
 /// The rig a model is skinned to, ready to answer a mesh's bone table with a palette.
@@ -67,6 +69,9 @@ pub struct Skin {
     anchor: Option<usize>,
     home: Vec3,
     spread: f32,
+    /// Where a mount seats each of its riders, nearest first, in the order its own skeleton
+    /// names them.
+    seats: Vec<usize>,
 }
 
 impl Skin {
@@ -84,6 +89,16 @@ impl Skin {
             .collect();
         let anchor = named.get(ANCHOR).copied();
         let (home, spread) = middle(&world, anchor);
+        let seats = rig
+            .names()
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| {
+                name.strip_prefix(SEAT)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('_'))
+            })
+            .map(|(bone, _)| bone)
+            .collect();
         Self {
             rig,
             rest,
@@ -91,6 +106,7 @@ impl Skin {
             anchor,
             home,
             spread,
+            seats,
         }
     }
 
@@ -468,6 +484,9 @@ pub struct Animation {
     /// The mount the body is seated on, posed on a rig of its own. A mount names the same bones a
     /// body does, so the two cannot be merged the way an extra skeleton is.
     mounted: Option<Box<Animation>>,
+    /// Which of this rig's own seats a rider takes, for the one that is a mount seating more
+    /// than one.
+    seat: Cell<usize>,
 }
 
 impl Animation {
@@ -489,7 +508,14 @@ impl Animation {
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
             body: Layer {
-                wanted: RefCell::new(code.as_deref().and_then(pack_path).unwrap_or_default()),
+                wanted: RefCell::new(
+                    code.as_deref()
+                        .and_then(|code| match mount.is_some() {
+                            true => ride_path(code),
+                            false => pack_path(code),
+                        })
+                        .unwrap_or_default(),
+                ),
                 ..Default::default()
             },
             face: Default::default(),
@@ -498,6 +524,7 @@ impl Animation {
             visor: Cell::new([0.0; 3]),
             running: Cell::new(true),
             mounted: mount.map(|mount| Box::new(Animation::new(filed_under(&mount, &models)))),
+            seat: Cell::new(0),
             code,
         }
     }
@@ -616,11 +643,19 @@ impl Animation {
         }
     }
 
-    /// The packs of the nearest body that files any, opened on the nearest body's own idle. Few
-    /// bodies carry an idle at all, and one that does not is stood in the idle of the body it is
-    /// built on rather than in whichever pack the listing happens to name first.
+    /// Every pack the lineage this body is built on files, nearest first, opened on the nearest
+    /// one's own idle (or its ride pack, mounted). A race rarely authors every motion its own
+    /// body plays: `battle_dead_1` ships only under `c0101`, so a Lalafell's own directory alone
+    /// would never offer it, and every other body's list is unioned in rather than replaced by
+    /// the first non-empty one. Where two bodies both ship a pack of the same name, the nearer's
+    /// is kept.
     fn listed(&self, listing: &Listing) -> Vec<Pack> {
+        let conventional = |code: &str| match self.mounted.is_some() {
+            true => ride_path(code),
+            false => pack_path(code),
+        };
         let mut listed: Vec<Pack> = Vec::new();
+        let mut named: HashSet<String> = HashSet::new();
         let mut idle = None;
         for code in self.built_on.borrow().iter() {
             let Some(root) = pack_root(code) else {
@@ -628,15 +663,16 @@ impl Animation {
             };
             let packs = found(&root, listing.under(&root));
             if idle.is_none() {
-                idle = pack_path(code).filter(|path| packs.iter().any(|pack| pack.path == *path));
+                idle =
+                    conventional(code).filter(|path| packs.iter().any(|pack| pack.path == *path));
             }
-            if listed.is_empty() {
-                listed = packs;
-            }
-            if idle.is_some() {
-                break;
+            for pack in packs {
+                if named.insert(pack.label.clone()) {
+                    listed.push(pack);
+                }
             }
         }
+        listed.sort_by(|left, right| left.label.cmp(&right.label));
         // The conventional pack is right for nearly every model but not for all of them, and a
         // weapon is named none at all; either way the listing knows better.
         let mut wanted = self.body.wanted.borrow_mut();
@@ -727,6 +763,14 @@ impl Animation {
     /// How far a raised visor has turned, in radians, one angle per bone it hinges on.
     pub fn hinged(&self, visor: [f32; 3]) {
         self.visor.set(visor);
+    }
+
+    /// Which of the mount's own seats the rider takes, for the one that is a mount seating more
+    /// than one. A body that is not riding has nowhere to put this.
+    pub fn seated(&self, seat: usize) {
+        if let Some(mounted) = &self.mounted {
+            mounted.seat.set(seat);
+        }
     }
 
     /// Plays `path`, settling into `then` once it has played through.
@@ -932,7 +976,14 @@ impl Animation {
             }
         }
         let (center, spread) = middle(&posed, skin.anchor);
-        let seat = skin.named.get(SEAT).map(|bone| posed[*bone]);
+        // A seat past what this rig's own skeleton names is a vehicle-class mount whose extra
+        // riders have no bone of their own; falling back to the first keeps them on the mount at
+        // all rather than carrying nothing.
+        let seat = skin
+            .seats
+            .get(self.seat.get())
+            .or_else(|| skin.seats.first())
+            .map(|bone| posed[*bone]);
         if let Some(at) = at {
             for placement in &mut posed {
                 *placement = placement.carried(at);
@@ -1219,6 +1270,16 @@ fn pack_path(code: &str) -> Option<String> {
     ))
 }
 
+/// The pack a body sits its rider on a mount with. Only a human rides, and every human body
+/// files this the same way; a race that ships none of its own borrows the nearest one its
+/// lineage does, the same as [`pack_path`].
+fn ride_path(code: &str) -> Option<String> {
+    Some(format!(
+        "chara/{}/{code}/animation/a0001/bt_common/mount/mount_start.pap",
+        tree(code)?
+    ))
+}
+
 /// The packs under a model's animation directory, named by what tells them apart. Every pack of a
 /// model sits under the same animation set and the same weapon class, and a segment they all share
 /// says nothing; one that would leave a bare file name has gone too far.
@@ -1254,7 +1315,8 @@ mod tests {
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
-        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, skeleton_path,
+        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, ride_path,
+        skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -1351,6 +1413,25 @@ mod tests {
         assert_eq!(held[1].w_axis.truncate(), Vec3::new(0.0, 3.0, 0.0));
     }
 
+    /// A mount's seats are `n_mount` and whatever else the skeleton names after it, in the order
+    /// it lists them; a name that only starts the same, like a decorative `n_mounted_light`, is
+    /// not a seat.
+    #[test]
+    fn a_mount_names_its_seats_in_skeleton_order() {
+        let names = [
+            "n_root",
+            "n_mount",
+            "n_mount_a",
+            "n_mounted_light",
+            "n_mount_b",
+        ]
+        .map(ToOwned::to_owned);
+        let reference: Vec<_> = names.iter().map(|_| transform([0.0, 0.0, 0.0])).collect();
+        let rig = Rig::new(&names, &[-1, 0, 0, 0, 0], &reference);
+        let skin = Skin::new(rig);
+        assert_eq!(skin.seats, [1, 2, 4]);
+    }
+
     /// A face is skinned to bones the body's own skeleton has never heard of, and its own skeleton
     /// hangs them off one the body does name.
     #[test]
@@ -1439,6 +1520,10 @@ mod tests {
         assert_eq!(
             pack_root("m0430").as_deref(),
             Some("chara/monster/m0430/animation/")
+        );
+        assert_eq!(
+            ride_path("c1101").as_deref(),
+            Some("chara/human/c1101/animation/a0001/bt_common/mount/mount_start.pap")
         );
     }
 

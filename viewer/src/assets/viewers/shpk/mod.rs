@@ -267,11 +267,17 @@ struct MergeTarget {
     count: usize,
 }
 
-/// Where the shader list's two chip rows currently name exactly one stage and one pass.
+/// Where the shader list's two chip rows currently name exactly one stage and one pass with more
+/// than one shader behind it. A single-shader "merge" is degenerate (the All-shaders choices
+/// already cover it correctly) and `shadermerge`'s own struct synthesis can drop an implicit
+/// output register in that case, so it is excluded here rather than offered and shown to fail.
 fn merge_target(ctx: &egui::Context, package: &Rendered) -> Option<MergeTarget> {
     let (chip_stage, chip_pass, _) =
         ctx.data(|data| data.get_temp::<(usize, usize, usize)>(package.state))?;
     let count = list::mergeable(package, chip_stage, chip_pass).ok()?;
+    if count < 2 {
+        return None;
+    }
     let (stage_name, ..) = package.stages.get(chip_stage.checked_sub(1)?)?;
     let stage = match *stage_name {
         "Vertex" => 0,
@@ -387,6 +393,25 @@ mod tests {
         (path, bytes)
     }
 
+    /// The last stage/pass combination the chips could name whose shared shader count satisfies
+    /// `matches`, so a test can ask for "more than one" or "exactly one" against a real corpus.
+    fn find_combo(
+        package: &super::Rendered,
+        matches: impl Fn(usize) -> bool,
+    ) -> Option<(usize, usize)> {
+        let mut found = None;
+        for stage_chip in 1..=package.stages.len() {
+            for pass_chip in 1..=package.keys.passes.len() {
+                if let Ok(count) = super::list::mergeable(package, stage_chip, pass_chip)
+                    && matches(count)
+                {
+                    found = Some((stage_chip, pass_chip));
+                }
+            }
+        }
+        found
+    }
+
     /// The chip state `list.rs` writes is a 1-based (stage row, pass row) pair; `merge_target`
     /// turns that back into the 0-based stage index `shadermerge::pass` takes and the pass's own
     /// id. Naming exactly one of each should add the Merged pair to the two All-shaders choices.
@@ -403,18 +428,8 @@ mod tests {
         let plain = super::export_choices(&package, &bytes, &ctx);
         assert_eq!(plain.len(), 2, "no chip state set: only the two All-shaders choices");
 
-        let mut target = None;
-        for stage_chip in 1..=package.stages.len() {
-            for pass_chip in 1..=package.keys.passes.len() {
-                if let Ok(count) = super::list::mergeable(&package, stage_chip, pass_chip)
-                    && count > 0
-                {
-                    target = Some((stage_chip, pass_chip));
-                }
-            }
-        }
-        let (stage_chip, pass_chip) =
-            target.expect("createviewposition.shpk has a stage and pass that share a shader");
+        let (stage_chip, pass_chip) = find_combo(&package, |count| count >= 2)
+            .expect("createviewposition.shpk has a stage and pass that share more than one shader");
         ctx.data_mut(|data| data.insert_temp(package.state, (stage_chip, pass_chip, 0usize)));
 
         let named = super::export_choices(&package, &bytes, &ctx);
@@ -422,6 +437,34 @@ mod tests {
             named.len(),
             4,
             "one stage and one pass named: the Merged pair joins the All-shaders pair"
+        );
+    }
+
+    /// The Pixel/`PASS_G_SEMITRANSPARENCY` pass in this package is exactly this case:
+    /// `shadermerge::pass` emits `output.SV_Depth.x = ...` while its own synthesized `Output`
+    /// struct declares only `SV_TARGET`, so `dxc` rejects it even though the same shader compiles
+    /// clean through the plain per-shader export. The menu must never offer a single-shader merge,
+    /// since the All-shaders choices already cover it and `merge_target` cannot tell this case from
+    /// one `shadermerge` handles correctly.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn export_choices_omit_the_merged_pair_for_a_single_shader_target() {
+        let (path, bytes) = createviewposition();
+        let preview = super::decode(&path, &bytes).expect("a real .shpk decodes");
+        let super::Preview::Shpk(package) = preview else {
+            panic!("decode() of a .shpk did not return Preview::Shpk");
+        };
+        let ctx = egui::Context::default();
+
+        let (stage_chip, pass_chip) = find_combo(&package, |count| count == 1)
+            .expect("createviewposition.shpk has a stage and pass with exactly one shader");
+        ctx.data_mut(|data| data.insert_temp(package.state, (stage_chip, pass_chip, 0usize)));
+
+        let named = super::export_choices(&package, &bytes, &ctx);
+        assert_eq!(
+            named.len(),
+            2,
+            "a single-shader target stays at the two All-shaders choices, no Merged pair"
         );
     }
 
@@ -479,19 +522,7 @@ mod tests {
         let first_target = target(&package.shaders[0].stage);
         compile(first_name, &String::from_utf8_lossy(first_source), first_target);
 
-        // The first stage and pass that share more than one shader, so the merge below is a real
-        // union rather than a single shader passed straight through.
-        let mut target_combo = None;
-        for stage_chip in 1..=package.stages.len() {
-            for pass_chip in 1..=package.keys.passes.len() {
-                if let Ok(count) = super::list::mergeable(&package, stage_chip, pass_chip)
-                    && count > 1
-                {
-                    target_combo = Some((stage_chip, pass_chip));
-                }
-            }
-        }
-        let (stage_chip, pass_chip) = target_combo
+        let (stage_chip, pass_chip) = find_combo(&package, |count| count >= 2)
             .expect("createviewposition.shpk has a stage and pass that share more than one shader");
         let stage_name = package.stages[stage_chip - 1].0;
         let stage_index = match stage_name {

@@ -55,7 +55,7 @@ use super::Source;
 use crate::assets::deps::Deps;
 use crate::backend::Backend;
 use crate::data::DecodedTexture;
-use crate::utils::TrackedPromise;
+use crate::utils::{TrackedPromise, export};
 
 use mdl::material::Material;
 use mdl::program;
@@ -4172,6 +4172,7 @@ impl Scene {
         deps: &mut Deps,
         backend: &Backend,
     ) {
+        self.saving.take_if(|promise| promise.try_get().is_some());
         let mut refit = false;
         let mut changed = false;
         // A preset dropped on the window, or picked with the button below, stands this view where a
@@ -4257,24 +4258,24 @@ impl Scene {
                     self.ambient.weather_id(),
                     self.ambient.time,
                 );
-                if ui.button("Export preset").clicked() {
-                    match held.write() {
-                        Ok(text) => {
-                            let name = format!("TE_{}.json", held.name);
-                            self.saving = Some(TrackedPromise::spawn_local(async move {
-                                if let Some(file) = rfd::AsyncFileDialog::new()
-                                    .set_title("Export a TitleEdit preset")
-                                    .set_file_name(&name)
-                                    .save_file()
-                                    .await
-                                    && let Err(why) = file.write(text.as_bytes()).await
-                                {
-                                    log::error!("assets/layer: {name}: {why}");
-                                }
-                            }));
-                        }
-                        Err(why) => log::error!("assets/layer: {why}"),
+                let file_name = format!("TE_{}.json", held.name);
+                let choices = match held.write() {
+                    Ok(text) => vec![
+                        export::Choice::bytes("Export preset", file_name, move || {
+                            Ok(text.into_bytes())
+                        })
+                        .title("Export a TitleEdit preset")
+                        .filter("JSON", &["json"]),
+                    ],
+                    Err(why) => {
+                        log::error!("assets/layer: {why}");
+                        Vec::new()
                     }
+                };
+                let promise =
+                    export::menu(ui, "Export preset", None, self.saving.is_some(), choices);
+                if promise.is_some() {
+                    self.saving = promise;
                 }
                 // The same shape the plugin hands over its own clipboard, so a paste elsewhere
                 // reads it back.

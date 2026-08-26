@@ -7,13 +7,9 @@ use anyhow::Result;
 
 use super::{Preview, upload};
 use crate::assets::{Bytes, Channels};
+use crate::utils::export;
 
-pub fn decode(
-    ctx: &egui::Context,
-    path: &str,
-    bytes: &[u8],
-    channels: Channels,
-) -> Result<Preview> {
+fn pixels(bytes: &[u8]) -> Result<image::RgbaImage> {
     use ironworks::file::{File as _, hwc};
 
     let cursor = hwc::HardwareCursor::read(std::io::Cursor::new(bytes.to_vec()))?;
@@ -22,8 +18,21 @@ pub fn decode(
         .chunks_exact(4)
         .flat_map(|pixel| [pixel[3], pixel[2], pixel[1], pixel[0]])
         .collect();
-    let image = image::RgbaImage::from_raw(hwc::WIDTH as u32, hwc::HEIGHT as u32, pixels)
-        .expect("the cursor is a whole image");
+    Ok(
+        image::RgbaImage::from_raw(hwc::WIDTH as u32, hwc::HEIGHT as u32, pixels)
+            .expect("the cursor is a whole image"),
+    )
+}
+
+pub fn decode(
+    ctx: &egui::Context,
+    path: &str,
+    bytes: &[u8],
+    channels: Channels,
+) -> Result<Preview> {
+    use ironworks::file::hwc;
+
+    let image = pixels(bytes)?;
 
     let facts = vec![
         ("Format", "8 bits per channel, alpha first".to_owned()),
@@ -43,4 +52,42 @@ pub fn decode(
         Vec::new(),
         channels,
     ))
+}
+
+/// Beyond the raw file: the same pixels as a `.bmp`, which every image tool opens with no decoder
+/// of its own.
+pub fn export_choices(bytes: &[u8]) -> Vec<export::Choice<'_>> {
+    vec![
+        export::Choice::bytes("As BMP", "cursor.bmp", move || {
+            crate::utils::tex_loader::write(pixels(bytes)?, image::ImageFormat::Bmp)
+        })
+        .filter("BMP image", &["bmp"]),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ironworks::file::hwc;
+
+    /// No real file is needed: a `.hwc` is a bare buffer with no header, so a synthetic one of the
+    /// right size is indistinguishable from a shipped one to this reader.
+    #[test]
+    fn the_bmp_choice_round_trips_the_pixels() {
+        let mut raw = vec![0u8; hwc::WIDTH * hwc::HEIGHT * 4];
+        // One pixel set to a distinctive, non-symmetric BGRA value so the round trip is checked
+        // against real content rather than an all-zero buffer that would pass by accident.
+        raw[0..4].copy_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+
+        let image = pixels(&raw).expect("a full-size buffer parses");
+        let bmp = crate::utils::tex_loader::write(image.clone(), image::ImageFormat::Bmp)
+            .expect("the image crate can write a BMP with an alpha channel");
+        assert_eq!(&bmp[0..2], b"BM", "a BMP starts with its own magic");
+
+        let read_back = image::load_from_memory_with_format(&bmp, image::ImageFormat::Bmp)
+            .expect("the image crate can read back what it wrote")
+            .to_rgba8();
+        assert_eq!(read_back.dimensions(), image.dimensions());
+        assert_eq!(read_back.as_raw(), image.as_raw());
+    }
 }

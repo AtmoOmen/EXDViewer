@@ -4,7 +4,7 @@ use image::RgbaImage;
 
 use crate::excel::{base::CachedProvider, provider::ExcelProvider};
 
-use super::TrackedPromise;
+use super::{TrackedPromise, export};
 
 /// A `Uri` source is a `.tex` file the web backend hands the browser a link to; only the loader
 /// already showing it on screen (`icon_loader::TexLoader`) knows how to decode that, so this reads
@@ -42,52 +42,44 @@ fn color_image_to_rgba(image: &egui::ColorImage) -> RgbaImage {
         .expect("ColorImage's pixel buffer matches its own size")
 }
 
-/// Copy an icon to the clipboard, or encode it to PNG and hand it to a save dialog. Returns the
-/// promise for the caller's own `Option<TrackedPromise<()>>` slot; a promise dropped mid-flight
-/// cancels its future, so that slot has to outlive the frame that started this.
-pub fn spawn_icon_export(
+/// Copy an icon to the clipboard. Returns the promise for the caller's own
+/// `Option<TrackedPromise<()>>` slot; a promise dropped mid-flight cancels its future, so that slot
+/// has to outlive the frame that started this.
+pub fn spawn_icon_copy(
     ctx: &egui::Context,
     excel: CachedProvider,
     icon_id: u32,
     path: String,
     source: egui::ImageSource<'static>,
-    to_file: bool,
 ) -> TrackedPromise<()> {
     let ctx = ctx.clone();
     TrackedPromise::spawn_local(async move {
-        let image = match resolve_icon_pixels(&ctx, excel, &path, source).await {
-            Ok(image) => image,
-            Err(error) => {
-                log::error!("Failed to resolve icon {icon_id} for export: {error}");
-                return;
-            }
-        };
-        if to_file {
-            let data = match crate::utils::tex_loader::write(image, image::ImageFormat::Png) {
-                Ok(data) => data,
-                Err(error) => {
-                    log::error!("Failed to encode icon {icon_id} as PNG: {error}");
-                    return;
-                }
-            };
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title("Export Icon")
-                .set_file_name(format!("icon_{icon_id:06}.png"))
-                .add_filter("PNG image", &["png"])
-                .save_file()
-                .await
-            {
-                if let Err(error) = file.write(&data).await {
-                    log::error!("Failed to write icon {icon_id}: {error}");
-                } else {
-                    log::info!("Exported icon {icon_id} successfully");
-                }
-            }
-        } else {
-            ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(
+        match resolve_icon_pixels(&ctx, excel, &path, source).await {
+            Ok(image) => ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(
                 [image.width() as usize, image.height() as usize],
                 image.as_raw(),
-            ));
+            )),
+            Err(error) => log::error!("Failed to resolve icon {icon_id} for export: {error}"),
         }
     })
+}
+
+/// The one export choice an icon offers: its pixels, resolved and PNG-encoded.
+pub fn icon_export_choice(
+    ctx: &egui::Context,
+    excel: CachedProvider,
+    icon_id: u32,
+    path: String,
+    source: egui::ImageSource<'static>,
+) -> export::Choice<'static> {
+    let file_name = format!("icon_{icon_id:06}.png");
+    let ctx = ctx.clone();
+    export::Choice::new("Export PNG…", file_name, move || {
+        Box::pin(async move {
+            let image = resolve_icon_pixels(&ctx, excel, &path, source).await?;
+            crate::utils::tex_loader::write(image, image::ImageFormat::Png)
+        })
+    })
+    .title("Export Icon")
+    .filter("PNG image", &["png"])
 }

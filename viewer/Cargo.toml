@@ -116,7 +116,7 @@ jsonschema = { version = "0.49", default-features = false }
 async-trait = "0.1"
 futures-util = "0.3"
 egui_logger = "0.11"
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "bmp"] }
 image_dds = { version = "0.7", default-features = false, features = ["image", "ddsfile"] }
 either = { version = "1", features = ["serde"] }
 replace_with = "0.1"

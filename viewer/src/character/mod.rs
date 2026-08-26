@@ -233,6 +233,8 @@ enum Attire {
 /// The bytes of every file read so far, by path, and one batch of them as they land.
 type Files = BTreeMap<String, Vec<u8>>;
 type Read = Vec<(String, Vec<u8>)>;
+/// The race a `.atch` fetch was asked for, alongside the bytes once it lands.
+type AtchRead = (u16, Vec<u8>);
 
 /// What a picked set is made of, and what to call it.
 struct Set {
@@ -333,11 +335,11 @@ pub struct CharacterBuilder {
     drawn: bool,
     /// What was last logged a weapon's placement, so a stance held for a thousand frames names its
     /// bone and offset once rather than on every one of them.
-    logged: Cell<(bool, Option<usize>, Option<usize>)>,
+    logged: Cell<(bool, Option<usize>, Option<usize>, bool)>,
     /// The race's own `.atch` file, which says where a weapon it names a tag for hangs, kept
     /// against the code it was fetched for so a change of race asks again.
     atch: Option<(u16, Rc<Vec<u8>>)>,
-    reading_atch: Option<TrackedPromise<Result<Vec<u8>>>>,
+    reading_atch: Option<TrackedPromise<Result<AtchRead>>>,
     /// The models each set is worn as under the current code, by slot. A set number means one
     /// thing as equipment and another as an adornment, so the two are kept apart. The picker asks
     /// about every set it lists, and a directory listing is too dear to pay for one on every frame.
@@ -429,7 +431,7 @@ impl Default for CharacterBuilder {
             main_matched: Default::default(),
             off_matched: Default::default(),
             drawn: false,
-            logged: Cell::new((false, None, None)),
+            logged: Cell::new((false, None, None, false)),
             atch: None,
             reading_atch: None,
             sets: RefCell::new(BTreeMap::new()),
@@ -480,7 +482,7 @@ impl CharacterBuilder {
         self.off_hand = None;
         self.main_matched.take();
         self.off_matched.take();
-        self.logged.set((false, None, None));
+        self.logged.set((false, None, None, false));
         self.atch = None;
         self.reading_atch = None;
         self.stood = false;
@@ -707,7 +709,13 @@ impl CharacterBuilder {
         }
         if let Some(promise) = self.reading_atch.take() {
             match promise.try_take() {
-                Ok(Ok(read)) => self.atch = Some((self.code, Rc::new(read))),
+                Ok(Ok((code, bytes))) => {
+                    log::info!(
+                        "character: attach points landed for c{code:04}, {} bytes",
+                        bytes.len()
+                    );
+                    self.atch = Some((code, Rc::new(bytes)));
+                }
                 Ok(Err(why)) => {
                     log::warn!("character: nothing says where a weapon attaches: {why}");
                 }
@@ -720,6 +728,18 @@ impl CharacterBuilder {
         let Some(deformers) = self.deformers.clone() else {
             return;
         };
+
+        // Checked every frame rather than folded into `!self.stood`: the code it settles on can
+        // change more than once before that flag next goes false, and a fetch spawned for a code
+        // already left behind must not be mistaken for the one now on screen.
+        let stale = self.atch.as_ref().is_none_or(|(held, _)| *held != self.code);
+        if self.reading_atch.is_none() && stale {
+            let files = backend.files().clone();
+            let code = self.code;
+            let path = weapons::atch_path(code);
+            let fetch = async move { anyhow::Ok((code, files.read(&path).await?)) };
+            self.reading_atch = Some(TrackedPromise::spawn_local(fetch));
+        }
 
         if !self.stood {
             self.stood = true;
@@ -737,13 +757,6 @@ impl CharacterBuilder {
                 self.shaped.borrow_mut().clear();
             }
             self.code = code;
-            let stale = self.atch.as_ref().is_none_or(|(held, _)| *held != self.code);
-            if self.reading_atch.is_none() && stale {
-                let files = backend.files().clone();
-                let path = weapons::atch_path(self.code);
-                let fetch = async move { files.read(&path).await };
-                self.reading_atch = Some(TrackedPromise::spawn_local(fetch));
-            }
             self.skin = skin(&listing, &deformers, self.code);
             self.body = body(&listing, &deformers, self.code);
             self.faces = sets(&listing, &self.code, "face");
@@ -875,9 +888,10 @@ impl CharacterBuilder {
             .as_ref()
             .filter(|(code, _)| *code == self.code)
             .map(|(_, bytes)| bytes);
-        // Logged once a stance or a wielded weapon actually changes, rather than every frame the
-        // pose is recomputed: this is the bone and offset a stance change moves a weapon to.
-        let key = (self.drawn, self.main_hand, self.off_hand);
+        // Logged once a stance, a wielded weapon or whether the atch file has landed actually
+        // changes, rather than every frame the pose is recomputed: this is the bone and offset a
+        // stance change moves a weapon to.
+        let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
         let log = self.logged.get() != key;
         self.logged.set(key);
         let mut found = vec![self.attach(main.weapon.model(), main.tag, true, atch, log)];

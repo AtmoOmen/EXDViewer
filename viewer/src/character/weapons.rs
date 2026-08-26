@@ -159,9 +159,9 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Pieces> {
             off_hand: row.read::<u64>(MODEL_SUB).ok().and_then(Weapon::read),
             covers_off_hand: covers_off,
             tag: row
-                .read::<u16>(UI_CATEGORY)
+                .read::<u8>(UI_CATEGORY)
                 .ok()
-                .and_then(|category| tag(category)),
+                .and_then(|category| tag(u16::from(category))),
         };
         if fills_main {
             main_hand.push(piece.clone());

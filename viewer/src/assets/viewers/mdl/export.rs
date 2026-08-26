@@ -84,10 +84,11 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
 
     let mut materials = Vec::with_capacity(level.materials.len());
     for (index, path) in level.materials.iter().enumerate() {
-        let Some(Some(Slot::Ready(material))) = slots.get(index) else {
-            bail!("material {path} has not finished loading yet");
-        };
-        materials.push(material_info(path, material));
+        match slots.get(index) {
+            Some(Some(Slot::Ready(material))) => materials.push(material_info(path, material)),
+            Some(Some(Slot::Failed(why))) => bail!("material {path} failed to load: {why}"),
+            _ => bail!("material {path} has not finished loading yet"),
+        }
     }
 
     let skeleton = match level.skinned {

@@ -86,9 +86,11 @@ shadermerge = { path = "../shadermerge" }
 glyphnames = { path = "../glyphnames" }
 luadec = { path = "../luadec" }
 pathlist = { path = "../pathlist", default-features = false }
-symphonia = { version = "0.6", default-features = false, features = [
+symphonia = { version = "0.6.1", default-features = false, features = [
+    "adpcm",
     "ogg",
     "vorbis",
+    "wav",
 ] }
 cridecoder = "0.3"
 async-channel = "2"

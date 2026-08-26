@@ -28,6 +28,7 @@ pub struct Frame<'a> {
     pub step: f32,
     pub placed: usize,
     pub drawn: usize,
+    pub effects: usize,
     /// How many of those the sun's own pass draws, the rest stating that they cast nothing.
     pub casting: usize,
     pub models: String,

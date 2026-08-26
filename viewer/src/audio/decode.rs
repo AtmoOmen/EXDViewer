@@ -21,14 +21,31 @@ pub struct Decoded {
 
 /// Decode a BGM sound entry to interleaved PCM.
 pub fn decode(entry: &SoundEntry) -> Result<Decoded> {
-    decode_data(entry.format(), entry.data())
+    let mut decoded = decode_data(entry.format(), entry.data())?;
+    // MS ADPCM carries no loop metadata of its own (unlike the Ogg/HCA containers, which do and
+    // are read from inside `decode_data`); the SCD-level fields are the only source, and they are
+    // byte offsets into the compressed body rather than sample indices.
+    if entry.format() == Codec::MsAdpcm
+        && entry.loop_end() > 0
+        && let (Some(block_align), Some(samples_per_block)) =
+            (entry.adpcm_block_align(), entry.adpcm_samples_per_block())
+        && block_align > 0
+    {
+        let to_frame = |byte_offset: u32| {
+            (byte_offset / u32::from(block_align)) * u32::from(samples_per_block)
+        };
+        decoded.loop_start = Some(to_frame(entry.loop_start()));
+        decoded.loop_end = Some(to_frame(entry.loop_end()));
+    }
+    Ok(decoded)
 }
 
 /// Decode raw codec bytes directly, for re-decoding a stream already held in memory.
 pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
     let mut decoded = match codec {
-        Codec::OggVorbis => decode_ogg(data),
+        Codec::OggVorbis => decode_stream(data, "ogg"),
         Codec::Hca => decode_hca(data),
+        Codec::MsAdpcm => decode_stream(data, "wav"),
         other => Err(anyhow!("unsupported audio codec {other:?}")),
     }?;
     downmix_to_stereo(&mut decoded);
@@ -116,12 +133,13 @@ fn downmix_to_stereo(decoded: &mut Decoded) {
     decoded.channels = 2;
 }
 
-/// OggVorbis via symphonia. Loop points come from the `LoopStart`/`LoopEnd` Vorbis comments,
-/// as the game uses; the SCD byte offsets are ignored.
-fn decode_ogg(data: &[u8]) -> Result<Decoded> {
+/// Anything symphonia probes, named by the extension its container would carry. Loop points
+/// come from the `LoopStart`/`LoopEnd` Vorbis comments where the container has them, as the
+/// game uses; the SCD byte offsets are ignored.
+fn decode_stream(data: &[u8], extension: &str) -> Result<Decoded> {
     let stream = MediaSourceStream::new(Box::new(Cursor::new(data.to_vec())), Default::default());
     let mut hint = Hint::new();
-    hint.with_extension("ogg");
+    hint.with_extension(extension);
     let mut format = symphonia::default::get_probe().probe(
         &hint,
         stream,
@@ -142,20 +160,20 @@ fn decode_ogg(data: &[u8]) -> Result<Decoded> {
 
     let track = format
         .default_track(TrackType::Audio)
-        .ok_or_else(|| anyhow!("ogg has no default track"))?;
+        .ok_or_else(|| anyhow!("{extension} has no default track"))?;
     let params = track
         .codec_params
         .as_ref()
         .and_then(|params| params.audio())
-        .ok_or_else(|| anyhow!("ogg track has no audio codec parameters"))?;
+        .ok_or_else(|| anyhow!("{extension} track has no audio codec parameters"))?;
     let channels = params
         .channels
         .as_ref()
-        .ok_or_else(|| anyhow!("ogg track has no channel layout"))?
+        .ok_or_else(|| anyhow!("{extension} track has no channel layout"))?
         .count() as u16;
     let sample_rate = params
         .sample_rate
-        .ok_or_else(|| anyhow!("ogg track has no sample rate"))?;
+        .ok_or_else(|| anyhow!("{extension} track has no sample rate"))?;
     let track_id = track.id;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())?;

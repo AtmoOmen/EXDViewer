@@ -729,16 +729,26 @@ fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Sourc
     let rows = rows(source.groups());
     let kinds = tally(source.groups());
     let instances = kinds.iter().map(|(_, count)| count).sum::<usize>();
-    identity.push((
-        "Layers",
-        source
-            .groups()
-            .iter()
-            .map(|group| group.layers().len())
-            .sum::<usize>()
-            .to_string(),
-    ));
-    identity.push(("Instances", instances.to_string()));
+    match (source.groups().is_empty(), source.scene()) {
+        // A level or shared group can name its layer groups by path instead of embedding them, so
+        // the file itself has no layer or instance count to give until those are read.
+        (true, Some(scene)) => identity.push((
+            "Layer groups",
+            format!("{} named, none embedded", scene.layer_group_paths().len()),
+        )),
+        _ => {
+            identity.push((
+                "Layers",
+                source
+                    .groups()
+                    .iter()
+                    .map(|group| group.layers().len())
+                    .sum::<usize>()
+                    .to_string(),
+            ));
+            identity.push(("Instances", instances.to_string()));
+        }
+    }
 
     log::info!("assets/layer: {path} {instances} instances");
 

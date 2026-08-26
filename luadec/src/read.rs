@@ -56,6 +56,10 @@ struct Reader<'a> {
     upvalues: Vec<String>,
     /// Registers below this hold locals; the rest are the expression under construction.
     active: usize,
+    /// Whether the instruction being read is the function's very first. `luaK_nil` skips the
+    /// `LOADNIL` a fresh register would otherwise need there, trusting the call convention's own
+    /// guarantee that every register up to the stack size starts out nil.
+    entry: bool,
     declared: usize,
     /// Where a call left a run of results whose length only the reader of them knows.
     open: Option<usize>,
@@ -193,6 +197,7 @@ fn function(
         names: parameter_names(held),
         upvalues,
         active: parameters,
+        entry: true,
         declared: 0,
         open: None,
         until: None,
@@ -751,6 +756,7 @@ impl<'a> Reader<'a> {
         match self.slots.get_mut(register) {
             Some(slot) => match std::mem::take(slot) {
                 Slot::Value(held) => Ok(held),
+                Slot::Empty if self.entry => Ok(Expr::Nil),
                 _ => Err("an instruction reads a register that holds nothing"),
             },
             None => Err("an instruction reads a register outside the stack"),
@@ -1517,6 +1523,7 @@ impl<'a> Reader<'a> {
         let a = usize::from(instruction.a());
         let (b, c) = (instruction.b(), instruction.c());
         let next = self.after(pc);
+        self.entry = pc == 0;
 
         match instruction.opcode() {
             Opcode::Move => {

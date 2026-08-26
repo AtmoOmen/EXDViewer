@@ -289,6 +289,19 @@ mod tests {
         assert_eq!(source(held), "print(\"hi\")");
     }
 
+    /// `luaK_nil` skips the `LOADNIL` a fresh register would otherwise need as a function's very
+    /// first instruction, trusting the call convention's own guarantee that it already reads nil.
+    #[test]
+    fn a_fresh_register_read_as_the_first_instruction_is_nil() {
+        let held = Proto {
+            parameters: 3,
+            code: vec![abc(RETURN, 3, 2, 0), abc(RETURN, 0, 1, 0)],
+            stack: 4,
+            ..Proto::default()
+        };
+        assert_eq!(source(held), "return nil");
+    }
+
     /// A key that reads as a name prints as a field, and the object of a method lookup is not
     /// repeated as its first argument.
     #[test]

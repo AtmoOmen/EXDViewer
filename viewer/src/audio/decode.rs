@@ -1,4 +1,6 @@
-use std::io::Cursor;
+use std::cell::RefCell;
+use std::io::{Cursor, Seek, Write};
+use std::rc::Rc;
 
 use anyhow::{Result, anyhow};
 use ironworks::file::scd::{Codec, SoundEntry};
@@ -52,41 +54,36 @@ pub fn decode_data(codec: Codec, data: &[u8]) -> Result<Decoded> {
     Ok(decoded)
 }
 
+/// A `Write + Seek` sink `hound::WavWriter` can own while this function keeps its own handle to
+/// read the bytes back out, since `WavWriter` has no way to hand its writer back.
+#[derive(Clone)]
+struct SharedSink(Rc<RefCell<Cursor<Vec<u8>>>>);
+
+impl Write for SharedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.borrow_mut().flush()
+    }
+}
+
+impl Seek for SharedSink {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.0.borrow_mut().seek(pos)
+    }
+}
+
 /// Encode decoded PCM as a 16-bit PCM WAV file.
 pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
-    let channels = u32::from(audio.channels);
-    let data_size = audio
-        .samples
-        .len()
-        .checked_mul(2)
-        .and_then(|size| u32::try_from(size).ok())
-        .ok_or_else(|| anyhow!("PCM data too large for WAV"))?;
-    let riff_size = data_size
-        .checked_add(36)
-        .ok_or_else(|| anyhow!("PCM data too large for WAV"))?;
-    let byte_rate = audio
-        .sample_rate
-        .checked_mul(channels)
-        .and_then(|rate| rate.checked_mul(2))
-        .ok_or_else(|| anyhow!("WAV byte rate overflows"))?;
-    let block_align = audio
-        .channels
-        .checked_mul(2)
-        .ok_or_else(|| anyhow!("WAV block alignment overflows"))?;
-
-    let mut wav = Vec::with_capacity(44 + data_size as usize);
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&riff_size.to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&audio.channels.to_le_bytes());
-    wav.extend_from_slice(&audio.sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_size.to_le_bytes());
+    let spec = hound::WavSpec {
+        channels: audio.channels,
+        sample_rate: audio.sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let sink = SharedSink(Rc::new(RefCell::new(Cursor::new(Vec::new()))));
+    let mut writer = hound::WavWriter::new(sink.clone(), spec)?;
     for &sample in &audio.samples {
         // A full-scale negative sample maps to the true i16::MIN rather than clipping a step
         // short of it, since the positive and negative ranges of i16 are not symmetric.
@@ -95,9 +92,10 @@ pub fn encode_wav(audio: &Decoded) -> Result<Vec<u8>> {
         } else {
             (sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)).round() as i16
         };
-        wav.extend_from_slice(&pcm.to_le_bytes());
+        writer.write_sample(pcm)?;
     }
-    Ok(wav)
+    writer.finalize()?;
+    Ok(sink.0.borrow().get_ref().clone())
 }
 
 const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;

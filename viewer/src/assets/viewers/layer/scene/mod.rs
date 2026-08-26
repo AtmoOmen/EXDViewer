@@ -18,6 +18,7 @@ mod ambient;
 mod gpu;
 mod preset;
 mod report;
+mod sound;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Cursor;
@@ -818,6 +819,7 @@ pub struct Scene {
     effects: Vec<Vfx>,
     effect_files: Vec<Effect>,
     effect_at: HashMap<String, usize>,
+    sound: sound::SoundStage,
     /// The two apricot packages every effect is drawn with, fetched once for the whole scene.
     effect_shape: Option<avfx::Package>,
     effect_model: Option<avfx::Package>,
@@ -1090,6 +1092,7 @@ impl Scene {
             effect_shape: None,
             effect_model: None,
             effect_packages: Arc::new(avfx::gpu::Packages::default()),
+            sound: sound::SoundStage::default(),
             clips: HashMap::new(),
             clip: aside(source.scene().map(layer::Scene::light_culling_path)),
             visibility: HashMap::new(),
@@ -1483,6 +1486,13 @@ impl Scene {
                                 tint: vfx_tint(vfx.colour()),
                                 fade_near: vfx.fade_near(),
                             });
+                        }
+                        InstanceData::Sound(placed_sound) => {
+                            self.sound.collect(
+                                placed_sound,
+                                here.transform_point3(Vec3::ZERO),
+                                reach(key, depth, instance.id()),
+                            );
                         }
                         _ => {}
                     }
@@ -2339,6 +2349,7 @@ impl Scene {
         self.load_asides(backend);
         self.load_effects(backend);
         self.load_effect_packages(backend);
+        self.sound.poll(backend, self.camera.position);
         self.ambient.poll(backend);
         self.expand(backend, until);
         if self.fitted == 0 && !self.placements.is_empty() {
@@ -4319,6 +4330,34 @@ impl Scene {
                     "How many tiles a second the night sky's point mask scrolls by. The stars do \
                      animate, but no capture pins down the rate, so this is a guess",
                 );
+
+            ui.add_space(8.0);
+            ui.separator();
+            let mut sound_on = self.sound.enabled();
+            if ui.checkbox(&mut sound_on, "Play in-zone sound").changed() {
+                match sound_on {
+                    true => self.sound.enable(),
+                    false => self.sound.disable(),
+                }
+            }
+            ui.add_enabled_ui(sound_on, |ui| {
+                ui.label(RichText::new("Sound volume").weak());
+                let mut volume = self.sound.volume();
+                if ui.add(egui::Slider::new(&mut volume, 0.0..=1.0)).changed() {
+                    self.sound.set_volume(volume);
+                }
+            });
+            ui.label(
+                RichText::new(format!(
+                    "{} placed, {} playing",
+                    self.sound.placed(),
+                    self.sound.playing()
+                ))
+                .weak(),
+            );
+            if let Some(error) = self.sound.error() {
+                ui.colored_label(Color32::RED, error);
+            }
 
             ui.add_space(8.0);
             ui.separator();

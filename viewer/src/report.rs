@@ -15,13 +15,13 @@ use std::time::{Duration, Instant};
 #[cfg(target_arch = "wasm32")]
 use web_time::{Duration, Instant};
 
-use egui::{Color32, RichText, containers::panel::Panel};
+use egui::{Color32, RichText};
 use ironworks::sqpack::IndexHash;
 use serde::Serialize;
 
 use crate::{
     backend::Backend,
-    settings::REPORT_PATHS,
+    settings::{REPORT_PATHS, REPORT_WINDOW_SHOWN},
     utils::{TrackedPromise, request},
 };
 
@@ -37,7 +37,7 @@ const BATCH: usize = 250;
 /// Candidates held at once; the oldest is dropped past this.
 const QUEUE: usize = 512;
 
-/// Queued paths the notice lists before it starts counting instead.
+/// Queued paths the window lists before it starts counting instead.
 const LISTED: usize = 20;
 
 /// The first segment of every path the list carries.
@@ -56,21 +56,31 @@ const CATEGORIES: [&str; 12] = [
     "vfx",
 ];
 
-/// A path in the form the packages hash it, or nothing when it cannot be a real name.
+/// A path in the form the packages hash it, alongside the case it actually appeared in.
+///
+/// The packages hash the lowercased path, so `hash` is what gets matched and sent; `display` keeps
+/// the original case, since that is what the user typed or the game shipped.
+struct Canonical {
+    hash: String,
+    display: String,
+}
+
+/// `path` in the form the packages hash it, or nothing when it cannot be a real name.
 ///
 /// An unnamed file is drawn as its hash, so a synthesised name is eight hex digits and carries no
 /// extension. Requiring one refuses both that and a directory the tree could only name by hash.
-fn canonical(path: &str) -> Option<String> {
-    let path = path.trim().trim_matches('/').to_lowercase();
-    if path.len() > 256
-        || !path
+fn canonical(path: &str) -> Option<Canonical> {
+    let display = path.trim().trim_matches('/');
+    let hash = display.to_lowercase();
+    if hash.len() > 256
+        || !hash
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_./-".contains(c))
     {
         return None;
     }
 
-    let mut segments = path.split('/');
+    let mut segments = hash.split('/');
     if !CATEGORIES.contains(&segments.next()?) {
         return None;
     }
@@ -80,7 +90,10 @@ fn canonical(path: &str) -> Option<String> {
     }
     segments
         .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
-        .then_some(path)
+        .then_some(Canonical {
+            hash,
+            display: display.to_string(),
+        })
 }
 
 /// The index entries this install carries that the list has no name for, keyed by hash.
@@ -112,10 +125,17 @@ impl Unknown {
     }
 }
 
+/// A queued path, kept in both the form it is sent as and the form it is shown as.
+#[derive(Clone)]
+struct Queued {
+    hash: String,
+    display: String,
+}
+
 #[derive(Default)]
 struct State {
     unknown: Option<Unknown>,
-    queue: Vec<String>,
+    queue: Vec<Queued>,
     seen: HashSet<String>,
     flush_at: Option<Instant>,
     upload: Option<TrackedPromise<Result<usize, String>>>,
@@ -150,7 +170,7 @@ impl Reporter {
         if !self.recording.get() {
             return;
         }
-        let Some(path) = canonical(path) else {
+        let Some(Canonical { hash, display }) = canonical(path) else {
             return;
         };
         // A read can land while the frame is already inside `poll`, and a candidate is offered
@@ -158,18 +178,18 @@ impl Reporter {
         let Ok(mut state) = self.state.try_borrow_mut() else {
             return;
         };
-        if state.seen.contains(&path) {
+        if state.seen.contains(&hash) {
             return;
         }
-        if !state.unknown.as_ref().is_some_and(|u| u.contains(&path)) {
+        if !state.unknown.as_ref().is_some_and(|u| u.contains(&hash)) {
             return;
         }
         if state.queue.len() == QUEUE {
             let dropped = state.queue.remove(0);
-            state.seen.remove(&dropped);
+            state.seen.remove(&dropped.hash);
         }
-        state.seen.insert(path.clone());
-        state.queue.push(path);
+        state.seen.insert(hash.clone());
+        state.queue.push(Queued { hash, display });
         state.flush_at = Some(Instant::now() + DEBOUNCE);
     }
 
@@ -212,7 +232,12 @@ impl Reporter {
         }
 
         state.flush_at = None;
-        let batch: Vec<String> = state.queue.iter().take(BATCH).cloned().collect();
+        let batch: Vec<String> = state
+            .queue
+            .iter()
+            .take(BATCH)
+            .map(|q| q.hash.clone())
+            .collect();
         let count = batch.len();
         let url = self.url.clone();
         state.upload = Some(TrackedPromise::spawn_local(async move {
@@ -247,11 +272,9 @@ async fn send(url: &str, paths: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The one-time ask, and the uploads it turns on.
-///
-/// Shown only once there is something to ask about, so a first launch is not interrupted by a
-/// question about a feature that has found nothing.
-pub fn notice(ui: &mut egui::Ui, backend: Option<&Backend>) {
+/// A small menu-bar badge: something was found, and clicking it opens the window rather than
+/// asking right there.
+pub fn indicator(ui: &mut egui::Ui, backend: Option<&Backend>) {
     let Some(reporter) = backend.map(Backend::reporter) else {
         return;
     };
@@ -260,48 +283,95 @@ pub fn notice(ui: &mut egui::Ui, backend: Option<&Backend>) {
     if REPORT_PATHS.get(ui.ctx()).is_some() {
         return;
     }
-    let queued = reporter.state.borrow().queue.clone();
-    if queued.is_empty() {
+    let pending = reporter.state.borrow().queue.len();
+    if pending == 0 {
         return;
     }
 
-    Panel::top("report_notice").show(ui, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!(
+    if ui
+        .button(format!(
+            "{pending} new path name{}",
+            if pending == 1 { "" } else { "s" }
+        ))
+        .on_hover_text(
+            "File names this install carries that the community path list does not know. Click \
+             to review.",
+        )
+        .clicked()
+    {
+        REPORT_WINDOW_SHOWN.set(ui.ctx(), true);
+    }
+}
+
+/// The path-report window: the one-time ask, and where "Show names" lives once it has been
+/// answered.
+pub fn draw_window(ctx: &egui::Context, backend: Option<&Backend>) {
+    let Some(reporter) = backend.map(Backend::reporter) else {
+        return;
+    };
+    let mut shown = REPORT_WINDOW_SHOWN.get(ctx);
+    let was_shown = shown;
+    egui::Window::new("Community Path Reports")
+        .open(&mut shown)
+        .show(ctx, |ui| {
+            let queued = reporter.state.borrow().queue.clone();
+            if queued.is_empty() {
+                ui.label("No new file names found yet.");
+                return;
+            }
+
+            ui.label(format!(
                 "Found {} file name{} the community path list does not know.",
                 queued.len(),
                 if queued.len() == 1 { "" } else { "s" }
-            )));
-            if ui
-                .button("Report")
-                .on_hover_text(
-                    "Sends these names to ResLogger2 through the XIViewer API so everyone's \
-                     browser can show them. Nothing else about your session is sent.",
-                )
-                .clicked()
-            {
-                REPORT_PATHS.set(ui.ctx(), Some(true));
+            ));
+
+            match REPORT_PATHS.get(ctx) {
+                None => {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Report")
+                            .on_hover_text(
+                                "Sends these names to ResLogger2 through the XIViewer API so \
+                                 everyone's browser can show them. Nothing else about your \
+                                 session is sent.",
+                            )
+                            .clicked()
+                        {
+                            REPORT_PATHS.set(ctx, Some(true));
+                        }
+                        if ui
+                            .button("No thanks")
+                            .on_hover_text("Remembered; you will not be asked again.")
+                            .clicked()
+                        {
+                            REPORT_PATHS.set(ctx, Some(false));
+                        }
+                    });
+                }
+                Some(true) => {
+                    ui.label(RichText::new("Reporting is on.").weak());
+                }
+                Some(false) => {
+                    ui.label(RichText::new("Reporting is off.").weak());
+                }
             }
-            if ui
-                .button("No thanks")
-                .on_hover_text("Remembered; you will not be asked again.")
-                .clicked()
-            {
-                REPORT_PATHS.set(ui.ctx(), Some(false));
-            }
+
+            ui.collapsing("Show names", |ui| {
+                for path in queued.iter().take(LISTED) {
+                    ui.label(RichText::new(&path.display).monospace().color(Color32::GRAY));
+                }
+                if let Some(rest) = queued.len().checked_sub(LISTED).filter(|rest| *rest > 0) {
+                    ui.label(RichText::new(format!("and {rest} more")).italics());
+                }
+            });
         });
-        ui.collapsing("Show names", |ui| {
-            for path in queued.iter().take(LISTED) {
-                ui.label(RichText::new(path).monospace().color(Color32::GRAY));
-            }
-            if let Some(rest) = queued.len().checked_sub(LISTED).filter(|rest| *rest > 0) {
-                ui.label(RichText::new(format!("and {rest} more")).italics());
-            }
-        });
-    });
+    if shown != was_shown {
+        REPORT_WINDOW_SHOWN.set(ctx, shown);
+    }
 }
 
-/// The settings entry, so the answer given once can be changed later.
+/// The settings entries: whether reporting is on, and whether the window above is open.
 pub fn menu_item(ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let mut enabled = REPORT_PATHS.get(&ctx) == Some(true);
@@ -314,6 +384,14 @@ pub fn menu_item(ui: &mut egui::Ui) {
         .changed()
     {
         REPORT_PATHS.set(&ctx, Some(enabled));
+    }
+
+    let mut window_shown = REPORT_WINDOW_SHOWN.get(&ctx);
+    if ui
+        .checkbox(&mut window_shown, "Show Path Report Window")
+        .changed()
+    {
+        REPORT_WINDOW_SHOWN.set(&ctx, window_shown);
     }
 }
 
@@ -434,12 +512,13 @@ mod tests {
     /// 7.3% of listed names carry a capital and the packages hash the lowercased form, so a test
     /// spelled only in lowercase passes whether or not the canonical form lowercases.
     #[test]
-    fn a_mixed_case_name_hashes_to_its_lowercase_entry() {
+    fn a_mixed_case_name_hashes_lowercase_but_displays_as_typed() {
         let unknown = unknown(&["sound/voice/Vo_Emote/vo_emote_battlecry_01.scd"]);
         let path = canonical("sound/voice/Vo_Emote/Vo_Emote_BattleCry_01.scd").unwrap();
-        assert_eq!(path, "sound/voice/vo_emote/vo_emote_battlecry_01.scd");
-        assert!(unknown.contains(&path));
-        assert!(!unknown.contains(&canonical("ui/uld/mkdrelicgrowth3.uld").unwrap()));
+        assert_eq!(path.hash, "sound/voice/vo_emote/vo_emote_battlecry_01.scd");
+        assert_eq!(path.display, "sound/voice/Vo_Emote/Vo_Emote_BattleCry_01.scd");
+        assert!(unknown.contains(&path.hash));
+        assert!(!unknown.contains(&canonical("ui/uld/mkdrelicgrowth3.uld").unwrap().hash));
     }
 
     #[test]
@@ -447,8 +526,8 @@ mod tests {
         assert!(canonical("ui/uld/1f01a2d3").is_none());
         assert!(canonical("music/ex4/12345678/000000ff").is_none());
         assert_eq!(
-            canonical("music/ex4/12345678/bgm_ex4_01.scd").as_deref(),
-            Some("music/ex4/12345678/bgm_ex4_01.scd")
+            canonical("music/ex4/12345678/bgm_ex4_01.scd").map(|c| c.hash),
+            Some("music/ex4/12345678/bgm_ex4_01.scd".to_string())
         );
     }
 
@@ -468,9 +547,8 @@ mod tests {
         ] {
             assert!(canonical(bad).is_none(), "{bad}");
         }
-        assert_eq!(
-            canonical("  /UI/Uld/Foo-Bar_1.uld/ ").as_deref(),
-            Some("ui/uld/foo-bar_1.uld")
-        );
+        let path = canonical("  /UI/Uld/Foo-Bar_1.uld/ ").unwrap();
+        assert_eq!(path.hash, "ui/uld/foo-bar_1.uld");
+        assert_eq!(path.display, "UI/Uld/Foo-Bar_1.uld");
     }
 }

@@ -429,7 +429,7 @@ impl App {
         self.github.poll(&ctx);
         about::draw(&ctx, &mut self.about_open);
         self.draw_menubar(ui, tab);
-        crate::report::notice(ui, self.backend.as_ref());
+        crate::report::draw_window(ui.ctx(), self.backend.as_ref());
         self.draw_logger(ui.ctx());
         self.draw_pr_window(ui.ctx());
 
@@ -810,6 +810,8 @@ impl App {
                             self.navigate(route);
                         }
                     }
+
+                    crate::report::indicator(ui, self.backend.as_ref());
 
                     if bar_left + bar_width - ui.cursor().left() >= LINKS_WIDTH {
                         add_links(ui, &mut self.about_open);

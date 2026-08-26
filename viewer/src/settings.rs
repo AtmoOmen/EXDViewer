@@ -246,6 +246,7 @@ pub const SHEET_FILTER_OPTIONS: DKey<MatchOptions> = DKey::new(
 /// Whether file names this install carries that the community path list does not know may be sent
 /// on. `None` until the user has been asked; declining is kept so the ask happens once.
 pub const REPORT_PATHS: DKey<Option<bool>> = DKey::new("report-paths", None);
+pub const REPORT_WINDOW_SHOWN: DKey<bool> = DKey::new("report-window-shown", false);
 pub const FILTER_GUIDE_VISIBLE: DKey<bool> = DKey::new("filter-guide-visible", false);
 pub const SELECTED_SHEET: DKey<Option<String>> = DKey::new("selected-sheet", None);
 pub const MISC_SHEETS_SHOWN: DKey<bool> = DKey::new("misc-sheets-shown", false);

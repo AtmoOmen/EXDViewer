@@ -186,6 +186,11 @@ impl Rig {
         self.at.get(name).copied()
     }
 
+    /// Which bone `bone`'s own transform composes onto, if any.
+    pub fn parent(&self, bone: usize) -> Option<usize> {
+        parent_of(&self.parents, bone)
+    }
+
     pub fn reference(&self) -> &[Transform] {
         &self.reference
     }

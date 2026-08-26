@@ -14,6 +14,7 @@
 
 pub(super) mod deferred;
 mod deform;
+mod export;
 pub(super) mod gpu;
 mod grid;
 pub(super) mod material;
@@ -457,6 +458,13 @@ pub struct Rendered {
     /// Which G-buffer channel the game's own shaders put on screen, starting at the frame their
     /// lighting resolves rather than at a channel of the buffer it is resolved from.
     target: Cell<usize>,
+    /// A glTF export in flight, or what became of the last one.
+    export: RefCell<Option<Export>>,
+}
+
+enum Export {
+    Fetching(TrackedPromise<Result<(), String>>),
+    Failed(String),
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
@@ -521,6 +529,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         shade_failure: Default::default(),
         clock: Cell::new(0.0),
         target: Cell::new(gpu::LIT),
+        export: Default::default(),
     })
 }
 
@@ -1221,6 +1230,27 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
             ui.label(RichText::new(format!("{arrived}/{wanted}")).weak())
                 .on_hover_text("Materials, shader packages and textures still on their way");
         }
+        let exporting = matches!(model.export.borrow().as_ref(), Some(Export::Fetching(_)));
+        ui.add_enabled_ui(arrived >= wanted && !exporting, |ui| {
+            if ui
+                .button("Export glTF")
+                .on_hover_text(
+                    "Write the geometry, materials and posed skeleton as a self-contained .glb. \
+                     Textures are baked from this viewer's own preview shading, not the game \
+                     shaders' G-buffer, so a shaded render and the export will not match exactly",
+                )
+                .clicked()
+            {
+                model.export_gltf(backend);
+            }
+        });
+        if exporting {
+            ui.add(egui::Spinner::new().size(14.0));
+        }
+        if let Some(Export::Failed(why)) = model.export.borrow().as_ref() {
+            ui.label(RichText::new("⚠ export failed").color(Color32::LIGHT_RED))
+                .on_hover_text(why.as_str());
+        }
         if !level.unreadable.is_empty() {
             ui.label(
                 RichText::new(format!("⚠ {} unreadable meshes", level.unreadable.len()))
@@ -1469,6 +1499,14 @@ impl Rendered {
     }
 
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
+        let mut export = self.export.borrow_mut();
+        if let Some(Export::Fetching(promise)) = export.as_ref()
+            && let Some(result) = promise.try_get()
+        {
+            *export = result.as_ref().err().map(|why| Export::Failed(why.clone()));
+        }
+        drop(export);
+
         let level = self.level.borrow();
         if level.skinned {
             self.animation.poll(ui.ctx(), backend);
@@ -2232,6 +2270,38 @@ impl Rendered {
         // A slot the model has not asked for yet still owes an answer, so every material the level
         // names counts against the total whether or not it is in flight.
         (ready, slots.len() + packages.len() + textures.len())
+    }
+
+    /// Gathers the model as it currently draws, then bakes and writes it in the background: gather
+    /// runs synchronously against `self`, so the async half that follows holds no reference to it
+    /// and can outlive the frame that started it.
+    fn export_gltf(&self, backend: &Backend) {
+        let scene = match export::gather(self) {
+            Ok(scene) => scene,
+            Err(why) => {
+                *self.export.borrow_mut() = Some(Export::Failed(why.to_string()));
+                return;
+            }
+        };
+        let files = backend.files().clone();
+        let stem = crate::utils::file_name(&self.pieces[0].path)
+            .strip_suffix(".mdl")
+            .unwrap_or(&self.pieces[0].path);
+        let file_name = format!("{stem}.glb");
+        *self.export.borrow_mut() = Some(Export::Fetching(TrackedPromise::spawn_local(async move {
+            let bytes = export::finish(scene, files.as_ref())
+                .await
+                .map_err(|why| why.to_string())?;
+            if let Some(file) = rfd::AsyncFileDialog::new()
+                .set_title("Export glTF")
+                .set_file_name(file_name)
+                .save_file()
+                .await
+            {
+                file.write(&bytes).await.map_err(|why| why.to_string())?;
+            }
+            Ok(())
+        })));
     }
 
     /// What the channel row offers: the translated shaders' own names for their targets, and the

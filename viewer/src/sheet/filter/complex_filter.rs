@@ -155,12 +155,15 @@ impl Wildcard {
     }
 }
 
+// `Regex::as_str()` returns only the pattern body; flags like `i` are applied through
+// `RegexBuilder` and never appear in it, so identity is keyed on the original source
+// text (pattern and flags together) rather than the compiled regex.
 #[derive(Debug, Clone)]
-pub struct RegexWrapper(Regex);
+pub struct RegexWrapper(Regex, String);
 
 impl PartialEq for RegexWrapper {
     fn eq(&self, other: &Self) -> bool {
-        self.0.as_str() == other.0.as_str()
+        self.1 == other.1
     }
 }
 
@@ -168,13 +171,13 @@ impl Eq for RegexWrapper {}
 
 impl std::hash::Hash for RegexWrapper {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.as_str().hash(state);
+        self.1.hash(state);
     }
 }
 
-impl From<Regex> for RegexWrapper {
-    fn from(value: Regex) -> Self {
-        Self(value)
+impl RegexWrapper {
+    pub fn new(regex: Regex, source: String) -> Self {
+        Self(regex, source)
     }
 }
 

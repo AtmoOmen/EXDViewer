@@ -318,4 +318,21 @@ mod tests {
         assert_ne!(loose_compiled, strict_compiled);
     }
 
+    #[test]
+    fn regex_flags_are_part_of_identity() {
+        let cache = make_cache(&["Name"]);
+        let options = MatchOptions {
+            case_insensitive: false,
+            use_display_field: false,
+        };
+
+        let bare = FilterInput::Complex(ComplexFilter::from_str("Name /= /foo/").unwrap());
+        let case_insensitive =
+            FilterInput::Complex(ComplexFilter::from_str("Name /= /foo/i").unwrap());
+
+        let bare_compiled = cache.compile(&bare, options).unwrap();
+        let case_insensitive_compiled = cache.compile(&case_insensitive, options).unwrap();
+
+        assert_ne!(bare_compiled, case_insensitive_compiled);
+    }
 }

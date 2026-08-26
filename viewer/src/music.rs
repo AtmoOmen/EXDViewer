@@ -852,8 +852,8 @@ impl MusicPlayer {
         }
     }
 
-    /// The original stream is the entry's own bytes untouched; WAV re-decodes them so an export
-    /// always carries the same stereo the player produced, even for a multichannel source.
+    /// `Original` hands back the entry's own bytes untouched, multichannel and all; `Wav`
+    /// re-decodes them, so it carries the same stereo downmix the player is producing.
     fn export(&mut self, name: String, codec: Codec, stream: Arc<[u8]>, format: ExportFormat) {
         let (extension, title) = match format {
             ExportFormat::Original => (codec_extension(codec), "Export Original Audio"),

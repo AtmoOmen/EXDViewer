@@ -81,7 +81,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 13] = [
+pub const ENGINE: [(u32, &str, u32); 15] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -144,7 +144,15 @@ pub const ENGINE: [(u32, &str, u32); 13] = [
         "common/graphics/texture/-noise.tex",
         glow::LINEAR,
     ),
+    // `grass.shpk`'s own wind field: two 512x512 textures the AutoPlacement vertex shader samples
+    // at a world-scaled UV, so unlike the rest of this table they read past a single tile and want
+    // to repeat rather than clamp, handled in `Buffers::layered`.
+    (WIND_SAMPLE_0, "bgcommon/nature/wind/texture/wind_001.tex", glow::LINEAR),
+    (WIND_SAMPLE_1, "bgcommon/nature/wind/texture/wind_002.tex", glow::LINEAR),
 ];
+
+const WIND_SAMPLE_0: u32 = 0x78d3_e3b7;
+const WIND_SAMPLE_1: u32 = 0x0fd4_d321;
 
 /// The decal a face paint is drawn through, and where the set the creator picks is filed. Kept out
 /// of [`ENGINE`] because which one binds is what a character was made with rather than a fixed path.
@@ -3399,6 +3407,18 @@ impl Buffers {
     /// the engine's own set is reached.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
         let held = Self::upload(gl, held)?;
+        // The wind field is read at a world-scaled UV that runs well past a single tile, unlike
+        // anything else `ENGINE` names, so `upload`'s own `Kind`-based guess of clamping a plane
+        // is wrong for it specifically. No file states this sampler's own state at all - grass.shpk
+        // declares it with no material behind it - so REPEAT is read off the shader's own math
+        // rather than off any capture.
+        if matches!(id, WIND_SAMPLE_0 | WIND_SAMPLE_1) {
+            unsafe {
+                gl.bind_texture(held.0, Some(held.1));
+                gl.tex_parameter_i32(held.0, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
+                gl.tex_parameter_i32(held.0, glow::TEXTURE_WRAP_T, glow::REPEAT as i32);
+            }
+        }
         if let Some((_, stale)) = self.arrays.insert(id, held) {
             graveyard().lock().unwrap().push(Dead::Texture(stale));
         }

@@ -1677,6 +1677,11 @@ pub struct WindLayer {
     pub max_strength: f32,
     /// The reach a texture sample of 0.0 stands for.
     pub min_strength: f32,
+    /// World units the set states for one cycle of this layer's gust, from which `worldScale` is
+    /// the plain reading `1.0 / wavelength`. Unconfirmed: the wind texture itself carries several
+    /// visible cycles across its own width, so the gust a player actually sees may run coarser
+    /// than this by that same factor, and nothing states which the engine intends.
+    pub wavelength: f32,
 }
 
 /// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
@@ -1695,6 +1700,12 @@ pub struct Wind {
     pub rate: f32,
     /// The two layers `heading` and `reach` are summed from, apart.
     pub layers: [WindLayer; 2],
+    /// Multiplies every layer's `1.0 / wavelength`. No file states whether that plain reading is
+    /// what the engine intends, so this stays a slider rather than a fixed derivation.
+    pub gust_scale: f32,
+    /// World units a gust texture is advected a second, in the layer's own heading. Nothing states
+    /// this at all; it is invented the same way `rate` is.
+    pub scroll: f32,
 }
 
 /// What a lone model is shown under, since nothing outside a zone names an environment to take a
@@ -1706,7 +1717,9 @@ impl Default for Wind {
             heading,
             reach: 4.0,
             rate: 1.6,
-            layers: [WindLayer { heading, max_strength: 2.0, min_strength: 0.0 }; 2],
+            layers: [WindLayer { heading, max_strength: 2.0, min_strength: 0.0, wavelength: 512.0 }; 2],
+            gust_scale: 1.0,
+            scroll: 2.0,
         }
     }
 }
@@ -2803,16 +2816,20 @@ impl Buffer {
             write(&mut out, 0, &[0.0, 0.0, 0.0, scene.clock * scene.wind.rate]);
             return out;
         }
-        // Two layers, each a heading, and a strength between the reflection's `windPowerMin` and
-        // `windPowerMin + windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex`.
-        // Nothing here binds those textures, so a shader reading past `windPowerMin`/`windPower`
-        // samples the deferred pass's own flat stand-in rather than a real one, which is why the
-        // reach still varies by weather and layer but not yet by world position. `windViewDir` is
-        // read by no vertex shader this viewer runs, so it is left at nought like `uvOffset` and
-        // `worldScale`, whose world-to-texel conversion the wind texture's own tiling would have to
-        // settle.
+        // Two layers, each a heading, and a strength between `windPowerMin` and `windPowerMin +
+        // windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex` at `worldPos.xz *
+        // worldScale - uvOffset`. `worldScale` is `gust_scale / wavelength`, the plain reading of
+        // the file's own stated cycle length; `uvOffset` advects that sample along the layer's own
+        // heading so the field scrolls rather than standing at one frozen texel. `windViewDir` is
+        // read by no vertex shader this viewer runs, so it is left at nought.
         if self.name == "g_WindInfo" {
             for (at, layer) in scene.wind.layers.iter().enumerate() {
+                let world_scale = match layer.wavelength > 0.0 {
+                    true => scene.wind.gust_scale / layer.wavelength,
+                    false => 0.0,
+                };
+                let offset = Vec2::new(layer.heading.x, layer.heading.z)
+                    * (scene.wind.scroll * scene.clock * world_scale);
                 for base in [at * 3, at * 3 + 6] {
                     write(&mut out, base, &[
                         layer.heading.x,
@@ -2820,7 +2837,7 @@ impl Buffer {
                         layer.heading.z,
                         layer.max_strength,
                     ]);
-                    write(&mut out, base + 1, &[0.0, 0.0, 0.0, layer.min_strength]);
+                    write(&mut out, base + 1, &[offset.x, offset.y, world_scale, layer.min_strength]);
                 }
             }
             return out;

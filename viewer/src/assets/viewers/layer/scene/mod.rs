@@ -581,6 +581,8 @@ struct Light {
 /// on top of what the file itself draws.
 struct Vfx {
     placement: Mat4,
+    /// Set where a timeline moves this, in which case the placement above is only where it starts.
+    driven: Option<Rc<Driven>>,
     path: String,
     layer: usize,
     key: (u32, [u8; 4]),
@@ -1512,6 +1514,12 @@ impl Scene {
                         {
                             self.effects.push(Vfx {
                                 placement: here,
+                                driven: (!chain.is_empty()).then(|| {
+                                    Rc::new(Driven {
+                                        chain: chain.clone(),
+                                        tail: since,
+                                    })
+                                }),
                                 path: vfx.asset_path().clone(),
                                 layer: at,
                                 key: reach(key, depth, instance.id()),
@@ -1895,13 +1903,19 @@ impl Scene {
     /// rather than here, since a record carries the object into view space and the camera turns.
     /// Where a placement stands now, which is where the file put it unless a timeline drives it.
     fn posed(&self, placement: &Placement) -> Mat4 {
-        match &placement.driven {
+        self.moved(placement.transform, &placement.driven)
+    }
+
+    /// Where a driven transform stands now, or the transform itself where nothing drives it. Shared
+    /// with `Vfx`, which carries the same chain but is not a `Placement`.
+    fn moved(&self, transform: Mat4, driven: &Option<Rc<Driven>>) -> Mat4 {
+        match driven {
             Some(held) => {
                 held.chain.iter().fold(Mat4::IDENTITY, |into, (at, fixed)| {
                     into * *fixed * self.motions[*at].at(self.clock)
                 }) * held.tail
             }
-            None => placement.transform,
+            None => transform,
         }
     }
 
@@ -2064,8 +2078,9 @@ impl Scene {
                 let base = parsed.drawn(live);
                 let mut drawn = Vec::new();
                 for vfx in self.effects.iter().filter(|vfx| vfx.path == effect.path) {
-                    let (scale, rotation, translation) =
-                        vfx.placement.to_scale_rotation_translation();
+                    let (scale, rotation, translation) = self
+                        .moved(vfx.placement, &vfx.driven)
+                        .to_scale_rotation_translation();
                     let scale = scale.abs().max_element().max(0.001);
                     let distance = eye.distance(translation);
                     let far = match vfx.no_far_clip {

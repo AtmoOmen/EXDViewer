@@ -14,8 +14,9 @@ mod mounts;
 mod npcs;
 mod palette;
 mod stains;
+mod weapons;
 
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -25,7 +26,7 @@ use egui::{
     Align, CentralPanel, Color32, Layout, Popup, RectAlign, RichText, ScrollArea, TextEdit,
     containers::panel::Panel,
 };
-use glam::Vec3;
+use glam::{EulerRot, Mat4, Quat, Vec3};
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -232,6 +233,8 @@ enum Attire {
 /// The bytes of every file read so far, by path, and one batch of them as they land.
 type Files = BTreeMap<String, Vec<u8>>;
 type Read = Vec<(String, Vec<u8>)>;
+/// The race a `.atch` fetch was asked for, alongside the bytes once it lands.
+type AtchRead = (u16, Vec<u8>);
 
 /// What a picked set is made of, and what to call it.
 struct Set {
@@ -319,6 +322,26 @@ pub struct CharacterBuilder {
     mount_seat: usize,
     mount_search: String,
     mounts_matched: RefCell<(Option<String>, Vec<usize>)>,
+    /// Every weapon the game names, split by which hand it can be picked for, and which of each
+    /// list is worn.
+    weapons_main: Vec<weapons::Piece>,
+    weapons_off: Vec<weapons::Piece>,
+    reading_weapons: Option<TrackedPromise<Result<weapons::Pieces>>>,
+    main_hand: Option<usize>,
+    off_hand: Option<usize>,
+    main_search: String,
+    off_search: String,
+    main_matched: RefCell<(Option<String>, Vec<usize>)>,
+    off_matched: RefCell<(Option<String>, Vec<usize>)>,
+    /// Whether the weapon on screen is drawn, which is a whole stance rather than a placement.
+    drawn: bool,
+    /// What was last logged a weapon's placement, so a stance held for a thousand frames names its
+    /// bone and offset once rather than on every one of them.
+    logged: Cell<(bool, Option<usize>, Option<usize>, bool)>,
+    /// The race's own `.atch` file, which says where a weapon it names a tag for hangs, kept
+    /// against the code it was fetched for so a change of race asks again.
+    atch: Option<(u16, Rc<Vec<u8>>)>,
+    reading_atch: Option<TrackedPromise<Result<AtchRead>>>,
     /// The models each set is worn as under the current code, by slot. A set number means one
     /// thing as equipment and another as an adornment, so the two are kept apart. The picker asks
     /// about every set it lists, and a directory listing is too dear to pay for one on every frame.
@@ -401,6 +424,19 @@ impl Default for CharacterBuilder {
             mount_seat: 0,
             mount_search: String::new(),
             mounts_matched: Default::default(),
+            weapons_main: Vec::new(),
+            weapons_off: Vec::new(),
+            reading_weapons: None,
+            main_hand: None,
+            off_hand: None,
+            main_search: String::new(),
+            off_search: String::new(),
+            main_matched: Default::default(),
+            off_matched: Default::default(),
+            drawn: false,
+            logged: Cell::new((false, None, None, false)),
+            atch: None,
+            reading_atch: None,
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
             worn_stains: Vec::new(),
@@ -443,6 +479,16 @@ impl CharacterBuilder {
         self.mount = None;
         self.mount_seat = 0;
         self.mounts_matched.take();
+        self.weapons_main.clear();
+        self.weapons_off.clear();
+        self.reading_weapons = None;
+        self.main_hand = None;
+        self.off_hand = None;
+        self.main_matched.take();
+        self.off_matched.take();
+        self.logged.set((false, None, None, false));
+        self.atch = None;
+        self.reading_atch = None;
         self.stood = false;
         self.body.clear();
         self.faces.clear();
@@ -640,9 +686,44 @@ impl CharacterBuilder {
                     self.creator.pieces = read;
                     // A picker open while they were still arriving matched against nothing.
                     self.matched.take();
+                    // Sequenced behind the equipment walk rather than alongside it, for the same
+                    // reason `reading_pieces` waits on `reading`: three promises racing the same
+                    // sheet would starve whichever lands last.
+                    let backend = backend.clone();
+                    let language = LANGUAGE.get(ctx);
+                    self.reading_weapons = Some(TrackedPromise::spawn_local(async move {
+                        weapons::read(&backend, language).await
+                    }));
                 }
                 Ok(Err(why)) => log::warn!("character: nothing to pick equipment from: {why}"),
                 Err(promise) => self.reading_pieces = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_weapons.take() {
+            match promise.try_take() {
+                Ok(Ok((main_hand, off_hand))) => {
+                    self.weapons_main = main_hand;
+                    self.weapons_off = off_hand;
+                    self.main_matched.take();
+                    self.off_matched.take();
+                }
+                Ok(Err(why)) => log::warn!("character: nothing to pick a weapon from: {why}"),
+                Err(promise) => self.reading_weapons = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_atch.take() {
+            match promise.try_take() {
+                Ok(Ok((code, bytes))) => {
+                    log::info!(
+                        "character: attach points landed for c{code:04}, {} bytes",
+                        bytes.len()
+                    );
+                    self.atch = Some((code, Rc::new(bytes)));
+                }
+                Ok(Err(why)) => {
+                    log::warn!("character: nothing says where a weapon attaches: {why}");
+                }
+                Err(promise) => self.reading_atch = Some(promise),
             }
         }
 
@@ -651,6 +732,18 @@ impl CharacterBuilder {
         let Some(deformers) = self.deformers.clone() else {
             return;
         };
+
+        // Checked every frame rather than folded into `!self.stood`: the code it settles on can
+        // change more than once before that flag next goes false, and a fetch spawned for a code
+        // already left behind must not be mistaken for the one now on screen.
+        let stale = self.atch.as_ref().is_none_or(|(held, _)| *held != self.code);
+        if self.reading_atch.is_none() && stale {
+            let files = backend.files().clone();
+            let code = self.code;
+            let path = weapons::atch_path(code);
+            let fetch = async move { anyhow::Ok((code, files.read(&path).await?)) };
+            self.reading_atch = Some(TrackedPromise::spawn_local(fetch));
+        }
 
         if !self.stood {
             self.stood = true;
@@ -800,7 +893,82 @@ impl CharacterBuilder {
             model.hinged(self.raised());
             model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
+            model.carried(self.attachments());
         }
+    }
+
+    /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
+    /// and its own placement relative to that bone. Falls back to the plain hand null bone at no
+    /// offset where the race's `.atch` file has not landed yet or names this weapon's job nothing.
+    fn attachments(&self) -> Vec<(String, String, Mat4)> {
+        let Some(main) = self.main_hand.and_then(|at| self.weapons_main.get(at)) else {
+            return Vec::new();
+        };
+        let atch = self
+            .atch
+            .as_ref()
+            .filter(|(code, _)| *code == self.code)
+            .map(|(_, bytes)| bytes);
+        // Logged once a stance, a wielded weapon or whether the atch file has landed actually
+        // changes, rather than every frame the pose is recomputed: this is the bone and offset a
+        // stance change moves a weapon to.
+        let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
+        let log = self.logged.get() != key;
+        self.logged.set(key);
+        let mut found = vec![self.attach(main.weapon.model(), main.tag, true, atch, log)];
+        let off = match main.covers_off_hand {
+            true => main.off_hand.map(|weapon| (weapon, main.tag)),
+            false => self
+                .off_hand
+                .and_then(|at| self.weapons_off.get(at))
+                .map(|piece| (piece.weapon, piece.tag)),
+        };
+        if let Some((weapon, tag)) = off {
+            found.push(self.attach(weapon.model(), tag, false, atch, log));
+        }
+        found
+    }
+
+    /// One weapon's own placement: the bone its attach point names and the offset, rotation and
+    /// scale it takes there, out of the race's `.atch` file at the current stance.
+    fn attach(
+        &self,
+        path: String,
+        tag: Option<&str>,
+        main: bool,
+        atch: Option<&Rc<Vec<u8>>>,
+        log: bool,
+    ) -> (String, String, Mat4) {
+        let stance = if self.drawn { "drawn" } else { "sheathed" };
+        let placed = tag
+            .zip(atch)
+            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, self.drawn));
+        let Some(placement) = placed else {
+            let bone = weapons::fallback_bone(main);
+            if log {
+                log::info!("character: {path} hangs from {bone} at no named offset, {stance}");
+            }
+            return (path, bone.to_owned(), Mat4::IDENTITY);
+        };
+        let local = Mat4::from_scale_rotation_translation(
+            Vec3::splat(placement.scale),
+            Quat::from_euler(
+                EulerRot::XYZ,
+                placement.rotation[0],
+                placement.rotation[1],
+                placement.rotation[2],
+            ),
+            Vec3::from_array(placement.offset),
+        );
+        if log {
+            log::info!(
+                "character: {path} hangs from {} at offset {:?} scale {}, {stance}",
+                placement.bone,
+                placement.offset,
+                placement.scale
+            );
+        }
+        (path, placement.bone, local)
     }
 
     /// What the creator's menus have been left at, and what the shaders and the model make of it:
@@ -1114,6 +1282,28 @@ impl CharacterBuilder {
                 .into_iter()
                 .map(|(path, variant)| (path, variant, [None, None])),
         );
+        found.extend(
+            self.wielded()
+                .into_iter()
+                .map(|weapon| (weapon.model(), weapon.variant, [None, None])),
+        );
+        found
+    }
+
+    /// The weapon in each hand: the picked main hand item, its own off hand where wielding it
+    /// leaves nothing to pick there, and otherwise the separately picked off hand item.
+    fn wielded(&self) -> Vec<weapons::Weapon> {
+        let Some(main) = self.main_hand.and_then(|at| self.weapons_main.get(at)) else {
+            return Vec::new();
+        };
+        let mut found = vec![main.weapon];
+        found.extend(match main.covers_off_hand {
+            true => main.off_hand,
+            false => self
+                .off_hand
+                .and_then(|at| self.weapons_off.get(at))
+                .map(|piece| piece.weapon),
+        });
         found
     }
 
@@ -1164,6 +1354,7 @@ impl CharacterBuilder {
     /// Puts what has arrived on screen, keeping the character that is already there where there is
     /// one so a change of clothes neither moves the view nor asks for anything twice.
     fn dress(&mut self) {
+        let wielded: Vec<String> = self.wielded().iter().map(weapons::Weapon::model).collect();
         let parts: Vec<_> = self
             .worn
             .iter()
@@ -1192,6 +1383,7 @@ impl CharacterBuilder {
                     material,
                     deform,
                     skin: self.skin,
+                    rigid: wielded.contains(path),
                 })
             })
             .collect();
@@ -1398,8 +1590,12 @@ impl CharacterBuilder {
         let dye = current.and_then(|id| self.dyes.iter().find(|dye| dye.id == id));
         let (rect, response) =
             ui.allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
-        ui.painter()
-            .rect_filled(rect, 2.0, dye.map_or(Color32::TRANSPARENT, |dye| dye.color));
+        stains::paint(
+            ui.painter(),
+            rect,
+            dye.map_or(Color32::TRANSPARENT, |dye| dye.color),
+            dye.is_some_and(|dye| dye.metallic),
+        );
         ui.painter().rect_stroke(
             rect,
             2.0,
@@ -1426,29 +1622,32 @@ impl CharacterBuilder {
                         .spacing(egui::Vec2::splat(2.0))
                         .show(ui, |ui| {
                             let mut column = 0;
-                            let mut cell = |ui: &mut egui::Ui, color, name: &str, hit: Option<u8>| {
-                                if column > 0 && column % 9 == 0 {
-                                    ui.end_row();
-                                }
-                                column += 1;
-                                let (rect, response) = ui
-                                    .allocate_exact_size(egui::Vec2::splat(SWATCH), egui::Sense::click());
-                                ui.painter().rect_filled(rect, 2.0, color);
-                                if current == hit {
-                                    ui.painter().rect_stroke(
-                                        rect,
-                                        2.0,
-                                        ui.visuals().selection.stroke,
-                                        egui::StrokeKind::Inside,
+                            let mut cell =
+                                |ui: &mut egui::Ui, color, metallic, name: &str, hit: Option<u8>| {
+                                    if column > 0 && column % 9 == 0 {
+                                        ui.end_row();
+                                    }
+                                    column += 1;
+                                    let (rect, response) = ui.allocate_exact_size(
+                                        egui::Vec2::splat(SWATCH),
+                                        egui::Sense::click(),
                                     );
-                                }
-                                if response.on_hover_text(name).clicked() {
-                                    picked = Some(hit);
-                                }
-                            };
-                            cell(ui, Color32::TRANSPARENT, "No dye", None);
+                                    stains::paint(ui.painter(), rect, color, metallic);
+                                    if current == hit {
+                                        ui.painter().rect_stroke(
+                                            rect,
+                                            2.0,
+                                            ui.visuals().selection.stroke,
+                                            egui::StrokeKind::Inside,
+                                        );
+                                    }
+                                    if response.on_hover_text(name).clicked() {
+                                        picked = Some(hit);
+                                    }
+                                };
+                            cell(ui, Color32::TRANSPARENT, false, "No dye", None);
                             for dye in &self.dyes {
-                                cell(ui, dye.color, &dye.name, Some(dye.id));
+                                cell(ui, dye.color, dye.metallic, &dye.name, Some(dye.id));
                             }
                         });
                 });
@@ -1819,6 +2018,123 @@ impl CharacterBuilder {
         Ref::map(self.emotes_matched.borrow(), |(_, rows)| rows)
     }
 
+    /// The weapon in each hand, searched by name, and the stance it is held in. An off hand a
+    /// wielded weapon covers itself is left unoffered: there is nothing to pick there.
+    fn weapons_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        backend: &Backend,
+        icons: &IconManager,
+    ) -> Option<Pick> {
+        let mut picked = None;
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Weapon").strong());
+            if self.reading_weapons.is_some() {
+                ui.spinner();
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (drawn, name) in [(false, "Sheathed"), (true, "Drawn")] {
+                if ui.selectable_label(self.drawn == drawn, name).clicked() {
+                    picked = Some(Pick::Stance(drawn));
+                }
+            }
+        });
+        ui.add(
+            TextEdit::singleline(&mut self.main_search)
+                .hint_text("Search")
+                .desired_width(f32::INFINITY),
+        );
+        {
+            let query = self.main_search.clone();
+            let matched = self.main_hand_matching(&query);
+            if let Some(index) = listed(
+                ui,
+                backend,
+                icons,
+                "character_weapons_main",
+                &matched,
+                self.main_hand,
+                |index| {
+                    let piece = &self.weapons_main[index];
+                    (piece.name.as_str(), piece.icon)
+                },
+            ) {
+                picked = Some(Pick::Weapon((self.main_hand != Some(index)).then_some(index)));
+            }
+        }
+
+        let covers_off_hand = self
+            .main_hand
+            .and_then(|at| self.weapons_main.get(at))
+            .is_some_and(|piece| piece.covers_off_hand);
+        if !covers_off_hand {
+            ui.add_space(4.0);
+            ui.label("Off hand");
+            ui.add(
+                TextEdit::singleline(&mut self.off_search)
+                    .hint_text("Search")
+                    .desired_width(f32::INFINITY),
+            );
+            let query = self.off_search.clone();
+            let matched = self.off_hand_matching(&query);
+            if let Some(index) = listed(
+                ui,
+                backend,
+                icons,
+                "character_weapons_off",
+                &matched,
+                self.off_hand,
+                |index| {
+                    let piece = &self.weapons_off[index];
+                    (piece.name.as_str(), piece.icon)
+                },
+            ) {
+                picked = Some(Pick::OffHand((self.off_hand != Some(index)).then_some(index)));
+            }
+        }
+        picked
+    }
+
+    /// Which main hand weapons a search names, kept the way a slot's own list is.
+    fn main_hand_matching(&self, query: &str) -> Ref<'_, Vec<usize>> {
+        if self.main_matched.borrow().0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.weapons_main
+                    .iter()
+                    .enumerate()
+                    .map(|(index, piece)| (index, piece.name.as_str())),
+                |piece| piece.1,
+            );
+            *self.main_matched.borrow_mut() = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.main_matched.borrow(), |(_, rows)| rows)
+    }
+
+    /// Which off hand weapons a search names, kept the way a slot's own list is.
+    fn off_hand_matching(&self, query: &str) -> Ref<'_, Vec<usize>> {
+        if self.off_matched.borrow().0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.weapons_off
+                    .iter()
+                    .enumerate()
+                    .map(|(index, piece)| (index, piece.name.as_str())),
+                |piece| piece.1,
+            );
+            *self.off_matched.borrow_mut() = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.off_matched.borrow(), |(_, rows)| rows)
+    }
+
     /// What one choice of a menu is: the number the file tree uses for it, and the icon it is
     /// offered under. A menu either names icons outright or names rows that carry one.
     fn choice_of(&self, menu: &menus::Menu, index: u32) -> Choice {
@@ -1970,6 +2286,8 @@ impl CharacterBuilder {
                             self.slot_ui(ui, backend, icons, listing, slot);
                         }
                     }
+                    self.weapons_ui(ui, backend, icons)
+                        .inspect(|pick| picked = Some(*pick));
                     self.appearance(ui, backend, icons)
                         .inspect(|made| picked = Some(*made));
                     self.emotes_ui(ui, backend, icons)
@@ -2039,6 +2357,14 @@ impl CharacterBuilder {
                 self.mount_seat = 0;
             }
             Some(Pick::Seat(seat)) => self.mount_seat = seat,
+            Some(Pick::Weapon(weapon)) => self.main_hand = weapon,
+            Some(Pick::OffHand(weapon)) => self.off_hand = weapon,
+            Some(Pick::Stance(drawn)) => {
+                self.drawn = drawn;
+                if let Some(Ok(model)) = &self.model {
+                    model.play(&weapons::stance_pack(self.code, drawn), None);
+                }
+            }
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }
@@ -2073,6 +2399,12 @@ enum Pick {
     /// Which of the mount's own seats to ride in.
     Seat(usize),
     Npc(usize),
+    /// A weapon to wield in the main hand, or none to go unarmed.
+    Weapon(Option<usize>),
+    /// A weapon to wield in the off hand, or none to leave it empty.
+    OffHand(Option<usize>),
+    /// Whether the weapon is drawn, which is a whole stance rather than a placement.
+    Stance(bool),
 }
 
 /// How far along a bar a menu has been left, over the range the row states for it rather than over

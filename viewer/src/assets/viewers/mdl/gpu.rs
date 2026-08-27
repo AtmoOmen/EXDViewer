@@ -504,6 +504,13 @@ impl Model {
                     let texture = id.and_then(|id| painter.texture(id));
                     gl.active_texture(glow::TEXTURE0 + unit);
                     gl.bind_texture(glow::TEXTURE_2D, texture);
+                    // The game-shader pass may have left this same egui-owned texture object at a
+                    // material's own anisotropy: it is texture-object state, not per-draw state,
+                    // so it survives toggling "Game shaders" off and this plain pass would
+                    // otherwise inherit it silently.
+                    if texture.is_some() && deferred::max_anisotropy(gl) > 0.0 {
+                        gl.tex_parameter_f32(glow::TEXTURE_2D, glow::TEXTURE_MAX_ANISOTROPY_EXT, 1.0);
+                    }
                     bound |= i32::from(texture.is_some()) << unit;
                 }
                 gl.active_texture(glow::TEXTURE0 + JOINTS_UNIT);

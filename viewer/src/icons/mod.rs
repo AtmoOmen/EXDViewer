@@ -761,13 +761,10 @@ impl IconBrowser {
                 if !is_open {
                     return;
                 }
-                let Some(icon_id) = self.selected else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(RichText::new("No icon selected").weak());
-                    });
-                    return;
+                let title = match self.selected {
+                    Some(icon_id) => format!("Icon {icon_id:06}"),
+                    None => "Icon".to_string(),
                 };
-
                 Panel::top("icon_info_header").show(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
@@ -777,7 +774,7 @@ impl IconBrowser {
                             // on the space left over beside it.
                             ui.add_space(ui.spacing().indent);
                             ui.vertical_centered_justified(|ui| {
-                                ui.heading(format!("Icon {icon_id:06}"));
+                                ui.heading(title);
                             });
                         });
                     });
@@ -785,6 +782,12 @@ impl IconBrowser {
                 });
 
                 CentralPanel::default().show(ui, |ui| {
+                    let Some(icon_id) = self.selected else {
+                        ui.centered_and_justified(|ui| {
+                            ui.label(RichText::new("No icon selected").weak());
+                        });
+                        return;
+                    };
                     followed = self.draw_detail(ui, backend, icons, icon_id, &mut nav);
                 });
             });

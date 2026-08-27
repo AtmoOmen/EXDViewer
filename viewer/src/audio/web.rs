@@ -615,7 +615,8 @@ impl<K: Eq + Hash> Mixer<K> {
         self.voices.len()
     }
 
-    /// Starts `key` looping, unless it already is.
+    /// Starts `key` playing, unless it already is: looping if `audio` carries loop points, once
+    /// through otherwise.
     pub fn play(&mut self, key: K, audio: Arc<Decoded>, gain: f32) -> Result<()> {
         if self.voices.contains_key(&key) {
             return Ok(());
@@ -656,8 +657,6 @@ impl<K: Eq + Hash> Mixer<K> {
             source.set_loop(true);
             source.set_loop_start(f64::from(start) / rate);
             source.set_loop_end(f64::from(end) / rate);
-        } else {
-            source.set_loop(true);
         }
         source
             .connect_with_audio_node(&node_gain)

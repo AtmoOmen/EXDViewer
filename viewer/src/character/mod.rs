@@ -365,6 +365,9 @@ pub struct CharacterBuilder {
     /// changed clothes since.
     fetching: Vec<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
+    /// The prop the playing emote's own timeline wants held, by path and material variant, read
+    /// off the model itself once a frame so `worn` picks it up the same way it does a weapon.
+    prop: Option<(String, u16)>,
 }
 
 impl Default for CharacterBuilder {
@@ -445,6 +448,7 @@ impl Default for CharacterBuilder {
             held: Files::new(),
             fetching: Vec::new(),
             model: None,
+            prop: None,
         }
     }
 }
@@ -813,6 +817,12 @@ impl CharacterBuilder {
             }
         }
 
+        // Read off the model rather than driven from here: an emote's own timeline is what says
+        // whether it wants a prop held, and when.
+        self.prop = self.model.as_ref().and_then(|model| match model {
+            Ok(model) => model.wanted_prop(),
+            Err(_) => None,
+        });
         let full = self.wearing(&listing, &deformers);
         let wanted: Vec<(String, u16)> = full
             .iter()
@@ -901,30 +911,35 @@ impl CharacterBuilder {
     /// and its own placement relative to that bone. Falls back to the plain hand null bone at no
     /// offset where the race's `.atch` file has not landed yet or names this weapon's job nothing.
     fn attachments(&self) -> Vec<(String, String, Mat4)> {
-        let Some(main) = self.main_hand.and_then(|at| self.weapons_main.get(at)) else {
-            return Vec::new();
-        };
-        let atch = self
-            .atch
-            .as_ref()
-            .filter(|(code, _)| *code == self.code)
-            .map(|(_, bytes)| bytes);
-        // Logged once a stance, a wielded weapon or whether the atch file has landed actually
-        // changes, rather than every frame the pose is recomputed: this is the bone and offset a
-        // stance change moves a weapon to.
-        let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
-        let log = self.logged.get() != key;
-        self.logged.set(key);
-        let mut found = vec![self.attach(main.weapon.model(), main.tag, true, atch, log)];
-        let off = match main.covers_off_hand {
-            true => main.off_hand.map(|weapon| (weapon, main.tag)),
-            false => self
-                .off_hand
-                .and_then(|at| self.weapons_off.get(at))
-                .map(|piece| (piece.weapon, piece.tag)),
-        };
-        if let Some((weapon, tag)) = off {
-            found.push(self.attach(weapon.model(), tag, false, atch, log));
+        let mut found = Vec::new();
+        if let Some(main) = self.main_hand.and_then(|at| self.weapons_main.get(at)) {
+            let atch = self
+                .atch
+                .as_ref()
+                .filter(|(code, _)| *code == self.code)
+                .map(|(_, bytes)| bytes);
+            // Logged once a stance, a wielded weapon or whether the atch file has landed actually
+            // changes, rather than every frame the pose is recomputed: this is the bone and offset
+            // a stance change moves a weapon to.
+            let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
+            let log = self.logged.get() != key;
+            self.logged.set(key);
+            found.push(self.attach(main.weapon.model(), main.tag, true, atch, log));
+            let off = match main.covers_off_hand {
+                true => main.off_hand.map(|weapon| (weapon, main.tag)),
+                false => self
+                    .off_hand
+                    .and_then(|at| self.weapons_off.get(at))
+                    .map(|piece| (piece.weapon, piece.tag)),
+            };
+            if let Some((weapon, tag)) = off {
+                found.push(self.attach(weapon.model(), tag, false, atch, log));
+            }
+        }
+        // An emote's own prop, held at the same fallback bone a weapon takes with no `.atch` tag
+        // resolved for it: nothing in the timeline states which point a prop hangs from.
+        if let Some((path, _)) = &self.prop {
+            found.push((path.clone(), weapons::fallback_bone(true).to_owned(), Mat4::IDENTITY));
         }
         found
     }
@@ -1287,6 +1302,11 @@ impl CharacterBuilder {
                 .into_iter()
                 .map(|weapon| (weapon.model(), weapon.variant, [None, None])),
         );
+        found.extend(
+            self.prop
+                .clone()
+                .map(|(path, variant)| (path, variant, [None, None])),
+        );
         found
     }
 
@@ -1383,7 +1403,8 @@ impl CharacterBuilder {
                     material,
                     deform,
                     skin: self.skin,
-                    rigid: wielded.contains(path),
+                    rigid: wielded.contains(path)
+                        || self.prop.as_ref().is_some_and(|(held, _)| held == path),
                 })
             })
             .collect();

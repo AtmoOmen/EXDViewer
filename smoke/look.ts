@@ -157,8 +157,13 @@ async function main() {
                     }
                     await cdp.send("Input.insertText", { text });
                     await sleep(400);
-                    // Clicks "Load pasted" rather than sending Enter.
-                    await click(WIDTH - 257, 135);
+                    // "Load pasted" never registers as clicked under a CDP-synthesized click; the
+                    // box loads on Enter instead, which is the same key that ends the text edit.
+                    for (const type of ["keyDown", "keyUp"]) {
+                        await cdp.send("Input.dispatchKeyEvent", {
+                            type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13,
+                        });
+                    }
                     await sleep(2500);
                 }
             }

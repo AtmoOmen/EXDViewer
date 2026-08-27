@@ -2347,7 +2347,13 @@ impl Scene {
             let EffectState::Ready(parsed, live) = &mut effect.state else {
                 continue;
             };
-            parsed.seek(live, frame.rem_euclid(parsed.length.max(1)));
+            // An effect with a run or a particle that never ends is meant to keep playing forever;
+            // wrapping it back to 0 would blank it out and replay the startup it already finished.
+            let at = match parsed.loops {
+                true => frame.rem_euclid(parsed.length.max(1)),
+                false => frame,
+            };
+            parsed.seek(live, at);
         }
     }
 

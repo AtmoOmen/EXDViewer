@@ -862,6 +862,10 @@ pub struct Effect {
     /// has no such point: it settles once its emitters stop spawning and holds there, and wrapping
     /// its frame back to zero anyway restarts it from empty on a cycle nothing in the file states.
     pub bounded: bool,
+    /// `SPFR`: how far behind a particle the soft-particle fade reaches. Zero where the file states
+    /// none, which the shader divides by, but only the apricot_model technique that samples depth
+    /// reads it at all.
+    pub fade_range: f32,
 }
 
 impl Effect {
@@ -899,6 +903,7 @@ impl Effect {
             models: file.models().iter().map(mesh).collect(),
             length,
             bounded,
+            fade_range: file.soft_particle_fade_range().unwrap_or(0.0),
         }
     }
 

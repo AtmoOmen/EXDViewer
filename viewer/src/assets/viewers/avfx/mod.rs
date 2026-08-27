@@ -1029,11 +1029,15 @@ impl Rendered {
                 projection,
                 size: (rect.width(), rect.height()),
                 light: (eye - camera.target).normalize_or(Vec3::Y),
+                fade_range: self.effect.fade_range,
                 ..program::Scene::default()
             },
             batches: self.batches(view, eye, axes.x_axis, axes.y_axis),
             packages: self.resolved.borrow().clone(),
             tested: false,
+            // Nothing behind a particle here, so the soft-particle variant reads an unbound
+            // sampler same as before: the preview has no scene depth to copy.
+            depth: None,
         };
 
         // The context is taken from the painter rather than captured: `glow::Context` is neither

@@ -70,6 +70,12 @@ impl Source {
     }
 }
 
+/// A scene for a level file, for a host outside this module's own tree view: a cutscene names the
+/// level it plays in and wants the same view this module opens from a `.lvb` link.
+pub fn level_scene(path: &str, file: LevelFile) -> scene::Scene {
+    scene::Scene::new(path, &Source::Level(file))
+}
+
 /// The files a scene names. A field the scene left empty is dropped rather than listed blank.
 fn files(scene: &Scene) -> Vec<(&'static str, String)> {
     let mut files: Vec<(&'static str, String)> = scene

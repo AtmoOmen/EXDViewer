@@ -556,10 +556,17 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
             ui.with_layout(
                 Layout::centered_and_justified(Direction::LeftToRight),
                 |ui| {
+                    // A wide banner icon reports its whole aspect-corrected width, which in a side
+                    // panel becomes a floor the panel can never shrink under. Table cells keep the
+                    // unbounded width: it is what tells the table how wide the column wants to be.
+                    let widest = match super::wrapping_to_panel() {
+                        true => ui.available_width(),
+                        false => f32::INFINITY,
+                    };
                     egui::Image::new(source)
                         .sense(Sense::click())
                         .maintain_aspect_ratio(true)
-                        .fit_to_exact_size(Vec2::new(f32::INFINITY, 32.0))
+                        .fit_to_exact_size(Vec2::new(widest, 32.0))
                         .ui(ui)
                 },
             )

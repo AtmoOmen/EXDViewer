@@ -149,6 +149,11 @@ pub fn wrap_to_panel_width<R>(f: impl FnOnce() -> R) -> R {
     result
 }
 
+/// Whether the caller is inside [`wrap_to_panel_width`], for the widgets a galley cannot speak for.
+pub(crate) fn wrapping_to_panel() -> bool {
+    WRAP_TO_PANEL_WIDTH.with(Cell::get)
+}
+
 fn create_galley(ui: &egui::Ui, text: String, try_elide: bool) -> Arc<Galley> {
     let setting_width = TEXT_WRAP_WIDTH
         .get(ui.ctx())

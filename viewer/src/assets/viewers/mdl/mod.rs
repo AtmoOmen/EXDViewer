@@ -100,6 +100,12 @@ const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
 const APPLY_WAVING_ANIM_ON: u32 = 0xf801_b859;
 
+/// `GetRLR`, water's own local-reflection toggle. A capture of a real frame carries it on; a
+/// package defaults it off, and the variant that answer selects has no `g_SamplerReflectionMap` at
+/// all rather than one nothing here fills.
+const GET_RLR: u32 = 0x1143_3f2d;
+const GET_RLR_ON: u32 = 0x4ba7_7904;
+
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
@@ -2807,7 +2813,7 @@ impl Rendered {
         // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
         // game would draw through the skinning variant. `GetNormalMap` is added per material below,
         // since only `bg.shpk` has a node for the parallax value.
-        let mut base = vec![(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON)];
+        let mut base = vec![(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON), (GET_RLR, GET_RLR_ON)];
         if skinned {
             base.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
         }

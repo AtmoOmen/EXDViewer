@@ -120,12 +120,19 @@ const APPLY_DETAIL_MAP_ON: u32 = 0x7a3d_9efd;
 const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
 const APPLY_WAVING_ANIM_ON: u32 = 0xf801_b859;
 
+/// `GetRLR`, water's own local-reflection toggle. A capture of a real frame carries it on; a
+/// package defaults it off, and the variant that answer selects has no `g_SamplerReflectionMap` at
+/// all rather than one nothing here fills.
+const GET_RLR: u32 = 0x1143_3f2d;
+const GET_RLR_ON: u32 = 0x4ba7_7904;
+
 /// The keys the engine sets rather than the material, other than `GetNormalMap`: a package that
 /// declares none of them resolves exactly as it did, since a key the package never declares is
 /// never looked up.
-const KEYS: [(u32, u32); 2] = [
+const KEYS: [(u32, u32); 3] = [
     (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
     (APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON),
+    (GET_RLR, GET_RLR_ON),
 ];
 
 /// The engine keys this package's materials draw with. `GetNormalMap` is separate from `KEYS`

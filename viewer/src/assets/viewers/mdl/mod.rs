@@ -40,6 +40,7 @@ use ironworks::file::{
     File,
     imc::ImageChange,
     mdl::{Lod, MeshKind, ModelContainer, VertexAttributeKind, VertexFormat, VertexValues},
+    mtrl,
     shpk::ShaderPackage,
     spm::ShaderParameters,
 };
@@ -1955,6 +1956,22 @@ impl Rendered {
                 _ => None,
             })
             .collect();
+        // Hair's cutout sampler states mirrored addressing, not the repeat this viewer otherwise
+        // assumes; wrong past the last texel it is what turns a filtered strand edge into a bleed
+        // of the texture's opposite side rather than a mirrored continuation of its own.
+        let wrap_paths: BTreeMap<&str, mtrl::AddressMode> = slots
+            .iter()
+            .flatten()
+            .filter_map(|slot| match slot {
+                Slot::Ready(material) => Some(material),
+                _ => None,
+            })
+            .flat_map(|material| {
+                material
+                    .bound()
+                    .map(move |(id, path)| (path, material.wrap(id)))
+            })
+            .collect();
         let mut textures = self.textures.borrow_mut();
         let detail = self.look.get().detail;
         for slot in slots.iter().flatten() {
@@ -2008,7 +2025,9 @@ impl Rendered {
                     );
                     // Model UVs tile, and a texture bound to a surface is minified far more often
                     // than it is magnified, so this is the one place the browser wants mipmaps and
-                    // repeat rather than the crisp clamped sampling a texture preview wants.
+                    // repeat rather than the crisp clamped sampling a texture preview wants. A
+                    // material's own sampler can ask for mirrored addressing instead; egui has a
+                    // variant for that too.
                     //
                     // Except a color table row index: a mip is `glGenerateMipmap`'s box filter
                     // over indices, which is not itself an index, so this one goes unmipmapped
@@ -2023,7 +2042,18 @@ impl Rendered {
                         false => TextureOptions {
                             magnification: egui::TextureFilter::Linear,
                             minification: egui::TextureFilter::Linear,
-                            wrap_mode: egui::TextureWrapMode::Repeat,
+                            wrap_mode: match wrap_paths.get(path.as_str()) {
+                                Some(mtrl::AddressMode::MirroredRepeat) => {
+                                    egui::TextureWrapMode::MirroredRepeat
+                                }
+                                Some(
+                                    mtrl::AddressMode::ClampToEdge
+                                    | mtrl::AddressMode::ClampToBorder,
+                                ) => egui::TextureWrapMode::ClampToEdge,
+                                Some(mtrl::AddressMode::Repeat) | None => {
+                                    egui::TextureWrapMode::Repeat
+                                }
+                            },
                             mipmap_mode: Some(egui::TextureFilter::Linear),
                         },
                     };

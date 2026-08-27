@@ -209,6 +209,16 @@ impl Material {
         }
     }
 
+    /// The address mode the material's own sampler of this id asks for, `Repeat` where none states
+    /// otherwise. All three axes agree in the live corpus, so U stands for the sampler's own mode.
+    pub fn wrap(&self, id: u32) -> mtrl::AddressMode {
+        self.held
+            .samplers()
+            .iter()
+            .find(|sampler| sampler.id() == id)
+            .map_or(mtrl::AddressMode::Repeat, mtrl::Sampler::address_u)
+    }
+
     pub fn family(&self) -> Family {
         self.family
     }

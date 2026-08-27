@@ -3129,10 +3129,12 @@ impl Buffer {
                 0.0,
             ]);
             // Read by the lighting rather than by the resolve, and a nought here is what makes the
-            // shadowed variant write black whatever the mask holds.
+            // shadowed variant write black whatever the mask holds. A texel of the whole atlas, not
+            // of one split's own cell: the game's own measured value is `1/2048, 1/10240` against a
+            // 2048x10240 atlas, the reciprocal of the full width and height.
             put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowMapParameter", vec![
-                1.0 / SHADOW_MAP as f32,
-                1.0 / SHADOW_MAP as f32,
+                1.0 / (SHADOW_MAP * ATLAS_COLUMNS as i32) as f32,
+                1.0 / (SHADOW_MAP * ATLAS_ROWS as i32) as f32,
                 0.0,
                 1.0,
             ]);

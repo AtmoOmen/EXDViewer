@@ -195,6 +195,12 @@ pub struct Pose {
 /// What a pack names the motion a model stands in, whatever rig it is built on.
 const IDLE: &str = "_id0";
 
+/// The seated idle a mount's own per-seat pack names. Picked by exact name rather than by
+/// [`Motions::standing`]'s suffix guess: the pack also carries an additive breathing layer and,
+/// for the seat a driver takes, a mount-up transition, and nothing about their own names rules
+/// them out as reliably as this one being named for what it is.
+const RIDE_IDLE: &str = "cbnm_mt_id0";
+
 /// The motions a pack holds, and the name each of its animations gives one.
 struct Motions {
     /// Animation names, each with the motion it plays.
@@ -509,11 +515,14 @@ impl Animation {
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
             body: Layer {
+                // A guess to stand in until the listing lands and `listed` picks properly: the
+                // mount's own seat 0, or the plain idle where there is no mount to guess a code
+                // for. Never the whistle a mount is called with; that is not a pose to hold.
                 wanted: RefCell::new(
                     code.as_deref()
-                        .and_then(|code| match mount.is_some() {
-                            true => ride_path(code),
-                            false => pack_path(code),
+                        .and_then(|code| match &mount {
+                            Some(mount) => seat_path(code, mount, 0).or_else(|| pack_path(code)),
+                            None => pack_path(code),
                         })
                         .unwrap_or_default(),
                 ),
@@ -651,43 +660,43 @@ impl Animation {
     /// the first non-empty one. Where two bodies both ship a pack of the same name, the nearer's
     /// is kept.
     fn listed(&self, listing: &Listing) -> Vec<Pack> {
-        let mount = self
-            .mounted
-            .as_ref()
-            .and_then(|mounted| mounted.code.as_deref());
-        let seat = self.seat.get();
         let mut listed: Vec<Pack> = Vec::new();
         let mut named: HashSet<String> = HashSet::new();
-        let mut idle = None;
         for code in self.built_on.borrow().iter() {
             let Some(root) = pack_root(code) else {
                 continue;
             };
-            let packs = found(&root, listing.under(&root));
-            let exists = |path: Option<String>| {
-                path.filter(|path| packs.iter().any(|pack| pack.path == *path))
-            };
-            if idle.is_none() {
-                idle = match mount {
-                    Some(mount) => {
-                        exists(seat_path(code, mount, seat)).or_else(|| exists(ride_path(code)))
-                    }
-                    None => exists(pack_path(code)),
-                };
-            }
-            for pack in packs {
+            for pack in found(&root, listing.under(&root)) {
                 if named.insert(pack.label.clone()) {
                     listed.push(pack);
                 }
             }
         }
         listed.sort_by(|left, right| left.label.cmp(&right.label));
+        let idle = match self
+            .mounted
+            .as_ref()
+            .and_then(|mounted| mounted.code.as_deref())
+        {
+            Some(mount) => self.ride_pack(mount, self.seat.get(), &listed),
+            None => {
+                let exists = |path: Option<String>| {
+                    path.filter(|path| listed.iter().any(|pack| pack.path == *path))
+                };
+                self.built_on
+                    .borrow()
+                    .iter()
+                    .find_map(|code| exists(pack_path(code)))
+                    .map(|path| (path, None))
+            }
+        };
         // The placeholder set at construction is only ever a guess, so the conventional pack
         // always overrides it once the listing is in; a weapon is named none at all, and only
         // then does the listing's own first pack stand in.
-        let mut wanted = self.body.wanted.borrow_mut();
-        if let Some(path) = idle.or_else(|| listed.first().map(|pack| pack.path.clone())) {
-            *wanted = path;
+        if let Some((path, motion)) =
+            idle.or_else(|| listed.first().map(|pack| (pack.path.clone(), None)))
+        {
+            self.body.load(&path, motion, None);
         }
         listed
     }
@@ -790,27 +799,36 @@ impl Animation {
         if self.seat.replace(seat) == seat {
             return;
         }
-        if let Some(path) = self.seat_pack(mount, seat) {
-            self.body.load(&path, None, None);
+        let packs = self.packs.borrow();
+        if let Some(packs) = packs.as_ref().and_then(|packs| packs.as_ref().ok())
+            && let Some((path, motion)) = self.ride_pack(mount, seat, packs)
+        {
+            self.body.load(&path, motion, None);
         }
     }
 
-    /// Where the seat's own pose is filed, out of the packs already fetched; falls back the same
-    /// way [`listed`](Self::listed) does where the mount ships none of its own.
-    fn seat_pack(&self, mount: &str, seat: usize) -> Option<String> {
-        let packs = self.packs.borrow();
-        let packs = packs.as_ref()?.as_ref().ok()?;
+    /// The pose a mount's own seat plays, out of the packs given: its own, by exact name, where
+    /// the mount ships one, else the plain standing idle every body has. Neither is the whistle a
+    /// mount is called with, which holds no seated pose at all.
+    fn ride_pack(
+        &self,
+        mount: &str,
+        seat: usize,
+        packs: &[Pack],
+    ) -> Option<(String, Option<&'static str>)> {
         let exists =
             |path: Option<String>| path.filter(|path| packs.iter().any(|pack| pack.path == *path));
         self.built_on
             .borrow()
             .iter()
             .find_map(|code| exists(seat_path(code, mount, seat)))
+            .map(|path| (path, Some(RIDE_IDLE)))
             .or_else(|| {
                 self.built_on
                     .borrow()
                     .iter()
-                    .find_map(|code| exists(ride_path(code)))
+                    .find_map(|code| exists(pack_path(code)))
+                    .map(|path| (path, None))
             })
     }
 
@@ -1311,20 +1329,12 @@ fn pack_path(code: &str) -> Option<String> {
     ))
 }
 
-/// The pack a body sits its rider on a mount with, where the mount ships no pose of its own for
-/// the seat asked for. Only a human rides, and every human body files this the same way; a race
-/// that ships none of its own borrows the nearest one its lineage does, the same as [`pack_path`].
-fn ride_path(code: &str) -> Option<String> {
-    Some(format!(
-        "chara/{}/{code}/animation/a0001/bt_common/mount/mount_start.pap",
-        tree(code)?
-    ))
-}
-
 /// The pack a mount names for one of its own seats, 1-based: a two-seater's driver leans and sits
 /// differently from its passenger, and a bench seating several turns some of them toward the one
 /// driving rather than facing forward, so each seat's pose is filed apart from the others rather
-/// than shared. Most mounts ship none of these and fall back to [`ride_path`].
+/// than shared. Most mounts ship none of these and fall back to the plain standing idle
+/// [`pack_path`] already names: `bt_common/mount/mount_start.pap` is not a pose to fall back to at
+/// all, whatever seat is asked for, since its one motion is the whistle a mount is called with.
 fn seat_path(code: &str, mount: &str, seat: usize) -> Option<String> {
     Some(format!(
         "chara/{}/{code}/animation/a0001/mt_{mount}/resident/mount{:02}.pap",
@@ -1368,8 +1378,8 @@ mod tests {
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
-        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, ride_path,
-        seat_path, skeleton_path,
+        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, seat_path,
+        skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -1573,10 +1583,6 @@ mod tests {
         assert_eq!(
             pack_root("m0430").as_deref(),
             Some("chara/monster/m0430/animation/")
-        );
-        assert_eq!(
-            ride_path("c1101").as_deref(),
-            Some("chara/human/c1101/animation/a0001/bt_common/mount/mount_start.pap")
         );
         assert_eq!(
             seat_path("c0101", "m0547", 3).as_deref(),

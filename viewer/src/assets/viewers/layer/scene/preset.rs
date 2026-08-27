@@ -319,7 +319,12 @@ impl From<Older> for Preset {
             level: format!("bg/{}.lvb", held.territory),
             camera: Vec3::new(held.camera.x, held.camera.y, held.camera.z),
             toward: Vec3::new(held.toward.x, held.toward.y, held.toward.z),
-            fov: held.fov,
+            // The plugin holds this in radians in every shape it has ever written, `File` included:
+            // see the same conversion there.
+            fov: held.fov.map(|fov| match fov > PI {
+                true => fov,
+                false => fov.to_degrees(),
+            }),
             weather: held.weather,
             time: held.time.map(|held| clock(held as u32)),
         }

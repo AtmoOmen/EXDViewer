@@ -195,6 +195,12 @@ pub struct Pose {
 /// What a pack names the motion a model stands in, whatever rig it is built on.
 const IDLE: &str = "_id0";
 
+/// The seated idle a mount's own per-seat pack names. Picked by exact name rather than by
+/// [`Motions::standing`]'s suffix guess: the pack also carries an additive breathing layer and,
+/// for the seat a driver takes, a mount-up transition, and nothing about their own names rules
+/// them out as reliably as this one being named for what it is.
+const RIDE_IDLE: &str = "cbnm_mt_id0";
+
 /// The motions a pack holds, and the name each of its animations gives one.
 struct Motions {
     /// Animation names, each with the motion it plays.
@@ -285,6 +291,10 @@ struct Layer {
     /// skeleton rests, which is what a file being inspected shows.
     motion: Cell<Option<usize>>,
     time: Cell<f32>,
+    /// Paths still to try, in order, if the one loading now lands without `opening`'s motion. A
+    /// name and its file disagree often enough that a guess has to be verified rather than
+    /// trusted on sight.
+    retry: RefCell<Vec<String>>,
 }
 
 impl Layer {
@@ -293,13 +303,42 @@ impl Layer {
         *self.pack.borrow_mut() = None;
         *self.then.borrow_mut() = then.map(ToOwned::to_owned);
         *self.opening.borrow_mut() = motion.map(ToOwned::to_owned);
+        *self.retry.borrow_mut() = Vec::new();
         self.motion.set(None);
         self.time.set(0.0);
     }
 
-    /// Takes up the pack once it lands, opening on the motion asked for. A pack that never
-    /// arrives gives way to whatever was queued behind it: not every race ships the motion an
-    /// emote starts with.
+    /// Loads the first of `candidates` opening on `motion`, keeping the rest to try in turn if it
+    /// lands without that motion. An empty list leaves the layer at rest.
+    fn seek(&self, mut candidates: Vec<String>, motion: &str) {
+        match candidates.is_empty() {
+            true => self.load("", None, None),
+            false => {
+                let first = candidates.remove(0);
+                self.load(&first, Some(motion), None);
+                *self.retry.borrow_mut() = candidates;
+            }
+        }
+    }
+
+    /// Whether the layer has run out of candidates without landing on `opening`'s motion,
+    /// however it got there: nothing was ever wanted, or every candidate `seek` was given has
+    /// landed and none of them named it.
+    fn spent(&self) -> bool {
+        if self.wanted.borrow().is_empty() {
+            return true;
+        }
+        let landed = matches!(
+            self.pack.borrow().as_ref(),
+            Some(Fetch::Ready(_)) | Some(Fetch::Failed(_))
+        );
+        landed && self.retry.borrow().is_empty() && self.motion.get().is_none()
+    }
+
+    /// Takes up the pack once it lands, opening on the motion asked for. A pack that lands
+    /// without it, or never arrives at all, gives way to the next candidate `seek` queued, or
+    /// what was queued behind it once that runs out too: not every race ships the motion an
+    /// emote starts with, and a file's name is not always its content.
     fn poll(&self, backend: &Backend) {
         let wanted = self.wanted.borrow().clone();
         let mut held = self.pack.borrow_mut();
@@ -307,15 +346,28 @@ impl Layer {
             return;
         }
         Fetch::poll(&mut held, backend, &wanted, Motions::read);
-        let motion = held
-            .as_ref()
-            .and_then(Fetch::ready)
-            .and_then(|motions| match self.opening.borrow().as_deref() {
-                Some(name) => motions.named.iter().position(|(held, _)| held == name),
-                None => motions.standing(),
-            });
+        let ready = held.as_ref().and_then(Fetch::ready);
+        let opening = self.opening.borrow().clone();
+        let motion = ready.and_then(|motions| match opening.as_deref() {
+            Some(name) => motions.named.iter().position(|(held, _)| held == name),
+            None => motions.standing(),
+        });
         let failed = matches!(held.as_ref(), Some(Fetch::Failed(_)));
+        let missed = opening.is_some() && ready.is_some() && motion.is_none();
         drop(held);
+        if failed || missed {
+            let next = {
+                let mut retry = self.retry.borrow_mut();
+                (!retry.is_empty()).then(|| retry.remove(0))
+            };
+            if let Some(next) = next {
+                next.clone_into(&mut self.wanted.borrow_mut());
+                *self.pack.borrow_mut() = None;
+                self.motion.set(None);
+                self.time.set(0.0);
+                return;
+            }
+        }
         self.motion.set(motion);
         if failed {
             let then = self.then.borrow_mut().take();
@@ -433,6 +485,109 @@ impl<T> Fetch<T> {
     }
 }
 
+/// The `cfxf_` names a pap's own animation table states, regardless of whether its own timeline
+/// also names a companion.
+fn pose_names(bytes: &[u8]) -> Result<Vec<String>> {
+    let file = AnimationPack::read(Cursor::new(bytes.to_vec()))?;
+    Ok(file
+        .animations()
+        .iter()
+        .filter_map(|animation| animation.name().strip_prefix("cfxf_").map(ToOwned::to_owned))
+        .collect())
+}
+
+/// What a lookup against [`Poses`] found.
+enum PoseLookup {
+    /// The index is still being built; ask again once more of it has landed.
+    Pending,
+    Found(String),
+    /// The index finished without ever seeing the name.
+    Miss,
+}
+
+/// Every `.pap` under a face's own tree, read one at a time and kept for the rest of the
+/// session. Built only once a pose neither the filename guess nor the shared library could
+/// confirm asks for it, since walking the whole tree costs hundreds of fetches a face rarely
+/// needs.
+#[derive(Default)]
+enum Poses {
+    #[default]
+    Unbuilt,
+    Building {
+        queue: Vec<String>,
+        current: Option<String>,
+        fetch: Option<Fetch<Vec<String>>>,
+        found: HashMap<String, String>,
+    },
+    Ready(HashMap<String, String>),
+}
+
+impl Poses {
+    /// Looks `name` up, advancing the walk by one fetch if it has not been seen yet. `paths` is
+    /// only read on the first call, to seed the walk from the listing already fetched.
+    fn advance(&mut self, backend: &Backend, paths: Vec<String>, name: &str) -> PoseLookup {
+        if matches!(self, Self::Unbuilt) {
+            let mut queue = paths;
+            queue.reverse();
+            *self = Self::Building {
+                queue,
+                current: None,
+                fetch: None,
+                found: HashMap::new(),
+            };
+        }
+        loop {
+            match self {
+                Self::Ready(found) => {
+                    return match found.get(name) {
+                        Some(path) => PoseLookup::Found(path.clone()),
+                        None => PoseLookup::Miss,
+                    };
+                }
+                Self::Building {
+                    queue,
+                    current,
+                    fetch,
+                    found,
+                } => {
+                    if let Some(path) = found.get(name) {
+                        return PoseLookup::Found(path.clone());
+                    }
+                    let path = match current.clone() {
+                        Some(path) => path,
+                        None => match queue.pop() {
+                            Some(next) => {
+                                *current = Some(next.clone());
+                                next
+                            }
+                            None => {
+                                let found = std::mem::take(found);
+                                *self = Self::Ready(found);
+                                continue;
+                            }
+                        },
+                    };
+                    Fetch::poll(fetch, backend, &path, pose_names);
+                    match fetch.take() {
+                        Some(Fetch::Ready(names)) => {
+                            for pose in names {
+                                found.entry(pose).or_insert_with(|| path.clone());
+                            }
+                            *current = None;
+                        }
+                        Some(Fetch::Failed(_)) => *current = None,
+                        other => {
+                            *fetch = other;
+                            return PoseLookup::Pending;
+                        }
+                    }
+                }
+                Self::Unbuilt => unreachable!(),
+            }
+        }
+    }
+}
+
 /// One pack a model can be played from, as the listing names it.
 struct Pack {
     path: String,
@@ -476,6 +631,12 @@ pub struct Animation {
     /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
     /// is what asks for another rather than every frame re-loading the same pack.
     linked: RefCell<Option<String>>,
+    /// A pose `express` or the body's own companion asked for that neither the filename guess
+    /// nor the shared library could confirm, waiting on `poses` to be built far enough to answer.
+    pending: RefCell<Option<String>>,
+    /// Every `.pap` under the face's own tree, read one at a time and kept for the session: the
+    /// last resort once a pose's name and its likely files disagree.
+    poses: RefCell<Poses>,
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
     /// How far a raised visor has turned, one angle per bone it hinges on.
@@ -509,11 +670,14 @@ impl Animation {
             packs: RefCell::new(None),
             filter: RefCell::new(String::new()),
             body: Layer {
+                // A guess to stand in until the listing lands and `listed` picks properly: the
+                // mount's own seat 0, or the plain idle where there is no mount to guess a code
+                // for. Never the whistle a mount is called with; that is not a pose to hold.
                 wanted: RefCell::new(
                     code.as_deref()
-                        .and_then(|code| match mount.is_some() {
-                            true => ride_path(code),
-                            false => pack_path(code),
+                        .and_then(|code| match &mount {
+                            Some(mount) => seat_path(code, mount, 0).or_else(|| pack_path(code)),
+                            None => pack_path(code),
                         })
                         .unwrap_or_default(),
                 ),
@@ -521,6 +685,8 @@ impl Animation {
             },
             face: Default::default(),
             linked: RefCell::new(None),
+            pending: RefCell::new(None),
+            poses: Default::default(),
             bust: Cell::new(Vec3::ONE),
             visor: Cell::new([0.0; 3]),
             running: Cell::new(true),
@@ -603,6 +769,7 @@ impl Animation {
         }
         self.poll_ordering(backend);
         self.poll_companion();
+        self.poll_pose(backend);
         if self.running.get() {
             let step = ctx.input(|input| input.stable_dt);
             for layer in self.layers() {
@@ -651,43 +818,43 @@ impl Animation {
     /// the first non-empty one. Where two bodies both ship a pack of the same name, the nearer's
     /// is kept.
     fn listed(&self, listing: &Listing) -> Vec<Pack> {
-        let mount = self
-            .mounted
-            .as_ref()
-            .and_then(|mounted| mounted.code.as_deref());
-        let seat = self.seat.get();
         let mut listed: Vec<Pack> = Vec::new();
         let mut named: HashSet<String> = HashSet::new();
-        let mut idle = None;
         for code in self.built_on.borrow().iter() {
             let Some(root) = pack_root(code) else {
                 continue;
             };
-            let packs = found(&root, listing.under(&root));
-            let exists = |path: Option<String>| {
-                path.filter(|path| packs.iter().any(|pack| pack.path == *path))
-            };
-            if idle.is_none() {
-                idle = match mount {
-                    Some(mount) => {
-                        exists(seat_path(code, mount, seat)).or_else(|| exists(ride_path(code)))
-                    }
-                    None => exists(pack_path(code)),
-                };
-            }
-            for pack in packs {
+            for pack in found(&root, listing.under(&root)) {
                 if named.insert(pack.label.clone()) {
                     listed.push(pack);
                 }
             }
         }
         listed.sort_by(|left, right| left.label.cmp(&right.label));
+        let idle = match self
+            .mounted
+            .as_ref()
+            .and_then(|mounted| mounted.code.as_deref())
+        {
+            Some(mount) => self.ride_pack(mount, self.seat.get(), &listed),
+            None => {
+                let exists = |path: Option<String>| {
+                    path.filter(|path| listed.iter().any(|pack| pack.path == *path))
+                };
+                self.built_on
+                    .borrow()
+                    .iter()
+                    .find_map(|code| exists(pack_path(code)))
+                    .map(|path| (path, None))
+            }
+        };
         // The placeholder set at construction is only ever a guess, so the conventional pack
         // always overrides it once the listing is in; a weapon is named none at all, and only
         // then does the listing's own first pack stand in.
-        let mut wanted = self.body.wanted.borrow_mut();
-        if let Some(path) = idle.or_else(|| listed.first().map(|pack| pack.path.clone())) {
-            *wanted = path;
+        if let Some((path, motion)) =
+            idle.or_else(|| listed.first().map(|pack| (pack.path.clone(), None)))
+        {
+            self.body.load(&path, motion, None);
         }
         listed
     }
@@ -790,27 +957,36 @@ impl Animation {
         if self.seat.replace(seat) == seat {
             return;
         }
-        if let Some(path) = self.seat_pack(mount, seat) {
-            self.body.load(&path, None, None);
+        let packs = self.packs.borrow();
+        if let Some(packs) = packs.as_ref().and_then(|packs| packs.as_ref().ok())
+            && let Some((path, motion)) = self.ride_pack(mount, seat, packs)
+        {
+            self.body.load(&path, motion, None);
         }
     }
 
-    /// Where the seat's own pose is filed, out of the packs already fetched; falls back the same
-    /// way [`listed`](Self::listed) does where the mount ships none of its own.
-    fn seat_pack(&self, mount: &str, seat: usize) -> Option<String> {
-        let packs = self.packs.borrow();
-        let packs = packs.as_ref()?.as_ref().ok()?;
+    /// The pose a mount's own seat plays, out of the packs given: its own, by exact name, where
+    /// the mount ships one, else the plain standing idle every body has. Neither is the whistle a
+    /// mount is called with, which holds no seated pose at all.
+    fn ride_pack(
+        &self,
+        mount: &str,
+        seat: usize,
+        packs: &[Pack],
+    ) -> Option<(String, Option<&'static str>)> {
         let exists =
             |path: Option<String>| path.filter(|path| packs.iter().any(|pack| pack.path == *path));
         self.built_on
             .borrow()
             .iter()
             .find_map(|code| exists(seat_path(code, mount, seat)))
+            .map(|path| (path, Some(RIDE_IDLE)))
             .or_else(|| {
                 self.built_on
                     .borrow()
                     .iter()
-                    .find_map(|code| exists(ride_path(code)))
+                    .find_map(|code| exists(pack_path(code)))
+                    .map(|path| (path, None))
             })
     }
 
@@ -824,39 +1000,41 @@ impl Animation {
             false => &self.body,
         }
         .load(path, None, then);
+        // Forces the next poll to re-read the companion rather than see the same name it had
+        // last time and assume nothing changed, which is what left a re-picked emote's face
+        // stuck on whatever frame it was already at.
+        *self.linked.borrow_mut() = None;
         self.running.set(true);
     }
 
-    /// Puts an expression on the face the character wears, out of whichever pack the listing files
-    /// it under: most are a pack of their own, the rest motions of the one a face keeps resident.
-    /// A name filed nowhere leaves the face as it rests, which is the game's own neutral pose.
+    /// Puts an expression on the face the character wears. A file's own name is only a guess at
+    /// what it holds, so every candidate is opened on the `cfxf_` name itself and skipped if it
+    /// does not carry it: the filename match first, since most poses are a pack of their own,
+    /// then the one a face keeps resident, then the rest of the face's own tree if neither knew
+    /// it. A name filed nowhere leaves the face as it rests, which is the game's own neutral pose.
     pub fn express(&self, name: &str) {
         let Some(root) = self.face_root() else {
             return;
         };
         let file = format!("{name}.pap");
-        let found = self.packs.borrow().as_ref().and_then(|packs| {
-            let found = packs
-                .as_ref()
-                .ok()?
+        let mut candidates: Vec<String> = match self.packs.borrow().as_ref() {
+            Some(Ok(packs)) => packs
                 .iter()
-                .find(|pack| pack.path.starts_with(&root) && file_name(&pack.path) == file)?;
-            Some(found.path.clone())
-        });
-        match found {
-            Some(path) => self.face.load(&path, None, None),
-            None => self.face.load(
-                &format!("{root}resident/face.pap"),
-                Some(&format!("cfxf_{name}")),
-                None,
-            ),
-        }
+                .filter(|pack| pack.path.starts_with(&root) && file_name(&pack.path) == file)
+                .map(|pack| pack.path.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+        candidates.push(format!("{root}resident/face.pap"));
+        self.face.seek(candidates, &format!("cfxf_{name}"));
+        *self.pending.borrow_mut() = Some(name.to_owned());
         self.running.set(true);
     }
 
     /// Drives the face from the `cfxf_` companion the body's own motion names, the way an emote
     /// like Joy carries its own expression rather than leaving the creator to pick one. A change of
-    /// companion is what asks for another; a body pack with none leaves the face as it was.
+    /// companion is what asks for another; a body pack with none resets the face to rest rather
+    /// than leaving it holding whatever it played last.
     fn poll_companion(&self) {
         let wanted = self.body.companion();
         if wanted == *self.linked.borrow() {
@@ -864,6 +1042,7 @@ impl Animation {
         }
         let Some(name) = &wanted else {
             *self.linked.borrow_mut() = wanted;
+            self.face.load("", None, None);
             return;
         };
         let Some(root) = self.face_root() else {
@@ -877,20 +1056,56 @@ impl Animation {
             .strip_suffix(".pap")
             .unwrap_or_default()
             .to_owned();
-        let candidates = [
+        let candidates: Vec<String> = [
             format!("{root}nonresident/{name}.pap"),
             format!("{root}nonresident/emot/{tail}.pap"),
             format!("{root}resident/face.pap"),
-        ];
-        let Some(path) = candidates
-            .into_iter()
-            .find(|candidate| packs.iter().any(|pack| pack.path == *candidate))
-        else {
+        ]
+        .into_iter()
+        .filter(|candidate| packs.iter().any(|pack| pack.path == *candidate))
+        .collect();
+        drop(held);
+        self.face.seek(candidates, &format!("cfxf_{name}"));
+        *self.pending.borrow_mut() = Some(name.clone());
+        *self.linked.borrow_mut() = wanted;
+    }
+
+    /// Falls back to the lazily-built name index for a pose `express` or `poll_companion` could
+    /// not confirm any faster way, once the face layer has run out of candidates to try on its
+    /// own.
+    fn poll_pose(&self, backend: &Backend) {
+        let Some(name) = self.pending.borrow().clone() else {
             return;
         };
+        if self.face.motion.get().is_some() {
+            *self.pending.borrow_mut() = None;
+            return;
+        }
+        if !self.face.spent() {
+            return;
+        }
+        let Some(root) = self.face_root() else {
+            *self.pending.borrow_mut() = None;
+            return;
+        };
+        let held = self.packs.borrow();
+        let Some(Ok(packs)) = held.as_ref() else {
+            return;
+        };
+        let paths: Vec<String> = packs
+            .iter()
+            .filter(|pack| pack.path.starts_with(&root) && pack.path.ends_with(".pap"))
+            .map(|pack| pack.path.clone())
+            .collect();
         drop(held);
-        self.face.load(&path, Some(&format!("cfxf_{name}")), None);
-        *self.linked.borrow_mut() = wanted;
+        match self.poses.borrow_mut().advance(backend, paths, &name) {
+            PoseLookup::Pending => {}
+            PoseLookup::Found(path) => {
+                self.face.load(&path, Some(&format!("cfxf_{name}")), None);
+                *self.pending.borrow_mut() = None;
+            }
+            PoseLookup::Miss => *self.pending.borrow_mut() = None,
+        }
     }
 
     /// Where the packs of the face the character wears are filed.
@@ -1311,20 +1526,12 @@ fn pack_path(code: &str) -> Option<String> {
     ))
 }
 
-/// The pack a body sits its rider on a mount with, where the mount ships no pose of its own for
-/// the seat asked for. Only a human rides, and every human body files this the same way; a race
-/// that ships none of its own borrows the nearest one its lineage does, the same as [`pack_path`].
-fn ride_path(code: &str) -> Option<String> {
-    Some(format!(
-        "chara/{}/{code}/animation/a0001/bt_common/mount/mount_start.pap",
-        tree(code)?
-    ))
-}
-
 /// The pack a mount names for one of its own seats, 1-based: a two-seater's driver leans and sits
 /// differently from its passenger, and a bench seating several turns some of them toward the one
 /// driving rather than facing forward, so each seat's pose is filed apart from the others rather
-/// than shared. Most mounts ship none of these and fall back to [`ride_path`].
+/// than shared. Most mounts ship none of these and fall back to the plain standing idle
+/// [`pack_path`] already names: `bt_common/mount/mount_start.pap` is not a pose to fall back to at
+/// all, whatever seat is asked for, since its one motion is the whistle a mount is called with.
 fn seat_path(code: &str, mount: &str, seat: usize) -> Option<String> {
     Some(format!(
         "chara/{}/{code}/animation/a0001/mt_{mount}/resident/mount{:02}.pap",
@@ -1368,8 +1575,8 @@ mod tests {
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
-        Extra, Skin, code, extra, facial, found, ordering, pack_path, pack_root, ride_path,
-        seat_path, skeleton_path,
+        Extra, Fetch, Layer, PoseLookup, Poses, Skin, code, extra, facial, found, ordering,
+        pack_path, pack_root, seat_path, skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -1575,10 +1782,6 @@ mod tests {
             Some("chara/monster/m0430/animation/")
         );
         assert_eq!(
-            ride_path("c1101").as_deref(),
-            Some("chara/human/c1101/animation/a0001/bt_common/mount/mount_start.pap")
-        );
-        assert_eq!(
             seat_path("c0101", "m0547", 3).as_deref(),
             Some("chara/human/c0101/animation/a0001/mt_m0547/resident/mount04.pap")
         );
@@ -1623,5 +1826,183 @@ mod tests {
             vec![format!("{root}a0001/wp_common/resident/weapon.pap")],
         );
         assert_eq!(packs[0].label, "resident/weapon");
+    }
+
+    #[test]
+    fn seek_queues_the_rest_as_retries() {
+        let layer = Layer::default();
+        layer.seek(vec!["a.pap".to_owned(), "b.pap".to_owned()], "cfxf_salute");
+        assert_eq!(*layer.wanted.borrow(), "a.pap");
+        assert_eq!(*layer.retry.borrow(), vec!["b.pap".to_owned()]);
+        assert_eq!(layer.opening.borrow().as_deref(), Some("cfxf_salute"));
+    }
+
+    #[test]
+    fn seek_with_nothing_to_try_rests() {
+        let layer = Layer::default();
+        layer.seek(Vec::new(), "cfxf_salute");
+        assert!(layer.wanted.borrow().is_empty());
+        assert!(layer.opening.borrow().is_none());
+    }
+
+    #[test]
+    fn spent_waits_for_a_landing_with_nothing_left_to_try() {
+        let layer = Layer::default();
+        assert!(layer.spent(), "nothing wanted yet");
+        layer.seek(vec!["a.pap".to_owned()], "cfxf_salute");
+        assert!(!layer.spent(), "still fetching, no candidates behind it");
+        *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
+        assert!(
+            layer.spent(),
+            "landed with nothing left to try and no motion found"
+        );
+    }
+
+    #[test]
+    fn spent_stays_false_while_a_retry_is_queued() {
+        let layer = Layer::default();
+        layer.seek(vec!["a.pap".to_owned(), "b.pap".to_owned()], "cfxf_salute");
+        *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
+        assert!(!layer.spent(), "b.pap is still queued behind a.pap");
+    }
+
+    /// Polls a future to completion on the current thread with no real waker, which is enough for
+    /// the local install's own I/O: nothing here needs to run concurrently with anything else.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::Wake;
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(value) => return value,
+                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    fn local_backend() -> crate::backend::Backend {
+        block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(SQPACK.to_owned()),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .unwrap()
+    }
+
+    /// Drives a layer's own polling loop against a real backend until it lands on a motion, runs
+    /// out of candidates, or the budget below runs out.
+    fn settle(layer: &Layer, backend: &crate::backend::Backend) {
+        let ctx = egui::Context::default();
+        for _ in 0..500 {
+            crate::utils::tick_promises(&ctx);
+            layer.poll(backend);
+            if layer.spent() || layer.motion.get().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
+    /// `salute.pap` really carries `cfxf_bow`, per `dump`ing the real file: exactly the case the
+    /// filename-first bug got wrong. Seeking it first with `resident/face.pap` behind it, which
+    /// does carry `cfxf_salute`, should miss the filename guess and land on the fallback instead.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_filename_guess_that_lands_on_the_wrong_pose_falls_back() {
+        let backend = local_backend();
+        let root = "chara/human/c0101/animation/f0206/";
+        let layer = Layer::default();
+        layer.seek(
+            vec![
+                format!("{root}nonresident/emot/salute.pap"),
+                format!("{root}resident/face.pap"),
+            ],
+            "cfxf_salute",
+        );
+        settle(&layer, &backend);
+        assert_eq!(
+            *layer.wanted.borrow(),
+            format!("{root}resident/face.pap"),
+            "the wrong-named guess should have been abandoned"
+        );
+        assert!(
+            layer.motion.get().is_some(),
+            "the fallback names cfxf_salute and should have landed on it"
+        );
+    }
+
+    /// `nonresident/comeon.pap` (not the `emot/` one) is self-consistent: its name really matches
+    /// its own `cfxf_comeon`. The filename guess should be kept rather than spent on the fallback.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_filename_guess_that_matches_is_kept() {
+        let backend = local_backend();
+        let root = "chara/human/c0101/animation/f0206/";
+        let layer = Layer::default();
+        layer.seek(
+            vec![
+                format!("{root}nonresident/comeon.pap"),
+                format!("{root}resident/face.pap"),
+            ],
+            "cfxf_comeon",
+        );
+        settle(&layer, &backend);
+        assert_eq!(
+            *layer.wanted.borrow(),
+            format!("{root}nonresident/comeon.pap"),
+            "the matching guess should never have been abandoned"
+        );
+        assert!(layer.motion.get().is_some());
+        assert_eq!(
+            layer.retry.borrow().len(),
+            1,
+            "resident/face.pap should still be queued, not yet fetched"
+        );
+    }
+
+    /// The lazy index has to walk past files that do not carry the name it is after before it
+    /// reaches the one that does, and has to come back with a clean miss for a name in none of
+    /// them: `act_emot27` names `cfxf_emot_eeh`, which only `nonresident/eeh.pap` carries, while
+    /// `loop_emot32_loop`'s `cfxf_lookback_l` is nowhere in the tree at all.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn the_pose_index_walks_past_misses_to_a_real_hit_and_reports_a_true_one() {
+        let backend = local_backend();
+        let root = "chara/human/c0101/animation/f0206/";
+        let paths: Vec<String> = [
+            "nonresident/angry.pap",
+            "nonresident/bow.pap",
+            "nonresident/eeh.pap",
+            "nonresident/kiss.pap",
+        ]
+        .into_iter()
+        .map(|tail| format!("{root}{tail}"))
+        .collect();
+
+        let mut poses = Poses::default();
+        let found = loop {
+            match poses.advance(&backend, paths.clone(), "emot_eeh") {
+                PoseLookup::Found(path) => break path,
+                PoseLookup::Miss => panic!("emot_eeh is really in nonresident/eeh.pap"),
+                PoseLookup::Pending => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        };
+        assert_eq!(found, format!("{root}nonresident/eeh.pap"));
+
+        let mut poses = Poses::default();
+        loop {
+            match poses.advance(&backend, paths.clone(), "lookback_l") {
+                PoseLookup::Found(path) => panic!("lookback_l should not exist, found in {path}"),
+                PoseLookup::Miss => break,
+                PoseLookup::Pending => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
     }
 }

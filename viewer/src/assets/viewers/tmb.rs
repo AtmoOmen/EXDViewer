@@ -45,11 +45,12 @@ commands!(
 );
 
 /// The asset a command plays, for the kinds that name one.
+///
+/// `C009` and `C010` also carry a `path()`, but it names an animation inside whatever `.pap` the
+/// cutscene's own `CTRL` resources list, not a file of its own; the body text below still shows it.
 fn asset(command: &Command) -> Option<&str> {
     match command.kind() {
         CommandKind::C002(play) => play.path(),
-        CommandKind::C009(animation) => animation.path(),
-        CommandKind::C010(animation) => animation.path(),
         CommandKind::C012(effect) => effect.path(),
         CommandKind::C063(sound) => sound.path(),
         CommandKind::C173(effect) => effect.path(),

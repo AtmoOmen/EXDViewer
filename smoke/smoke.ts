@@ -430,10 +430,14 @@ async function counters(cdp: Cdp) {
     return await cdp.eval("JSON.parse(JSON.stringify(window.__smoke ?? {}))");
 }
 
-async function click(cdp: Cdp, x: number, y: number) {
+async function click(cdp: Cdp, x: number, y: number, settle = 60) {
     const base = { x, y, button: "left", clickCount: 1, buttons: 1 };
     await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mouseMoved", buttons: 0 });
-    await sleep(60);
+    // egui reads the pointer where the last frame left it, so a press dispatched before a slow or
+    // loaded canvas has painted that move is answered by wherever it was before. The default is
+    // fine against a settled UI; a caller that expects to land on something the canvas only just
+    // finished changing (a picker just opened, a redress just kicked off) wants longer.
+    await sleep(settle);
     await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mousePressed" });
     await sleep(40);
     await cdp.send("Input.dispatchMouseEvent", { ...base, type: "mouseReleased", buttons: 0 });
@@ -450,12 +454,18 @@ async function clickUntil(
     cdp: Cdp,
     point: { x: number; y: number },
     read: () => string,
+    reset: () => void,
     wants: string,
     what: string,
 ) {
     let last = "";
     for (let attempt = 0; attempt < 3; attempt++) {
-        await click(cdp, point.x, point.y);
+        // Reset inside the loop, not once before it: the button this is most often aimed at is a
+        // toggle that only logs on open, so a stale "wants" left over from an earlier attempt
+        // (its log landing late, after that attempt's own wait gave up) would otherwise let a
+        // later attempt pass on a picker this click actually just closed.
+        reset();
+        await click(cdp, point.x, point.y, 1500);
         try {
             await waitFor(what, 4_000, async () => read() === wants);
             return;
@@ -653,15 +663,27 @@ async function main() {
         // frame the canvas had not caught up to yet) opens nothing, and every wait below it would
         // otherwise still run to its own timeout before saying so, reading as the redress itself
         // failing. Caught here and named for what it is instead.
-        picking = "";
-        await clickUntil(cdp, HEAD_SLOT, () => picking, "Head", "the Head slot's picker");
+        await clickUntil(
+            cdp,
+            HEAD_SLOT,
+            () => picking,
+            () => (picking = ""),
+            "Head",
+            "the Head slot's picker",
+        );
         // The picker's item list is its own fetch, behind the model that is already on screen.
         await sleep(6000);
         await shot(cdp, "06-character-picker");
-        chose = "";
-        await clickUntil(cdp, HEAD_ITEM, () => chose, "Head", "an item chosen for Head");
+        await clickUntil(
+            cdp,
+            HEAD_ITEM,
+            () => chose,
+            () => (chose = ""),
+            "Head",
+            "an item chosen for Head",
+        );
         await waitFor(
-            "the equipment change to rebuild the model",
+            "the equipment change to rebuild the model (both clicks already confirmed landed)",
             180_000,
             async () => rebuilt > builtBefore,
         );
@@ -670,14 +692,15 @@ async function main() {
         console.log(`   links to retranslate the redress: ${linksOnRedress}`);
         await shot(cdp, "06-character-worn");
 
-        // Not a screenshot comparison: the failure this guards against is silent. It draws
-        // nothing past the rebuild that already succeeded above, and it logs nothing new either,
-        // so the only thing left to ask is whether the composite is still running at all. `draws`
-        // cannot answer that: egui's own panel repaints it constantly on their own, game shaders
-        // or not. `drawBuffers` cannot be confused with that traffic, since only the deferred
-        // path's own passes ever call it; a G-buffer that never runs again holds it at exactly
-        // zero, not just low, which is what a mesh whose program fails to link and takes the whole
-        // pass down with it looks like instead of one that is skipped and drawn around.
+        // Not a screenshot comparison: the failure this guards against is silent. A single
+        // material that fails to link is not it: `render()`'s own loop (gpu.rs:725) already skips
+        // one and keeps going, and that miss surfaces on its own as a fatal `ERROR:` log, which
+        // fails the run before this check ever runs. What zero drawBuffers actually means is that
+        // `mdl::ui` stopped being called at all: `show()` calls `gl.drawBuffers` unconditionally as
+        // its first GL call every frame it runs, so the only way this stays at zero is a redress
+        // that fails wholesale, flips `self.model` to `Err`, and leaves the Character tab painting
+        // a red label instead of the viewer forever after. `draws` cannot stand in for that: egui's
+        // own panels repaint it constantly on their own, game shaders or not.
         const mid = await counters(cdp);
         try {
             await waitFor(

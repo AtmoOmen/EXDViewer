@@ -59,6 +59,11 @@ pub struct Frame {
     /// standalone preview draws into a frame with none, and a zone draws into the one its own
     /// geometry left, so a glow standing behind a wall does not show through it.
     pub tested: bool,
+    /// A copy of the opaque depth, for the soft-particle apricot_model variant that samples it.
+    /// Never the live attachment `tested` compares against: reading and writing the same depth in
+    /// one draw is the feedback loop `blended()` once fell into. `None` where the caller has no
+    /// scene depth to copy, which leaves the sampler unbound.
+    pub depth: Option<glow::Texture>,
 }
 
 /// The two apricot packages an effect is drawn with.
@@ -214,6 +219,18 @@ impl Particles {
         unsafe { gl.use_program(Some(program)) };
 
         for (unit, texture) in linked.held.textures.iter().enumerate() {
+            // The engine's own depth, not a particle's: nothing in the effect names it, so it is
+            // matched by id and bound from the caller rather than looked up in `shading.textures`.
+            if texture.id == program::id("g_SamplerDepth") {
+                unsafe {
+                    gl.active_texture(glow::TEXTURE0 + unit as u32);
+                    gl.bind_texture(glow::TEXTURE_2D, frame.depth);
+                    if let Some(location) = gl.get_uniform_location(program, &texture.name) {
+                        gl.uniform_1_i32(Some(&location), unit as i32);
+                    }
+                }
+                continue;
+            }
             let held = shading
                 .textures
                 .iter()

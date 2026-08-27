@@ -208,6 +208,10 @@ pub struct Batch {
 pub struct EffectDraw {
     pub path: String,
     pub batches: Vec<avfxgpu::Batch>,
+    /// The file's own `SPFR`, which the soft-particle apricot_model variant reads as its fade
+    /// range: every placement of one file shares the same effect, so this is the effect's, not the
+    /// placement's.
+    pub fade_range: f32,
 }
 
 pub struct Frame {
@@ -734,11 +738,10 @@ impl Renderer {
     }
 
     /// Every placed effect, one draw per unique file no matter how many placements share it. Tested
-    /// against the depth the opaque and blended passes left standing rather than a copy: nothing
-    /// binds it as a texture today, so the live attachment is enough for the depth test alone. A
-    /// soft-particle apricot_model variant does declare and sample `g_SamplerDepth` for a fade
-    /// against what stands behind a particle; wiring that has to bind a copy, not this live
-    /// attachment, or it is the same feedback loop `blended()` once sampled itself against.
+    /// against the depth the opaque and blended passes left standing, and a soft-particle
+    /// apricot_model variant also samples a copy of it for a fade against what stands behind a
+    /// particle. The copy rather than the live attachment: reading and writing the same depth in
+    /// one draw is the feedback loop `blended()` once fell into.
     fn effects(
         &mut self,
         gl: &glow::Context,
@@ -751,6 +754,10 @@ impl Renderer {
         }
         let into = self.buffers.lit().ok_or("no lit frame")?;
         let size = self.buffers.size();
+        // Refreshed here rather than relied on from `blended()`: a frame with no blended surface
+        // never runs that pass, and this copy has to be standing regardless.
+        self.buffers.cut(gl)?;
+        let depth = self.buffers.cutoff();
         let effect_scene = avfxprogram::Scene {
             view: scene.view,
             projection: scene.projection,
@@ -770,10 +777,14 @@ impl Renderer {
                 continue;
             };
             let held = avfxgpu::Frame {
-                scene: effect_scene,
+                scene: avfxprogram::Scene {
+                    fade_range: effect.fade_range,
+                    ..effect_scene
+                },
                 batches: effect.batches.clone(),
                 packages: frame.effect_packages.clone(),
                 tested: true,
+                depth,
             };
             particles.draw(gl, painter, &held);
         }

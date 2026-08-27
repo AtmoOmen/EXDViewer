@@ -81,6 +81,10 @@ pub struct Scene {
     pub light: Vec3,
     pub diffuse: Vec3,
     pub ambient: Vec3,
+    /// The effect's own `SPFR`, which only the apricot_model technique that samples depth reads,
+    /// as the range a soft particle fades over rather than the screen size the register otherwise
+    /// holds. Zero where unset, which divides out to no softening.
+    pub fade_range: f32,
 }
 
 impl Default for Scene {
@@ -92,6 +96,7 @@ impl Default for Scene {
             light: Vec3::Y,
             diffuse: Vec3::ONE,
             ambient: Vec3::splat(0.12),
+            fade_range: 0.0,
         }
     }
 }
@@ -501,8 +506,11 @@ impl Buffer {
         put("Parameters", vec![instance.depth_offset, 0.0, 0.0, 0.0]);
         put("Color", instance.color.to_array().to_vec());
 
+        // The fourth lane is unread by every technique but the one soft-particle variant that
+        // samples depth, which reads it as the fade range rather than 1/height: the RDEF names the
+        // whole register `ScreenSize` regardless, so nothing else can tell the two apart by name.
         let (width, height) = (scene.size.0.max(1.0), scene.size.1.max(1.0));
-        put("ScreenSize", vec![width, height, 1.0 / width, 1.0 / height]);
+        put("ScreenSize", vec![width, height, 1.0 / width, scene.fade_range]);
         put("ScreenRealSize", vec![width, height]);
         put("ModulateColor", vec![1.0; 4]);
         put("FogParam", vec![0.0, 0.0, 0.0, 0.0]);

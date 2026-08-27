@@ -2153,6 +2153,7 @@ impl Scene {
                 (!batches.is_empty()).then_some(gpu::EffectDraw {
                     path: effect.path.clone(),
                     batches,
+                    fade_range: parsed.fade_range,
                 })
             })
             .collect()

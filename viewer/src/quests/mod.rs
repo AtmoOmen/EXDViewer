@@ -31,7 +31,7 @@ use crate::{
         tree::{Outline, Row},
     },
     settings::{LANGUAGE, api_base},
-    sheet::GlobalContext,
+    sheet::{GlobalContext, wrap_to_panel_width},
     utils::{CollapsibleSidePanel, FuzzyMatcher, IconManager, PromiseKind, Side, TrackedPromise},
 };
 
@@ -756,10 +756,13 @@ impl QuestBrowser {
                         });
                         return;
                     };
-                    action = self.detail.ui(ui, index, node).map(|action| match action {
-                        detail::Action::Select(row_id) => Action::Select(row_id),
-                        detail::Action::Navigate(route) => Action::Navigate(route),
-                    });
+                    action =
+                        wrap_to_panel_width(|| self.detail.ui(ui, index, node)).map(|action| {
+                            match action {
+                                detail::Action::Select(row_id) => Action::Select(row_id),
+                                detail::Action::Navigate(route) => Action::Navigate(route),
+                            }
+                        });
                 });
             });
         action

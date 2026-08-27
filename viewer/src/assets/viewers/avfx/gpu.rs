@@ -472,9 +472,12 @@ fn blend(gl: &glow::Context, blend: Blend) {
                 glow::ZERO,
                 glow::ONE,
             ),
-            Blend::Multiply => {
-                gl.blend_func_separate(glow::DST_COLOR, glow::ZERO, glow::ZERO, glow::ONE)
-            }
+            Blend::Multiply => gl.blend_func_separate(
+                glow::DST_COLOR,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ZERO,
+                glow::ONE,
+            ),
             Blend::Screen => {
                 gl.blend_func_separate(glow::ONE, glow::ONE_MINUS_SRC_COLOR, glow::ZERO, glow::ONE)
             }

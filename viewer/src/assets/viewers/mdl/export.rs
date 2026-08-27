@@ -1265,6 +1265,7 @@ mod tests {
             material: 0,
             deform: None,
             skin: None,
+            rigid: false,
         }])
         .unwrap();
 
@@ -1361,6 +1362,7 @@ mod tests {
                 material: 0,
                 deform: None,
                 skin: None,
+                rigid: false,
             },
             super::super::Source {
                 path: hair_path.to_owned(),
@@ -1369,6 +1371,7 @@ mod tests {
                 material: 0,
                 deform: None,
                 skin: None,
+                rigid: false,
             },
         ])
         .unwrap();

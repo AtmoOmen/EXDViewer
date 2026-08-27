@@ -114,7 +114,14 @@ fn eye_pose(set: &Curves, time: f32, near: f32, far: f32) -> Pose {
         .filter(|focal| *focal > 0.0)
         .map(field_of_view_degrees)
         .unwrap_or(55.0);
-    Pose { position, forward, up, fov_degrees, near, far }
+    Pose {
+        position,
+        forward,
+        up,
+        fov_degrees,
+        near,
+        far,
+    }
 }
 
 /// One shot: a `C004` command and the `CTTL` node it came from, in the cutscene's own global
@@ -135,7 +142,9 @@ pub struct Shot {
 fn reachable_commands(timeline: &Timeline) -> std::collections::BTreeSet<i16> {
     let mut reachable = std::collections::BTreeSet::new();
     for item in timeline.items() {
-        let Item::ActorList(list) = item else { continue };
+        let Item::ActorList(list) = item else {
+            continue;
+        };
         for actor_id in list.actors() {
             let Some(Item::Actor(actor)) = timeline
                 .items()
@@ -186,8 +195,12 @@ fn shots_of(timeline: &Timeline) -> Vec<RawShot> {
         .items()
         .iter()
         .filter_map(|item| {
-            let Item::Command(command) = item else { return None };
-            let CommandKind::C004(camera) = command.kind() else { return None };
+            let Item::Command(command) = item else {
+                return None;
+            };
+            let CommandKind::C004(camera) = command.kind() else {
+                return None;
+            };
             Some((
                 command.id(),
                 f32::from(command.time()),
@@ -232,7 +245,9 @@ impl Player {
         let mut shots = Vec::new();
         let mut offset = 0.0;
         for (node, held) in cutscene.nodes().iter().enumerate() {
-            let Node::Timeline(timeline) = held else { continue };
+            let Node::Timeline(timeline) = held else {
+                continue;
+            };
             let local = shots_of(timeline);
             let span = timeline_span(
                 timeline,
@@ -254,7 +269,10 @@ impl Player {
             }
             offset += span.max(1.0);
         }
-        Self { duration: offset, shots }
+        Self {
+            duration: offset,
+            shots,
+        }
     }
 
     /// Every shot, in the order it plays.
@@ -327,7 +345,12 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { fetch: Fetch::Idle, time: 0.0, playing: false, fps: DEFAULT_FPS }
+        Self {
+            fetch: Fetch::Idle,
+            time: 0.0,
+            playing: false,
+            fps: DEFAULT_FPS,
+        }
     }
 }
 
@@ -341,7 +364,11 @@ pub struct Tab {
 
 impl Tab {
     pub fn new(level: String, cutscene: &Cutscene) -> Self {
-        Self { level, player: Player::new(cutscene), state: RefCell::new(State::default()) }
+        Self {
+            level,
+            player: Player::new(cutscene),
+            state: RefCell::new(State::default()),
+        }
     }
 }
 
@@ -371,15 +398,18 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         };
     }
 
-    Panel::left("cutb_shots").default_size(200.0).show(ui, |ui| {
-        shots_ui(ui, tab, &mut state);
-    });
+    let pose = tab.player.pose_at(cutscene, state.time);
+
+    Panel::left("cutb_shots")
+        .default_size(200.0)
+        .show(ui, |ui| {
+            shots_ui(ui, tab, &mut state);
+        });
     Panel::bottom("cutb_transport").show(ui, |ui| {
         ui.add_space(4.0);
-        transport(ui, tab, &mut state);
+        transport(ui, tab, &mut state, pose.as_ref());
         ui.add_space(4.0);
     });
-    let time = state.time;
     CentralPanel::default().show(ui, |ui| match &mut state.fetch {
         Fetch::Idle | Fetch::Loading(_) => {
             ui.horizontal(|ui| {
@@ -391,7 +421,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
             ui.colored_label(egui::Color32::RED, error.clone());
         }
         Fetch::Ready(scene) => {
-            if let Some(pose) = tab.player.pose_at(cutscene, time) {
+            if let Some(pose) = pose {
                 scene.drive(pose.drive());
             }
             scene.mark(markers(cutscene));
@@ -403,29 +433,32 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
 
 fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
     let active = active_shot(tab.player.shots(), state.time).map(|shot| shot.start);
-    ScrollArea::vertical().id_salt("cutb_shot_list").auto_shrink(false).show(ui, |ui| {
-        ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
-            for shot in tab.player.shots() {
-                let current = active == Some(shot.start);
-                let label = format!(
-                    "{} · node {} · {:.0}f",
-                    shot.name.as_deref().unwrap_or("-"),
-                    shot.node,
-                    shot.duration,
-                );
-                if ui.add(Button::selectable(current, label)).clicked() {
-                    state.time = shot.start;
-                    state.playing = false;
+    ScrollArea::vertical()
+        .id_salt("cutb_shot_list")
+        .auto_shrink(false)
+        .show(ui, |ui| {
+            ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                for shot in tab.player.shots() {
+                    let current = active == Some(shot.start);
+                    let label = format!(
+                        "{} · node {} · {:.0}f",
+                        shot.name.as_deref().unwrap_or("-"),
+                        shot.node,
+                        shot.duration,
+                    );
+                    if ui.add(Button::selectable(current, label)).clicked() {
+                        state.time = shot.start;
+                        state.playing = false;
+                    }
                 }
-            }
-            if tab.player.shots().is_empty() {
-                ui.label(RichText::new("This cutscene's timelines hold no camera").weak());
-            }
+                if tab.player.shots().is_empty() {
+                    ui.label(RichText::new("This cutscene's timelines hold no camera").weak());
+                }
+            });
         });
-    });
 }
 
-fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
+fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose>) {
     let duration = tab.player.duration();
     if state.playing {
         state.time += ui.input(|input| input.stable_dt).min(0.25) * state.fps;
@@ -441,7 +474,10 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
             state.time = 0.0;
             state.playing = false;
         }
-        if ui.add(Button::new(if state.playing { "⏸" } else { "▶" })).clicked() {
+        if ui
+            .add(Button::new(if state.playing { "⏸" } else { "▶" }))
+            .clicked()
+        {
             state.playing = !state.playing;
         }
         ui.spacing_mut().slider_width = 200.0;
@@ -449,6 +485,16 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
         ui.add(egui::Slider::new(&mut state.fps, 5.0..=60.0).text("fps")).on_hover_text(
             "How fast to play the cutscene's own frames. No file states a rate for one; this is a \
              starting guess.",
+        );
+        ui.label(
+            RichText::new(match pose {
+                Some(pose) => format!(
+                    "eye {:.1}, {:.1}, {:.1} · {:.1}\u{b0}",
+                    pose.position.x, pose.position.y, pose.position.z, pose.fov_degrees
+                ),
+                None => "no shot active yet".to_owned(),
+            })
+            .weak(),
         );
     });
 }
@@ -495,7 +541,15 @@ mod test {
     }
 
     fn shot(start: f32, duration: f32) -> Shot {
-        Shot { node: 0, name: None, start, duration, curves: 0, near: 0.1, far: 1000.0 }
+        Shot {
+            node: 0,
+            name: None,
+            start,
+            duration,
+            curves: 0,
+            near: 0.1,
+            far: 1000.0,
+        }
     }
 
     #[test]

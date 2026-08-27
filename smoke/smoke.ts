@@ -111,9 +111,10 @@ const CHANNELS = 6;
 // The Character tab's Head slot: the row that opens its picker, and the first item once the list
 // has populated. Both sit in the side panel, which only reaches its full width once the race
 // selector and the default attire have both arrived; recalibrate with smoke/drive.ts against
-// --path=/character if the panel's layout changes.
-const HEAD_SLOT = { x: 52, y: 436 };
-const HEAD_ITEM = { x: 113, y: 502 };
+// --path=/character if the panel's layout changes. `slot_ui` logs which slot a click opened, so a
+// miss against either point is caught in seconds rather than surfacing as a 180s timeout later.
+const HEAD_SLOT = { x: 52, y: 457 };
+const HEAD_ITEM = { x: 113, y: 525 };
 
 // How many more times the G-buffer has to bind its draw targets after an equipment change for the
 // composite to count as still running. A composite that has stopped holds this at exactly zero, so
@@ -163,6 +164,15 @@ let rebuilt = 0;
 // The Character tab's own menus and equipment list load over a separate fetch from the mesh
 // geometry, unordered against it; this is what says the picker has something to click on.
 let pieced = 0;
+// A slot's own picker button logs which slot it opened, which is what tells a click that landed on
+// the wrong row (a stale coordinate against a panel whose layout moved) apart from one that opened
+// nothing at all: both would otherwise only surface later, as the ambiguous timeout the redress
+// itself times out with.
+let picking = "";
+// Which slot a picked item was chosen for, the same way `picking` names which slot a click opened
+// the picker of: a click that lands on the wrong row inside an open picker still "succeeds" by
+// every other measure (a piece gets chosen, the model rebuilds), just for the wrong slot.
+let chose = "";
 
 function record(where: string, source: string, level: string, text: string) {
     const message: Message = { where: phase, source, level, text };
@@ -172,6 +182,10 @@ function record(where: string, source: string, level: string, text: string) {
     if (/assets\/(preview: |layer: )/.test(text)) decoded += 1;
     if (/assets\/mdl: .* meshes,/.test(text)) rebuilt += 1;
     if (/character: \d+ pieces to wear/.test(text)) pieced += 1;
+    const picked = text.match(/character: picking (\w+)/);
+    if (picked) picking = picked[1];
+    const chosen = text.match(/character: chose .* for (\w+)/);
+    if (chosen) chose = chosen[1];
     if (MUTED_TEXT.some((pattern) => pattern.test(text))) {
         muted.push(message);
         return;
@@ -426,6 +440,35 @@ async function click(cdp: Cdp, x: number, y: number) {
     await sleep(160);
 }
 
+/// Clicks a point and confirms, off a value read back rather than a screenshot, that the click
+/// landed on what it was aimed at. Retried rather than asserted on the first try: a canvas this
+/// loaded can still be a frame or two a second behind the pointer, and a press dispatched into
+/// that lag is answered by wherever the cursor last settled, not where it just moved to. A miss
+/// that never resolves across every attempt is a coordinate stale against the current layout (or
+/// a real fault upstream of the click landing at all), not this kind of timing noise.
+async function clickUntil(
+    cdp: Cdp,
+    point: { x: number; y: number },
+    read: () => string,
+    wants: string,
+    what: string,
+) {
+    let last = "";
+    for (let attempt = 0; attempt < 3; attempt++) {
+        await click(cdp, point.x, point.y);
+        try {
+            await waitFor(what, 4_000, async () => read() === wants);
+            return;
+        } catch {
+            last = read();
+        }
+    }
+    throw new Error(
+        `the click at (${point.x}, ${point.y}) never landed on ${what} in 3 attempts ` +
+            `(last seen: ${last || "nothing"}); recalibrate against smoke/drive.ts --path=/character`,
+    );
+}
+
 /// Drags the viewport, which is how the camera is turned. The move is stepped: the viewer reads a
 /// pointer delta per frame, and one jump would be a single frame's worth of turn.
 async function drag(cdp: Cdp, by: number) {
@@ -606,11 +649,17 @@ async function main() {
         // Programs are linked into a fresh, empty cache on every redress; this is what says how
         // many of them a single equipment click paid to retranslate.
         const linksBefore = (await counters(cdp)).links;
-        await click(cdp, HEAD_SLOT.x, HEAD_SLOT.y);
+        // A click that misses the Head row (a stale coordinate, or a press dispatched into a
+        // frame the canvas had not caught up to yet) opens nothing, and every wait below it would
+        // otherwise still run to its own timeout before saying so, reading as the redress itself
+        // failing. Caught here and named for what it is instead.
+        picking = "";
+        await clickUntil(cdp, HEAD_SLOT, () => picking, "Head", "the Head slot's picker");
         // The picker's item list is its own fetch, behind the model that is already on screen.
         await sleep(6000);
         await shot(cdp, "06-character-picker");
-        await click(cdp, HEAD_ITEM.x, HEAD_ITEM.y);
+        chose = "";
+        await clickUntil(cdp, HEAD_ITEM, () => chose, "Head", "an item chosen for Head");
         await waitFor(
             "the equipment change to rebuild the model",
             180_000,

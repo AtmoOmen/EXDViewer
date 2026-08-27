@@ -121,6 +121,39 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
+**`timed out after 180000ms waiting for the equipment change to rebuild the model`, character
+phase.** RESOLVED, and it was the harness, not the equipment-change path itself: `HEAD_SLOT`/
+`HEAD_ITEM` (`smoke/smoke.ts`), calibrated when the step landed at `d5bb5a1e`, had drifted stale
+against the side panel's current layout and landed on the "Equipment" heading rather than
+"Head: Bare", so the picker never opened and every wait behind it ran to its own budget before
+saying so. Confirmed by hand with `smoke/drive.ts --path=/character`: the old coordinate opens
+nothing, the same x one row lower opens the picker correctly. The code between "Race" and
+"Equipment" in `side_panel` reads byte-identical against `d5bb5a1e`, so the drift is not a code
+regression in the panel itself; what actually moved the row is unexplained. Recalibrated to
+`{x:52,y:457}`/`{x:113,y:525}`.
+
+A second, live-caught fault of the same class: the click can still miss at the *correct*
+coordinate, since the canvas right after a picker opens is still repainting at a frame or two a
+second under software rendering, and a press dispatched too soon after the move lands wherever
+the pointer was on the previous frame rather than where it just moved to (the same lag
+`smoke/drive.ts` already documents for its own clicks). One run's `HEAD_ITEM` click silently chose
+nothing this way, at the same coordinate that had just worked moments before.
+
+Fixed at both ends. `slot_ui` (`viewer/src/character/mod.rs`) now logs which slot a click opened
+(`character: picking {slot}`) and which slot an item was chosen for (`character: chose {piece} for
+{slot}`); `smoke.ts`'s new `clickUntil` reads that log back, retries a miss up to three times, and
+fails in seconds with an attributable "recalibrate against smoke/drive.ts" message instead of
+waiting out the redress step's own 180s budget with no clue why.
+
+Verified against a real fault the way the step's own author did: poisoned `mdl::compose`/
+`Rendered::redress` so a redress still rebuilds the mesh (the `assets/mdl: ... meshes,` log fires,
+same as a healthy run) and then fails, matching "the model rebuilt but the composite stopped
+running" exactly; the step reported the intended `the G-buffer never bound another draw target in
+the 30s...` failure, and the injected fault was reverted after. A stale coordinate on its own now
+fails in about 15s with the new attributable message instead of the old 180s timeout. A full
+`smoke/run.sh` (model, shaders, channels, scene, level, character, all nine avfx effects) passes
+clean end to end with the fix in place.
+
 **`Feedback loop formed between Framebuffer and active Texture`, in the scene and level phases.**
 RESOLVED. `blended()`'s resolve leg (`viewer/src/assets/viewers/layer/scene/gpu.rs`) drew into
 `self.lit`, whose depth attachment is the live G-buffer depth, while at least one blended surface

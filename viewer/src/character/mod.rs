@@ -1492,6 +1492,9 @@ impl CharacterBuilder {
             .min_size(egui::vec2(ui.available_width(), 0.0));
         if ui.add(button).clicked() {
             self.picking = (!open).then_some(slot);
+            if let Some(slot) = self.picking {
+                log::info!("character: picking {}", slot.name());
+            }
         }
         if visored {
             ui.checkbox(&mut self.visor, "Visor");
@@ -1598,6 +1601,11 @@ impl CharacterBuilder {
                 });
         }
         if let Some(index) = picked {
+            log::info!(
+                "character: chose {} for {}",
+                self.creator.pieces[at][index].name,
+                slot.name()
+            );
             self.chosen[at] = Some(index);
         }
     }

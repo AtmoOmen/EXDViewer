@@ -85,9 +85,15 @@ async function main() {
             console.log(`   !! ${held.source}/${held.level}: ${String(held.text).slice(0, 400)}`);
         }
     });
+    cdp.on("Network.responseReceived", (p: any) => {
+        if (p.response?.status >= 400) {
+            console.log(`   !! ${p.response.status} ${p.response.url}`);
+        }
+    });
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
     await cdp.send("Log.enable");
+    await cdp.send("Network.enable");
     // The same counters the gate asserts, so a shot comes with the GL work behind it rather than
     // leaving a draw that stopped happening to the eye.
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", {

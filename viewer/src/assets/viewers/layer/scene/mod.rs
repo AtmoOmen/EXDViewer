@@ -4265,7 +4265,9 @@ impl Scene {
             );
             let mut load =
                 pasted.lost_focus() && ui.input(|held| held.key_pressed(egui::Key::Enter));
-            ui.horizontal(|ui| {
+            // Wrapped rather than run on: four buttons in one row is wider than the panel's own
+            // minimum, and a row that can't shrink pins the whole panel at its own width.
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Import preset").clicked() {
                     self.picking = Some(TrackedPromise::spawn_local(async {
                         let held = rfd::AsyncFileDialog::new()
@@ -4417,7 +4419,7 @@ impl Scene {
                 .filter(|model| matches!(model.state, State::Ready))
                 .count();
             ui.scope(|ui| {
-                ui.set_max_width(DETAILS_ROW_WIDTH);
+                ui.set_max_width(ui.available_width().min(DETAILS_ROW_WIDTH));
                 facts(
                     ui,
                     "scene_counts",

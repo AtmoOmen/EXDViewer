@@ -755,9 +755,41 @@ impl Camera {
     }
 }
 
+/// A camera driven for one frame by a host outside this view, in place of the free orbit camera.
+/// `near` and `far` here are only the projection's clip planes; the world streaming distance stays
+/// keyed on the load distance regardless of what a cutscene states.
+pub struct Drive {
+    pub position: Vec3,
+    pub forward: Vec3,
+    pub up: Vec3,
+    /// Vertical, and stated for a 16:9 frame: [`refit_16_9_fov`] carries it to the viewport's own
+    /// aspect.
+    pub fov_degrees: f32,
+    pub near: f32,
+    pub far: f32,
+}
+
+/// A 16:9-authored vertical field of view, carried to another aspect ratio by keeping its
+/// horizontal field rather than its vertical one.
+fn refit_16_9_fov(vertical_degrees: f32, aspect: f32) -> f32 {
+    const AUTHORED: f32 = 16.0 / 9.0;
+    let half_horizontal = (vertical_degrees.to_radians() * 0.5).tan() * AUTHORED;
+    2.0 * (half_horizontal / aspect).atan().to_degrees()
+}
+
 pub struct Scene {
     camera: Camera,
     home: Camera,
+    /// A camera a host outside this view wants for the next frame, in place of the free orbit
+    /// camera. Taken (and so cleared) as soon as that frame draws, so a host that stops calling
+    /// [`Scene::drive`] hands control back to the free camera on its very next frame.
+    drive: Option<Drive>,
+    /// Markers a host outside this view wants drawn over the frame, in scene space with a label.
+    /// Cleared the same way [`Self::drive`] is.
+    markers: Vec<(Vec3, String)>,
+    /// Whether the last frame drawn was driven, for the side panel to grey its own camera controls
+    /// against: [`Self::drive`] itself is forgotten the instant a frame reads it.
+    driving: bool,
     /// The level this view was opened for, which is what a preset's own is checked against.
     path: String,
     /// The last TitleEdit preset read, which is where a capture was taken from.
@@ -1075,6 +1107,9 @@ impl Scene {
         let mut scene = Self {
             camera: home,
             home,
+            drive: None,
+            markers: Vec::new(),
+            driving: false,
             path: path.to_owned(),
             preset: preset::taken(path),
             picking: None,
@@ -1203,6 +1238,19 @@ impl Scene {
             scene.preset = Some(held);
         }
         scene
+    }
+
+    /// Drives the camera for the next frame in place of the free orbit camera, and suppresses the
+    /// mouse and keyboard input that would otherwise fly it. Takes effect once and is forgotten, so
+    /// a host that stops calling this hands control back to the free camera on its next frame.
+    pub fn drive(&mut self, drive: Drive) {
+        self.drive = Some(drive);
+    }
+
+    /// Labels drawn over the next frame at the given scene-space points, alongside whatever a
+    /// driven camera shows. Forgotten the same way [`Self::drive`] is.
+    pub fn mark(&mut self, markers: Vec<(Vec3, String)>) {
+        self.markers = markers;
     }
 
     /// Reads placements out of a file's layers, queueing every shared group it names.
@@ -3727,17 +3775,21 @@ impl Scene {
             return;
         }
 
-        if response.dragged_by(egui::PointerButton::Primary) {
+        // A driven camera answers to whatever is driving it, not the mouse and keyboard. Kept on
+        // the struct too, since the side panel's own controls are drawn from outside this method.
+        self.driving = self.drive.is_some();
+        let driving = self.driving;
+        if !driving && response.dragged_by(egui::PointerButton::Primary) {
             let delta = response.drag_delta();
             self.camera.yaw -= delta.x * 0.005;
             self.camera.pitch = (self.camera.pitch - delta.y * 0.005).clamp(-1.5, 1.5);
         }
         let mut moved = Vec3::ZERO;
-        if response.dragged_by(egui::PointerButton::Secondary) {
+        if !driving && response.dragged_by(egui::PointerButton::Secondary) {
             let delta = response.drag_delta();
             moved += (self.camera.right() * delta.x + Vec3::Y * delta.y) * self.load * 0.0005;
         }
-        if response.hovered() {
+        if !driving && response.hovered() {
             let scroll = ui.input(|input| input.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 moved += self.camera.forward() * scroll * self.load * 0.002;
@@ -3745,7 +3797,8 @@ impl Scene {
         }
         // Keys only where nothing else has taken them, so typing in the browser's own fields does
         // not fly the camera along with it.
-        let flying = (response.hovered() || response.dragged())
+        let flying = !driving
+            && (response.hovered() || response.dragged())
             && ui.memory(|memory| memory.focused().is_none());
         if flying {
             let (ahead, side, up, step) = ui.input(|input| {
@@ -3769,6 +3822,18 @@ impl Scene {
                         * self.speed;
                 ui.ctx().request_repaint();
             }
+        }
+        // Taken rather than borrowed: a host that stops driving next frame gets the free camera
+        // back, and this frame still needs to know it was driven for the clip planes below.
+        let driven = self.drive.take();
+        if let Some(drive) = &driven {
+            let forward = drive.forward.normalize_or_zero();
+            self.camera = Camera {
+                position: drive.position,
+                yaw: forward.x.atan2(forward.z),
+                pitch: forward.y.clamp(-1.0, 1.0).asin(),
+            };
+            self.fov = drive.fov_degrees;
         }
         if moved != Vec3::ZERO {
             self.camera.position += moved;
@@ -3796,15 +3861,38 @@ impl Scene {
         }
 
         let eye = self.camera.position;
-        let view = Mat4::look_at_rh(eye, eye + self.camera.forward(), Vec3::Y);
-        let far = self.load * 1.5;
-        // Capped as well as scaled: at the largest load distance a proportional near plane would
-        // sit further out than the walls of an interior.
-        let near = (far * 0.0002).min(0.2);
+        // A drive's own forward/up are used directly rather than rebuilt from the yaw/pitch
+        // `self.camera` stores them as: that round trip degenerates for a shot looking straight up
+        // or down, which an orbit camera's clamped pitch never reaches but a cutscene's camera can.
+        // The free camera never rolls itself, so a raw `Vec3::Y` hint is exactly what it wants;
+        // `look_at_rh` levels it against forward on its own.
+        let (forward, up) = match &driven {
+            Some(drive) => (drive.forward.normalize_or_zero(), drive.up.normalize_or_zero()),
+            None => (self.camera.forward(), Vec3::Y),
+        };
+        let view = Mat4::look_at_rh(eye, eye + forward, up);
+        // A driven camera's own clip planes, where it states them: the world streaming distance
+        // stays keyed on the load distance regardless.
+        let (near, far) = match &driven {
+            Some(drive) => (drive.near, drive.far),
+            None => {
+                let far = self.load * 1.5;
+                // Capped as well as scaled: at the largest load distance a proportional near plane
+                // would sit further out than the walls of an interior.
+                ((far * 0.0002).min(0.2), far)
+            }
+        };
+        // A driven shot's own field of view is stated for a 16:9 frame (see the `C004` doc); refit
+        // it to the viewport's actual aspect so its horizontal field is what the shot states rather
+        // than whatever a narrower or wider panel would crop it to.
+        let vertical_fov = match &driven {
+            Some(_) => refit_16_9_fov(self.fov, rect.width() / rect.height()),
+            None => self.fov,
+        };
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against.
         let projection = Mat4::perspective_rh(
-            self.fov.to_radians(),
+            vertical_fov.to_radians(),
             rect.width() / rect.height(),
             near,
             far,
@@ -3948,16 +4036,25 @@ impl Scene {
             })),
         });
         self.outline(ui, rect, projection * view);
+        // Taken the same way the drive is: a host that stops asking for markers gets none next
+        // frame, rather than a stale label left over another view.
+        for (point, label) in std::mem::take(&mut self.markers) {
+            self.mark_point(ui, rect, projection * view, point, &label);
+        }
         self.state(
             rect,
             ui.ctx().pixels_per_point(),
             ui.input(|input| input.stable_dt),
             effects_drawn,
+            vertical_fov,
         );
     }
 
     /// Publishes what this frame was drawn from, for a harness measuring it against a capture.
-    fn state(&self, rect: egui::Rect, scale: f32, step: f32, effects_drawn: usize) {
+    /// `vertical_fov` is what the projection matrix actually used, which for a driven shot is not
+    /// [`Self::fov`]: that field states the shot's own 16:9 value, refit here to the viewport's
+    /// real aspect.
+    fn state(&self, rect: egui::Rect, scale: f32, step: f32, effects_drawn: usize, vertical_fov: f32) {
         let (exposure, measured) = match self.exposure.is_some() {
             true => {
                 let held = self.renderer.lock().unwrap();
@@ -3973,7 +4070,7 @@ impl Scene {
             preset: self.preset.as_ref().map(|held| held.name.as_str()),
             eye: self.camera.position.to_array(),
             forward: self.camera.forward().to_array(),
-            fov: self.fov,
+            fov: vertical_fov,
             viewport: [
                 rect.left() * scale,
                 rect.top() * scale,
@@ -4131,6 +4228,32 @@ impl Scene {
                 .unwrap_or_default(),
             egui::FontId::monospace(11.0),
             stroke.color,
+        );
+    }
+
+    /// A labelled point, projected the same way [`Self::outline`] projects a box's corners. Behind
+    /// the eye, it draws nothing rather than a label pinned to the wrong edge of the screen.
+    fn mark_point(&self, ui: &egui::Ui, rect: egui::Rect, clip: Mat4, point: Vec3, label: &str) {
+        let clipped = clip * point.extend(1.0);
+        if clipped.w <= 0.0 {
+            return;
+        }
+        let at = egui::pos2(
+            rect.left() + (clipped.x / clipped.w * 0.5 + 0.5) * rect.width(),
+            rect.top() + (0.5 - clipped.y / clipped.w * 0.5) * rect.height(),
+        );
+        if !rect.contains(at) {
+            return;
+        }
+        let painter = ui.painter_at(rect);
+        let color = Color32::from_rgb(120, 200, 255);
+        painter.circle_stroke(at, 4.0, egui::Stroke::new(1.5, color));
+        painter.text(
+            at + egui::vec2(6.0, -6.0),
+            egui::Align2::LEFT_BOTTOM,
+            label,
+            egui::FontId::monospace(11.0),
+            color,
         );
     }
 
@@ -4390,9 +4513,18 @@ impl Scene {
             ui.label(RichText::new("Speed").weak());
             ui.add(egui::Slider::new(&mut self.speed, 0.1..=20.0).logarithmic(true));
             ui.label(RichText::new("Field of view").weak());
-            changed |= ui
-                .add(egui::Slider::new(&mut self.fov, 20.0..=120.0).suffix("\u{b0}"))
-                .changed();
+            match self.driving {
+                // Derived from the shot's own focal length while a cutscene drives the camera,
+                // so it is a label rather than a slider here.
+                true => {
+                    ui.label(RichText::new(format!("{:.1}\u{b0}", self.fov)).monospace());
+                }
+                false => {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.fov, 20.0..=120.0).suffix("\u{b0}"))
+                        .changed();
+                }
+            }
             ui.checkbox(&mut self.look.vignette, "Vignette").on_hover_text(
                 "Darken the frame's corners with the game's own pass. The ellipse it spreads over \
                  follows the frame's own shape, but the two below are choices: no file states \
@@ -4711,6 +4843,18 @@ mod tests {
         let quarter = std::f32::consts::FRAC_PI_2;
         assert!((rotation([0.0, quarter, 0.0]) * Vec3::Z - Vec3::X).length() < 1e-5);
         assert!((rotation([quarter, 0.0, quarter]) * Vec3::Z - Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn refitting_to_the_authored_aspect_changes_nothing() {
+        assert!((refit_16_9_fov(30.0, 16.0 / 9.0) - 30.0).abs() < 1e-4);
+    }
+
+    /// A narrower viewport than 16:9 must widen the vertical field to keep the same horizontal
+    /// one, not crop it.
+    #[test]
+    fn refitting_to_a_narrower_aspect_widens_the_vertical_field() {
+        assert!(refit_16_9_fov(30.0, 1.0) > 30.0);
     }
 
     /// A whole turn starts over where it ends, so it never runs backwards; anything else swings

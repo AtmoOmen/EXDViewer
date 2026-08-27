@@ -3510,9 +3510,12 @@ impl Buffer {
         for name in ["m_GBufferSize", "m_RenderTargetSize"] {
             put(water, name, vec![width, height, 1.0 / width, 1.0 / height]);
         }
-        for name in ["m_GBufferPixelSize", "m_RenderTargetPixelSize"] {
-            put(water, name, vec![1.0 / width, 1.0 / height, width, height]);
-        }
+        put(water, "m_GBufferPixelSize", vec![1.0 / width, 1.0 / height, width, height]);
+        // river.shpk's own resolve reads `.zw` as the constant that completes an NDC-to-UV
+        // remap (`clip * (0.5, -0.5) + this`); water.shpk's own resolve does the identical sum
+        // with a bare `0.5` literal in the same spot, which is what a buffer read of this name
+        // stands in for here.
+        put(water, "m_RenderTargetPixelSize", vec![1.0 / width, 1.0 / height, 0.5, 0.5]);
         put(
             water,
             "m_HalfViewPositionPixelSize",

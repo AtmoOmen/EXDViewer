@@ -86,10 +86,28 @@ pub struct Rig {
 
 impl Rig {
     pub fn new(bones: &[String], parent_indices: &[i16], reference_pose: &[Transform]) -> Self {
-        let names = bones.to_vec();
-        let parents = parent_indices.to_vec();
-        let reference = reference_pose.to_vec();
+        let at = bones
+            .iter()
+            .enumerate()
+            .map(|(bone, name)| (name.clone(), bone))
+            .collect();
+        Self::built(
+            bones.to_vec(),
+            parent_indices.to_vec(),
+            reference_pose.to_vec(),
+            at,
+        )
+    }
 
+    /// Shared by [`Self::new`] and [`Self::merged`], which differ only in where `at` came from: a
+    /// merge keeps a name apart from the base's own rather than handing every lookup of it to
+    /// whichever bone claimed it first.
+    fn built(
+        names: Vec<String>,
+        parents: Vec<i16>,
+        reference: Vec<Transform>,
+        at: HashMap<String, usize>,
+    ) -> Self {
         let mut children: Vec<Vec<usize>> = vec![Vec::new(); names.len()];
         let mut roots = Vec::new();
         for bone in 0..names.len() {
@@ -127,11 +145,6 @@ impl Rig {
             ("Scale", 26),
         ];
 
-        let at = names
-            .iter()
-            .enumerate()
-            .map(|(bone, name)| (name.clone(), bone))
-            .collect();
         let mut rig = Self {
             names,
             at,
@@ -146,30 +159,47 @@ impl Rig {
         rig
     }
 
-    /// This rig with another skeleton's bones hung off the ones it already names. A name both
-    /// carry stays this one's: an extra skeleton states the head where its own file put it rather
-    /// than where the body's chain carries it.
-    pub fn merged(&self, names: &[String], parents: &[i16], reference: &[Transform]) -> Self {
+    /// This rig with another skeleton's bones hung off the ones it already names, scoped to
+    /// `origin` so a name it shares with the base or a previous extra for an unrelated bone is
+    /// kept apart rather than merged into it. A name both carry stays this one's only where it is
+    /// the extra skeleton's own structural root: an extra skeleton states the head where its own
+    /// file put it rather than where the body's chain carries it.
+    pub fn merged(
+        &self,
+        origin: &str,
+        names: &[String],
+        parents: &[i16],
+        reference: &[Transform],
+    ) -> Self {
         let mut held = self.names.clone();
         let mut hung = self.parents.clone();
         let mut rest = self.reference.clone();
         let mut at = self.at.clone();
         for (bone, name) in names.iter().enumerate() {
-            if at.contains_key(name) {
+            let root = parent_of(parents, bone).is_none();
+            if root && at.contains_key(name) {
                 continue;
             }
             // A bone whose parent is nowhere to be found would stand at the world origin, which is
             // further from where it belongs than leaving it out entirely.
-            let Some(parent) = parent_of(parents, bone).and_then(|parent| at.get(&names[parent]))
-            else {
+            let Some(parent) = parent_of(parents, bone).and_then(|parent| {
+                let name = &names[parent];
+                at.get(&scoped(origin, name))
+                    .or_else(|| at.get(name))
+                    .copied()
+            }) else {
                 continue;
             };
-            hung.push(*parent as i16);
+            hung.push(parent as i16);
             rest.push(reference[bone]);
-            at.insert(name.clone(), held.len());
+            let key = match at.contains_key(name) {
+                true => scoped(origin, name),
+                false => name.clone(),
+            };
+            at.insert(key, held.len());
             held.push(name.clone());
         }
-        Self::new(&held, &hung, &rest)
+        Self::built(held, hung, rest, at)
     }
 
     pub fn bones(&self) -> usize {
@@ -184,6 +214,16 @@ impl Rig {
     /// Which bone the skeleton calls `name`.
     pub fn bone(&self, name: &str) -> Option<usize> {
         self.at.get(name).copied()
+    }
+
+    /// Which bone `name` reaches for a motion authored against `origin`'s own skeleton,
+    /// preferring a bone `origin` had to keep apart from the base's over one they both happened
+    /// to call the same thing.
+    fn resolve(&self, origin: Option<&str>, name: &str) -> Option<usize> {
+        origin
+            .and_then(|origin| self.at.get(&scoped(origin, name)))
+            .or_else(|| self.at.get(name))
+            .copied()
     }
 
     /// Which bone `bone`'s own transform composes onto, if any.
@@ -226,10 +266,19 @@ impl Rig {
     /// Lays a motion's tracks over `locals` at `time`.
     ///
     /// A motion's tracks are in the order of the skeleton it was authored against, which need not
-    /// be this rig, so `ordering` names that skeleton's bones and the two are matched by name. A
-    /// motion that blends states a delta in each bone's own frame rather than a pose of its own,
-    /// so it composes onto whatever is already there.
-    pub fn lay(&self, locals: &mut [Transform], binding: &Binding, ordering: &[String], time: f32) {
+    /// be this rig, so `ordering` names that skeleton's bones and the two are matched by name.
+    /// `origin` is that skeleton's own path where it is an extra one, so a name it shares with the
+    /// base or another extra reaches the bone kept apart for it rather than whichever claimed the
+    /// name first. A motion that blends states a delta in each bone's own frame rather than a pose
+    /// of its own, so it composes onto whatever is already there.
+    pub fn lay(
+        &self,
+        locals: &mut [Transform],
+        binding: &Binding,
+        ordering: &[String],
+        origin: Option<&str>,
+        time: f32,
+    ) {
         let blends = binding.blend_hint() != 0;
         for (track, sampled) in binding.motion().sample(time).into_iter().enumerate() {
             let Some(bone) = binding
@@ -237,7 +286,7 @@ impl Rig {
                 .get(track)
                 .and_then(|bone| usize::try_from(*bone).ok())
                 .and_then(|bone| ordering.get(bone))
-                .and_then(|name| self.bone(name))
+                .and_then(|name| self.resolve(origin, name))
             else {
                 continue;
             };
@@ -353,6 +402,12 @@ fn over(base: &Transform, delta: &Transform) -> Transform {
         rotation: (rotation * Quat::from_array(delta.rotation)).to_array(),
         scale: [scale.x, scale.y, scale.z, base.scale[3]],
     }
+}
+
+/// A name kept apart from whatever the base or another extra already called the same thing,
+/// since two skeletons can each have their own unrelated bone of that name.
+fn scoped(origin: &str, name: &str) -> String {
+    format!("{origin}\u{0}{name}")
 }
 
 /// A bone with nothing above it, and the one case a file could get wrong: a parent at or past the
@@ -518,6 +573,7 @@ mod tests {
             &[transform([0.0, 0.0, 0.0]), transform([0.0, 1.0, 0.0])],
         );
         let merged = body.merged(
+            "face",
             &["j_kao".to_owned(), "j_f_face".to_owned()],
             &[-1, 0],
             &[transform([0.0, 9.0, 0.0]), transform([0.0, 0.1, 0.0])],
@@ -525,6 +581,48 @@ mod tests {
         assert_eq!(merged.bone("j_kao"), Some(1));
         assert_eq!(merged.bone("j_f_face"), Some(2));
         assert_eq!(merged.bone("j_f_ago"), None);
+    }
+
+    /// The extra skeleton's own root aliases onto the base's, same name and all, but a bone one
+    /// level under it that only happens to share a name with an unrelated base bone must stay its
+    /// own: Viera's face skeleton carries a `j_ago` that is not the body's jaw.
+    #[test]
+    fn a_colliding_non_root_bone_stays_apart_from_the_bases_own() {
+        let base = Rig::new(
+            &["n_root".to_owned(), "j_kao".to_owned(), "j_ago".to_owned()],
+            &[-1, 0, 1],
+            &[
+                transform([0.0, 0.0, 0.0]),
+                transform([0.0, 1.0, 0.0]),
+                transform([0.0, 0.1, 0.0]),
+            ],
+        );
+        let merged = base.merged(
+            "face",
+            &[
+                "j_kao".to_owned(),
+                "j_ago".to_owned(),
+                "j_f_noanim_ago".to_owned(),
+            ],
+            &[-1, 0, 1],
+            &[
+                transform([0.0, 9.0, 0.0]),
+                transform([0.0, 0.2, 0.0]),
+                transform([0.0, 0.05, 0.0]),
+            ],
+        );
+        assert_eq!(merged.bones(), 5);
+        let base_ago = merged.bone("j_ago").expect("the body keeps its own jaw");
+        assert_eq!(base_ago, 2);
+        let face_ago = merged
+            .resolve(Some("face"), "j_ago")
+            .expect("the face's own j_ago must not be dropped");
+        assert_ne!(face_ago, base_ago, "the two j_agos collapsed into one bone");
+        assert_eq!(merged.parent(face_ago), merged.bone("j_kao"));
+        let noanim = merged
+            .resolve(Some("face"), "j_f_noanim_ago")
+            .expect("added with nothing to collide with");
+        assert_eq!(merged.parent(noanim), Some(face_ago));
     }
 
     /// A parent index at or past its own bone would leave the ordered walks below it unreachable,

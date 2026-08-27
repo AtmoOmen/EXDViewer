@@ -42,9 +42,77 @@ def buf_name(buf):
     name_cache[buf] = n
     return n
 
+def kid(e, n):
+    """Direct child by name, so a deep search never picks a homonym out of a nested struct."""
+    return next((c for c in e if c.get('name') == n), None)
+
+def enum(e, n):
+    c = kid(e, n) if e is not None else None
+    return c.get('string') if c is not None else None
+
+def num(e, n):
+    c = kid(e, n) if e is not None else None
+    return None if c is None else (float(c.text) if c.get('typename') == 'float' else int(c.text))
+
+def stencil(e):
+    if e is None: return None
+    return {'fail': enum(e,'failOp'), 'pass': enum(e,'passOp'), 'depthfail': enum(e,'depthFailOp'),
+            'cmp': enum(e,'compareOp'), 'cmpmask': num(e,'compareMask'),
+            'writemask': num(e,'writeMask'), 'ref': num(e,'reference')}
+
+def pipeline_state(ci):
+    ds = kid(ci, 'pDepthStencilState'); rs = kid(ci, 'pRasterizationState')
+    cb = kid(ci, 'pColorBlendState');   vi = kid(ci, 'pVertexInputState')
+    dy = kid(ci, 'pDynamicState');      ia = kid(ci, 'pInputAssemblyState')
+    ms = kid(ci, 'pMultisampleState');  rd = kid(ci, 'pNext')
+    st = {'layout': (kid(ci,'layout').text.strip() if kid(ci,'layout') is not None else None),
+          'topology': enum(ia, 'topology'), 'samples': enum(ms, 'rasterizationSamples'),
+          'a2c': num(ms, 'alphaToCoverageEnable')}
+    if ds is not None and ds.tag != 'null':
+        st['depth'] = {'test': num(ds,'depthTestEnable'), 'write': num(ds,'depthWriteEnable'),
+                       'cmp': enum(ds,'depthCompareOp'), 'bounds': num(ds,'depthBoundsTestEnable'),
+                       'min': num(ds,'minDepthBounds'), 'max': num(ds,'maxDepthBounds'),
+                       'stencil': num(ds,'stencilTestEnable'),
+                       'front': stencil(kid(ds,'front')), 'back': stencil(kid(ds,'back'))}
+    if rs is not None and rs.tag != 'null':
+        st['raster'] = {'cull': enum(rs,'cullMode'), 'front': enum(rs,'frontFace'),
+                        'polygon': enum(rs,'polygonMode'), 'biasenable': num(rs,'depthBiasEnable'),
+                        'bias': num(rs,'depthBiasConstantFactor'), 'slope': num(rs,'depthBiasSlopeFactor'),
+                        'clamp': num(rs,'depthClampEnable'), 'discard': num(rs,'rasterizerDiscardEnable')}
+    if cb is not None and cb.tag != 'null':
+        att = []
+        arr = kid(cb, 'pAttachments')
+        for a in (arr if arr is not None else []):
+            att.append({'on': num(a,'blendEnable'), 'srcc': enum(a,'srcColorBlendFactor'),
+                        'dstc': enum(a,'dstColorBlendFactor'), 'opc': enum(a,'colorBlendOp'),
+                        'srca': enum(a,'srcAlphaBlendFactor'), 'dsta': enum(a,'dstAlphaBlendFactor'),
+                        'opa': enum(a,'alphaBlendOp'), 'mask': enum(a,'colorWriteMask')})
+        st['blend'] = att
+        st['logicop'] = num(cb, 'logicOpEnable')
+        consts = kid(cb, 'blendConstants')
+        if consts is not None: st['blendconst'] = [float(c.text) for c in consts]
+    if vi is not None and vi.tag != 'null':
+        binds = kid(vi, 'pVertexBindingDescriptions'); attrs = kid(vi, 'pVertexAttributeDescriptions')
+        st['bindings'] = [{'b': num(b,'binding'), 'stride': num(b,'stride'), 'rate': enum(b,'inputRate')}
+                          for b in (binds if binds is not None else [])]
+        st['attribs'] = [{'loc': num(a,'location'), 'b': num(a,'binding'), 'fmt': enum(a,'format'),
+                          'off': num(a,'offset')} for a in (attrs if attrs is not None else [])]
+    if dy is not None and dy.tag != 'null':
+        arr = kid(dy, 'pDynamicStates')
+        st['dynamic'] = [d.get('string','').replace('VK_DYNAMIC_STATE_','') for d in (arr if arr is not None else [])]
+    if rd is not None and rd.get('typename') == 'VkPipelineRenderingCreateInfo':
+        fmts = kid(rd, 'pColorAttachmentFormats')
+        st['targets'] = [f.get('string') for f in (fmts if fmts is not None else [])]
+        st['depthfmt'] = enum(rd, 'depthAttachmentFormat')
+        st['stencilfmt'] = enum(rd, 'stencilAttachmentFormat')
+    return st
+
+
 images, views, sets, draws, passes, pipelines = {}, {}, {}, [], [], {}
 bufmem, memblob, bufsize, shadermodules, samplers = {}, {}, {}, {}, {}
+pipestate = {}
 cur_pass, cur_pipe, cur_cull, bound = None, None, None, {}
+cur_front, cur_ref, cur_index, cur_verts = None, None, None, {}
 events = []
 
 def stage_entry(s):
@@ -69,6 +137,7 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
         if rid is not None and ci is not None:
             ext = named(ci,'extent')
             images[rid.text.strip()] = {'w':int(named(ext,'width').text),'h':int(named(ext,'height').text),
+                'd':int(named(ext,'depth').text),'type':(named(ci,'imageType').get('string') or ''),
                 'fmt':(named(ci,'format').get('string') or ''),'layers':int(named(ci,'arrayLayers').text),
                 'mips':int(named(ci,'mipLevels').text)}
     elif n == 'vkCreateImageView':
@@ -143,28 +212,49 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
         rid = named(elem,'Pipeline')
         stages = [stage_entry(s) for s in elem.iter()
                   if s.tag=='struct' and s.get('typename')=='VkPipelineShaderStageCreateInfo']
-        if rid is not None: pipelines[rid.text.strip()] = stages
+        ci = next((e for e in elem if e.get('name') == 'CreateInfo'), None)
+        if rid is not None:
+            pipelines[rid.text.strip()] = stages
+            if ci is not None: pipestate[rid.text.strip()] = pipeline_state(ci)
     elif n == 'vkCreateComputePipelines':
         rid = named(elem,'Pipeline')
         s = next((e for e in elem.iter() if e.tag=='struct' and e.get('typename')=='VkPipelineShaderStageCreateInfo'), None)
         if rid is not None and s is not None: pipelines[rid.text.strip()] = [stage_entry(s)]
     elif n == 'vkCmdBeginRendering':
-        col, dep = [], None
+        col, dep, ops, depop = [], None, [], None
         for e in elem.iter():
             if e.tag=='struct' and e.get('typename')=='VkRenderingAttachmentInfo':
                 iv = named(e,'imageView'); nm = e.get('name') or ''
                 v = iv.text.strip() if iv is not None else None
-                if 'epth' in nm: dep = v
-                elif 'tencil' not in nm: col.append(v)
+                op = {'load': enum(e,'loadOp'), 'store': enum(e,'storeOp'),
+                      'resolve': enum(e,'resolveMode')}
+                if 'epth' in nm: dep, depop = v, op
+                elif 'tencil' not in nm:
+                    col.append(v); ops.append(op)
         ext = next(((int(named(e,'width').text), int(named(e,'height').text))
                     for e in elem.iter() if e.tag=='struct' and e.get('typename')=='VkRect2D'), None)
         cur_pass = len(passes)
-        passes.append({'idx':idx,'color':col,'depth':dep,'extent':ext})
+        passes.append({'idx':idx,'color':col,'depth':dep,'extent':ext,'ops':ops,'depthop':depop})
     elif n == 'vkCmdEndRendering': cur_pass = None
     elif n == 'vkCmdBindPipeline':
         p = named(elem,'pipeline'); cur_pipe = p.text.strip() if p is not None else None
     elif n == 'vkCmdSetCullMode':
         c = named(elem,'cullMode'); cur_cull = c.get('string') if c is not None else None
+    elif n == 'vkCmdSetFrontFace':
+        c = named(elem,'frontFace'); cur_front = c.get('string') if c is not None else None
+    elif n == 'vkCmdSetStencilReference':
+        c = named(elem,'reference'); cur_ref = int(c.text) if c is not None else None
+    elif n in ('vkCmdBindIndexBuffer', 'vkCmdBindIndexBuffer2'):
+        b = named(elem,'buffer'); o = named(elem,'offset'); t = named(elem,'indexType')
+        cur_index = {'r': b.text.strip() if b is not None else None,
+                     'o': int(o.text) if o is not None else 0,
+                     't': t.get('string') if t is not None else None}
+    elif n in ('vkCmdBindVertexBuffers', 'vkCmdBindVertexBuffers2'):
+        first = int(named(elem,'firstBinding').text)
+        bufs = next(([x.text.strip() for x in e if x.tag=='ResourceId'] for e in elem.iter() if e.get('name')=='pBuffers'), [])
+        offs = next(([int(x.text) for x in e] for e in elem.iter() if e.get('name')=='pOffsets'), [])
+        for at, b in enumerate(bufs):
+            cur_verts[first+at] = {'r': b, 'o': offs[at] if at < len(offs) else 0}
     elif n == 'vkCmdBindDescriptorSets':
         first = int(named(elem,'firstSet').text)
         got = next(([x.text.strip() for x in e if x.tag == 'ResourceId'] for e in elem.iter() if e.get('name')=='pDescriptorSets'), [])
@@ -172,14 +262,21 @@ for ev, elem in ET.iterparse(XML, events=("end",)):
     elif n in ('vkCmdDrawIndexed','vkCmdDraw'):
         cnt = named(elem,'indexCount'); cnt = cnt if cnt is not None else named(elem,'vertexCount')
         inst = named(elem,'instanceCount')
+        first = named(elem,'firstIndex')
+        if first is None: first = named(elem,'firstVertex')
+        voff = named(elem,'vertexOffset')
         draws.append({'idx':idx,'pass':cur_pass,'pipe':cur_pipe,'cull':cur_cull,
             'count':int(cnt.text) if cnt is not None else 0,
-            'instances':int(inst.text) if inst is not None else 0, 'sets':dict(bound)})
+            'instances':int(inst.text) if inst is not None else 0, 'sets':dict(bound),
+            'front':cur_front, 'ref':cur_ref,
+            'first':int(first.text) if first is not None else 0,
+            'voff':int(voff.text) if voff is not None else 0,
+            'ib':cur_index, 'vb':dict(cur_verts)})
     elem.clear()
 
 json.dump({'images':images,'views':views,'sets':sets,'draws':draws,'passes':passes,
            'pipelines':pipelines,'bufmem':bufmem,'memblob':memblob,'bufsize':bufsize,
-           'samplers':samplers}, open(OUT,'w'))
+           'samplers':samplers,'pipestate':pipestate}, open(OUT,'w'))
 named_shaders = sum(1 for s in pipelines.values() for e in s if e[3])
 total_shaders = sum(len(s) for s in pipelines.values())
 print(len(draws),'draws',len(sets),'sets',len(memblob),'memory blobs',len(pipelines),'pipelines',

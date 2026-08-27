@@ -2,6 +2,7 @@ mod cutscenes;
 mod dag;
 mod derive;
 mod detail;
+mod dialogue_box;
 pub mod glyph;
 pub mod graph;
 mod index;

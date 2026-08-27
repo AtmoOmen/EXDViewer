@@ -3,14 +3,15 @@
 use std::collections::HashMap;
 
 use egui::{
-    Align, Button, CentralPanel, Color32, Layout, RichText, ScrollArea, Sense,
-    containers::panel::Panel,
+    containers::panel::Panel, Align, Button, CentralPanel, Color32, Layout, RichText, ScrollArea,
+    Sense,
 };
 
 use crate::quests::{
-    Action, Load,
-    detail::Detail,
+    detail::{Detail, Line},
+    dialogue_box,
     script::{Arm, Script, Step},
+    Action, Load,
 };
 
 /// Frames a second, which is what an animation pack states for a timeline. The script's own `Wait`
@@ -137,6 +138,7 @@ impl Player {
         Panel::left("quest_scenes")
             .default_size(180.0)
             .show(ui, |ui| self.scenes_ui(ui, script));
+        self.now_playing_ui(ui, detail, &steps);
         Panel::bottom("quest_transport").show(ui, |ui| {
             ui.add_space(4.0);
             self.transport(ui, &steps);
@@ -146,6 +148,50 @@ impl Player {
             action = self.steps_ui(ui, detail, &steps);
         });
         action
+    }
+
+    /// The current step, boxed the way the game presents it: a line in its dialogue box, or a
+    /// branch as a question prompt. Silent for anything else a scene runs.
+    fn now_playing_ui(&mut self, ui: &mut egui::Ui, detail: &Detail, steps: &[(&Step, usize)]) {
+        let Some((step, _)) = steps.get(self.step) else {
+            return;
+        };
+        match step {
+            Step::Line { keys, .. } => {
+                let Some(line) = resolve_line(detail, keys) else {
+                    return;
+                };
+                let text = super::detail::sestring(ui, &line.text);
+                Panel::top("quest_now_playing").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    dialogue_box::ui(ui, &line.speaker, RichText::new(text));
+                    ui.add_space(4.0);
+                });
+            }
+            Step::Branch { id, arms } => {
+                let id = *id;
+                let taken = self
+                    .picks
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(arms.len() - 1);
+                let labels: Vec<String> = arms.iter().map(arm_label).collect();
+                Panel::top("quest_now_playing").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    if let Some(at) = dialogue_box::options_ui(ui, &labels, taken) {
+                        self.pick_arm(id, at);
+                    }
+                    ui.add_space(4.0);
+                });
+            }
+            _ => {}
+        }
+    }
+
+    fn pick_arm(&mut self, id: usize, at: usize) {
+        self.picks.insert(id, at);
+        self.follow = true;
     }
 
     fn scenes_ui(&mut self, ui: &mut egui::Ui, script: &Script) {
@@ -296,10 +342,7 @@ impl Player {
     ) -> Option<Action> {
         match step {
             Step::Line { keys, last } => {
-                let held = detail
-                    .dialogue_lines()
-                    .and_then(|held| keys.iter().find_map(|key| held.line(key)));
-                match held {
+                match resolve_line(detail, keys) {
                     Some(line) => {
                         ui.label(RichText::new(format!("{}:", line.speaker)).strong());
                         let text = super::detail::sestring(ui, &line.text);
@@ -348,8 +391,7 @@ impl Player {
                         .on_hover_text("Play this arm")
                         .clicked()
                     {
-                        self.picks.insert(*id, at);
-                        self.follow = true;
+                        self.pick_arm(*id, at);
                     }
                 }
                 None
@@ -360,6 +402,13 @@ impl Player {
             }
         }
     }
+}
+
+/// The dialogue line a `Step::Line`'s keys resolve to, trying each until one lands.
+fn resolve_line<'a>(detail: &'a Detail, keys: &[String]) -> Option<&'a Line> {
+    detail
+        .dialogue_lines()
+        .and_then(|held| keys.iter().find_map(|key| held.line(key)))
 }
 
 /// A link to the file a `QuestParams` instruction names, or the instruction where the quest names

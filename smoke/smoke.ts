@@ -695,12 +695,13 @@ async function main() {
         // Not a screenshot comparison: the failure this guards against is silent. A single
         // material that fails to link is not it: `render()`'s own loop (gpu.rs:725) already skips
         // one and keeps going, and that miss surfaces on its own as a fatal `ERROR:` log, which
-        // fails the run before this check ever runs. What zero drawBuffers actually means is that
-        // `mdl::ui` stopped being called at all: `show()` calls `gl.drawBuffers` unconditionally as
-        // its first GL call every frame it runs, so the only way this stays at zero is a redress
-        // that fails wholesale, flips `self.model` to `Err`, and leaves the Character tab painting
-        // a red label instead of the viewer forever after. `draws` cannot stand in for that: egui's
-        // own panels repaint it constantly on their own, game shaders or not.
+        // fails the run regardless of what this check reports. What zero drawBuffers actually
+        // means is that `mdl::ui` stopped being called at all: `show()` calls `gl.drawBuffers`
+        // unconditionally as its first GL call every frame it runs, so the only way this stays at
+        // zero is a redress that fails wholesale, flips `self.model` to `Err`, and leaves the
+        // Character tab painting a red label instead of the viewer forever after. `draws` cannot
+        // stand in for that: egui's own panels repaint it constantly on their own, game shaders or
+        // not.
         const mid = await counters(cdp);
         try {
             await waitFor(

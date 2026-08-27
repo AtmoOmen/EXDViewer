@@ -159,9 +159,16 @@ Verified against a real fault the way the step's own author did: poisoned `mdl::
 same as a healthy run) and then fails, matching "the model rebuilt but the composite stopped
 running" exactly; the step reported the intended `the G-buffer never bound another draw target in
 the 30s...` failure, and the injected fault was reverted after. A stale coordinate on its own now
-fails in about 15s with the new attributable message instead of the old 180s timeout. A full
-`smoke/run.sh` (model, shaders, channels, scene, level, character, all nine avfx effects) passes
-clean end to end with the fix in place.
+fails in about 15s with the new attributable message instead of the old 180s timeout.
+
+A full `smoke/run.sh` (model, shaders, channels, scene, level, character, all nine avfx effects)
+passed clean end to end once with the recalibrated coordinates in place, before the later pass that
+added `clickUntil`'s per-attempt `reset` and the longer click settle. Every run since, on a machine
+under enough concurrent load to matter (see below), has reproduced the already-documented level-
+phase `glDrawElementsInstanced` flake before ever reaching the character phase. That flake is not
+this step's and not new; `--character-only` on the exact committed tree has passed repeatedly. A
+`--no-build` full run on a quiet machine is still owed before calling the whole gate proven end to
+end again.
 
 **This step is genuinely load-sensitive, not just click-brittle.** Under a machine already running
 several other agents' headless chromiums (measured: load average above 30, 50+ live chromium

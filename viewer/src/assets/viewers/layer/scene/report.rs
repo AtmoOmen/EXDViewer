@@ -15,7 +15,8 @@ pub struct Frame<'a> {
     pub preset: Option<&'a str>,
     pub eye: [f32; 3],
     pub forward: [f32; 3],
-    /// Vertical, in degrees.
+    /// Vertical, in degrees, and what the projection matrix actually used: for a driven shot this
+    /// is already refit to `viewport`'s aspect, not the shot's own 16:9 value.
     pub fov: f32,
     /// The scene's own rect inside the window, in physical pixels.
     pub viewport: [f32; 4],

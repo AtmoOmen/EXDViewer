@@ -740,9 +740,6 @@ struct Camera {
     position: Vec3,
     yaw: f32,
     pitch: f32,
-    /// Tilt about the forward axis, zero for the free orbit camera: it never rolls itself, only a
-    /// cutscene drives one in.
-    roll: f32,
 }
 
 impl Camera {
@@ -755,19 +752,6 @@ impl Camera {
     fn right(&self) -> Vec3 {
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
         Vec3::new(-cos_yaw, 0.0, sin_yaw)
-    }
-
-    /// World up, tilted about the forward axis by [`Self::roll`]. The identity where roll is
-    /// zero, which it is outside a driven cutscene.
-    fn up(&self) -> Vec3 {
-        let forward = self.forward();
-        // World up with its own component along forward taken out, which is exactly what
-        // `Mat4::look_at_rh` would have levelled a raw `Vec3::Y` hint to anyway.
-        let level = (Vec3::Y - forward * forward.dot(Vec3::Y)).normalize_or_zero();
-        match self.roll == 0.0 {
-            true => level,
-            false => Quat::from_axis_angle(forward, self.roll) * level,
-        }
     }
 }
 
@@ -1111,7 +1095,6 @@ fn looking_at(center: Vec3, reach: f32) -> Camera {
         position,
         yaw: to.x.atan2(to.z),
         pitch: to.y.atan2((to.x * to.x + to.z * to.z).sqrt()),
-        roll: 0.0,
     }
 }
 
@@ -3845,18 +3828,10 @@ impl Scene {
         let driven = self.drive.take();
         if let Some(drive) = &driven {
             let forward = drive.forward.normalize_or_zero();
-            let yaw = forward.x.atan2(forward.z);
-            let pitch = forward.y.clamp(-1.0, 1.0).asin();
-            // The forward and up a level camera at that yaw and pitch would have, to measure the
-            // drive's own up against: the signed angle between them about forward is its roll.
-            let level = (Vec3::Y - forward * forward.dot(Vec3::Y)).normalize_or_zero();
-            let up = drive.up.normalize_or_zero();
-            let roll = level.cross(up).dot(forward).atan2(level.dot(up));
             self.camera = Camera {
                 position: drive.position,
-                yaw,
-                pitch,
-                roll,
+                yaw: forward.x.atan2(forward.z),
+                pitch: forward.y.clamp(-1.0, 1.0).asin(),
             };
             self.fov = drive.fov_degrees;
         }
@@ -3886,13 +3861,14 @@ impl Scene {
         }
 
         let eye = self.camera.position;
-        // A drive's own forward/up are used directly rather than round-tripped through the
-        // yaw/pitch/roll stored on `self.camera`: that round trip degenerates (`Camera::up`'s
-        // `level` hits zero) for a shot looking straight up or down, which an orbit camera's
-        // clamped pitch never reaches but a cutscene's camera can.
+        // A drive's own forward/up are used directly rather than rebuilt from the yaw/pitch
+        // `self.camera` stores them as: that round trip degenerates for a shot looking straight up
+        // or down, which an orbit camera's clamped pitch never reaches but a cutscene's camera can.
+        // The free camera never rolls itself, so a raw `Vec3::Y` hint is exactly what it wants;
+        // `look_at_rh` levels it against forward on its own.
         let (forward, up) = match &driven {
             Some(drive) => (drive.forward.normalize_or_zero(), drive.up.normalize_or_zero()),
-            None => (self.camera.forward(), self.camera.up()),
+            None => (self.camera.forward(), Vec3::Y),
         };
         let view = Mat4::look_at_rh(eye, eye + forward, up);
         // A driven camera's own clip planes, where it states them: the world streaming distance
@@ -4070,11 +4046,15 @@ impl Scene {
             ui.ctx().pixels_per_point(),
             ui.input(|input| input.stable_dt),
             effects_drawn,
+            vertical_fov,
         );
     }
 
     /// Publishes what this frame was drawn from, for a harness measuring it against a capture.
-    fn state(&self, rect: egui::Rect, scale: f32, step: f32, effects_drawn: usize) {
+    /// `vertical_fov` is what the projection matrix actually used, which for a driven shot is not
+    /// [`Self::fov`]: that field states the shot's own 16:9 value, refit here to the viewport's
+    /// real aspect.
+    fn state(&self, rect: egui::Rect, scale: f32, step: f32, effects_drawn: usize, vertical_fov: f32) {
         let (exposure, measured) = match self.exposure.is_some() {
             true => {
                 let held = self.renderer.lock().unwrap();
@@ -4090,7 +4070,7 @@ impl Scene {
             preset: self.preset.as_ref().map(|held| held.name.as_str()),
             eye: self.camera.position.to_array(),
             forward: self.camera.forward().to_array(),
-            fov: self.fov,
+            fov: vertical_fov,
             viewport: [
                 rect.left() * scale,
                 rect.top() * scale,

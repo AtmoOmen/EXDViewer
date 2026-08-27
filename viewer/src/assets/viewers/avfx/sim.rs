@@ -855,6 +855,11 @@ pub struct Effect {
     pub models: Vec<Mesh>,
     /// Frames the effect runs for before it starts over.
     pub length: i32,
+    /// Whether `length` is a real cycle everything in the file finishes within, rather than the
+    /// arbitrary preview window stood in for something with a run or a particle that never ends.
+    /// A placement should keep stepping such an effect forward and never wrap it back to 0: doing
+    /// so would reset the state that was meant to keep running and blank it out until it rebuilds.
+    pub loops: bool,
 }
 
 impl Effect {
@@ -891,6 +896,7 @@ impl Effect {
             textures: file.textures().to_vec(),
             models: file.models().iter().map(mesh).collect(),
             length,
+            loops: bounded,
         }
     }
 

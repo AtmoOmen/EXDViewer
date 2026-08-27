@@ -85,9 +85,15 @@ async function main() {
             console.log(`   !! ${held.source}/${held.level}: ${String(held.text).slice(0, 400)}`);
         }
     });
+    cdp.on("Network.responseReceived", (p: any) => {
+        if (p.response?.status >= 400) {
+            console.log(`   !! ${p.response.status} ${p.response.url}`);
+        }
+    });
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
     await cdp.send("Log.enable");
+    await cdp.send("Network.enable");
     // The same counters the gate asserts, so a shot comes with the GL work behind it rather than
     // leaving a draw that stopped happening to the eye.
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", {
@@ -151,8 +157,13 @@ async function main() {
                     }
                     await cdp.send("Input.insertText", { text });
                     await sleep(400);
-                    // Clicks "Load pasted" rather than sending Enter.
-                    await click(WIDTH - 257, 135);
+                    // "Load pasted" never registers as clicked under a CDP-synthesized click; the
+                    // box loads on Enter instead, which is the same key that ends the text edit.
+                    for (const type of ["keyDown", "keyUp"]) {
+                        await cdp.send("Input.dispatchKeyEvent", {
+                            type, key: "Enter", code: "Enter", windowsVirtualKeyCode: 13,
+                        });
+                    }
                     await sleep(2500);
                 }
             }

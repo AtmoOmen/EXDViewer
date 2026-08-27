@@ -1868,6 +1868,64 @@ mod tests {
         assert_eq!(at(effect, 0)[0].texture, Some(1));
     }
 
+    /// A timeline item with no end (`EdTm -1`) never bounds the effect, so `length` is only a
+    /// fallback for scrubbing it in isolation. A particle stating no life of its own settles once
+    /// its own emitter stops spawning, rather than being capped to that fallback.
+    #[test]
+    fn a_particle_with_no_life_settles_once_its_emitter_stops_spawning() {
+        let effect = &read(&[
+            nest(
+                "TmLn",
+                &[
+                    block("TICn", &integer(1)),
+                    block(
+                        "Item",
+                        &[
+                            block("bEna", &integer(1)),
+                            block("StTm", &integer(0)),
+                            block("EdTm", &integer(-1)),
+                            block("EmNo", &integer(0)),
+                        ]
+                        .concat(),
+                    ),
+                ],
+            ),
+            nest(
+                "Emit",
+                &[
+                    block("PrCn", &integer(1)),
+                    block(
+                        "ItPr",
+                        &[
+                            block("bEnb", &integer(1)),
+                            block("TgtB", &integer(0)),
+                            block("CrCn", &integer(1)),
+                        ]
+                        .concat(),
+                    ),
+                    life(3.0),
+                    curve("CrC", 0, 0, &scalars(&[(0, 1, 1.0)])),
+                    curve("CrI", 0, 0, &scalars(&[(0, 1, 1.0)])),
+                ],
+            ),
+            nest("Ptcl", &[life(-1.0)]),
+        ])
+        .effect;
+        assert!(!effect.bounded);
+        let settled = at(effect, 10).len();
+        assert!((1..10).contains(&settled));
+        assert_eq!(at(effect, 1000).len(), settled);
+    }
+
+    /// Where the emitter itself never stops either, a particle stating no life of its own would
+    /// otherwise pile up forever: it is capped to `length`, the same as under a bounded effect.
+    #[test]
+    fn a_particle_with_no_life_is_capped_where_its_emitter_never_stops_either() {
+        let effect = &playing(&[life(-1.0)], (0, -1)).effect;
+        assert!(!effect.bounded);
+        assert_eq!(at(effect, 1000).len(), 301);
+    }
+
     #[test]
     fn length_is_the_latest_timeline_item_ends_not_a_particles_own_life_past_it() {
         let effect = &playing(&[life(50.0)], (0, 10)).effect;

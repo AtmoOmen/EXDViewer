@@ -853,13 +853,15 @@ pub struct Effect {
     /// The `.atex` files the particles sample, in the order they index them.
     pub textures: Vec<String>,
     pub models: Vec<Mesh>,
-    /// Frames the effect runs for before it starts over.
+    /// Frames the effect runs for before it starts over. Only meaningful where `bounded` is true;
+    /// where it is not, this is `LOOP`, a fallback for scrubbing the file on its own rather than a
+    /// span the effect actually starts over at.
     pub length: i32,
-    /// Whether `length` is a real cycle everything in the file finishes within, rather than the
-    /// arbitrary preview window stood in for something with a run or a particle that never ends.
-    /// A placement should keep stepping such an effect forward and never wrap it back to 0: doing
-    /// so would reset the state that was meant to keep running and blank it out until it rebuilds.
-    pub loops: bool,
+    /// Whether every run the file states truly ends and every particle it can spawn has a life of
+    /// its own, so nothing outlives the point `length` names. An effect a placement runs forever
+    /// has no such point: it settles once its emitters stop spawning and holds there, and wrapping
+    /// its frame back to zero anyway restarts it from empty on a cycle nothing in the file states.
+    pub bounded: bool,
 }
 
 impl Effect {
@@ -896,7 +898,7 @@ impl Effect {
             textures: file.textures().to_vec(),
             models: file.models().iter().map(mesh).collect(),
             length,
-            loops: bounded,
+            bounded,
         }
     }
 
@@ -972,9 +974,15 @@ impl Effect {
                 if local < spawn.delay {
                     continue;
                 }
+                // Infinite only where the emitter itself is bound to stop spawning; otherwise
+                // nothing would ever cap how many pile up. Reaching here at all already means the
+                // effect is unbounded, since a bounded one states a life on every particle.
                 let life = self.particles[spawn.target]
                     .life
-                    .unwrap_or(self.length as f32);
+                    .unwrap_or(match def.life.is_some() {
+                        true => f32::INFINITY,
+                        false => self.length as f32,
+                    });
                 for _ in 0..burst * spawn.count {
                     if state.particles.len() >= PARTICLES {
                         break;

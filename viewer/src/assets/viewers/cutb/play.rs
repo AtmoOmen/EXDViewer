@@ -22,9 +22,9 @@ use crate::utils::{PromiseKind, TrackedPromise};
 
 /// The curve target carrying the eye's own position and rotation, measured against the corpus.
 /// Contradicts the ironworks crate's own doc comment on `C004`, which names target 2: that target
-/// sits at the identity throughout 71% of the corpus's shots (a placeholder the rest of the time
-/// carries a real, unexplained transform of its own), where target 1 is where the shot's actual
-/// eye lives in all of them.
+/// sits at the identity, at every sampled time, in 71% of the corpus's shots (a placeholder which
+/// carries a real, unexplained transform of its own the rest of the time), where target 1 is where
+/// the shot's actual eye lives in all of them.
 const EYE: u8 = 1;
 
 /// Where a set's own fields sit, past its targets' transform channels.

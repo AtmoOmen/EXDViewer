@@ -92,13 +92,17 @@ It then walks the paths that broke:
    Each effect has to draw something, and across the run the two shots of at least one of them have
    to differ, or the click never landed on the slider and the shots are of an arbitrary frame.
 8. Opens `/character`, waits for the default body and its starting attire to both build and for
-   the equipment menus to load, then opens the Head slot and picks an item, which is the one path
-   here that redresses an already-drawn model rather than opening a fresh one. `drawBuffers` has to
-   climb again within 30s of the redress: only the deferred path's own passes ever call it, so a
-   G-buffer that has stopped running holds it at exactly zero rather than merely low, which is what
-   a mesh whose program fails to link and takes the whole pass down with it looks like instead of
-   one that is skipped and drawn around. `draws` cannot stand in for this: egui's own panels repaint
-   it constantly on their own, game shaders or not.
+   the equipment menus to load, then opens the Head slot and picks an item, both confirmed off a
+   log line naming which slot each click actually landed on rather than assumed from the
+   coordinate alone. This redresses an already-drawn model rather than opening a fresh one.
+   `drawBuffers` has to climb again within 30s of the redress. A single material that fails to
+   link is not what this catches: `render()`'s own loop already skips one and keeps going, and
+   that miss surfaces on its own as a fatal `ERROR:` log. What zero drawBuffers here actually means
+   is that the viewer stopped being drawn at all: `show()` calls `gl.drawBuffers` unconditionally
+   as its first GL call every frame it runs, so the only way this holds at exactly zero is a
+   redress that fails wholesale and leaves the tab painting an error label forever after instead of
+   the model. `draws` cannot stand in for this: egui's own panels repaint it constantly on their
+   own, game shaders or not.
 
 `smoke/instrument.js` is injected before the app loads and counts draws, instanced draws, blits,
 `drawBuffers` calls and program links. Those counters are asserted, so a click that lands in the
@@ -120,6 +124,61 @@ Network-level errors are reported but not fatal, since the app probes for option
 coverage counters are what catch a model that failed to load.
 
 ## Known red
+
+**`timed out after 180000ms waiting for the equipment change to rebuild the model`, character
+phase.** RESOLVED, and it was the harness, not the equipment-change path itself: `HEAD_SLOT`/
+`HEAD_ITEM` (`smoke/smoke.ts`), calibrated when the step landed at `d5bb5a1e`, had drifted stale
+against the side panel's current layout and landed on the "Equipment" heading rather than
+"Head: Bare", so the picker never opened and every wait behind it ran to its own budget before
+saying so. Confirmed by hand with `smoke/drive.ts --path=/character`: the old coordinate opens
+nothing, the same x one row lower opens the picker correctly. The code between "Race" and
+"Equipment" in `side_panel` reads byte-identical against `d5bb5a1e`, so the drift is not a code
+regression in the panel itself. Untested candidate for whoever wants to close it rather than
+recalibrate again next time: `adff0b4f` (`Put the character panel's arrow on its outer edge and add
+its re-expand`) wrapped `character_header`'s heading in `with_layout(right_to_left) {
+vertical_centered_justified { heading } }`, which sits above every row measured here and is exactly
+the kind of change that can shift a row's height allocation; one build at `adff0b4f^` and one
+`drive.ts` shot of where "Race" sits would confirm or rule it out. Recalibrated to
+`{x:52,y:457}`/`{x:113,y:525}`.
+
+A second, live-caught fault of the same class: the click can still miss at the *correct*
+coordinate, since the canvas right after a picker opens is still repainting at a frame or two a
+second under software rendering, and a press dispatched too soon after the move lands wherever
+the pointer was on the previous frame rather than where it just moved to (the same lag
+`smoke/drive.ts` already documents for its own clicks). One run's `HEAD_ITEM` click silently chose
+nothing this way, at the same coordinate that had just worked moments before.
+
+Fixed at both ends. `slot_ui` (`viewer/src/character/mod.rs`) now logs which slot a click opened
+(`character: picking {slot}`) and which slot an item was chosen for (`character: chose {piece} for
+{slot}`); `smoke.ts`'s new `clickUntil` reads that log back, retries a miss up to three times, and
+fails in seconds with an attributable "recalibrate against smoke/drive.ts" message instead of
+waiting out the redress step's own 180s budget with no clue why.
+
+Verified against a real fault the way the step's own author did: poisoned `mdl::compose`/
+`Rendered::redress` so a redress still rebuilds the mesh (the `assets/mdl: ... meshes,` log fires,
+same as a healthy run) and then fails, matching "the model rebuilt but the composite stopped
+running" exactly; the step reported the intended `the G-buffer never bound another draw target in
+the 30s...` failure, and the injected fault was reverted after. A stale coordinate on its own now
+fails in about 15s with the new attributable message instead of the old 180s timeout.
+
+A full `smoke/run.sh` (model, shaders, channels, scene, level, character, all nine avfx effects)
+passed clean end to end once with the recalibrated coordinates in place, before the later pass that
+added `clickUntil`'s per-attempt `reset` and the longer click settle. Every run since, on a machine
+under enough concurrent load to matter (see below), has reproduced the already-documented level-
+phase `glDrawElementsInstanced` flake before ever reaching the character phase. That flake is not
+this step's and not new; `--character-only` on the exact committed tree has passed repeatedly. A
+`--no-build` full run on a quiet machine is still owed before calling the whole gate proven end to
+end again.
+
+**This step is genuinely load-sensitive, not just click-brittle.** Under a machine already running
+several other agents' headless chromiums (measured: load average above 30, 50+ live chromium
+processes), even `smoke/drive.ts`'s own slow, deliberate click (a 1500ms move-to-press delay,
+already the fix for the same class of lag) missed the same coordinate that had just worked moments
+earlier with the machine quieter. The retry in `clickUntil` absorbs ordinary lag; it is not a fix
+for the machine being this loaded, and three attempts at ~1.7s apiece is not going to out-wait a
+render loop that is losing real wall-clock time to a dozen unrelated tabs. A red character phase
+during a run like that is not evidence of a regression; check `uptime` and the chromium count
+before trusting it.
 
 **`Feedback loop formed between Framebuffer and active Texture`, in the scene and level phases.**
 RESOLVED. `blended()`'s resolve leg (`viewer/src/assets/viewers/layer/scene/gpu.rs`) drew into

@@ -581,6 +581,8 @@ struct Light {
 /// on top of what the file itself draws.
 struct Vfx {
     placement: Mat4,
+    /// Set where a timeline moves this, in which case the placement above is only where it starts.
+    driven: Option<Rc<Driven>>,
     path: String,
     layer: usize,
     key: (u32, [u8; 4]),
@@ -628,7 +630,9 @@ fn vfx_tint(colour: Rgba) -> Vec4 {
 enum EffectState {
     Wanted,
     Fetching(TrackedPromise<Result<Vec<u8>>>),
-    Ready(avfx::sim::Effect, avfx::sim::State),
+    /// The clock reading the fetch resolved at, so the effect's own timeline starts at zero
+    /// wherever real time happened to be when it arrived rather than at the clock's own zero.
+    Ready(avfx::sim::Effect, avfx::sim::State, i32),
     Failed,
 }
 
@@ -1512,6 +1516,12 @@ impl Scene {
                         {
                             self.effects.push(Vfx {
                                 placement: here,
+                                driven: (!chain.is_empty()).then(|| {
+                                    Rc::new(Driven {
+                                        chain: chain.clone(),
+                                        tail: since,
+                                    })
+                                }),
                                 path: vfx.asset_path().clone(),
                                 layer: at,
                                 key: reach(key, depth, instance.id()),
@@ -1895,13 +1905,19 @@ impl Scene {
     /// rather than here, since a record carries the object into view space and the camera turns.
     /// Where a placement stands now, which is where the file put it unless a timeline drives it.
     fn posed(&self, placement: &Placement) -> Mat4 {
-        match &placement.driven {
+        self.moved(placement.transform, &placement.driven)
+    }
+
+    /// Where a driven transform stands now, or the transform itself where nothing drives it. Shared
+    /// with `Vfx`, which carries the same chain but is not a `Placement`.
+    fn moved(&self, transform: Mat4, driven: &Option<Rc<Driven>>) -> Mat4 {
+        match driven {
             Some(held) => {
                 held.chain.iter().fold(Mat4::IDENTITY, |into, (at, fixed)| {
                     into * *fixed * self.motions[*at].at(self.clock)
                 }) * held.tail
             }
-            None => placement.transform,
+            None => transform,
         }
     }
 
@@ -2042,7 +2058,7 @@ impl Scene {
         self.effect_files
             .iter()
             .filter_map(|effect| {
-                let EffectState::Ready(parsed, live) = &effect.state else {
+                let EffectState::Ready(parsed, live, _) = &effect.state else {
                     return None;
                 };
                 // Held back rather than drawn white: a texture still fetching would otherwise bind
@@ -2064,8 +2080,9 @@ impl Scene {
                 let base = parsed.drawn(live);
                 let mut drawn = Vec::new();
                 for vfx in self.effects.iter().filter(|vfx| vfx.path == effect.path) {
-                    let (scale, rotation, translation) =
-                        vfx.placement.to_scale_rotation_translation();
+                    let (scale, rotation, translation) = self
+                        .moved(vfx.placement, &vfx.driven)
+                        .to_scale_rotation_translation();
                     let scale = scale.abs().max_element().max(0.001);
                     let distance = eye.distance(translation);
                     let far = match vfx.no_far_clip {
@@ -2318,7 +2335,7 @@ impl Scene {
                         .unwrap()
                         .queue_effect(effect.path.clone(), models);
                     self.dirty = true;
-                    EffectState::Ready(parsed, avfx::sim::State::default())
+                    EffectState::Ready(parsed, avfx::sim::State::default(), self.clock as i32)
                 }
                 Err(why) => {
                     log::error!("assets/layer: {}: {why}", effect.path);
@@ -2329,10 +2346,18 @@ impl Scene {
 
         let frame = self.clock as i32;
         for effect in &mut self.effect_files {
-            let EffectState::Ready(parsed, live) = &mut effect.state else {
+            let EffectState::Ready(parsed, live, born) = &mut effect.state else {
                 continue;
             };
-            parsed.seek(live, frame.rem_euclid(parsed.length.max(1)));
+            // Relative to when the effect arrived, so its own timeline starts at zero there rather
+            // than at the clock's zero. An unbounded one is left running past `length` rather than
+            // wrapped back to it.
+            let elapsed = frame - *born;
+            let target = match parsed.bounded {
+                true => elapsed.rem_euclid(parsed.length.max(1)),
+                false => elapsed,
+            };
+            parsed.seek(live, target);
         }
     }
 
@@ -3587,7 +3612,7 @@ impl Scene {
             .flat_map(|material| material.bound().map(|(_, path)| path.to_owned()))
             .chain(maps.iter().cloned())
             .chain(self.effect_files.iter().flat_map(|effect| match &effect.state {
-                EffectState::Ready(parsed, _) => parsed.textures.clone(),
+                EffectState::Ready(parsed, ..) => parsed.textures.clone(),
                 _ => Vec::new(),
             }))
             .filter(|path| !self.textures.contains_key(path) && !sliced.contains(path))
@@ -3673,6 +3698,14 @@ impl Scene {
             (held.fog, "fog"),
             (held.reflection, "reflection"),
             (held.vignette, "vignette"),
+            (
+                !self.effects.is_empty()
+                    && self
+                        .effect_files
+                        .iter()
+                        .any(|effect| matches!(effect.state, EffectState::Ready(..))),
+                "effects",
+            ),
         ]
         .into_iter()
         .filter_map(|(ran, name)| ran.then_some(name))
@@ -4265,7 +4298,9 @@ impl Scene {
             );
             let mut load =
                 pasted.lost_focus() && ui.input(|held| held.key_pressed(egui::Key::Enter));
-            ui.horizontal(|ui| {
+            // Wrapped rather than run on: four buttons in one row is wider than the panel's own
+            // minimum, and a row that can't shrink pins the whole panel at its own width.
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Import preset").clicked() {
                     self.picking = Some(TrackedPromise::spawn_local(async {
                         let held = rfd::AsyncFileDialog::new()
@@ -4417,7 +4452,7 @@ impl Scene {
                 .filter(|model| matches!(model.state, State::Ready))
                 .count();
             ui.scope(|ui| {
-                ui.set_max_width(DETAILS_ROW_WIDTH);
+                ui.set_max_width(ui.available_width().min(DETAILS_ROW_WIDTH));
                 facts(
                     ui,
                     "scene_counts",
@@ -4621,15 +4656,20 @@ impl Scene {
                 }
             });
             ui.add_space(4.0);
+            // Truncated rather than run on: a zone's layer names are unbounded, and one long name
+            // in an unwrapped checkbox pins the whole panel at its own width forever.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             for layer in &mut self.layers {
                 let mut label = format!("{} ({})", layer.name, layer.placements);
                 if layer.festival != 0 {
                     label.push_str(&format!("  festival {}", layer.festival));
                 }
-                let mut hover = match layer.visible {
-                    true => "drawn by default".to_owned(),
-                    false => "hidden by default".to_owned(),
-                };
+                let mut hover = label.clone();
+                hover.push('\n');
+                hover.push_str(match layer.visible {
+                    true => "drawn by default",
+                    false => "hidden by default",
+                });
                 if let Some(origin) = &layer.origin {
                     hover.push('\n');
                     hover.push_str(origin);

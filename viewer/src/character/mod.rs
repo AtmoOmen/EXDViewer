@@ -2695,6 +2695,10 @@ fn colors(
     let mut picked = None;
     egui::Grid::new(id)
         .spacing(egui::Vec2::splat(2.0))
+        // Without this, an empty column falls back to the UI's default interact size (~40px)
+        // rather than a swatch's own 18px, and 8 of those locks the panel wide for good.
+        .min_col_width(SWATCH)
+        .min_row_height(SWATCH)
         .show(ui, |ui| {
             for (place, index) in offered.enumerate() {
                 if place > 0 && place % palette::COLUMNS == 0 {

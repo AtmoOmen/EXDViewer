@@ -957,7 +957,7 @@ impl Ambient {
             ));
         }
         ui.scope(|ui| {
-            ui.set_max_width(super::DETAILS_ROW_WIDTH);
+            ui.set_max_width(ui.available_width().min(super::DETAILS_ROW_WIDTH));
             egui::Grid::new("scene_environment_files")
                 .num_columns(2)
                 .striped(true)

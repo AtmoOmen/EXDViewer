@@ -3510,17 +3510,14 @@ impl Buffer {
         for name in ["m_GBufferSize", "m_RenderTargetSize"] {
             put(water, name, vec![width, height, 1.0 / width, 1.0 / height]);
         }
-        put(water, "m_GBufferPixelSize", vec![1.0 / width, 1.0 / height, width, height]);
-        // river.shpk's own resolve reads `.zw` as the constant that completes an NDC-to-UV
-        // remap (`clip * (0.5, -0.5) + this`); water.shpk's own resolve does the identical sum
-        // with a bare `0.5` literal in the same spot, which is what a buffer read of this name
-        // stands in for here.
-        put(water, "m_RenderTargetPixelSize", vec![1.0 / width, 1.0 / height, 0.5, 0.5]);
-        put(
-            water,
+        // `.zw` of each is the half-resolution reciprocal, measured off the game's own frame.
+        for name in [
+            "m_GBufferPixelSize",
+            "m_RenderTargetPixelSize",
             "m_HalfViewPositionPixelSize",
-            vec![2.0 / width, 2.0 / height, width * 0.5, height * 0.5],
-        );
+        ] {
+            put(water, name, vec![1.0 / width, 1.0 / height, 0.5 / width, 0.5 / height]);
+        }
         // How far into the frame a surface may reach for what stands behind it. Sampling past this
         // is folded back in, so the whole frame is what leaves the reading where it was aimed.
         put(water, "m_DynamicViewportResolution", vec![1.0; 4]);

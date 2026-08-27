@@ -919,8 +919,18 @@ impl Renderer {
                         }
                         false => {
                             gl.depth_mask(false);
-                            gl.enable(glow::BLEND);
-                            gl.blend_func_separate(blend.0, blend.1, glow::ZERO, glow::ONE);
+                            match held.pass {
+                                // The game's own PASS_WATER never blends: its pixel shader samples
+                                // the frame behind it through g_SamplerRefractionMap and writes the
+                                // finished color. The alpha write is disabled tightly around the
+                                // draw itself, below, rather than here: a `?` between this point and
+                                // the draw would leave it off for the rest of the frame.
+                                program::Pass::Water => gl.disable(glow::BLEND),
+                                _ => {
+                                    gl.enable(glow::BLEND);
+                                    gl.blend_func_separate(blend.0, blend.1, glow::ZERO, glow::ONE);
+                                }
+                            }
                         }
                     }
                     match surface.cull {
@@ -1001,7 +1011,13 @@ impl Renderer {
                     true => *windows,
                     false => 0,
                 };
+                // Alpha stays out of the write mask only for water's own resolve draw, and only
+                // across it: nothing fallible runs between the two calls that set it.
+                let resolving_water = !filling && held.pass == program::Pass::Water;
                 unsafe {
+                    if resolving_water {
+                        gl.color_mask(true, true, true, false);
+                    }
                     gl.bind_vertex_array(Some(array));
                     for at in 0..taken {
                         gl.bind_buffer_range(
@@ -1021,6 +1037,9 @@ impl Renderer {
                         );
                     }
                     gl.bind_vertex_array(None);
+                    if resolving_water {
+                        gl.color_mask(true, true, true, true);
+                    }
                 }
                 if taken == 0 {
                     for instance in &batch.instances {
@@ -1030,9 +1049,15 @@ impl Renderer {
                         };
                         self.buffers.bind(gl, program, held, &held_scene, &[])?;
                         unsafe {
+                            if resolving_water {
+                                gl.color_mask(true, true, true, false);
+                            }
                             gl.bind_vertex_array(Some(array));
                             gl.draw_elements(glow::TRIANGLES, *indices, glow::UNSIGNED_SHORT, 0);
                             gl.bind_vertex_array(None);
+                            if resolving_water {
+                                gl.color_mask(true, true, true, true);
+                            }
                         }
                     }
                 }

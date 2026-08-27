@@ -111,7 +111,9 @@ const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
 const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 
 /// `ApplyDetailMap`, and the value that lays the tiled arrays over a surface. Left at the package's
-/// own default a wall is its albedo and nothing finer however close the camera stands.
+/// own default: the game picks this per material and we have no `g_SamplerDetailColorMap`/
+/// `g_SamplerDetailNormalMap` to feed it, so forcing it on tints every surface toward the grey
+/// stand-in instead of leaving it off like a material that never asked for it.
 const APPLY_DETAIL_MAP: u32 = 0x6313_fd87;
 const APPLY_DETAIL_MAP_ON: u32 = 0x7a3d_9efd;
 
@@ -129,11 +131,7 @@ const GET_RLR_ON: u32 = 0x4ba7_7904;
 /// The keys the engine sets rather than the material, other than `GetNormalMap`: a package that
 /// declares none of them resolves exactly as it did, since a key the package never declares is
 /// never looked up.
-const KEYS: [(u32, u32); 3] = [
-    (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
-    (APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON),
-    (GET_RLR, GET_RLR_ON),
-];
+const KEYS: [(u32, u32); 2] = [(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON), (GET_RLR, GET_RLR_ON)];
 
 /// The engine keys this package's materials draw with. `GetNormalMap` is separate from `KEYS`
 /// because only `bg.shpk` has a node for the parallax value; everything else stays on the plain

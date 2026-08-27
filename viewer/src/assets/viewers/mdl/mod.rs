@@ -107,6 +107,24 @@ const APPLY_WAVING_ANIM_ON: u32 = 0xf801_b859;
 const GET_RLR: u32 = 0x1143_3f2d;
 const GET_RLR_ON: u32 = 0x4ba7_7904;
 
+/// Packages with no opaque pass that still belong on the dedicated semi-transparent buffer rather
+/// than water's shared-G-buffer fallback: glass and veils are transparent everywhere, not a fringe
+/// around an opaque fill, and a captured frame keeps their own composite out of the frame's alpha
+/// (glare share) entirely, which only the semi-transparent buffer's resolve does.
+const CHARACTER_TRANSPARENT_PACKAGES: [&str; 11] = [
+    "/character.shpk",
+    "/characterlegacy.shpk",
+    "/characterglass.shpk",
+    "/charactertattoo.shpk",
+    "/charactertransparency.shpk",
+    "/characterocclusion.shpk",
+    "/characterinc.shpk",
+    "/characterscroll.shpk",
+    "/hair.shpk",
+    "/iris.shpk",
+    "/skin.shpk",
+];
+
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
@@ -2902,38 +2920,59 @@ impl Rendered {
             };
             let mut passes = Passes::default();
             // A package with no opaque pass is a surface that blends itself into the frame: water
-            // and river fill the same G-buffer through a pass of their own.
+            // and river fill the same G-buffer through a pass of their own. A character-family one
+            // is transparent everywhere rather than a fringe around an opaque fill, so it takes the
+            // dedicated semi-transparent buffer a fringe does instead: claiming the shared opaque
+            // G-buffer and depth would be wrong, and its composite's real coverage would land in
+            // the frame's alpha, which downstream is a glare share rather than an opacity.
             let filling = build(program::Pass::Buffer, 0)
                 .map(|held| (program::Pass::Buffer, held))
                 .or_else(|_| {
                     build(program::Pass::Blended, 0).map(|held| (program::Pass::Blended, held))
                 });
+            let all_transparent = matches!(&filling, Ok((program::Pass::Blended, _)))
+                && CHARACTER_TRANSPARENT_PACKAGES
+                    .iter()
+                    .any(|suffix| name.ends_with(suffix));
             if let Ok((pass, first)) = filling {
-                let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
-                passes.buffer.push(Arc::new(first));
-                passes
-                    .buffer
-                    .extend((1..pages).filter_map(|at| build(pass, at).ok().map(Arc::new)));
-                // Only where the same vertex shader settled the depth. A blending surface fills the
-                // buffer through a pass whose vertices are lifted by its own waves, and the depth
-                // pass leaves them where the file put them: every later test against it fails.
-                if pass == program::Pass::Buffer {
-                    passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
-                    // Only where the material states a clip the semi-transparent pass's own reaches
-                    // under. Below that the two passes cover the same fragments, and the resolve
-                    // drops every one the opaque half already drew.
-                    if material.clip() > program::SHEER_CLIP {
-                        passes.sheer = build(program::Pass::Blended, 0)
-                            .and_then(|held| {
-                                Ok((Arc::new(held), Arc::new(build(program::Pass::CompositeBlended, 0)?)))
-                            })
-                            .inspect_err(|why| {
-                                log::warn!(
-                                    "assets/mdl: {}: no semi-transparent pass: {why}",
-                                    material.package()
-                                )
-                            })
-                            .ok();
+                if all_transparent {
+                    passes.sheer = build(program::Pass::CompositeBlended, 0)
+                        .map(|resolve| (Arc::new(first), Arc::new(resolve)))
+                        .inspect_err(|why| {
+                            log::warn!(
+                                "assets/mdl: {}: no semi-transparent resolve: {why}",
+                                material.package()
+                            )
+                        })
+                        .ok();
+                } else {
+                    let pages = first.outputs.len().div_ceil(attachments.max(1)).max(1);
+                    passes.buffer.push(Arc::new(first));
+                    passes
+                        .buffer
+                        .extend((1..pages).filter_map(|at| build(pass, at).ok().map(Arc::new)));
+                    // Only where the same vertex shader settled the depth. A blending surface fills
+                    // the buffer through a pass whose vertices are lifted by its own waves, and the
+                    // depth pass leaves them where the file put them: every later test against it
+                    // fails.
+                    if pass == program::Pass::Buffer {
+                        passes.depth = build(program::Pass::Depth, 0).ok().map(Arc::new);
+                        // Only where the material states a clip the semi-transparent pass's own
+                        // reaches under. Below that the two passes cover the same fragments, and the
+                        // resolve drops every one the opaque half already drew.
+                        if material.clip() > program::SHEER_CLIP {
+                            passes.sheer = build(program::Pass::Blended, 0)
+                                .and_then(|held| {
+                                    Ok((Arc::new(held), Arc::new(build(program::Pass::CompositeBlended, 0)?)))
+                                })
+                                .inspect_err(|why| {
+                                    log::warn!(
+                                        "assets/mdl: {}: no semi-transparent pass: {why}",
+                                        material.package()
+                                    )
+                                })
+                                .ok();
+                        }
                     }
                 }
             }
@@ -2941,12 +2980,21 @@ impl Rendered {
             // pass is `bg`'s, and `bg` reserves values past one in the second target as the sign
             // that a pixel keeps its specular color in the fifth; a character writes a luminance
             // there that reaches one of its own accord, and is then read as that.
-            passes.resolve = build(program::Pass::Composite, 0)
-                .or_else(|_| build(program::Pass::CompositeBlended, 0))
-                .or_else(|_| build(program::Pass::Water, 0))
-                .ok()
-                .map(Arc::new);
-            let held = match passes.buffer.is_empty() && passes.resolve.is_none() {
+            //
+            // Not where the semi-transparent buffer above already took the same composite: that one
+            // draws through `sheer()`'s own resolve, against its own dedicated depth, rather than
+            // here against the shared frame.
+            if !all_transparent {
+                passes.resolve = build(program::Pass::Composite, 0)
+                    .or_else(|_| build(program::Pass::CompositeBlended, 0))
+                    .or_else(|_| build(program::Pass::Water, 0))
+                    .ok()
+                    .map(Arc::new);
+            }
+            let held = match passes.buffer.is_empty()
+                && passes.resolve.is_none()
+                && passes.sheer.is_none()
+            {
                 true => Err("this material's keys reach no pass that draws it".into()),
                 false => Ok(passes),
             };

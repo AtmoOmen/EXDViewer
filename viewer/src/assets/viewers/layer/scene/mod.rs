@@ -4571,12 +4571,6 @@ impl Scene {
                 ui.add(egui::Slider::new(&mut self.look.darkening, 0.0..=2.0))
                     .on_hover_text("How steeply it deepens past that");
             });
-            ui.label(RichText::new(format!("Twinkle rate {}", program::STAR_TWINKLE_RATE)).weak())
-                .on_hover_text(
-                    "How many tiles a second the night sky's point mask scrolls by. Read off the \
-                     game's own per-frame update rather than fitted",
-                );
-
             ui.add_space(8.0);
             ui.separator();
             let mut sound_on = self.sound.enabled();

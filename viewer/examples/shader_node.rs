@@ -24,12 +24,13 @@ const SUB_VIEW_MAIN: u32 = 0xf43b_2f35;
 
 /// The keys the engine sets rather than a material, as `layer/scene/mod.rs` and `mdl/program.rs`
 /// set them. A package that declares none of them resolves exactly as it would without.
-const KEYS: [(u32, u32); 5] = [
+const KEYS: [(u32, u32); 6] = [
     (0x6313_fd87, 0x7a3d_9efd),
     (0x8115_916d, 0x51ed_d496),
     (0x0d81_2fa4, 0xaba1_f498),
     (0xcbdf_d5ec, 0xd999_4ef1),
     (0xdcfc_844e, 0x59c4_e6db),
+    (0x1143_3f2d, 0x4ba7_7904),
 ];
 
 fn named(id: u32) -> String {

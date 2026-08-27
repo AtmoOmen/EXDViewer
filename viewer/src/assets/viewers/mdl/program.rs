@@ -3521,6 +3521,10 @@ impl Buffer {
         // How far into the frame a surface may reach for what stands behind it. Sampling past this
         // is folded back in, so the whole frame is what leaves the reading where it was aimed.
         put(water, "m_DynamicViewportResolution", vec![1.0; 4]);
+        // The engine's own local-reflection toggle, measured on in a real frame. Neither river
+        // shader this viewer reaches happens to read it, but a variant that does should see the
+        // game's own value rather than the package's dead default.
+        put(water, "m_RLRParam", vec![2.0, 0.0, 0.0, 0.0]);
         // The light the caustics volume adds under the surface, at the strength the material states
         // and nothing else. The lane past it wobbles where that slice is read, and no file or frame
         // states how far, so the slice is taken where the surface puts it.

@@ -24,6 +24,9 @@ const VIEW_POSITION: u32 = 0xbc61_5663;
 const WATER_VIEW_POSITION: u32 = 0x34a0_4363;
 /// What water reads for whatever stands behind it, which is the frame as the lighting left it.
 const REFRACTION: u32 = 0xa38e_45e1;
+/// What water reads its own local reflection through. No pass here renders one, so it falls to the
+/// neutral answer below rather than a real march.
+const REFLECTION_MAP: u32 = 0xc705_a5b6;
 const LIGHT_DIFFUSE: u32 = 0x23d0_f850;
 const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
 const OCCLUSION: u32 = 0x3266_7bd7;
@@ -283,15 +286,18 @@ const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 /// flat stand-in would double every pixel; a fog weight of nought keeps the color it mixes toward
 /// out of the frame entirely.
 ///
-/// The last two are what the shadowed lighting reads beside its mask, and they are neutral at
+/// The middle two are what the shadowed lighting reads beside its mask, and they are neutral at
 /// opposite ends: a cloud shadow multiplies, so nothing overhead is white, while caustics are light
 /// added by water, so none of it is black. The flat grey every unnamed sampler otherwise answers
 /// with is half a cloud shadow over the whole zone and half a pool's worth of light on top of it.
-const NEUTRAL: [(u32, [u8; 4]); 4] = [
+/// The last is water's own local reflection: its alpha is what the shader lerps by, so zero leaves
+/// the term it feeds exactly as it stood without one.
+const NEUTRAL: [(u32, [u8; 4]); 5] = [
     (0x342f_2734, [255, 255, 255, 255]),
     (0x6e23_1669, [0, 0, 0, 0]),
     (0xb821_f0d3, [255, 255, 255, 255]),
     (0x0efb_24f7, [0, 0, 0, 0]),
+    (REFLECTION_MAP, [0, 0, 0, 0]),
 ];
 
 /// What a buffer nothing here fills answers with where a lighting pass wants a weight: nothing

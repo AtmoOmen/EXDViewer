@@ -101,9 +101,12 @@ impl CollapsibleSidePanel {
         })
     }
 
+    // Same id `Panel::show_switched` uses for its own slide animation, rather than a second,
+    // independently-timed tracker of the same open/closed state: this way the arrow's rotation
+    // always matches the panel's actual slide instead of running its own separate clock.
     fn openness(ctx: &Context, id: impl Into<Id>) -> f32 {
         let id = id.into();
-        ctx.animate_bool_responsive(id.with("arrow_animation"), !Self::is_collapsed(ctx, id))
+        ctx.animate_bool_responsive(id.with("animation"), !Self::is_collapsed(ctx, id))
     }
 
     /// The arrow points the way clicking it will move the panel: outward to collapse, inward to

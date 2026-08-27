@@ -778,9 +778,19 @@ pub struct Drive {
     pub position: Vec3,
     pub forward: Vec3,
     pub up: Vec3,
+    /// Vertical, and stated for a 16:9 frame: [`refit_16_9_fov`] carries it to the viewport's own
+    /// aspect.
     pub fov_degrees: f32,
     pub near: f32,
     pub far: f32,
+}
+
+/// A 16:9-authored vertical field of view, carried to another aspect ratio by keeping its
+/// horizontal field rather than its vertical one.
+fn refit_16_9_fov(vertical_degrees: f32, aspect: f32) -> f32 {
+    const AUTHORED: f32 = 16.0 / 9.0;
+    let half_horizontal = (vertical_degrees.to_radians() * 0.5).tan() * AUTHORED;
+    2.0 * (half_horizontal / aspect).atan().to_degrees()
 }
 
 pub struct Scene {
@@ -3876,7 +3886,15 @@ impl Scene {
         }
 
         let eye = self.camera.position;
-        let view = Mat4::look_at_rh(eye, eye + self.camera.forward(), self.camera.up());
+        // A drive's own forward/up are used directly rather than round-tripped through the
+        // yaw/pitch/roll stored on `self.camera`: that round trip degenerates (`Camera::up`'s
+        // `level` hits zero) for a shot looking straight up or down, which an orbit camera's
+        // clamped pitch never reaches but a cutscene's camera can.
+        let (forward, up) = match &driven {
+            Some(drive) => (drive.forward.normalize_or_zero(), drive.up.normalize_or_zero()),
+            None => (self.camera.forward(), self.camera.up()),
+        };
+        let view = Mat4::look_at_rh(eye, eye + forward, up);
         // A driven camera's own clip planes, where it states them: the world streaming distance
         // stays keyed on the load distance regardless.
         let (near, far) = match &driven {
@@ -3888,10 +3906,17 @@ impl Scene {
                 ((far * 0.0002).min(0.2), far)
             }
         };
+        // A driven shot's own field of view is stated for a 16:9 frame (see the `C004` doc); refit
+        // it to the viewport's actual aspect so its horizontal field is what the shot states rather
+        // than whatever a narrower or wider panel would crop it to.
+        let vertical_fov = match &driven {
+            Some(_) => refit_16_9_fov(self.fov, rect.width() / rect.height()),
+            None => self.fov,
+        };
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against.
         let projection = Mat4::perspective_rh(
-            self.fov.to_radians(),
+            vertical_fov.to_radians(),
             rect.width() / rect.height(),
             near,
             far,
@@ -4838,6 +4863,18 @@ mod tests {
         let quarter = std::f32::consts::FRAC_PI_2;
         assert!((rotation([0.0, quarter, 0.0]) * Vec3::Z - Vec3::X).length() < 1e-5);
         assert!((rotation([quarter, 0.0, quarter]) * Vec3::Z - Vec3::X).length() < 1e-5);
+    }
+
+    #[test]
+    fn refitting_to_the_authored_aspect_changes_nothing() {
+        assert!((refit_16_9_fov(30.0, 16.0 / 9.0) - 30.0).abs() < 1e-4);
+    }
+
+    /// A narrower viewport than 16:9 must widen the vertical field to keep the same horizontal
+    /// one, not crop it.
+    #[test]
+    fn refitting_to_a_narrower_aspect_widens_the_vertical_field() {
+        assert!(refit_16_9_fov(30.0, 1.0) > 30.0);
     }
 
     /// A whole turn starts over where it ends, so it never runs backwards; anything else swings

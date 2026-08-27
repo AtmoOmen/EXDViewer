@@ -115,9 +115,10 @@ fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
         .striped(true)
         .show(ui, |ui| {
             for (label, value) in rows {
-                ui.add_sized(
+                ui.allocate_ui_with_layout(
                     vec2(FACT_LABEL_WIDTH, 0.0),
-                    Label::new(RichText::new(*label).weak()).truncate(),
+                    Layout::left_to_right(Align::Center),
+                    |ui| ui.add(Label::new(RichText::new(*label).weak()).truncate()),
                 );
                 // Wrapped rather than run on: a grid's cell is as wide as it likes, and one long
                 // row would take the panel and the view beside it with it.

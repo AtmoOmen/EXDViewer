@@ -65,8 +65,9 @@ const FOV: f32 = 55.0_f32.to_radians();
 
 /// How wide a details grid is let grow before its value column wraps. A grid sizes to whatever its
 /// widest row ever measured and never shrinks again, so left unbounded one long row drags the whole
-/// panel past the cap the details side panel holds itself to.
-const DETAILS_ROW_WIDTH: f32 = crate::assets::DETAILS_WIDTH - 60.0;
+/// panel past the cap the details side panel holds itself to. Held well under that cap rather than
+/// tied to it: the panel's own chrome costs more than the difference once every row is measured.
+const DETAILS_ROW_WIDTH: f32 = 250.0;
 
 /// How deep a shared group may hold another. Files reach four; the cap guards against a cycle
 /// rather than limiting anything real.

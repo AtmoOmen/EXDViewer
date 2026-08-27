@@ -695,3 +695,13 @@ impl<K: Eq + Hash> Mixer<K> {
         self.retain(|_| false);
     }
 }
+
+impl<K> Drop for Mixer<K> {
+    /// Each one opens its own `AudioContext`; left open, enough of these across a session's worth
+    /// of character views hits the browser's per-page limit and the next one fails to construct.
+    fn drop(&mut self) {
+        if let Err(error) = self.context.close() {
+            log::warn!("audio: context did not close: {error:?}");
+        }
+    }
+}

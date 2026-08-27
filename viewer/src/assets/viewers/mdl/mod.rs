@@ -2347,9 +2347,9 @@ impl Rendered {
         };
 
         // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in
-        // the mesh it poses. Shown whenever there is a vfx marker to draw even with the skeleton
-        // toggle off, since that one is not a debug view.
-        let overlay = (self.skeleton.get() || !markers.is_empty()).then(|| {
+        // the mesh it poses. A vfx marker is a placeholder box, not the game's particles, so it
+        // rides the same skeleton toggle rather than drawing on the live view.
+        let overlay = self.skeleton.get().then(|| {
             self.overlay.lock().unwrap().replace(markers);
             (self.overlay.clone(), (projection * view).to_cols_array())
         });

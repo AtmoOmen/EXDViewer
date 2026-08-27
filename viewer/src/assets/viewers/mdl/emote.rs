@@ -262,7 +262,9 @@ impl Cue {
         if self.key.as_ref() != Some(&key) {
             self.key = Some(key);
             self.fetch = None;
-            self.last_time = time;
+            // Below any real command time, so a sound at frame 0 still counts as due once the
+            // pack finishes fetching rather than needing a loop back around to be crossed.
+            self.last_time = -1.0;
         }
         match &mut self.fetch {
             None => {

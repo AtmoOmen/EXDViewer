@@ -3,6 +3,8 @@
 //! The timelines hold the same commands `.tmb` does, and most of what a cutscene puts in them is a
 //! kind that crate does not model, so a row saying only its magic and its size is the honest one.
 
+mod play;
+
 use std::cell::Cell;
 use std::io::Cursor;
 
@@ -13,6 +15,7 @@ use ironworks::file::cutb::{Cutscene, Node};
 use ironworks::file::tmb::{CommandKind, Item};
 
 use super::{Preview, facts, line, link, section, table, tmb as timeline};
+use crate::backend::Backend;
 
 const NODES: [(&str, usize); 3] = [("Node", 6), ("Kind", 6), ("Holds", 60)];
 const RESOURCES: [(&str, usize); 2] = [("Flag", 6), ("File", 8)];
@@ -22,6 +25,7 @@ enum Tab {
     Files,
     Timelines,
     Nodes,
+    Play,
 }
 
 /// A cutscene, decoded and ready to draw.
@@ -37,6 +41,7 @@ pub struct Rendered {
     tab: Cell<Tab>,
     /// Which timeline is on screen, indexing [`Self::timelines`].
     shown: Cell<usize>,
+    play: play::Tab,
 }
 
 fn magic(node: &Node) -> String {
@@ -133,6 +138,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         })
         .sum::<usize>();
 
+    let play = play::Tab::new(level.clone(), &file);
     let identity = vec![
         ("Nodes", nodes.len().to_string()),
         ("Level", level),
@@ -159,16 +165,18 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         timelines,
         tab: Cell::new(Tab::Files),
         shown: Cell::new(0),
+        play,
     })))
 }
 
-pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
+pub fn ui(ui: &mut egui::Ui, file: &Rendered, backend: &Backend) -> Option<String> {
     let mut follow = None;
     ui.horizontal(|ui| {
         for (tab, label) in [
             (Tab::Files, "Files"),
             (Tab::Timelines, "Timelines"),
             (Tab::Nodes, "Nodes"),
+            (Tab::Play, "Play"),
         ] {
             if ui.selectable_label(file.tab.get() == tab, label).clicked() {
                 file.tab.set(tab);
@@ -203,6 +211,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
             });
         }
         Tab::Timelines => follow = file.timelines_ui(ui),
+        Tab::Play => follow = play::ui(ui, &file.play, &file.file, backend),
     }
     follow
 }

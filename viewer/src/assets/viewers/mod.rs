@@ -509,7 +509,7 @@ impl Preview {
             Self::GrassZone(zone) => follow = grass::zone_ui(ui, zone, deps, backend),
             Self::GrassGrid(grid) => grass::grid_ui(ui, grid),
             Self::Dic(dictionary) => dic::ui(ui, dictionary),
-            Self::Cutb(cutscene) => follow = cutb::ui(ui, cutscene),
+            Self::Cutb(cutscene) => follow = cutb::ui(ui, cutscene, backend),
             Self::Stm(templates) => stm::ui(ui, templates, deps, backend),
             Self::Scd(container) => scd::ui(ui, container),
             Self::Failed(e) if e.is_empty() => {

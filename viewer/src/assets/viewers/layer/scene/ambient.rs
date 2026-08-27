@@ -745,6 +745,7 @@ impl Ambient {
         if self.environments.len() > 1 {
             ui.label(RichText::new("Environment").weak());
             egui::ComboBox::from_id_salt("scene_environment")
+                .truncate()
                 .selected_text(format!("{} of {}", self.at + 1, self.environments.len()))
                 .show_ui(ui, |ui| {
                     for at in 0..self.environments.len() {
@@ -792,6 +793,7 @@ impl Ambient {
                 .get(self.weather)
                 .map_or_else(String::new, |id| named(ui, *id));
             egui::ComboBox::from_id_salt("scene_weather")
+                .truncate()
                 .selected_text(selected)
                 .show_ui(ui, |ui| {
                     for (at, id) in weathers.iter().enumerate() {

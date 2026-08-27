@@ -103,6 +103,11 @@ fn missing(ui: &egui::Ui, rect: Rect) {
     );
 }
 
+/// Width held for a fact's label. Fixed rather than natural, so the grid's un-tracked label
+/// column can't push the value column - and the row with it - past whatever room the value's own
+/// wrap was given.
+const FACT_LABEL_WIDTH: f32 = 150.0;
+
 /// A table of label and value, which is most of what a details panel is.
 fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
     egui::Grid::new(id)
@@ -110,7 +115,11 @@ fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
         .striped(true)
         .show(ui, |ui| {
             for (label, value) in rows {
-                ui.label(RichText::new(*label).weak());
+                ui.allocate_ui_with_layout(
+                    vec2(FACT_LABEL_WIDTH, 0.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| ui.add(Label::new(RichText::new(*label).weak()).truncate()),
+                );
                 // Wrapped rather than run on: a grid's cell is as wide as it likes, and one long
                 // row would take the panel and the view beside it with it.
                 ui.add(Label::new(RichText::new(value).monospace()).wrap());

@@ -3694,6 +3694,14 @@ impl Scene {
             (held.fog, "fog"),
             (held.reflection, "reflection"),
             (held.vignette, "vignette"),
+            (
+                !self.effects.is_empty()
+                    && self
+                        .effect_files
+                        .iter()
+                        .any(|effect| matches!(effect.state, EffectState::Ready(..))),
+                "effects",
+            ),
         ]
         .into_iter()
         .filter_map(|(ran, name)| ran.then_some(name))

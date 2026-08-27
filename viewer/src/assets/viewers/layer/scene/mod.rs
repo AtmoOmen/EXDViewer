@@ -4174,35 +4174,38 @@ impl Scene {
         });
         let place = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
         let (group, id) = placement.key;
-        facts(ui, "scene_selected", &[
-            ("Layer", self.layers[placement.layer].name.clone()),
-            ("Position", place(held.w_axis.truncate())),
-            ("Rotation", match angles {
-                Some(held) => place(held),
-                None => "flat".to_owned(),
-            }),
-            ("Scale", place(scale)),
-            ("Size", format!("{:.3}", placement.radius)),
-            ("Fade", match placement.fade {
-                held if held > 0.0 => format!("{held:.1}"),
-                _ => "never".to_owned(),
-            }),
-            ("Motion", match &placement.driven {
-                Some(held) => format!("{} driven", held.chain.len()),
-                None => "still".to_owned(),
-            }),
-            (
-                "Sky",
-                format!(
-                    "{:.3}",
-                    reached(&self.visibility, placement.key).copied().unwrap_or(1.0)
+        ui.scope(|ui| {
+            ui.set_max_width(ui.available_width().min(DETAILS_ROW_WIDTH));
+            facts(ui, "scene_selected", &[
+                ("Layer", self.layers[placement.layer].name.clone()),
+                ("Position", place(held.w_axis.truncate())),
+                ("Rotation", match angles {
+                    Some(held) => place(held),
+                    None => "flat".to_owned(),
+                }),
+                ("Scale", place(scale)),
+                ("Size", format!("{:.3}", placement.radius)),
+                ("Fade", match placement.fade {
+                    held if held > 0.0 => format!("{held:.1}"),
+                    _ => "never".to_owned(),
+                }),
+                ("Motion", match &placement.driven {
+                    Some(held) => format!("{} driven", held.chain.len()),
+                    None => "still".to_owned(),
+                }),
+                (
+                    "Sky",
+                    format!(
+                        "{:.3}",
+                        reached(&self.visibility, placement.key).copied().unwrap_or(1.0)
+                    ),
                 ),
-            ),
-            (
-                "Key",
-                format!("{group:08x} {:02x}{:02x}{:02x}{:02x}", id[0], id[1], id[2], id[3]),
-            ),
-        ]);
+                (
+                    "Key",
+                    format!("{group:08x} {:02x}{:02x}{:02x}{:02x}", id[0], id[1], id[2], id[3]),
+                ),
+            ]);
+        });
     }
 
     /// A box around what the pointer picked, drawn over the frame rather than into it, and the name

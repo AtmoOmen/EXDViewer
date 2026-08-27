@@ -4656,15 +4656,20 @@ impl Scene {
                 }
             });
             ui.add_space(4.0);
+            // Truncated rather than run on: a zone's layer names are unbounded, and one long name
+            // in an unwrapped checkbox pins the whole panel at its own width forever.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             for layer in &mut self.layers {
                 let mut label = format!("{} ({})", layer.name, layer.placements);
                 if layer.festival != 0 {
                     label.push_str(&format!("  festival {}", layer.festival));
                 }
-                let mut hover = match layer.visible {
-                    true => "drawn by default".to_owned(),
-                    false => "hidden by default".to_owned(),
-                };
+                let mut hover = label.clone();
+                hover.push('\n');
+                hover.push_str(match layer.visible {
+                    true => "drawn by default",
+                    false => "hidden by default",
+                });
                 if let Some(origin) = &layer.origin {
                     hover.push('\n');
                     hover.push_str(origin);

@@ -734,8 +734,11 @@ impl Renderer {
     }
 
     /// Every placed effect, one draw per unique file no matter how many placements share it. Tested
-    /// against the depth the opaque and blended passes left standing rather than a copy: apricot's
-    /// own shaders never sample it back, so the live attachment is enough.
+    /// against the depth the opaque and blended passes left standing rather than a copy: nothing
+    /// binds it as a texture today, so the live attachment is enough for the depth test alone. A
+    /// soft-particle apricot_model variant does declare and sample `g_SamplerDepth` for a fade
+    /// against what stands behind a particle; wiring that has to bind a copy, not this live
+    /// attachment, or it is the same feedback loop `blended()` once sampled itself against.
     fn effects(
         &mut self,
         gl: &glow::Context,

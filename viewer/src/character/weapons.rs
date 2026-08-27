@@ -222,7 +222,8 @@ pub fn fallback_bone(main: bool) -> &'static str {
 /// regardless of what it holds; drawn is `a0034`, a battle idle measured to exist for c0101
 /// alongside it (`cbbm_id0`, the `b` where `a0001`'s own idle is `cbnm_id0`'s `n`). Nothing on disk
 /// states which of the many other numbered battle idles a given weapon style should play instead,
-/// so every drawn weapon shares this one until that is resolved.
+/// so every drawn weapon shares this one until that is resolved; every other race lacks `a0034`
+/// entirely, so the caller carries a fallback to whichever stance was already on screen.
 pub fn stance_pack(code: u16, drawn: bool) -> String {
     let set = if drawn { 34 } else { 1 };
     format!("chara/human/c{code:04}/animation/a{set:04}/bt_common/resident/idle.pap")

@@ -2296,7 +2296,11 @@ impl CharacterBuilder {
             Some(Pick::Stance(drawn)) => {
                 self.drawn = drawn;
                 if let Some(Ok(model)) = &self.model {
-                    model.play(&weapons::stance_pack(self.code, drawn), None);
+                    // `a0034` (the drawn battle idle) is only known to ship for c0101; falling
+                    // back to the stance already on screen beats the rest pose a failed fetch
+                    // would otherwise leave the character in.
+                    let then = weapons::stance_pack(self.code, !drawn);
+                    model.play(&weapons::stance_pack(self.code, drawn), Some(&then));
                 }
             }
             Some(Pick::Made(customize, choice)) => {

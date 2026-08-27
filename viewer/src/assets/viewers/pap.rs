@@ -394,6 +394,7 @@ impl Rendered {
                         &mut locals,
                         binding,
                         loaded.rig.names(),
+                        None,
                         self.play.time.get(),
                     );
                     let world = loaded.rig.world(&locals);

@@ -81,12 +81,12 @@ impl Skin {
             .iter()
             .map(|placement| placement.matrix().inverse())
             .collect();
-        let named: HashMap<_, _> = rig
-            .names()
-            .iter()
-            .enumerate()
-            .map(|(bone, name)| (name.clone(), bone))
-            .collect();
+        // A name that collided on merge names more than one bone here; the first is the one the
+        // rig itself resolves a bare lookup to, so a mesh's own table has to agree with it.
+        let mut named: HashMap<String, usize> = HashMap::new();
+        for (bone, name) in rig.names().iter().enumerate() {
+            named.entry(name.clone()).or_insert(bone);
+        }
         let anchor = named.get(ANCHOR).copied();
         let (home, spread) = middle(&world, anchor);
         let seats = rig
@@ -201,13 +201,25 @@ const IDLE: &str = "_id0";
 /// them out as reliably as this one being named for what it is.
 const RIDE_IDLE: &str = "cbnm_mt_id0";
 
+/// The `cfxf_` clip a motion's own timeline plays over it, and where in the motion's own clock
+/// (in seconds) it is held across: a `C010` states this as a frame count and a start/end fraction
+/// of the clip itself, which only means anything once scaled by the timeline it is read from.
+#[derive(Clone)]
+struct Companion {
+    name: String,
+    /// Seconds into the motion's own clock the hold starts and ends.
+    window: (f32, f32),
+    /// The clip's own position, normalized start to end, that the window plays across.
+    span: (f32, f32),
+}
+
 /// The motions a pack holds, and the name each of its animations gives one.
 struct Motions {
     /// Animation names, each with the motion it plays.
     named: Vec<(String, usize)>,
-    /// The `cfxf_` companion each of `named`'s own timeline plays over it, parallel to it. An
-    /// emote often states its facial expression this way rather than by a name the creator picks.
-    companions: Vec<Option<String>>,
+    /// The companion each of `named`'s own timeline plays over it, parallel to it. An emote often
+    /// states its facial expression this way rather than by a name the creator picks.
+    companions: Vec<Option<Companion>>,
     bindings: Vec<Binding>,
 }
 
@@ -224,7 +236,8 @@ impl Motions {
                 continue;
             };
             named.push((animation.name().to_owned(), motion));
-            companions.push(companion(timeline));
+            let duration = bindings[motion].motion().duration();
+            companions.push(companion(timeline, duration));
         }
         Ok(Self {
             named,
@@ -239,9 +252,9 @@ impl Motions {
         self.bindings.get(*at)
     }
 
-    /// The `cfxf_` companion the motion at `motion` names, if its own timeline names one.
-    fn companion(&self, motion: usize) -> Option<&str> {
-        self.companions.get(motion)?.as_deref()
+    /// The companion the motion at `motion` names, if its own timeline names one.
+    fn companion(&self, motion: usize) -> Option<&Companion> {
+        self.companions.get(motion)?.as_ref()
     }
 
     /// Which motion the pack opens on: the idle where it names one, since a monster's pack leads
@@ -258,19 +271,45 @@ impl Motions {
     }
 }
 
-/// The `cfxf_` name a motion's own timeline plays over it, out of the `C009`/`C010` that plays it.
-fn companion(timeline: &[u8]) -> Option<String> {
+/// The companion a motion's own timeline plays over it, out of the first `C009`/`C010` that plays
+/// one: `duration` is the motion's own, in seconds, which is what the timeline's frame units are
+/// scaled against. A timeline naming more than one, the way a longer emote's does to run through
+/// several expressions in turn, is read as only the first; nothing here schedules a change of
+/// companion mid-motion.
+fn companion(timeline: &[u8], duration: f32) -> Option<Companion> {
     let timeline = Timeline::read(Cursor::new(timeline.to_vec())).ok()?;
+    let frames = timeline.items().iter().find_map(|item| match item {
+        Item::Header(header) => Some(header.duration()),
+        _ => None,
+    })?;
+    if frames <= 0 {
+        return None;
+    }
+    let scale = duration / f32::from(frames);
     timeline.items().iter().find_map(|item| {
         let Item::Command(command) = item else {
             return None;
         };
-        let path = match command.kind() {
-            CommandKind::C009(animation) => animation.path(),
-            CommandKind::C010(animation) => animation.path(),
-            _ => None,
-        }?;
-        path.strip_prefix("cfxf_").map(ToOwned::to_owned)
+        let (path, hold, span) = match command.kind() {
+            CommandKind::C009(animation) => (animation.path(), animation.duration(), (0.0, 1.0)),
+            CommandKind::C010(animation) => (
+                animation.path(),
+                animation.duration(),
+                // `0x01` enables the start and end frames; without it the whole clip plays.
+                match animation.flags() & 0x01 != 0 {
+                    true => (animation.animation_start(), animation.animation_end()),
+                    false => (0.0, 1.0),
+                },
+            ),
+            _ => return None,
+        };
+        let name = path?.strip_prefix("cfxf_")?.to_owned();
+        let start = f32::from(command.time()) * scale;
+        Some(Companion {
+            name,
+            window: (start, start + hold as f32 * scale),
+            span,
+        })
     })
 }
 
@@ -411,11 +450,11 @@ impl Layer {
         Some(binding.motion().duration().max(f32::EPSILON))
     }
 
-    /// The `cfxf_` companion the motion now playing names, if its own timeline names one.
-    fn companion(&self) -> Option<String> {
+    /// The companion the motion now playing names, if its own timeline names one.
+    fn companion(&self) -> Option<Companion> {
         let pack = self.pack.borrow();
         let motions = pack.as_ref().and_then(Fetch::ready)?;
-        motions.companion(self.motion.get()?).map(ToOwned::to_owned)
+        motions.companion(self.motion.get()?).cloned()
     }
 
     /// The pack playing, the name its own file gives the motion, and how far into it, in
@@ -445,6 +484,26 @@ impl Layer {
             None => self.time.set(time - duration),
         }
     }
+
+    /// Sets this layer's clock from `at`, the other layer's own, against the window `companion`
+    /// states, rather than running one of its own: a facial clip a fraction of a second long
+    /// otherwise loops many times over while the body it belongs to plays once.
+    fn hold(&self, companion: &Companion, at: f32) {
+        let Some(duration) = self.duration() else {
+            return;
+        };
+        self.time.set(held(companion, at, duration));
+    }
+}
+
+/// Where a `duration`-second clip should sit to hold `companion` against `at`, the other clip's
+/// own time in seconds: clamped, so it settles at the window's own edge rather than snap back to
+/// it before the window opens or past it once it has closed.
+fn held(companion: &Companion, at: f32, duration: f32) -> f32 {
+    let (start, end) = companion.window;
+    let fraction = ((at - start) / (end - start).max(f32::EPSILON)).clamp(0.0, 1.0);
+    let (from, to) = companion.span;
+    (from + (to - from) * fraction) * duration
 }
 
 /// One file on its way in, and what it decoded to.
@@ -641,6 +700,10 @@ pub struct Animation {
     /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
     /// is what asks for another rather than every frame re-loading the same pack.
     linked: RefCell<Option<String>>,
+    /// Whether `face` is still the pack `linked` put it on, so its clock tracks the body's own
+    /// rather than running free. `express` and a manual face pick from the picker both drop this,
+    /// since a pose the creator asked for by name is not the body's to hold or let go of.
+    synced: Cell<bool>,
     /// A pose `express` or the body's own companion asked for that neither the filename guess
     /// nor the shared library could confirm, waiting on `poses` to be built far enough to answer.
     pending: RefCell<Option<String>>,
@@ -695,6 +758,7 @@ impl Animation {
             },
             face: Default::default(),
             linked: RefCell::new(None),
+            synced: Cell::new(false),
             pending: RefCell::new(None),
             poses: Default::default(),
             bust: Cell::new(Vec3::ONE),
@@ -782,8 +846,15 @@ impl Animation {
         self.poll_pose(backend);
         if self.running.get() {
             let step = ctx.input(|input| input.stable_dt);
-            for layer in self.layers() {
-                layer.advance(step);
+            self.body.advance(step);
+            // A body command names a window of its own clock to hold the face against rather than
+            // let it loop on one of its own; nothing named, or a face the creator has since picked
+            // by hand, leaves it free to run on its own clock instead.
+            match self.body.companion() {
+                Some(companion) if self.synced.get() => {
+                    self.face.hold(&companion, self.body.time.get());
+                }
+                _ => self.face.advance(step),
             }
             // Nothing else asks for a frame while the pointer is still, so playback has to.
             ctx.request_repaint();
@@ -903,11 +974,11 @@ impl Animation {
             return;
         }
         let mut rig = Rig::new(&base.names, &base.parents, &base.reference);
-        for held in landed
-            .iter()
-            .filter_map(|path| extras[path].as_ref().and_then(Fetch::ready))
-        {
-            rig = rig.merged(&held.names, &held.parents, &held.reference);
+        for path in &landed {
+            let Some(held) = extras[path].as_ref().and_then(Fetch::ready) else {
+                continue;
+            };
+            rig = rig.merged(path, &held.names, &held.parents, &held.reference);
         }
         *self.skin.borrow_mut() = Some(Skin::new(rig));
         *self.built.borrow_mut() = landed;
@@ -1012,11 +1083,12 @@ impl Animation {
     /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
     /// so which of the two it lands on is the pack's to say.
     pub fn play(&self, path: &str, then: Option<&str>) {
-        match facial(path) {
-            true => &self.face,
-            false => &self.body,
+        if facial(path) {
+            self.synced.set(false);
+            self.face.load(path, None, then);
+        } else {
+            self.body.load(path, None, then);
         }
-        .load(path, None, then);
         // Forces the next poll to re-read the companion rather than see the same name it had
         // last time and assume nothing changed, which is what left a re-picked emote's face
         // stuck on whatever frame it was already at.
@@ -1045,6 +1117,7 @@ impl Animation {
         candidates.push(format!("{root}resident/face.pap"));
         self.face.seek(candidates, &format!("cfxf_{name}"));
         *self.pending.borrow_mut() = Some(name.to_owned());
+        self.synced.set(false);
         self.running.set(true);
     }
 
@@ -1054,14 +1127,17 @@ impl Animation {
     /// than leaving it holding whatever it played last.
     fn poll_companion(&self) {
         let wanted = self.body.companion();
-        if wanted == *self.linked.borrow() {
+        let name = wanted.as_ref().map(|companion| companion.name.clone());
+        if name == *self.linked.borrow() {
             return;
         }
-        let Some(name) = &wanted else {
-            *self.linked.borrow_mut() = wanted;
+        let Some(companion) = &wanted else {
+            *self.linked.borrow_mut() = name;
+            self.synced.set(false);
             self.face.load("", None, None);
             return;
         };
+        let name = &companion.name;
         let Some(root) = self.face_root() else {
             return;
         };
@@ -1084,7 +1160,8 @@ impl Animation {
         drop(held);
         self.face.seek(candidates, &format!("cfxf_{name}"));
         *self.pending.borrow_mut() = Some(name.clone());
-        *self.linked.borrow_mut() = wanted;
+        *self.linked.borrow_mut() = Some(name.clone());
+        self.synced.set(true);
     }
 
     /// Falls back to the lazily-built name index for a pose `express` or `poll_companion` could
@@ -1230,7 +1307,13 @@ impl Animation {
             let Some(names) = held.and_then(Fetch::ready).map(|held| &held.names) else {
                 continue;
             };
-            skin.rig.lay(&mut locals, binding, names, layer.time.get());
+            skin.rig.lay(
+                &mut locals,
+                binding,
+                names,
+                ordered.as_deref(),
+                layer.time.get(),
+            );
         }
         for (name, angle) in VISOR.iter().zip(self.visor.get()) {
             if angle != 0.0
@@ -1592,8 +1675,8 @@ mod tests {
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
-        Extra, Fetch, Layer, PoseLookup, Poses, Skin, code, extra, facial, found, ordering,
-        pack_path, pack_root, seat_path, skeleton_path,
+        Animation, Companion, Extra, Fetch, Layer, Motions, PoseLookup, Poses, Skeleton, Skin,
+        code, extra, facial, found, held, ordering, pack_path, pack_root, seat_path, skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -1716,6 +1799,7 @@ mod tests {
         let base = rig();
         assert_eq!(base.bones(), 2);
         let merged = base.merged(
+            "face",
             &[
                 "j_kubi".to_owned(),
                 "j_f_ago".to_owned(),
@@ -1742,6 +1826,24 @@ mod tests {
         let posed = skin.rig.world(&locals);
         let held = skin.palette(&["j_f_ago".to_owned()], &posed);
         assert_eq!(held[0].w_axis.truncate(), Vec3::new(0.0, 3.0, 0.0));
+    }
+
+    /// A mesh's own table still means the body's bone by a name a merge had to keep apart from an
+    /// extra's: `Skin`'s own lookup has to agree with `Rig::bone`'s, or a mesh skinned to the
+    /// base's `j_ago` would draw off the face's instead of the body's the moment one collided.
+    #[test]
+    fn a_meshs_bare_lookup_still_means_the_bases_own_bone() {
+        let base = rig();
+        let merged = base.merged(
+            "face",
+            &["j_kubi".to_owned(), "j_kubi".to_owned()],
+            &[-1, 0],
+            &[transform([0.0, 9.0, 0.0]), transform([0.0, 0.5, 0.0])],
+        );
+        assert_eq!(merged.bones(), 3);
+        let base_kubi = merged.bone("j_kubi").expect("the body keeps its own");
+        let skin = Skin::new(merged);
+        assert_eq!(skin.named["j_kubi"], base_kubi);
     }
 
     #[test]
@@ -1883,6 +1985,25 @@ mod tests {
         assert!(!layer.spent(), "b.pap is still queued behind a.pap");
     }
 
+    /// `c1801`'s own Joy emote, measured against the install: a `Header duration: 122` timeline
+    /// naming `C010 { duration: 103, animation_start: 0.0, animation_end: 1.0 }` over a body clip
+    /// 4.0 seconds long, held against a face clip 2.0 seconds long. Before the window the face
+    /// sits at its own first frame, inside it the two clocks track each other, and past it the
+    /// face holds its last rather than snapping back to loop on a clock of its own.
+    #[test]
+    fn held_tracks_the_bodys_clock_across_the_window_and_clamps_past_it() {
+        let scale = 4.0 / 122.0;
+        let companion = Companion {
+            name: "satisfied".to_owned(),
+            window: (0.0, 103.0 * scale),
+            span: (0.0, 1.0),
+        };
+        assert_eq!(held(&companion, -1.0, 2.0), 0.0);
+        assert!((held(&companion, 103.0 * scale * 0.5, 2.0) - 1.0).abs() < 1e-4);
+        assert!((held(&companion, 103.0 * scale, 2.0) - 2.0).abs() < 1e-4);
+        assert_eq!(held(&companion, 4.0, 2.0), 2.0);
+    }
+
     /// Polls a future to completion on the current thread with no real waker, which is enough for
     /// the local install's own I/O: nothing here needs to run concurrently with anything else.
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
@@ -2021,5 +2142,97 @@ mod tests {
                 PoseLookup::Pending => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
         }
+    }
+
+    /// Drives the base skeleton fetch and the extra-skeleton merge until the rig lands.
+    fn settle_rig(animation: &Animation, backend: &crate::backend::Backend) {
+        let ctx = egui::Context::default();
+        let Some(path) = animation.skeleton.clone() else {
+            panic!("a human model always names its own base skeleton");
+        };
+        for _ in 0..2000 {
+            crate::utils::tick_promises(&ctx);
+            Fetch::poll(
+                &mut animation.base.borrow_mut(),
+                backend,
+                &path,
+                Skeleton::read,
+            );
+            animation.poll_extras(backend);
+            if animation.rig().is_some() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the rig never landed");
+    }
+
+    /// Viera's own face skeleton (`c1801f0002`) carries a `j_ago` that is not the body's jaw: the
+    /// real merge, off the real install, has to keep both rather than let the face's vanish onto
+    /// whichever one the body already named.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_vieras_face_keeps_its_own_jaw_distinct_from_the_bodys() {
+        let backend = local_backend();
+        let animation = Animation::new([
+            "chara/human/c1801/obj/body/b0001/model/c1801b0001_top.mdl",
+            "chara/human/c1801/obj/face/f0002/model/c1801f0002_fac.mdl",
+        ]);
+        settle_rig(&animation, &backend);
+        let (names, parents, _) = animation.rig().expect("settled above");
+        let agos: Vec<usize> = names
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| *name == "j_ago")
+            .map(|(bone, _)| bone)
+            .collect();
+        assert_eq!(
+            agos.len(),
+            2,
+            "the body's own jaw and the face's own must both survive the merge, found {names:?}"
+        );
+        let kao = names
+            .iter()
+            .position(|name| name == "j_kao")
+            .expect("j_kao merges in as the face's own root");
+        assert!(
+            agos.iter().any(|bone| parents[*bone] == Some(kao)),
+            "the face's own j_ago hangs off j_kao, same as the real file states"
+        );
+    }
+
+    /// `cbem_joy`, off the real install: `Motions::read` has to carry `cfxf_satisfied`'s window
+    /// through in seconds, scaled off the timeline's own `Header duration: 122` against `duration:
+    /// 103`, rather than the bare frame counts the file states.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_joy_emote_holds_its_face_across_the_bodys_own_window() {
+        let backend = local_backend();
+        let path = "chara/human/c1801/animation/a0001/bt_common/emote/joy.pap";
+        let bytes =
+            block_on(backend.files().read(path)).expect("joy.pap should read off the real install");
+        let motions = Motions::read(&bytes).expect("a real animation pack should parse");
+        let at = motions
+            .named
+            .iter()
+            .position(|(name, _)| name == "cbem_joy")
+            .expect("cbem_joy should be named");
+        let companion = motions
+            .companion(at)
+            .expect("cbem_joy names a facial companion");
+        assert_eq!(companion.name, "satisfied");
+        assert_eq!(companion.window.0, 0.0);
+        assert_eq!(companion.span, (0.0, 1.0));
+        let body_duration = motions
+            .binding(at)
+            .expect("cbem_joy has a binding")
+            .motion()
+            .duration();
+        let expected_end = 103.0 / 122.0 * body_duration;
+        assert!(
+            (companion.window.1 - expected_end).abs() < 1e-4,
+            "window end {} should scale duration 103 against Header duration 122, expected {expected_end}",
+            companion.window.1
+        );
     }
 }

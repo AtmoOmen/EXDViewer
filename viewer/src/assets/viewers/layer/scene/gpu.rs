@@ -1427,12 +1427,13 @@ impl Renderer {
                 // After both, which is what it fades the far distance toward, and before the
                 // exposure, which measures the frame the fog leaves rather than the one under it.
                 self.blended(gl, painter, frame, &scene, &offsets, lighting)?;
-                // Blended too: an effect's glow is drawn the same additive way as any other
-                // translucent surface, and the fog after it fades a distant one the same way.
-                self.effects(gl, painter, frame, &scene)?;
                 if let Some(haze) = frame.haze.as_ref() {
                     self.buffers.fog(gl, haze, &scene)?;
                 }
+                // After the fog: the game never fogs a placed effect, so anything drawn here lands
+                // untouched by it rather than blended toward it by however much of the frame the fog
+                // pass covered.
+                self.effects(gl, painter, frame, &scene)?;
             }
             // Over the sky, the water and the fog: a fringe pixel is one the opaque pass left
             // uncovered, and drawing it any earlier leaves the sky free to paint over it.

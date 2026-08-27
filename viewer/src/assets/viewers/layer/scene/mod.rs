@@ -45,7 +45,7 @@ use ironworks::file::shpk::ShaderPackage;
 use ironworks::file::spm::ShaderParameters;
 use ironworks::file::tmb;
 use ironworks::file::{
-    File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, sgb::SharedGroupFile, svb, tera,
+    File, ggd, gzd, layer, lcb, lgb::LayerGroupFile, mtrl, sgb::SharedGroupFile, svb, tera,
 };
 
 use super::super::avfx;
@@ -3652,15 +3652,28 @@ impl Scene {
         // Either reading: a material the wind reaches and no still model carries is translated
         // only as a waving one.
         let drawn: HashSet<usize> = self.translated.keys().map(|(at, _)| *at).collect();
-        let wanted: Vec<String> = self
+        let live: Vec<&Material> = self
             .materials
             .iter()
             .enumerate()
             .filter(|(at, _)| drawn.contains(at))
             .filter_map(|(_, (_, slot))| match slot {
-                Slot::Ready(material) => Some(material),
+                Slot::Ready(material) => Some(material.as_ref()),
                 _ => None,
             })
+            .collect();
+        // Past its last texel a texture addresses the way its own sampler states, which for a
+        // cutout is mirrored far more often than the repeat this otherwise assumes.
+        let wrap_paths: BTreeMap<&str, mtrl::AddressMode> = live
+            .iter()
+            .flat_map(|material| {
+                material
+                    .bound()
+                    .map(move |(id, path)| (path, material.wrap(id)))
+            })
+            .collect();
+        let wanted: Vec<String> = live
+            .iter()
             // By the sampler each is bound to, not by the four roles this viewer's own shading
             // knows: the game's shaders read every one, and water names its wave maps through
             // samplers no other package declares.
@@ -3723,7 +3736,18 @@ impl Scene {
                         TextureOptions {
                             magnification: egui::TextureFilter::Linear,
                             minification: egui::TextureFilter::Linear,
-                            wrap_mode: egui::TextureWrapMode::Repeat,
+                            wrap_mode: match wrap_paths.get(path.as_str()) {
+                                Some(mtrl::AddressMode::MirroredRepeat) => {
+                                    egui::TextureWrapMode::MirroredRepeat
+                                }
+                                Some(
+                                    mtrl::AddressMode::ClampToEdge
+                                    | mtrl::AddressMode::ClampToBorder,
+                                ) => egui::TextureWrapMode::ClampToEdge,
+                                Some(mtrl::AddressMode::Repeat) | None => {
+                                    egui::TextureWrapMode::Repeat
+                                }
+                            },
                             mipmap_mode: Some(egui::TextureFilter::Linear),
                         },
                     ))

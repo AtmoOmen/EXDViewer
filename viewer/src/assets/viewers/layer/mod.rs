@@ -87,6 +87,10 @@ fn files(scene: &Scene) -> Vec<(&'static str, String)> {
     files
 }
 
+/// Width held for the header grid's name column. Fitted to the longest name currently in
+/// `HEADER_NAMES` ("sky visibility path"); longer names added later will truncate.
+const HEADER_NAME_WIDTH: f32 = 130.0;
+
 /// What each slot of the scene header's general block is, where anything has established one. The
 /// blanks are real: nothing has identified them yet, and the viewer shows their bytes rather than
 /// pretending otherwise.
@@ -878,7 +882,15 @@ pub fn ui(
                         })
                         .monospace(),
                     );
-                    ui.label(RichText::new(HEADER_NAMES.get(slot).copied().unwrap_or("")).weak());
+                    // Fixed rather than natural: an untracked name column is this grid's widest
+                    // cell forever, and it never shrinks back down once measured wide.
+                    ui.add_sized(
+                        vec2(HEADER_NAME_WIDTH, 0.0),
+                        egui::Label::new(
+                            RichText::new(HEADER_NAMES.get(slot).copied().unwrap_or("")).weak(),
+                        )
+                        .truncate(),
+                    );
                     ui.allocate_space(vec2(ui.available_width(), 0.0));
                     ui.end_row();
                 }

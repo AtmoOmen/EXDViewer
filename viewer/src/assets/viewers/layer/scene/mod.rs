@@ -4150,6 +4150,18 @@ impl Scene {
             Slot::Ready(material) => Some(material),
             _ => None,
         });
+        if let Some((path, _)) = self.materials.get(slot)
+            && (path.contains("fal01a") || path.contains("riv01a"))
+        {
+            log::info!(
+                "WATER_PROBE {path} slot={slot} ready={} translated={} resolve={}",
+                held.is_some(),
+                self.translated.contains_key(&(slot, waving)),
+                self.translated
+                    .get(&(slot, waving))
+                    .is_some_and(|t| t.resolve.is_some()),
+            );
+        }
         // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
         // its package is translated, and answering with that one would pin the sampler to it.
         let bind = |path: &str, aniso: f32| match self.stacked.get_key_value(path) {

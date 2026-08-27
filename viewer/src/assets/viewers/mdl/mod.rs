@@ -15,6 +15,7 @@
 pub(super) mod deferred;
 mod deform;
 pub mod dye;
+mod emote;
 mod export;
 pub(super) mod gpu;
 mod grid;
@@ -473,6 +474,9 @@ pub struct Rendered {
     /// A piece hung rigidly off a bone rather than skinned to the shared rig, by the path it was
     /// worn as: a weapon, carried at the placement its attach point states this frame.
     attachments: RefCell<Vec<Attachment>>,
+    /// The props, sound and vfx an emote's own timeline states, read against whatever the body is
+    /// playing.
+    emote: RefCell<emote::Cue>,
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
@@ -560,6 +564,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         stains: Default::default(),
         dyed: Default::default(),
         attachments: Default::default(),
+        emote: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
         customize: Cell::new(program::Customize::default()),
@@ -1566,6 +1571,9 @@ impl Rendered {
         let level = self.level.borrow();
         if level.skinned {
             self.animation.poll(ui.ctx(), backend);
+            self.emote
+                .borrow_mut()
+                .poll(backend, self.animation.body_playing());
         }
         let mut slots = self.slots.borrow_mut();
         for (index, slot) in slots.iter_mut().enumerate() {
@@ -2085,11 +2093,12 @@ impl Rendered {
             .map(|mesh| self.pieces[mesh.piece].path.as_str())
             .collect();
         let mut pose = self.animation.pose(&level.bones, &worn, self.skeleton.get());
+        let rig = self.animation.rig();
         // A carried piece has no bone table of its own to resolve against the shared rig, so
         // `pose` names it by an unresolvable placeholder and leaves it at `Mat4::IDENTITY`; this
         // overwrites that with the bone it actually hangs from, carried the way a rider is.
         if !self.attachments.borrow().is_empty()
-            && let Some((names, ..)) = self.animation.rig()
+            && let Some((names, ..)) = &rig
         {
             for attachment in self.attachments.borrow().iter() {
                 let Some(bone) = names.iter().position(|name| *name == attachment.bone) else {
@@ -2104,6 +2113,29 @@ impl Rendered {
                         pose.joints[index] = vec![carried];
                     }
                 }
+            }
+        }
+        // A marker standing in for a vfx an emote's own timeline fires: not the game's particles,
+        // only where and when one would draw.
+        let mut markers = std::mem::take(&mut pose.skeleton);
+        if let (Some((_, _, time)), Some((names, ..))) = (self.animation.body_playing(), &rig) {
+            for vfx in self.emote.borrow().active_vfx(time) {
+                let Some(bone) = names.iter().position(|name| *name == vfx.bone) else {
+                    continue;
+                };
+                let Some(&world) = pose.world.get(bone) else {
+                    continue;
+                };
+                let (_, rotation, translation) = vfx.local(world).to_scale_rotation_translation();
+                markers.push(placed::Batch {
+                    shape: placed::Shape::Box,
+                    instances: vec![placed::Instance {
+                        center: translation.to_array(),
+                        scale: [0.08; 3],
+                        turn: rotation.to_array(),
+                        color: vfx.tint(),
+                    }],
+                });
             }
         }
         // Carried rather than written into the camera, so a motion that walks runs in place and the
@@ -2315,9 +2347,10 @@ impl Rendered {
         };
 
         // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in
-        // the mesh it poses.
-        let overlay = self.skeleton.get().then(|| {
-            self.overlay.lock().unwrap().replace(pose.skeleton);
+        // the mesh it poses. Shown whenever there is a vfx marker to draw even with the skeleton
+        // toggle off, since that one is not a debug view.
+        let overlay = (self.skeleton.get() || !markers.is_empty()).then(|| {
+            self.overlay.lock().unwrap().replace(markers);
             (self.overlay.clone(), (projection * view).to_cols_array())
         });
 
@@ -3089,6 +3122,15 @@ impl Rendered {
             .into_iter()
             .map(|(path, bone, local)| Attachment { path, bone, local })
             .collect();
+    }
+
+    /// The model an emote's own timeline wants held right now, by the path it is worn as and its
+    /// material variant, where a `C043`/`C198` prop command's window covers the current time.
+    /// `None` once it has played through: the caller is what carries a prop away again, the way a
+    /// weapon put away carries nothing.
+    pub fn wanted_prop(&self) -> Option<(String, u16)> {
+        let (_, _, time) = self.animation.body_playing()?;
+        self.emote.borrow().active_prop(time)
     }
 
     /// Poses the character out of a different pack, which is what picking an emote is.

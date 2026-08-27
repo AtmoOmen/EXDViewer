@@ -366,6 +366,16 @@ impl Layer {
         motions.companion(self.motion.get()?).map(ToOwned::to_owned)
     }
 
+    /// The pack playing, the name its own file gives the motion, and how far into it, in
+    /// seconds: for whatever reads a motion's timeline directly rather than through the pose it
+    /// drives.
+    fn playing(&self) -> Option<(String, String, f32)> {
+        let pack = self.pack.borrow();
+        let motions = pack.as_ref().and_then(Fetch::ready)?;
+        let (name, _) = motions.named.get(self.motion.get()?)?;
+        Some((self.wanted.borrow().clone(), name.clone(), self.time.get()))
+    }
+
     /// Runs the clock on by `step`, taking up whatever was queued behind the motion once it has
     /// played through. Nothing queued means it loops, which is what a pose held forever wants.
     fn advance(&self, step: f32) {
@@ -812,6 +822,13 @@ impl Animation {
                     .iter()
                     .find_map(|code| exists(ride_path(code)))
             })
+    }
+
+    /// The pack, motion name and time the body is playing, for an emote's own timeline commands
+    /// (props, sound, vfx) rather than the face's: those are read against whatever the body is
+    /// doing, not the expression laid over it.
+    pub fn body_playing(&self) -> Option<(String, String, f32)> {
+        self.body.playing()
     }
 
     /// Plays `path`, settling into `then` once it has played through.

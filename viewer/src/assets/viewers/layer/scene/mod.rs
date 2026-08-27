@@ -628,7 +628,9 @@ fn vfx_tint(colour: Rgba) -> Vec4 {
 enum EffectState {
     Wanted,
     Fetching(TrackedPromise<Result<Vec<u8>>>),
-    Ready(avfx::sim::Effect, avfx::sim::State),
+    /// The clock reading the fetch resolved at, so the effect's own timeline starts at zero
+    /// wherever real time happened to be when it arrived rather than at the clock's own zero.
+    Ready(avfx::sim::Effect, avfx::sim::State, i32),
     Failed,
 }
 
@@ -2042,7 +2044,7 @@ impl Scene {
         self.effect_files
             .iter()
             .filter_map(|effect| {
-                let EffectState::Ready(parsed, live) = &effect.state else {
+                let EffectState::Ready(parsed, live, _) = &effect.state else {
                     return None;
                 };
                 // Held back rather than drawn white: a texture still fetching would otherwise bind
@@ -2318,7 +2320,7 @@ impl Scene {
                         .unwrap()
                         .queue_effect(effect.path.clone(), models);
                     self.dirty = true;
-                    EffectState::Ready(parsed, avfx::sim::State::default())
+                    EffectState::Ready(parsed, avfx::sim::State::default(), self.clock as i32)
                 }
                 Err(why) => {
                     log::error!("assets/layer: {}: {why}", effect.path);
@@ -2329,10 +2331,18 @@ impl Scene {
 
         let frame = self.clock as i32;
         for effect in &mut self.effect_files {
-            let EffectState::Ready(parsed, live) = &mut effect.state else {
+            let EffectState::Ready(parsed, live, born) = &mut effect.state else {
                 continue;
             };
-            parsed.seek(live, frame.rem_euclid(parsed.length.max(1)));
+            // Relative to when the effect arrived, so its own timeline starts at zero there rather
+            // than at the clock's zero. An unbounded one is left running past `length` rather than
+            // wrapped back to it.
+            let elapsed = frame - *born;
+            let target = match parsed.bounded {
+                true => elapsed.rem_euclid(parsed.length.max(1)),
+                false => elapsed,
+            };
+            parsed.seek(live, target);
         }
     }
 
@@ -3587,7 +3597,7 @@ impl Scene {
             .flat_map(|material| material.bound().map(|(_, path)| path.to_owned()))
             .chain(maps.iter().cloned())
             .chain(self.effect_files.iter().flat_map(|effect| match &effect.state {
-                EffectState::Ready(parsed, _) => parsed.textures.clone(),
+                EffectState::Ready(parsed, ..) => parsed.textures.clone(),
                 _ => Vec::new(),
             }))
             .filter(|path| !self.textures.contains_key(path) && !sliced.contains(path))

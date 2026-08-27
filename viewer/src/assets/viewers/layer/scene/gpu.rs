@@ -873,12 +873,6 @@ impl Renderer {
                 let Some(held) = held else {
                     continue;
                 };
-                if !filling && !fringe && held.pass == program::Pass::Water {
-                    log::info!(
-                        "WATER_DRAW model={} mesh={mesh} material={} indices={indices}",
-                        batch.model, surface.material
-                    );
-                }
                 let program = deferred::link(
                     gl,
                     &mut self.programs,

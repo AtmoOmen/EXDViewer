@@ -28,9 +28,13 @@ CHROMIUM="${CHROMIUM:-$(need chromium chromium)}"
 BUN="${BUN:-$(need bun bun)}"
 export CHROMIUM
 
+# A dev build's own decode times run 10-25x slower than release's, which is what starves a
+# streaming zone under load; the "smoke" cargo profile (root Cargo.toml) is release everywhere
+# except egui_glow, which keeps its own check_for_gl_error active, and keeps overflow-checks on so
+# a malformed or oversized file still panics instead of wrapping a usize on the 32-bit wasm target.
 if [ "$build" = 1 ]; then
     echo "== building viewer/dist"
-    (cd "$root/viewer" && trunk build index.html)
+    (cd "$root/viewer" && trunk build index.html --release --cargo-profile smoke)
 fi
 
 exec "$BUN" "$root/smoke/smoke.ts" "$@"

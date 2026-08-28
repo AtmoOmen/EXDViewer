@@ -525,6 +525,13 @@ let proxyFailed = 0;
 async function proxyFetches(cdp: Cdp) {
     await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://xiviewer.app/*" }] });
     cdp.on("Fetch.requestPaused", async (p: any) => {
+        // A Range header is not CORS-safelisted, so the browser sends its own OPTIONS preflight
+        // for a ranged fetch; the real server already answers that correctly, so let it through
+        // rather than replaying it ourselves and breaking the CORS handshake chromium expects.
+        if (p.request.method === "OPTIONS") {
+            await cdp.send("Fetch.continueRequest", { requestId: p.requestId }).catch(() => {});
+            return;
+        }
         try {
             const upstream = await fetch(p.request.url, {
                 method: p.request.method,

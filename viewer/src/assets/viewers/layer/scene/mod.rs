@@ -155,9 +155,6 @@ fn engine_keys(package: &str, waving: bool) -> Vec<(u32, u32)> {
 /// How large a box a light is drawn as where the zone states none for it.
 const REACH: f32 = 6.0;
 
-/// Five parts in 255, inverted: what a light's reach solves out of.
-const CUTOFF: f32 = 255.0 / 5.0;
-
 /// How fast a shared group's timeline runs. An animation pack states one span both in seconds and
 /// in these, and the two agree on thirty a second.
 const TICKS: f32 = 30.0;
@@ -558,11 +555,12 @@ struct Translated {
 }
 
 /// One light the zone places. The box it is clipped against is stated in its own space, so the
-/// placement carries where it stands and the box how much of its reach the zone kept.
+/// placement carries where it stands and the box how far it carries: a zone that cuts none states
+/// this fallback instead, which is what the reach is worked out from either way.
 struct Light {
     placement: Mat4,
-    /// How far it carries, worked out from how bright it is rather than read.
-    reach: f32,
+    min: Vec3,
+    max: Vec3,
     /// Which of its package's falloff variants shades it.
     falloff: usize,
     /// The range its record states, which its falloff is divided by.
@@ -951,14 +949,6 @@ fn reached<V>(map: &HashMap<(u32, [u8; 4]), V>, mut key: (u32, [u8; 4])) -> Opti
         let at = key.1.iter().rposition(|byte| *byte != 0)?;
         key.1[at] = 0;
     }
-}
-
-/// How far a light carries, which no field states: the brightest channel and the power the record
-/// attenuates by solve it, and the light's own pass drops every pixel past it. The colour is the one
-/// the file states, not the one an animation cycles it to.
-fn carry(color: Vec3, attenuation: f32, range: f32) -> f32 {
-    let peak = color.max_element().max(0.0);
-    (CUTOFF * peak * peak / range).powf(1.0 / attenuation.max(1.0))
 }
 
 /// The variant of its own package a light is shaded by, which is that same power: the corpus states
@@ -1549,8 +1539,9 @@ impl Scene {
                             self.lights.push(Light {
                                 placement: here,
                                 center: at,
+                                min: Vec3::splat(-REACH),
+                                max: Vec3::splat(REACH),
                                 range,
-                                reach: carry(color, light.attenuation(), range),
                                 falloff: falloff(light.attenuation()),
                                 color,
                                 kind,
@@ -2067,24 +2058,30 @@ impl Scene {
         let mut near: Vec<(f32, &Light)> = self
             .lights
             .iter()
-            .map(|light| (((light.center - eye).length() - light.reach).max(0.0), light))
+            .map(|light| {
+                let reach = light.min.abs().max(light.max.abs()).max_element();
+                (((light.center - eye).length() - reach).max(0.0), light)
+            })
             .filter(|(span, _)| *span <= self.load)
             .collect();
         near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         near.into_iter()
             .take(LAMPS)
             .map(|(_, light)| {
-                // A light the `.lcb` states no box for keeps one of this viewer's own, since the
-                // pass clips against whatever stands here and a light's whole reach can be a zone.
-                let (min, max) = reached(&self.clips, light.key).copied().unwrap_or((
-                    Vec3::splat(-REACH.min(light.reach)),
-                    Vec3::splat(REACH.min(light.reach)),
-                ));
+                // A light the `.lcb` states no box for keeps one of this viewer's own. Either
+                // way, how far the light carries is read off that box rather than off its
+                // brightness: a captured frame keeps one reach for one box under a colour that
+                // swings widely, and a reach solved from brightness alone can drift far past a
+                // small box, leaving everything inside it lit at full strength up to a hard wall.
+                let (min, max) = reached(&self.clips, light.key)
+                    .copied()
+                    .unwrap_or((light.min, light.max));
+                let reach = min.abs().max(max.abs()).max_element().max(0.001);
                 program::Lamp {
                     placement: light.placement,
                     min,
                     max,
-                    reach: light.reach,
+                    reach,
                     falloff: light.falloff,
                     range: light.range,
                     color: match light.glow {

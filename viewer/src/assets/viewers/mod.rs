@@ -110,13 +110,15 @@ const FACT_LABEL_WIDTH: f32 = 150.0;
 
 /// A table of label and value, which is most of what a details panel is.
 fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
+    // A zero-height cell centers the label a half-line off the value's own centering.
+    let label_height = ui.text_style_height(&egui::TextStyle::Body);
     egui::Grid::new(id)
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
             for (label, value) in rows {
                 ui.allocate_ui_with_layout(
-                    vec2(FACT_LABEL_WIDTH, 0.0),
+                    vec2(FACT_LABEL_WIDTH, label_height),
                     Layout::left_to_right(Align::Center),
                     |ui| ui.add(Label::new(RichText::new(*label).weak()).truncate()),
                 );

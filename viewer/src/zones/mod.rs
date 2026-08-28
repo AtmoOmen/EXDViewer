@@ -513,20 +513,20 @@ impl ZoneBrowser {
 
             Panel::top("zone_header").show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    if CollapsibleSidePanel::is_collapsed(ui.ctx(), "zone_info") {
-                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                            CollapsibleSidePanel::draw_arrow(ui, "zone_info", Side::Right);
-                        });
-                    }
-                    // No sheet row names this path: shown as-is rather than hidden.
-                    let title = self
-                        .name_of(&opened.path)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| opened.path.clone());
-                    ui.vertical_centered_justified(|ui| {
-                        ui.heading(title).on_hover_text(&opened.path)
+                // Stacked, not nested: a right-to-left child inside the title's horizontal claims
+                // the whole row width.
+                if CollapsibleSidePanel::is_collapsed(ui.ctx(), "zone_info") {
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        CollapsibleSidePanel::draw_arrow(ui, "zone_info", Side::Right);
                     });
+                }
+                // No sheet row names this path: shown as-is rather than hidden.
+                let title = self
+                    .name_of(&opened.path)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| opened.path.clone());
+                ui.vertical_centered_justified(|ui| {
+                    ui.heading(title).on_hover_text(&opened.path)
                 });
                 ui.add_space(4.0);
             });

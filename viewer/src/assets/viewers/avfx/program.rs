@@ -209,10 +209,24 @@ fn pair(package: &ShaderPackage, set: &[(u32, u32)]) -> Option<(u32, u32)> {
 /// The pair these keys draw with. A package carries only the combinations it was built with, so a
 /// set reaching no node gives keys up one at a time rather than all at once; they arrive in the
 /// order they matter in, so the last is the first to go.
+///
+/// No particle field names `ComputeSoftParticleType`: apricot compiles it as an all-or-nothing
+/// split across whole texture combinations rather than a per-particle toggle, so a combination
+/// that only exists with it enabled reaches nothing at the package's own default (`Disable`) and
+/// the truncation above lands on an unrelated node instead. Tried whole and un-truncated first,
+/// since every combination observed compiles at exactly one of the two states.
 fn resolve(package: &ShaderPackage, set: &[(u32, u32)]) -> Option<(u32, u32)> {
-    (0..=set.len())
-        .rev()
-        .find_map(|held| pair(package, &set[..held]))
+    let mut soft = Vec::with_capacity(set.len() + 1);
+    soft.push((
+        id("ComputeSoftParticleType_Table"),
+        id("ComputeSoftParticleType_Enable"),
+    ));
+    soft.extend_from_slice(set);
+    pair(package, &soft).or_else(|| {
+        (0..=set.len())
+            .rev()
+            .find_map(|held| pair(package, &set[..held]))
+    })
 }
 
 fn program<'a>(

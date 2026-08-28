@@ -20,6 +20,19 @@ catppuccin-egui = { git = "https://github.com/WorkingRobot/egui.git", branch = "
 inherits = "release"
 debug = true
 
+# smoke/run.sh's build: release speed (a dev wasm's decode times are 10-25x slower, which is what
+# actually starves the level phase under load), but overflow-checks stays on so a malformed or
+# oversized file still panics instead of silently wrapping a usize on the 32-bit wasm target.
+[profile.smoke]
+inherits = "release"
+overflow-checks = true
+
+# Keeps egui_glow's own check_for_gl_error polling alive, which is gated on debug-assertions and is
+# the only thing that catches a GL error class chromium's own renderer log stays silent on (see
+# smoke/README.md's unattributed GL_INVALID_OPERATION at painter.rs:447).
+[profile.smoke.package.egui_glow]
+debug-assertions = true
+
 # A debug build of epaint acquires its context lock with a timeout, and parking_lot measures that
 # timeout with `std::time::Instant`, which wasm32-unknown-unknown does not implement. Any lock that
 # misses the uncontended fast path then panics, killing whatever task it was on. Release builds take

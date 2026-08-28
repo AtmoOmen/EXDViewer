@@ -125,6 +125,50 @@ coverage counters are what catch a model that failed to load.
 
 ## Known red
 
+**`timed out after 180000ms waiting for r2d1.lvb to be titled`, level phase.** Root-caused
+2026-08-27. `smoke/run.sh` used to build the dev profile (`trunk build index.html`, no `--release`),
+and the working theory going in was that `egui_glow::check_for_gl_error` panicked the whole app on
+a transient GL error under load. That does not hold up: `check_for_gl_error_impl` only calls
+`log::error!`, never panics, and forcing `WEBGL_lose_context` on both a dev and a `--release` build
+produced identical behaviour (frozen canvas, no panic, either side, `gl.getError()` reporting
+`CONTEXT_LOST_WEBGL`). The real difference is size and speed: the dev `viewer.wasm` measured 104.5
+MiB against a `--release` build's 18.8 MiB (5.5x), first frame 582.9ms against 114.3ms (5x), and a
+single texture decode 10-25x slower. A streaming zone is decode-bound, and the level phase's
+`titled`/`decoded` waits fire only once the router runs, which needs the whole wasm module fetched
+and booted first. `smoke/run.sh` now builds the `smoke` cargo profile (`Cargo.toml`): release
+everywhere except `egui_glow`, which keeps `debug-assertions` on so its own `check_for_gl_error`
+still runs (the unattributed `GL_INVALID_OPERATION (0x502)` below has nothing else to catch it),
+and `overflow-checks` stays on project-wide so a malformed or oversized file still panics on the
+32-bit wasm target instead of wrapping a `usize` silently. Reproduced live: three dev-profile runs
+at load average ~30 (three concurrent, the machine also running other agents' chromiums) gave 2
+PASS and 1 FAIL at exactly this message; the `smoke`-profile build measured the level phase's own
+`titled`+`decoded`+`instanced` wait at 28-39s total across four separate runs at settled-to-moderate
+load (~7-17), comfortably under the 180s budget it used to time out on. The budget was never too
+tight for what the level phase actually does; it was too tight for a 104 MiB unoptimized wasm
+competing with everything else on the box. Left at 180s.
+
+**The app's own `fetch()` to `xiviewer.app` exhausts chromium under concurrent load; `curl` to the
+same URL stays fast throughout.** `smoke/run.sh` now runs a CDP `Fetch.enable` proxy
+(`proxyFetches` in `smoke/smoke.ts`) on `https://xiviewer.app/*`: every request chromium would have
+made is instead answered from bun's own `fetch()`, so contention inside chromium's network stack
+never gets a chance to happen. Measured across four runs after the fix: 0, 0, 2 and 12 fetches
+failed against totals of 1480-1760 served, against the 103-157 failures per run a prior measurement
+found unproxied. One thing this had to get right and initially didn't: a `Range` header (used for
+partial mip/LOD reads) is not CORS-safelisted, so the browser sends its own preflight `OPTIONS` for
+a ranged fetch. The first version of this proxy intercepted and replayed that preflight itself,
+which broke the CORS handshake outright (`blocked by CORS policy: No 'Access-Control-Allow-Origin'
+header is present`) even though the real server already answers it correctly unproxied.
+`Fetch.continueRequest` on any `OPTIONS` method fixes it: let the preflight go straight to the real
+server, and only intercept the request it is negotiating for.
+
+This unblocks a zone that could not load headless at all before: `bg/ffxiv/wil_w1/twn/w1t1` (a
+capital city) ran the full gate end to end with the proxy in place - model, shaders, scene, level,
+character and all nine avfx effects. It still fails, but not on anything this fix touches: seven
+pre-existing 404s, for `bg/ffxiv/wil_w1/twn/w1t1/grass/_grass{1,4}.tex` and five
+`bgcommon/world/chi/shared/for_bg/sgbg_w_chi_*.sgb` paths the zone's own layer data names but the
+install does not have. That is a pathlist/asset-completeness question for whoever owns w1t1's
+zone-lighting work, not a harness fault.
+
 **`timed out after 180000ms waiting for the equipment change to rebuild the model`, character
 phase.** RESOLVED, and it was the harness, not the equipment-change path itself: `HEAD_SLOT`/
 `HEAD_ITEM` (`smoke/smoke.ts`), calibrated when the step landed at `d5bb5a1e`, had drifted stale

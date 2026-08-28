@@ -515,6 +515,50 @@ async function drag(cdp: Cdp, by: number) {
     await sleep(400);
 }
 
+// The app's own fetch() to xiviewer.app hits ERR_INSUFFICIENT_RESOURCES dozens of times per
+// character-tab load under concurrent chromium load, while curl to the same URL succeeds
+// throughout: it is chromium-internal request contention, not the network. Answering the request
+// from bun instead of letting chromium carry it out avoids that contention entirely.
+let proxied = 0;
+let proxyFailed = 0;
+
+async function proxyFetches(cdp: Cdp) {
+    await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://xiviewer.app/*" }] });
+    cdp.on("Fetch.requestPaused", async (p: any) => {
+        // A Range header is not CORS-safelisted, so the browser sends its own OPTIONS preflight
+        // for a ranged fetch; the real server already answers that correctly, so let it through
+        // rather than replaying it ourselves and breaking the CORS handshake chromium expects.
+        if (p.request.method === "OPTIONS") {
+            await cdp.send("Fetch.continueRequest", { requestId: p.requestId }).catch(() => {});
+            return;
+        }
+        try {
+            const upstream = await fetch(p.request.url, {
+                method: p.request.method,
+                headers: p.request.headers,
+            });
+            const body = Buffer.from(await upstream.arrayBuffer());
+            // Bun already decompressed the body, and re-declaring its original length or encoding
+            // is what makes chromium fail to parse a response that is no longer what they describe.
+            const headers = [...upstream.headers.entries()]
+                .filter(([name]) => !/^(content-encoding|content-length|transfer-encoding)$/i.test(name))
+                .map(([name, value]) => ({ name, value }));
+            await cdp.send("Fetch.fulfillRequest", {
+                requestId: p.requestId,
+                responseCode: upstream.status,
+                responseHeaders: headers,
+                body: body.toString("base64"),
+            });
+            proxied++;
+        } catch {
+            proxyFailed++;
+            await cdp
+                .send("Fetch.failRequest", { requestId: p.requestId, errorReason: "Failed" })
+                .catch(() => {});
+        }
+    });
+}
+
 async function main() {
     if (!existsSync(join(dist, "index.html"))) {
         throw new Error(`no build at ${dist} (run smoke/run.sh, which builds first)`);
@@ -547,6 +591,7 @@ async function main() {
     await cdp.send("Log.enable");
     await cdp.send("Page.enable");
     await cdp.send("Inspector.enable");
+    await proxyFetches(cdp);
     await cdp.send("Emulation.setDeviceMetricsOverride", {
         width: WIDTH,
         height: HEIGHT,
@@ -907,6 +952,9 @@ async function main() {
         await effects();
     } finally {
         if (crashed) failures.push({ where: phase, source: "browser", level: "error", text: "the renderer process crashed" });
+        console.log(`\nfetch proxy: ${proxied} served, ${proxyFailed} failed`);
+        report.proxied = proxied;
+        report.proxyFailed = proxyFailed;
         writeFileSync(
             join(root, "smoke/last-run.json"),
             JSON.stringify({ report, failures, noted, muted }, null, 2),
@@ -924,12 +972,15 @@ async function main() {
 async function walk(cdp: Cdp, origin: string, path: string, name: string, route: string) {
     console.log(`\n== ${phase}: ${path}`);
     const opened = decoded;
+    const start = Date.now();
     await cdp.send("Page.navigate", { url: `${origin}/${route}/${path}` });
     await waitFor(`${path} to be titled`, 180_000, async () => {
         const title = await cdp.eval<string>("document.title").catch(() => "");
         return title.includes(path.split("/").pop()!);
     });
+    const titled = Date.now();
     await waitFor(`${path} to be decoded`, 180_000, async () => decoded > opened);
+    const decodedAt = Date.now();
     await sleep(3000);
     const before = await counters(cdp);
     if (route === "assets") {
@@ -939,6 +990,11 @@ async function walk(cdp: Cdp, origin: string, path: string, name: string, route:
         const c = await counters(cdp).catch(() => ({}) as any);
         return (c.instanced ?? 0) > before.instanced;
     });
+    const instancedAt = Date.now();
+    console.log(
+        `   titled +${titled - start}ms  decoded +${decodedAt - titled}ms  ` +
+            `instanced +${instancedAt - decodedAt}ms`,
+    );
     await sleep(SETTLE);
     await shot(cdp, name);
     const held = await counters(cdp);

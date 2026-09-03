@@ -300,6 +300,29 @@ mod tests {
         );
     }
 
+    /// One weapon the install itself gives an effect: `w0401b0080`'s third variant names vfx 2,
+    /// and the file that resolves to is one the install ships.
+    #[test]
+    fn a_weapon_variant_that_names_an_effect_resolves_a_file_the_install_holds() {
+        let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
+            ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),
+        ));
+        let imc: Vec<u8> = install
+            .file("chara/weapon/w0401/obj/body/b0080/b0080.imc")
+            .expect("the imc");
+        let weapon = Weapon {
+            set: 401,
+            base: 80,
+            variant: 2,
+        };
+        let path = vfx_path(&weapon, &imc).expect("this variant names an effect");
+        assert_eq!(path, "chara/weapon/w0401/obj/body/b0080/vfx/eff/vw0002.avfx");
+        assert!(install.file::<Vec<u8>>(&path).is_ok(), "{path}");
+
+        let plain = Weapon { variant: 0, ..weapon };
+        assert_eq!(vfx_path(&plain, &imc), None, "the default variant has none");
+    }
+
     #[test]
     fn a_fist_weapon_wears_the_set_past_its_own_and_gauntlets() {
         // "Ultimate Omega Knuckles": set 1601, and a `ModelSub` naming equipment set 8808.

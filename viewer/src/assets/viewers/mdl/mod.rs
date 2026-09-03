@@ -693,6 +693,13 @@ pub(crate) fn imc_path(path: &str) -> Option<String> {
     }
     let base = &path[..path.rfind("/model/")?];
     let part = base.rsplit('/').next()?;
+    // The off-hand half of a paired weapon ships none of its own and reads the main hand's.
+    if let Some(tail) = base.strip_prefix("chara/weapon/w")
+        && let Ok(set) = tail.get(..4)?.parse::<u32>()
+    {
+        let shared = material::shared_set(set);
+        return Some(format!("chara/weapon/w{shared:04}{}/{part}.imc", &tail[4..]));
+    }
     Some(format!("{base}/{part}.imc"))
 }
 

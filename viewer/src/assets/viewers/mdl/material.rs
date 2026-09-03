@@ -314,10 +314,13 @@ fn pack(table: &mtrl::ColorTable) -> Option<Vec<f32>> {
 /// A body drawn from another body's model reads its own skin all the same, which is `skin`: the one
 /// mesh the game holds is named for the body it was modelled on and every body wearing it names a
 /// material of its own.
-pub fn path(name: &str, variant: u16, skin: Option<u16>) -> Option<String> {
+pub fn path(model: &str, name: &str, variant: u16, skin: Option<u16>) -> Option<String> {
     let name = name.trim_start_matches('/');
     if name.contains('/') {
         return Some(name.to_owned());
+    }
+    if let Some(held) = weapon(model, name, variant) {
+        return Some(held);
     }
     let stem = name.strip_prefix("mt_")?;
     let kind = stem.as_bytes().first().copied()? as char;
@@ -342,10 +345,43 @@ pub fn path(name: &str, variant: u16, skin: Option<u16>) -> Option<String> {
             format!("chara/demihuman/d{body:04}/obj/equipment/e{part:04}/material/v{worn:04}")
         }
         ('m', 'b') => format!("chara/monster/m{body:04}/obj/body/b{part:04}/material/v0001"),
-        ('w', 'b') => format!("chara/weapon/w{body:04}/obj/body/b{part:04}/material/v0001"),
         _ => return None,
     };
     Some(format!("{directory}/{name}"))
+}
+
+/// The file a weapon's material sits in, which `Weapon::ResolveMtrlPath` builds out of the weapon
+/// being drawn rather than out of the material's own name: a model is free to name a set that is
+/// not the one it is filed under, and the name's own digits are rewritten to match the directory.
+fn weapon(model: &str, name: &str, variant: u16) -> Option<String> {
+    let (set, rest) = model.strip_prefix("chara/weapon/w")?.split_once("/obj/body/b")?;
+    let set: u32 = set.parse().ok()?;
+    let base: u32 = rest.get(..4)?.parse().ok()?;
+    // Every machinist gun hangs the same aetherotransformer off its `_c` material, and the game
+    // answers that one with the base set's rather than the gun's own.
+    if set / 100 == 20 && name.as_bytes().get(14) == Some(&b'c') {
+        return Some("chara/weapon/w2001/obj/body/b0001/material/v0001/mt_w2001b0001_c.mtrl".into());
+    }
+    let shared = shared_set(set);
+    let name = match shared == set {
+        true => name.to_owned(),
+        false => format!("mt_w{shared:04}{}", name.strip_prefix("mt_")?.get(5..)?),
+    };
+    let worn = variant.max(1);
+    Some(format!(
+        "chara/weapon/w{shared:04}/obj/body/b{base:04}/material/v{worn:04}/{name}"
+    ))
+}
+
+/// The set a weapon's materials and its `.imc` are filed under, which is not its own for the
+/// off-hand half of a paired weapon: `Weapon::ResolveMtrlPath` and `ResolveImcPath` both map a set
+/// whose last two digits pass fifty back by fifty, in the six families that pair across two hands.
+pub(crate) fn shared_set(set: u32) -> u32 {
+    const PAIRED: [u32; 6] = [3, 16, 18, 26, 30, 31];
+    match PAIRED.contains(&(set / 100)) && set % 100 > 50 {
+        true => set - 50,
+        false => set,
+    }
 }
 
 /// The material variant a worn piece's `.imc` says `variant` actually draws with. Several variants

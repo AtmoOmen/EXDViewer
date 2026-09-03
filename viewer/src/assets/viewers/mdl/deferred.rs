@@ -1312,7 +1312,6 @@ impl Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
-        dead.extend(self.gather.take().map(Dead::Sampler));
         if let Some(held) = self.sheer.take() {
             dead.push(Dead::Frame(held.frame));
             dead.extend(held.color.into_iter().map(Dead::Texture));
@@ -4074,6 +4073,7 @@ impl Drop for Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
+        dead.extend(self.gather.take().map(Dead::Sampler));
         if let Some(held) = self.sheer.take() {
             dead.push(Dead::Frame(held.frame));
             dead.extend(held.color.into_iter().map(Dead::Texture));

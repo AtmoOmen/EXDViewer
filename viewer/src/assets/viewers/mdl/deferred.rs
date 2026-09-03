@@ -618,6 +618,8 @@ pub struct Drawn {
     pub vignette: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
     pub shadow: bool,
+    /// Whether the chain that weights a pixel by how much sky reaches it ran this frame.
+    pub occlusion: bool,
     /// The horizon band and the overhead sheet, in that order.
     pub clouds: [bool; 2],
 }
@@ -1830,6 +1832,7 @@ impl Buffers {
         self.pass(gl, 9, &held.gather, gathered, scene, Over::Fraction)?;
         self.pass(gl, 10, &held.occlude, occluded, scene, Over::Fraction)?;
         self.occluding = true;
+        self.drawn.occlusion = true;
         Ok(())
     }
 
@@ -1837,6 +1840,7 @@ impl Buffers {
     /// occlusion on is lit against.
     pub fn unocclude(&mut self) {
         self.occluding = false;
+        self.drawn.occlusion = false;
     }
 
     /// How much of the sun reaches each pixel, worked out from the depth it left of its own view.

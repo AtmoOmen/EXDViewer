@@ -3820,6 +3820,7 @@ impl Scene {
     fn passes(&self) -> String {
         let held = self.renderer.lock().unwrap().drawn();
         let ran: Vec<&str> = [
+            (held.occlusion, "occlusion"),
             (held.shadow, "shadow"),
             (held.sky, "sky"),
             (held.sun, "sun"),

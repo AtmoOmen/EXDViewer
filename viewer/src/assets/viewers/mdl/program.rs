@@ -518,11 +518,9 @@ pub const WATER_MIRROR: [&str; 10] = [
 /// The reference the mask stamps and every member after it draws against.
 pub const WATER_MIRROR_STENCIL: i32 = 1;
 
-/// What the reflection is taken over by with distance, and how far it takes: the color, the most of
-/// it that ever arrives in the last lane, then the view depth the fade starts at and how much of it
-/// a unit past that adds. Read whole off a frame the game drew, since nothing on disk states them.
-pub const WATER_MIRROR_FOG: [f32; 4] = [0.734_657, 0.543_774, 0.758_775, 0.860_343];
-pub const WATER_MIRROR_REACH: [f32; 4] = [0.0001, 200.0, 3500.0, 1.0];
+/// The lane past the fog's own start distance that the game uploads and no member of the chain
+/// reads.
+pub const WATER_MIRROR_UNREAD: f32 = 3500.0;
 
 /// The weights each blur reads its sixteen taps through, eight of them since the kernel is
 /// symmetric. A Gaussian of variance twenty-five taken between texels and normalized over the whole
@@ -3023,8 +3021,13 @@ impl Buffer {
                 0.5 / height,
             ]);
             write(&mut out, 2, &step);
-            write(&mut out, 3, &WATER_MIRROR_FOG);
-            write(&mut out, 4, &WATER_MIRROR_REACH);
+            // What the reflection is taken over by with distance is the zone's own vertical fog,
+            // read out of the same four fields the fog pass takes: the color it fades toward, the
+            // most of it that ever arrives, then where the fade starts and how much a unit past
+            // that adds.
+            let fog = scene.fog;
+            write(&mut out, 3, &[fog.color.x, fog.color.y, fog.color.z, fog.cap]);
+            write(&mut out, 4, &[fog.rate, fog.start, WATER_MIRROR_UNREAD, 1.0]);
             write(&mut out, 5, &weights[..4]);
             write(&mut out, 6, &weights[4..]);
             write(&mut out, 7, &[1.0, 1.0, 0.0, 0.0]);
@@ -4460,7 +4463,8 @@ mod test {
 
     /// Water's own reflection chain reads one buffer for everything it is told, against the bytes a
     /// capture of the running game held in it: the frame there is 2560 by 1440 and the chain runs at
-    /// half of it, which is why the game's own upload writes the same register twice.
+    /// half of it, which is why the game's own upload writes the same register twice. The fog is the
+    /// one that zone's own environment states at the hour the capture was taken.
     #[test]
     fn the_water_reflection_buffer_comes_out_as_the_game_held_it() {
         let scene = Scene {
@@ -4468,6 +4472,13 @@ mod test {
             reflect: Reflect {
                 level: 0,
                 texel: Vec2::new(1.0 / 1280.0, 1.0 / 720.0),
+            },
+            fog: Fog {
+                color: Vec3::new(0.734657, 0.543774, 0.758775),
+                cap: 0.860343,
+                rate: 0.0001,
+                start: 200.0,
+                ..Fog::default()
             },
             ..Default::default()
         };
@@ -4507,6 +4518,35 @@ mod test {
         }
         assert_eq!(filled[28..32], [1.0, 1.0, 0.0, 0.0]);
         assert_eq!(filled[32], 0.0);
+    }
+
+    /// The same two registers under a second zone, against a capture taken there: neither lane the
+    /// march reads is the first zone's.
+    #[test]
+    fn the_water_reflection_fog_is_the_zone_standing_under_it() {
+        let scene = Scene {
+            fog: Fog {
+                color: Vec3::new(0.478431, 0.672222, 0.783333),
+                cap: 0.995752,
+                rate: 0.00026,
+                start: 300.0,
+                ..Fog::default()
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: REFLECTION_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 9,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::WaterMirror, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        assert_eq!(filled[12..16], [0.478431, 0.672222, 0.783333, 0.995752]);
+        assert_eq!(filled[16..20], [0.00026, 300.0, 3500.0, 1.0]);
     }
 
     /// The two members of that chain drawn over the water itself take a vertex into view space

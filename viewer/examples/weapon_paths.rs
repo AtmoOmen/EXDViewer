@@ -292,6 +292,11 @@ fn main() {
         show("fist range", &fists);
     }
     if flags.contains("--list-skinned") {
-        show("skinned", &skinned);
+        let mut held: Vec<&String> = skinned.iter().collect();
+        held.sort();
+        held.dedup();
+        for line in held {
+            println!("  {line}");
+        }
     }
 }

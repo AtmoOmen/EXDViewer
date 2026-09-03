@@ -864,11 +864,10 @@ impl Renderer {
             },
             ..scene.clone()
         };
-        unsafe {
-            gl.enable(glow::CULL_FACE);
-            gl.cull_face(glow::BACK);
-            gl.front_face(glow::CW);
-        }
+        // Both faces. The game culls the back one, which it can only do because it knows which way
+        // its own water is wound; drawn under a projection whose second row is negated the winding
+        // is the other way round, and culling the wrong side leaves the whole chain empty.
+        unsafe { gl.disable(glow::CULL_FACE) };
         for (at, member) in [&chain.mask, &chain.march].into_iter().enumerate() {
             let program = deferred::link(gl, &mut self.water_programs, at, member)?;
             unsafe {
@@ -947,7 +946,6 @@ impl Renderer {
             }
         }
         unsafe {
-            gl.front_face(glow::CCW);
             gl.color_mask(true, true, true, true);
         }
         self.buffers.water_mirror(gl, &chain, scene)

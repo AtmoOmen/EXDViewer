@@ -613,6 +613,13 @@ const TONE_MAP: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 const VIEWPORT_PARAM: &str = "cDynamicViewportResolutionParam";
 const FXAA_PARAM: &str = "cFxaaParam";
 
+/// What that pass runs with, read off the game's own upload. The shader takes one less the first
+/// for FXAA's subpixel term, and a half is its own complement, so the lane and the term are the
+/// same number; the second scales the frame's own contrast into an edge threshold, over a floor the
+/// shader carries as `0.0833`.
+pub const FXAA_SUBPIX: f32 = 0.5;
+pub const FXAA_EDGE: f32 = 0.15;
+
 /// The buffers the occlusion chain reads. The first is what turns a depth buffer reading into the
 /// distance in front of the camera it stands for, and the second the rotation that brings a normal
 /// out of the world and into the camera's own space. The third is a bare `float4[3]` the reflection
@@ -620,6 +627,21 @@ const FXAA_PARAM: &str = "cFxaaParam";
 const VIEW_DEPTH_FACTOR: &str = "cViewDepthFactor";
 const VIEW_ROTATION: &str = "cView";
 const HDAO_PARAM: &str = "cHDAOParam";
+
+/// What that pass reads past the texel size of what it gathers from, read off the game's own
+/// upload since nothing describes the buffer. The accept is a fall measured against the depth it
+/// stands at and the four lengths after it are world units in front of the camera, so those carry
+/// across whole; the pass reads the reciprocal of all but the reach. The spread is in texels of the
+/// gather instead, which transfers only because both sides run that gather at half the frame: the
+/// viewer's is [`OCCLUSION_SCALE`], and where the game sizes its own is untraced.
+pub const OCCLUSION_SPREAD: f32 = 0.56;
+pub const OCCLUSION_ACCEPT: f32 = 0.01;
+pub const OCCLUSION_REJECT: f32 = 0.2;
+pub const OCCLUSION_NEAR: f32 = 1.0;
+pub const OCCLUSION_REACH: f32 = 50.0;
+pub const OCCLUSION_BIAS: f32 = 0.1;
+pub const OCCLUSION_INTENSITY: f32 = 10.0;
+pub const OCCLUSION_POWER: f32 = 0.3;
 
 /// The vertex shader the pass is drawn with. The game pairs these with a `VSSampling`, which reads a
 /// quad of positions and coordinates against a scale and a bias no file states; the screen triangle
@@ -1105,75 +1127,38 @@ impl Ambient {
     }
 }
 
-/// What the viewer draws with, past what the files decide. Most of these are constants a pass of the
-/// post chain reads and no file states: the buffers behind them report no member names and no
-/// defaults at all, so what the sliders open at is a guess and nothing more.
+/// What the viewer draws with, past what the files decide. Which passes run and how much of a
+/// texture is decoded are choices; every constant this once carried now comes out of the game's own
+/// upload but the two lanes of the vignette below.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Look {
     /// The longest edge a model's textures are decoded to, or the file's own where nothing caps it.
     /// Not a shader constant: it decides which mipmap is fetched.
     pub detail: Option<u16>,
     pub antialias: bool,
-    /// `fxaaQualitySubpix`, at FXAA 3.11's own default. The shader takes one less it, so the slider
-    /// runs the way the published constant does rather than the way the buffer holds it.
-    pub subpix: f32,
-    /// `fxaaQualityEdgeThreshold`, likewise. The threshold it is held against is the `0.0833` the
-    /// shader carries as a literal, which is what identifies the pass as stock FXAA.
-    pub edge: f32,
     pub occlude: bool,
-    /// Which of [`OCCLUDERS`] runs.
+    /// Which of [`OCCLUDERS`] runs, which in the game follows a graphics setting. What this opens
+    /// at is a pick.
     pub quality: usize,
-    /// What the tap offsets the pass carries are scaled by, in texels of what it reads.
-    pub radius: f32,
-    /// How steeply a valley counts, as the fall in depth over the distance to it. The one lane of
-    /// the three below that is a ratio rather than a length.
-    pub accept: f32,
-    /// The fall past which two samples are no longer one surface, the distance under which
-    /// occlusion fades out, and the distance past which a pixel is left alone. The first two are
-    /// fractions of the depth the model itself spans, the last of the far plane: the frame is cut to
-    /// the model's own bounding sphere, so a length stated in the world would mean something
-    /// different for every file opened.
-    pub reject: f32,
-    pub fade: f32,
-    pub distance: f32,
-    /// How far along its own normal a sample is pushed before it is compared, likewise a fraction of
-    /// that span.
-    pub bias: f32,
-    pub intensity: f32,
-    /// The exponent the occlusion is raised to. The pass also multiplies by it a second time, which
-    /// is the file's own arithmetic and not a reading of it.
-    pub power: f32,
     pub bloom: bool,
     pub vignette: bool,
     /// Whether the frame is reflected off itself, which is what a metal surface answers with where
     /// nothing captured an environment for it.
     pub reflect: bool,
     /// Where the corners start darkening, as the squared distance from the middle of the frame with
-    /// a corner at one, and how steeply the darkening deepens past that. No file states either: in
-    /// the game they follow a graphics setting.
+    /// a corner at one, and how steeply the darkening deepens past that. Both are a guess: no file
+    /// states either, and in the game they follow a graphics setting.
     pub onset: f32,
     pub darkening: f32,
 }
 
-/// The occlusion values are a guess. Nothing states them: the buffer behind them reports no member
-/// names, no defaults, and no units.
 impl Default for Look {
     fn default() -> Self {
         Self {
             detail: None,
             antialias: true,
-            subpix: 0.75,
-            edge: 0.166,
             occlude: true,
             quality: 6,
-            radius: 2.0,
-            accept: 150.0,
-            reject: 0.05,
-            fade: 0.02,
-            distance: 1.0,
-            bias: 0.02,
-            intensity: 3.0,
-            power: 1.0,
             bloom: true,
             vignette: true,
             reflect: true,
@@ -3258,11 +3243,10 @@ impl Buffer {
             return out;
         }
         if self.name == FXAA_PARAM {
-            let look = scene.look;
             write(
                 &mut out,
                 0,
-                &[1.0 / size.0, 1.0 / size.1, 1.0 - look.subpix, look.edge],
+                &[1.0 / size.0, 1.0 / size.1, FXAA_SUBPIX, FXAA_EDGE],
             );
             return out;
         }
@@ -3279,31 +3263,37 @@ impl Buffer {
             return out;
         }
         if self.name == HDAO_PARAM {
-            let look = scene.look;
-            let (near, far) = scene.planes();
-            let far = far.max(f32::EPSILON);
-            let span = (far - near).max(f32::EPSILON);
-            let scale = OCCLUSION_SCALE as f32;
-            let reach = look.distance * far;
+            let texel = OCCLUSION_SCALE as f32;
             write(
                 &mut out,
                 0,
-                &[look.radius, look.radius, scale / size.0, scale / size.1],
+                &[
+                    texel / size.0,
+                    texel / size.1,
+                    OCCLUSION_SPREAD,
+                    OCCLUSION_SPREAD,
+                ],
             );
+            // The reach goes in the last lane here as well, which no quality the game reads.
             write(
                 &mut out,
                 1,
                 &[
-                    look.accept,
-                    1.0 / (look.reject * span).max(f32::EPSILON),
-                    1.0 / (look.fade * far).max(f32::EPSILON),
-                    reach,
+                    1.0 / OCCLUSION_ACCEPT,
+                    1.0 / OCCLUSION_REJECT,
+                    1.0 / OCCLUSION_NEAR,
+                    OCCLUSION_REACH,
                 ],
             );
             write(
                 &mut out,
                 2,
-                &[reach, look.bias * span, look.intensity, look.power],
+                &[
+                    OCCLUSION_REACH,
+                    OCCLUSION_BIAS,
+                    OCCLUSION_INTENSITY,
+                    OCCLUSION_POWER,
+                ],
             );
             return out;
         }
@@ -4038,12 +4028,55 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
-        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass, Scene, Sky, Volume,
-        Wind, ambient, decal_field,
-        encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
-        selector, shader_types, sun,
+        ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, FXAA_PARAM, Fog,
+        HDAO_PARAM, INSTANCE, INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass,
+        Scene, Sky, Volume, Wind, ambient, decal_field, encode, instance_fields, joints,
+        moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
     };
+
+    /// The two buffers of the post chain no reflection describes, against what the game's own
+    /// upload holds in them. Nothing else stands between a lane of either and the wrong number.
+    #[test]
+    fn the_smoothing_and_occlusion_buffers_come_out_as_the_game_holds_them() {
+        let scene = Scene {
+            size: (1920.0, 1080.0),
+            ..Default::default()
+        };
+        let filled = |name: &str, registers| {
+            let held = Buffer {
+                name: name.to_owned(),
+                members: Vec::new(),
+                registers,
+                fixed: None,
+            };
+            held.fill(&scene, Pass::Composite, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect::<Vec<f32>>()
+        };
+        assert_eq!(filled(FXAA_PARAM, 1), [
+            1.0 / 1920.0,
+            1.0 / 1080.0,
+            0.5,
+            0.15
+        ]);
+        // The taps run over a gather half the frame across, so the texel the first pair names is
+        // that gather's rather than the frame's.
+        assert_eq!(filled(HDAO_PARAM, 3), [
+            2.0 / 1920.0,
+            2.0 / 1080.0,
+            0.56,
+            0.56,
+            100.0,
+            5.0,
+            1.0,
+            50.0,
+            50.0,
+            0.1,
+            10.0,
+            0.3
+        ]);
+    }
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
     /// held in them. What the environment stated at that time and weather goes in; what the frame

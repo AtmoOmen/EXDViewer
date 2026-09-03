@@ -1405,10 +1405,16 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
         ui.checkbox(&mut look.antialias, "Antialias")
             .on_hover_text("Smooth the frame's edges with the game's own FXAA");
         ui.add_enabled_ui(look.antialias, |ui| {
-            ui.add(egui::Slider::new(&mut look.subpix, 0.0..=1.0).text("Subpixel"))
-                .on_hover_text("FXAA's own subpixel aliasing removal, at its published default");
-            ui.add(egui::Slider::new(&mut look.edge, 0.03..=0.5).text("Edge"))
-                .on_hover_text("How much local contrast counts as an edge, likewise");
+            ui.label(format!("Subpixel {}", program::FXAA_SUBPIX))
+                .on_hover_text(
+                    "How much of FXAA's own subpixel aliasing removal reaches the frame, off the \
+                     game's own upload",
+                );
+            ui.label(format!("Edge {}", program::FXAA_EDGE))
+                .on_hover_text(
+                    "How much local contrast counts as an edge, likewise, over a floor the pass \
+                     carries itself",
+                );
         });
     });
     ui.horizontal_wrapped(|ui| {
@@ -1477,63 +1483,30 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
                         ui.selectable_value(&mut look.quality, at, *what);
                     }
                 });
-        });
-    });
-    ui.add_enabled_ui(look.occlude, |ui| {
-        ui.horizontal_wrapped(|ui| {
-            for (value, range, name, what) in [
-                (
-                    &mut look.radius,
-                    0.25..=4.0,
-                    "Radius",
-                    "What the taps the pass carries are spread by",
-                ),
-                (
-                    &mut look.accept,
-                    1.0..=200.0,
-                    "Accept",
-                    "How steeply a valley has to fall to count, against the distance to it",
-                ),
-                (
-                    &mut look.reject,
-                    0.005..=0.5,
-                    "Reject",
-                    "The fall past which two samples are no longer one surface",
-                ),
-                (
-                    &mut look.bias,
-                    0.0..=0.2,
-                    "Normal bias",
-                    "How far along its own normal a sample is pushed before it is compared",
-                ),
-                (
-                    &mut look.fade,
-                    0.0..=0.5,
-                    "Near fade",
-                    "The distance under which occlusion fades out",
-                ),
-                (
-                    &mut look.distance,
-                    0.05..=1.0,
-                    "Distance",
-                    "The distance past which a pixel is left alone",
-                ),
-                (
-                    &mut look.intensity,
-                    0.0..=4.0,
-                    "Intensity",
-                    "What the taps add up to is scaled by",
-                ),
-                (
-                    &mut look.power,
-                    0.25..=3.0,
-                    "Power",
-                    "The exponent it is raised to, which the pass multiplies by a second time too",
-                ),
-            ] {
-                ui.add(egui::Slider::new(value, range).text(name))
-                    .on_hover_text(what);
-            }
+            ui.add(
+                Label::new(
+                    RichText::new(format!(
+                        "{} texels  accept {}  reject {}  {}-{} units  bias {}  x{}  ^{}",
+                        program::OCCLUSION_SPREAD,
+                        program::OCCLUSION_ACCEPT,
+                        program::OCCLUSION_REJECT,
+                        program::OCCLUSION_NEAR,
+                        program::OCCLUSION_REACH,
+                        program::OCCLUSION_BIAS,
+                        program::OCCLUSION_INTENSITY,
+                        program::OCCLUSION_POWER,
+                    ))
+                    .weak(),
+                )
+                .wrap(),
+            )
+            .on_hover_text(
+                "What the pass runs with, read whole off the game's own upload: how far the taps \
+                 spread, how steeply a valley has to fall to count against the depth it stands at, \
+                 the fall past which two samples are no longer one surface, the distances under \
+                 and past which a pixel is left alone, how far a sample is pushed along its own \
+                 normal, what the taps add up to is scaled by, and the exponent it is raised to",
+            );
         });
     });
     let held = model.look.get();

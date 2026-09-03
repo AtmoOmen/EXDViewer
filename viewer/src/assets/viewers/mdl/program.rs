@@ -792,18 +792,8 @@ const INSTANCE_FIELDS: [(&str, u32); 9] = [
     ("m_HeadUpVector", 16),
 ];
 
-/// The clock every animated package shares. Some of the shaders reading it describe its one
-/// register as a bare array named after itself, which hands over no field for a write to land in.
+/// The clock every animated package shares, which the engine drives and no file states.
 const PBR: &str = "g_PbrParameterCommon";
-
-fn loop_field() -> Vec<hlsl::layout::Member> {
-    vec![hlsl::layout::Member {
-        name: "m_LoopTime".to_owned(),
-        offset: 0,
-        size: 4,
-        kind: "float".to_owned(),
-    }]
-}
 
 fn decal_field() -> Vec<hlsl::layout::Member> {
     vec![hlsl::layout::Member {
@@ -2631,7 +2621,6 @@ impl Program {
                 let members = match described.get(&name) {
                     Some(held) if !held.is_empty() => held.clone(),
                     _ if name == INSTANCE => instance_fields(),
-                    _ if name == PBR => loop_field(),
                     _ if name == DECAL => decal_field(),
                     _ => Vec::new(),
                 };

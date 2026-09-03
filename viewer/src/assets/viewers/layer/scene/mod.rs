@@ -2691,6 +2691,7 @@ impl Scene {
 
     /// Reads one detail level of a model and hands its geometry to the card.
     fn decode(&mut self, at: usize, bytes: Vec<u8>, level: u8) -> Result<()> {
+        let path = self.models[at].path.clone();
         let container = ModelContainer::read(Cursor::new(bytes))?;
         let model = container.model(mdl::detail(level));
         let mut built = Vec::new();
@@ -2706,7 +2707,7 @@ impl Scene {
                 continue;
             };
             let name = mesh.material().unwrap_or_default();
-            let resolved = mdl::material::path(&name, 0, None).unwrap_or(name);
+            let resolved = mdl::material::path(&path, &name, 0, None).unwrap_or(name);
             used.push(self.material(&resolved));
             built.push(geometry);
         }

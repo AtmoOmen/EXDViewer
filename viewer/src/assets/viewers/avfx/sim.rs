@@ -645,11 +645,26 @@ fn lights(file: &Avfx) -> Vec<(u32, u32)> {
     out
 }
 
+/// When an emitter makes what one of its entries names, `CrTm`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Pass {
+    /// Every `CrI` frames, for as long as the emitter runs.
+    Interval,
+    /// Once, as the emitter starts.
+    Start,
+    /// Once, as the emitter is destroyed. Nothing reaches this: an emitter here runs out the span
+    /// its timeline gives it, with no moment answering to the one the game tears one down at.
+    End,
+}
+
 /// One entry of an emitter's particle or emitter list.
 struct Spawn {
     target: usize,
+    /// `CrCn`, how many the start pass makes. The interval pass counts by the emitter's own `CrC`
+    /// and never reads this.
     count: i32,
     delay: f32,
+    pass: Pass,
 }
 
 impl Spawn {
@@ -660,7 +675,24 @@ impl Spawn {
             target,
             count: integer(blocks, "CrCn").unwrap_or(1).clamp(0, 64),
             delay: integer(blocks, "GenD").unwrap_or_default() as f32,
+            pass: match integer(blocks, "CrTm").unwrap_or_default() {
+                0 => Pass::Interval,
+                1 => Pass::Start,
+                _ => Pass::End,
+            },
         })
+    }
+
+    /// How many of this one to make on a burst `local` frames into the emitter's run that bursts
+    /// `burst`, where the burst before it came at `previous`. A start entry the file delays is made
+    /// on the first burst its delay has run out by rather than dropped.
+    fn made(&self, burst: i32, previous: f32, local: f32) -> i32 {
+        match self.pass {
+            _ if local < self.delay => 0,
+            Pass::Interval => burst,
+            Pass::Start if previous < self.delay => self.count,
+            _ => 0,
+        }
     }
 }
 
@@ -935,8 +967,7 @@ impl Effect {
 
         // A timeline item's own end is where the effect it placed is done, not a lower bound a
         // particle's own life can run past: an `EdTm` an artist tunes to the effect's length would
-        // otherwise need every particle's life hand-matched to it as well. A particle with no life
-        // of its own still runs to whatever that end comes out to, via `length` below.
+        // otherwise need every particle's life hand-matched to it as well.
         let bounded = runs.iter().all(|run| run.until != i32::MAX)
             && particles.iter().all(|particle| particle.life.is_some());
         let length = match bounded {
@@ -1011,12 +1042,11 @@ impl Effect {
             if running.since < def.interval.at(local).max(1.0) {
                 continue;
             }
+            // Where the last burst came, which is before the run began until there has been one.
+            let previous = local - running.since;
             running.since = 0.0;
 
             let burst = def.count.at(local).round().clamp(0.0, 64.0) as i32;
-            if burst == 0 {
-                continue;
-            }
             let place = running.place.under(Place {
                 origin: def.position.at(local),
                 turn: rotation(def.rotation.at(local)),
@@ -1026,19 +1056,8 @@ impl Effect {
             let velocity = rotation(read(&def.heading, local)) * Vec3::Y * def.speed.at(local);
 
             for spawn in &def.particles {
-                if local < spawn.delay {
-                    continue;
-                }
-                // Infinite only where the emitter itself is bound to stop spawning; otherwise
-                // nothing would ever cap how many pile up. Reaching here at all already means the
-                // effect is unbounded, since a bounded one states a life on every particle.
-                let life = self.particles[spawn.target]
-                    .life
-                    .unwrap_or(match def.life.is_some() {
-                        true => f32::INFINITY,
-                        false => self.length as f32,
-                    });
-                for _ in 0..burst * spawn.count {
+                let life = self.particles[spawn.target].life.unwrap_or(f32::INFINITY);
+                for _ in 0..spawn.made(burst, previous, local) {
                     if state.particles.len() >= PARTICLES {
                         break;
                     }
@@ -1056,7 +1075,10 @@ impl Effect {
 
             if running.depth < DEPTH {
                 for spawn in &def.emitters {
-                    if local < spawn.delay || spawned.len() >= room {
+                    if spawn.made(burst, previous, local) == 0 {
+                        continue;
+                    }
+                    if spawned.len() >= room {
                         break;
                     }
                     spawned.push(Running {
@@ -1390,6 +1412,70 @@ mod test {
             assert!((rows[0][0] - angle.cos()).abs() < 1e-6, "at {angle}");
             assert!((rows[1][0] - angle.sin()).abs() < 1e-6, "at {angle}");
         }
+    }
+
+    /// `CrTm` names which of an emitter's creation passes makes an entry: nought on the emitter's
+    /// own interval, counting by its `CrC`, and one as the emitter starts, counting by the entry's
+    /// own `CrCn`. A particle stating no life outlives every interval, so only that once-only pass
+    /// keeps one from piling up.
+    #[test]
+    fn an_emitter_makes_its_start_entries_once_and_its_interval_entries_over_and_over() {
+        let span = |tag: &str, value: f32| block(tag, &block("Val", &value.to_le_bytes()));
+        let entry = |target: i32, when: i32, count: i32, delay: i32| {
+            [
+                scalar("bEnb", 1),
+                scalar("TgtB", target),
+                scalar("CrTm", when),
+                scalar("CrCn", count),
+                scalar("GenD", delay),
+            ]
+            .concat()
+        };
+        let emitter = block(
+            "Emit",
+            &[
+                span("Life", -1.0),
+                curve("CrC", [1.0, 1.0, 1.0]),
+                curve("CrI", [1.0, 1.0, 15.0]),
+                block(
+                    "ItPr",
+                    &[
+                        entry(0, 0, 0, 0),
+                        entry(1, 1, 1, 0),
+                        entry(2, 1, 2, 0),
+                        entry(3, 1, 1, 20),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let particle = |life: f32| block("Ptcl", &[scalar("PrVT", 1), span("Life", life)].concat());
+        let bytes = block(
+            "AVFX",
+            &[
+                scalar("Ver", 0x0001_0000),
+                particle(32.0),
+                particle(-1.0),
+                particle(-1.0),
+                particle(-1.0),
+                emitter,
+            ]
+            .concat(),
+        );
+
+        let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+        let effect = Effect::read(&file);
+        let mut state = State::default();
+        effect.seek(&mut state, 330);
+
+        let mut alive = [0; 4];
+        for live in &state.particles {
+            alive[live.def] += 1;
+        }
+        // A 32-frame life over a 15-frame interval leaves the two before this burst still running,
+        // and the delayed entry is made on the first burst past its twenty rather than dropped.
+        assert_eq!(alive, [3, 1, 2, 1]);
     }
 
     /// A file stating no ramp has to leave the lerp an identity rather than a black, invisible one.

@@ -1907,7 +1907,7 @@ mod test {
             keys.extend(color);
         }
         let mut frames = Vec::new();
-        for frame in [0i16, 2, 4, 8] {
+        for frame in [2i16, 4, 6, 8] {
             frames.extend(frame.to_le_bytes());
         }
         let held = [
@@ -1918,8 +1918,9 @@ mod test {
         ];
         let color = |frame: i32| shown(effect(&held, 1), frame)[0].color;
         assert_eq!(color(0), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(color(1), [0.5, 0.5, 0.0, 1.0]);
-        assert_eq!(color(4), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(color(2), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(color(3), [0.5, 0.5, 0.0, 1.0]);
+        assert_eq!(color(6), [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(color(9), [1.0, 1.0, 1.0, 0.0]);
     }
 
@@ -1960,6 +1961,11 @@ mod test {
         assert_eq!(at(0), ([0.0, 0.0, 0.0], 0.5));
         assert_eq!(at(4), ([0.0, 1.0, 4.0], 1.5));
 
+        // The same angle again as the quaternion the shape packages are handed, which is what a
+        // sprite the camera has no say in is turned by.
+        let turned = glam::Quat::from_array(shown(effect(&held, 1), 4)[0].turn) * Vec3::X;
+        assert!(turned.abs_diff_eq(Vec3::new(0.070_737_2, 0.997_495_0, 0.0), 1e-5), "{turned:?}");
+
         // `SIPT` nought spreads a slot over the box `CrAX`..`CrAZ` states rather than standing it
         // on the particle's own middle.
         let spread = [scalar("CCnt", 1), scalar("CrIL", -1), real("CrAX", 2.0)];
@@ -1996,9 +2002,20 @@ mod test {
     /// walked its atlas that many times.
     #[test]
     fn a_simple_slot_starts_over_or_stops_where_its_file_says() {
-        let remade = [scalar("CCnt", 1), scalar("CrIL", 4), block("bCrN", &[1])];
+        let remade = [
+            scalar("CCnt", 1),
+            scalar("CrIL", 4),
+            block("bCrN", &[1]),
+            real("SBX", 1.0),
+            real("SEX", 0.0),
+        ];
         let counts: Vec<usize> = (0..9).map(|frame| shown(effect(&remade, 1), frame).len()).collect();
         assert_eq!(counts, [1; 9]);
+        // A slot that starts over is back where it began rather than carrying its age past its life.
+        let width = |frame: i32| shown(effect(&remade, 1), frame)[0].scale[0];
+        assert_eq!(width(1), 1.5);
+        assert_eq!(width(5), 1.5);
+        assert_eq!(width(3), 0.5);
 
         let looped = [
             scalar("CCnt", 1),

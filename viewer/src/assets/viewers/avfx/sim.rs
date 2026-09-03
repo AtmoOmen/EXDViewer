@@ -373,6 +373,10 @@ pub struct Shading {
     pub lights: Vec<(u32, u32)>,
     /// The package's own sampler id, the effect's texture behind it, and how it is sampled.
     pub textures: Vec<(u32, usize, u32, [u32; 2])>,
+    /// `CalculateColor` and `CalculateAlpha`, the two ratios the package lerps the first color
+    /// set's texel towards white by. An alpha-only texture is written with the color ratio at
+    /// nought, which is what leaves such a particle its own color rather than the texture's.
+    pub calculate: [f32; 2],
     /// Whether this is drawn from a stream the viewer places in the world rather than from one of
     /// the effect's own models.
     pub sprite: bool,
@@ -536,10 +540,17 @@ fn shading(block: &Block, lights: Option<Vec<(u32, u32)>>, sprite: bool) -> Shad
             [wrap("TBUT"), wrap("TBVT")],
         ));
     }
+    let first = nested(blocks, "TC1");
     Shading {
         keys,
         lights: lights.unwrap_or_default(),
         textures,
+        // The first set combines with the particle's own color rather than with another set, so
+        // these two are ratios where the sets below read them as the arithmetic above.
+        calculate: [
+            integer(first, "TCCT").unwrap_or(1) as f32,
+            integer(first, "TCAT").unwrap_or(1) as f32,
+        ],
         sprite,
     }
 }
@@ -1149,7 +1160,7 @@ mod test {
 
     use glam::{Vec3, Vec4};
 
-    use super::{Effect, Fresnel, Live, Place, State, nested};
+    use super::{Blend, Effect, Fresnel, Live, Place, State, nested};
 
     /// One block as the format writes it: the tag back to front and null-padded, its length, then
     /// a payload rounded up to the next four bytes.
@@ -1214,6 +1225,47 @@ mod test {
         assert_eq!(rim.power, 3.0);
         assert_eq!(rim.begin, [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(rim.end, [0.5, 0.25, 0.125, 1.0]);
+    }
+
+    /// The rows a capture's own pipeline state settles. Nought is `SRC_ALPHA -> INV_SRC_ALPHA` and
+    /// two is `SRC_ALPHA -> ONE`; ten sets the same pipeline as two, which is what says the eighth
+    /// bit leaves the family alone rather than naming one of its own.
+    #[test]
+    fn the_blend_modes_are_the_ones_the_captures_set() {
+        assert_eq!(Blend::from(0), Blend::Alpha);
+        assert_eq!(Blend::from(2), Blend::Add);
+        assert_eq!(Blend::from(10), Blend::Add);
+        for mode in 1..=4 {
+            assert_eq!(Blend::from(mode), Blend::from(mode + 8), "mode {mode}");
+        }
+    }
+
+    /// `TCCT` and `TCAT` under the first color set are the two ratios the package lerps its texel
+    /// towards white by, so a set that states no color has to reach the shader as nought.
+    #[test]
+    fn the_first_color_set_states_the_two_ratios() {
+        let particle = |color: i32, alpha: i32| {
+            block(
+                "Ptcl",
+                &[
+                    scalar("PrVT", 1),
+                    block(
+                        "TC1",
+                        &[scalar("TCCT", color), scalar("TCAT", alpha)].concat(),
+                    ),
+                ]
+                .concat(),
+            )
+        };
+        let bytes = block(
+            "AVFX",
+            &[scalar("Ver", 0x0001_0000), particle(0, 1), particle(1, 0)].concat(),
+        );
+        let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+        let effect = Effect::read(&file);
+
+        assert_eq!(effect.particles[0].shading.calculate, [0.0, 1.0]);
+        assert_eq!(effect.particles[1].shading.calculate, [1.0, 0.0]);
     }
 
     /// A curve ramping to `end` over `span` frames and starting over, as a scroll is written.

@@ -3811,6 +3811,7 @@ impl Scene {
             (held.clouds[1], "sheet"),
             (held.fog, "fog"),
             (held.reflection, "reflection"),
+            (held.water, "water mirror"),
             (held.vignette, "vignette"),
             (
                 !self.effects.is_empty()

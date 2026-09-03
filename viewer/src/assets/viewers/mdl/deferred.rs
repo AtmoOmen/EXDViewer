@@ -593,6 +593,8 @@ pub struct Drawn {
     pub sky: bool,
     /// Whether the frame was reflected off itself this frame.
     pub reflection: bool,
+    /// Whether water's own chain filled the map it reflects itself through.
+    pub water: bool,
     pub sun: bool,
     pub moon: bool,
     pub stars: bool,
@@ -2800,6 +2802,7 @@ impl Buffers {
             gl.disable(glow::STENCIL_TEST);
             gl.stencil_mask(0xff);
         }
+        self.drawn.water = drawn.is_ok();
         drawn
     }
 

@@ -4033,8 +4033,8 @@ mod test {
 
     use super::{
         ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
-        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, WAVING_RATE, Pass, Scene,
-        Sky, Volume, ambient, decal_field,
+        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass, Scene, Sky, Volume,
+        ambient, decal_field,
         encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
         selector, shader_types, sun,
     };
@@ -4485,6 +4485,7 @@ mod test {
             };
             floats(held.fill(&Scene { clock, ..Default::default() }, Pass::Buffer, &[]))[0]
         };
-        assert!((phase(3.0) - phase(1.0) - 2.0 * WAVING_RATE).abs() < 1e-5);
+        // Two seconds of it, at the one radian a second the engine states.
+        assert!((phase(3.0) - phase(1.0) - 2.0).abs() < 1e-5);
     }
 }

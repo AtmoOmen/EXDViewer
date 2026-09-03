@@ -1101,7 +1101,6 @@ impl Game {
         let shaded = surface.shaded.as_ref().ok_or("nothing to draw with")?;
         let palette = *self.joints.get(at).ok_or("no joint palette")?;
         let layout = self.layout(gl)?;
-        let size = self.buffers.size();
         self.buffers.bind(gl, program, held, scene, &[])?;
         // Before anything is bound: making a texture binds it to whichever unit happens to be
         // active, so one made partway through the loop below takes over the unit the sampler
@@ -1159,9 +1158,6 @@ impl Game {
             unit += 1;
         }
         unsafe {
-            if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
-                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-            }
             gl.bind_vertex_array(Some(layout));
             gl.bind_buffer(glow::ARRAY_BUFFER, Some(mesh.vertices));
             gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(mesh.indices));

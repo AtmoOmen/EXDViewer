@@ -4065,10 +4065,9 @@ mod test {
     use super::{
         ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, Customize, DECAL,
         DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
-        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SUN_PARAM, SUN_SOFTNESS, WAVING,
-        Pass, SPLITS, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode,
-        instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator, selector,
-        shader_types, sun,
+        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS, SUN_PARAM, WAVING,
+        Pass, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode, instance_fields,
+        joints, moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
     };
 
     /// The two buffers of the post chain no reflection describes, against what the game's own
@@ -4156,10 +4155,11 @@ mod test {
             let step = row(2).length();
             assert!((along(step) - along(0.0) - 1.0).abs() < 1e-4, "split {split}");
             // Its disc is stated in the shorter side of the whole image, and that many texels of
-            // one split's own cell is what the penumbra measures in the world.
+            // one split's own cell is what the penumbra measures in the world. Against the width
+            // the frame was captured at rather than against the constant, which would move with it.
             let short = (SHADOW_MAP * ATLAS_COLUMNS.min(ATLAS_ROWS) as i32) as f32;
             let across = -x * short / (SHADOW_MAP as f32 * ATLAS_ROWS as f32 * row(1).length());
-            assert!((across - SUN_SOFTNESS).abs() < 1e-6, "split {split}: {across}");
+            assert!((across - 0.007).abs() < 1e-6, "split {split}: {across}");
         }
     }
 

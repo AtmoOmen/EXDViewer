@@ -654,6 +654,14 @@ g_SamplerWaveletNoise
 g_SamplerWhitecapMap
 g_SamplerWrinklesMask
 g_ScatteringLevel
+g_ScrollBaseScaleU_1
+g_ScrollBaseScaleU_2
+g_ScrollBaseScaleV_1
+g_ScrollBaseScaleV_2
+g_ScrollTransTimeU_1
+g_ScrollTransTimeU_2
+g_ScrollTransTimeV_1
+g_ScrollTransTimeV_2
 g_SeaWaveScale
 g_ShaderID
 g_ShadowAlphaThreshold

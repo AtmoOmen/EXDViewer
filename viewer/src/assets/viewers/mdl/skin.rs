@@ -546,21 +546,22 @@ impl Layer {
     /// fade towards; a layer with nothing wanted is fading out to whatever is under it and opens
     /// straight away.
     fn fading(&self, step: f32) {
-        let mut leaving = self.leaving.borrow_mut();
-        let Some(held) = leaving.as_mut() else {
-            return;
-        };
-        if self.motion.get().is_none() && !self.wanted.borrow().is_empty() {
+        if self.fade.get() >= self.over.get()
+            || (self.motion.get().is_none() && !self.wanted.borrow().is_empty())
+        {
             return;
         }
-        let duration = held
-            .pack
-            .binding(held.motion)
-            .map_or(f32::EPSILON, |binding| {
-                binding.motion().duration().max(f32::EPSILON)
-            });
-        held.time = (held.time + step.min(duration)) % duration;
         self.fade.set(self.fade.get() + step);
+        let mut leaving = self.leaving.borrow_mut();
+        if let Some(held) = leaving.as_mut() {
+            let duration = held
+                .pack
+                .binding(held.motion)
+                .map_or(f32::EPSILON, |binding| {
+                    binding.motion().duration().max(f32::EPSILON)
+                });
+            held.time = (held.time + step.min(duration)) % duration;
+        }
         if self.share() >= 1.0 {
             *leaving = None;
         }
@@ -1418,6 +1419,9 @@ impl Animation {
                 .lay(&mut locals, binding, names, ordered.as_deref(), time, weight);
         };
         for layer in self.layers() {
+            // The incoming clip is laid over whatever is already there at the share the fade has
+            // opened to, so a layer replacing a clip cross-fades and one that had nothing playing
+            // fades up out of the layers under it alike.
             let share = layer.share();
             if let Some(leaving) = layer.leaving.borrow().as_ref()
                 && let Some(binding) = leaving.pack.binding(leaving.motion)
@@ -1438,15 +1442,7 @@ impl Animation {
             else {
                 continue;
             };
-            lay(
-                &layer.wanted.borrow(),
-                binding,
-                layer.time.get(),
-                match layer.leaving.borrow().is_some() {
-                    true => share,
-                    false => 1.0,
-                },
-            );
+            lay(&layer.wanted.borrow(), binding, layer.time.get(), share);
         }
         for (name, angle) in VISOR.iter().zip(self.visor.get()) {
             if angle != 0.0
@@ -2181,6 +2177,19 @@ mod tests {
         assert_eq!(layer.share(), 0.5);
         layer.advance(0.2);
         assert!(layer.leaving.borrow().is_none(), "the fade closed");
+    }
+
+    #[test]
+    fn a_layer_with_nothing_playing_fades_its_clip_up_out_of_the_ones_under_it() {
+        let layer = Layer::default();
+        layer.once("a.pap", Some("cbbp_a_activ"), 0.4);
+        assert!(layer.leaving.borrow().is_none(), "nothing was playing");
+        assert_eq!(layer.share(), 0.0);
+        layer.motion.set(Some(0));
+        layer.advance(0.2);
+        assert_eq!(layer.share(), 0.5);
+        layer.advance(0.2);
+        assert_eq!(layer.share(), 1.0);
     }
 
     #[test]

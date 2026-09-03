@@ -1185,6 +1185,27 @@ impl Animation {
         self.running.set(true);
     }
 
+    /// Stands the body in `motion` from `path`, cross-fading out of whatever it was standing in
+    /// over `fade` seconds. A base pose is picked by what the character is doing rather than by
+    /// what its pack opens on, which is why this names the motion.
+    ///
+    /// Asking again for the pose already asked for changes nothing, so a caller that states the
+    /// stance every frame does not refetch the pack on every one of them.
+    pub fn stand(&self, path: &str, motion: &str, fade: f32) {
+        if *self.body.wanted.borrow() == path
+            && self.body.opening.borrow().as_deref() == Some(motion)
+        {
+            return;
+        }
+        self.body.load(path, Some(motion), None, fade);
+        self.running.set(true);
+    }
+
+    /// What the body is standing in, by the name its own pack gives the motion.
+    pub fn standing(&self) -> Option<String> {
+        self.body.playing().map(|(_, name, _)| name)
+    }
+
     /// Lays `motion` from `path` over whatever the body is doing for as long as it runs, fading in
     /// and back out over `fade` seconds. A partial motion names only the bones it moves, so the
     /// base keeps every other one for the whole of it.

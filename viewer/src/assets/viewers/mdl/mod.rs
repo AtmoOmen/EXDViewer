@@ -3221,6 +3221,23 @@ impl Rendered {
         self.animation.play(path, then, 0.0);
     }
 
+    /// Stands the character in one pose out of a pack, cross-fading out of whatever it was
+    /// standing in, which is what a change of weapon or of stance is.
+    pub fn stand(&self, path: &str, motion: &str, fade: f32) {
+        self.animation.stand(path, motion, fade);
+    }
+
+    /// Lays one motion over the pose the character is standing in for as long as it runs, which is
+    /// what drawing or sheathing a weapon is.
+    pub fn act(&self, path: &str, motion: &str, fade: f32) {
+        self.animation.act(path, motion, fade);
+    }
+
+    /// The motion the character is standing in, by the name its own pack gives it.
+    pub fn standing(&self) -> Option<String> {
+        self.animation.standing()
+    }
+
     /// Puts an expression on the character's face, which is what picking an emote that only makes
     /// one is.
     pub fn express(&self, name: &str) {

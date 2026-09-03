@@ -548,12 +548,85 @@ impl Renderer {
         Ok(at)
     }
 
-    /// The scene's depth as the sun sees it, which the lighting tests a pixel against. Depth only:
-    /// no colour is written, no texture is bound, and a material that answers no shadow subview is
-    /// left out rather than drawn with the wrong pass.
+    /// Every sampler a pass declares, pointed at what the material named for it, at what the engine
+    /// binds where nothing names one, or at the stand-in.
+    fn textures(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        program: glow::Program,
+        held: &program::Program,
+        shaded: &Shaded,
+        material: usize,
+    ) -> Result<(), String> {
+        let stand_in = self.buffers.stand_in(gl)?;
+        // Before anything is bound: making a texture binds it to whichever unit happens to be
+        // active, so one made partway through the loop below takes over the unit the sampler
+        // before it was just given.
+        let table = match &shaded.table {
+            Some(table) => Some(self.table(gl, material, table)?),
+            None => None,
+        };
+        let mut unit = 0;
+        for texture in &held.textures {
+            // Only a plane can come from the material: what it binds is an egui texture, and egui
+            // has nothing but two-dimensional ones.
+            let mut aniso = 0.0;
+            let bound = match texture.kind {
+                program::Kind::Plane => {
+                    let held = match texture.id {
+                        TABLE => table,
+                        id => {
+                            let plane = shaded.bound(id).and_then(Bound::plane);
+                            aniso = plane.map_or(0.0, |(_, aniso)| aniso);
+                            plane.and_then(|(held, _)| painter.texture(held))
+                        }
+                    };
+                    match held {
+                        Some(held) => held,
+                        None => self.buffers.engine(gl, texture.id)?,
+                    }
+                }
+                kind => match shaded
+                    .bound(texture.id)
+                    .and_then(Bound::stacked)
+                    .and_then(|path| self.buffers.stacked(kind, path))
+                {
+                    Some(held) => held,
+                    None => self.buffers.absent(gl, kind, texture.id)?,
+                },
+            };
+            deferred::bind(
+                gl,
+                program,
+                &texture.name,
+                unit,
+                bound,
+                deferred::target(texture.kind),
+                aniso,
+            );
+            unit += 1;
+        }
+        for structured in &held.structured {
+            let bound = match structured.name.as_str() {
+                TYPES => self.buffers.types(gl)?,
+                _ => stand_in,
+            };
+            sampler(gl, program, &structured.name, unit, bound);
+            unit += 1;
+        }
+        Ok(())
+    }
+
+    /// The scene's depth as the sun sees it, which the lighting tests a pixel against. No colour is
+    /// written and a material that answers no shadow subview is left out rather than drawn with the
+    /// wrong pass. The samplers are bound all the same: the pass a cutout material answers with
+    /// reads its color map and discards under the clip, so a leaf that binds nothing casts its whole
+    /// card.
     fn shadow(
         &mut self,
         gl: &glow::Context,
+        painter: &egui_glow::Painter,
         frame: &Frame,
         scene: &program::Scene,
     ) -> Result<(), String> {
@@ -610,11 +683,10 @@ impl Renderer {
                     if surface.hidden {
                         continue;
                     }
-                    let Some(held) = surface
-                        .shaded
-                        .as_ref()
-                        .and_then(|shaded| shaded.shadow.as_ref())
-                    else {
+                    let Some(shaded) = surface.shaded.as_ref() else {
+                        continue;
+                    };
+                    let Some(held) = shaded.shadow.as_ref() else {
                         continue;
                     };
                     let program =
@@ -628,6 +700,7 @@ impl Renderer {
                     if held.batch() > 1 {
                         self.buffers.bind(gl, program, held, &sun, &[])?;
                     }
+                    self.textures(gl, painter, program, held, shaded, surface.material)?;
                     let slot = held
                         .buffers
                         .iter()
@@ -859,7 +932,6 @@ impl Renderer {
         fringe: bool,
     ) -> Result<(), String> {
         let instances = self.instances.ok_or("no instance buffer")?;
-        let stand_in = self.buffers.stand_in(gl)?;
         let size = self.buffers.size();
         for (batch, (offset, windows, window)) in frame.batches.iter().zip(offsets) {
             let meshes: Vec<i32> = match self
@@ -959,56 +1031,7 @@ impl Renderer {
                 if held.batch() > 1 {
                     self.buffers.bind(gl, program, held, scene, &[])?;
                 }
-                let table = match &shaded.table {
-                    Some(table) => Some(self.table(gl, surface.material, table)?),
-                    None => None,
-                };
-                let mut unit = 0;
-                for texture in &held.textures {
-                    let mut aniso = 0.0;
-                    let bound = match texture.kind {
-                        program::Kind::Plane => {
-                            let held = match texture.id {
-                                TABLE => table,
-                                id => {
-                                    let plane = shaded.bound(id).and_then(Bound::plane);
-                                    aniso = plane.map_or(0.0, |(_, aniso)| aniso);
-                                    plane.and_then(|(held, _)| painter.texture(held))
-                                }
-                            };
-                            match held {
-                                Some(held) => held,
-                                None => self.buffers.engine(gl, texture.id)?,
-                            }
-                        }
-                        kind => match shaded
-                            .bound(texture.id)
-                            .and_then(Bound::stacked)
-                            .and_then(|path| self.buffers.stacked(kind, path))
-                        {
-                            Some(held) => held,
-                            None => self.buffers.absent(gl, kind, texture.id)?,
-                        },
-                    };
-                    deferred::bind(
-                        gl,
-                        program,
-                        &texture.name,
-                        unit,
-                        bound,
-                        deferred::target(texture.kind),
-                        aniso,
-                    );
-                    unit += 1;
-                }
-                for structured in &held.structured {
-                    let bound = match structured.name.as_str() {
-                        TYPES => self.buffers.types(gl)?,
-                        _ => stand_in,
-                    };
-                    sampler(gl, program, &structured.name, unit, bound);
-                    unit += 1;
-                }
+                self.textures(gl, painter, program, held, shaded, surface.material)?;
                 let slot = held
                     .buffers
                     .iter()
@@ -1168,7 +1191,6 @@ impl Renderer {
     ) -> Result<(), String> {
         self.buffers.attach(gl, size)?;
         self.buffers.stand_ins(gl)?;
-        let stand_in = self.buffers.stand_in(gl)?;
         // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
         // has nothing else to turn a fragment into a texel with.
         let scene = program::Scene {
@@ -1177,7 +1199,7 @@ impl Renderer {
         };
         let offsets = self.windows(gl, frame, &scene, true)?;
         let instances = self.instances.ok_or("no instance buffer")?;
-        self.shadow(gl, frame, &scene)?;
+        self.shadow(gl, painter, frame, &scene)?;
 
         for page in 0..self.buffers.pages() {
             self.buffers.open(gl, page);
@@ -1256,61 +1278,7 @@ impl Renderer {
                         if held.batch() > 1 {
                             self.buffers.bind(gl, program, held, &scene, &[])?;
                         }
-                        // Before anything is bound: making a texture binds it to whichever unit
-                        // happens to be active, so one made partway through the loop below takes
-                        // over the unit the sampler before it was just given.
-                        let table = match &shaded.table {
-                            Some(table) => Some(self.table(gl, surface.material, table)?),
-                            None => None,
-                        };
-                        let mut unit = 0;
-                        for texture in &held.textures {
-                            // Only a plane can come from the material: what it binds is an egui
-                            // texture, and egui has nothing but two-dimensional ones.
-                            let mut aniso = 0.0;
-                            let bound = match texture.kind {
-                                program::Kind::Plane => {
-                                    let held = match texture.id {
-                                        TABLE => table,
-                                        id => {
-                                            let plane = shaded.bound(id).and_then(Bound::plane);
-                                            aniso = plane.map_or(0.0, |(_, aniso)| aniso);
-                                            plane.and_then(|(held, _)| painter.texture(held))
-                                        }
-                                    };
-                                    match held {
-                                        Some(held) => held,
-                                        None => self.buffers.engine(gl, texture.id)?,
-                                    }
-                                }
-                                kind => match shaded
-                                    .bound(texture.id)
-                                    .and_then(Bound::stacked)
-                                    .and_then(|path| self.buffers.stacked(kind, path))
-                                {
-                                    Some(held) => held,
-                                    None => self.buffers.absent(gl, kind, texture.id)?,
-                                },
-                            };
-                            deferred::bind(
-                                gl,
-                                program,
-                                &texture.name,
-                                unit,
-                                bound,
-                                deferred::target(texture.kind),
-                                aniso,
-                            );
-                            unit += 1;
-                        }
-                        for structured in &held.structured {
-                            let bound = match structured.name.as_str() {
-                                TYPES => self.buffers.types(gl)?,
-                                _ => stand_in,
-                            };
-                            sampler(gl, program, &structured.name, unit, bound);
-                            unit += 1;
-                        }
+                        self.textures(gl, painter, program, held, shaded, surface.material)?;
                         let slot = held
                             .buffers
                             .iter()

@@ -398,8 +398,13 @@ viewer's own paste box, which is the only way from outside to put the camera, we
 where a capture was taken from.
 
 ```
-CHROMIUM=$(...) bun smoke/look.ts --origin=http://127.0.0.1:9080 --preset=capture.json <path.lvb>
+CHROMIUM=$(...) bun smoke/look.ts --origin=http://127.0.0.1:9080 --preset=capture.json /zones/<path.lvb>
 ```
+
+**A `.lvb` wants the `/zones/` path, not the asset one.** Opened under `/assets/` it offers Tree
+and Sounds and no scene: `scene_enabled` starts false for a level and only the Zones tab turns it
+on. A run that opens the asset route clicks the Sounds tab, never publishes `window.__frame`, and
+fails with no console error at all. `look.ts` takes a leading `/` path as given.
 
 `preset.rs`'s JSON shape has two traps neither the plugin nor anything else documents:
 

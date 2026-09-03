@@ -4574,6 +4574,60 @@ mod test {
         assert!((phase(3.0) - phase(1.0) - 2.0).abs() < 1e-5);
     }
 
+    /// What a strand of hair is swayed along and the clock it flutters on, neither of which any file
+    /// states and both of which the engine drives.
+    #[test]
+    fn a_strand_takes_a_capped_wind_and_a_wrapping_clock() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let instance = Buffer {
+            name: INSTANCE.to_owned(),
+            members: instance_fields(),
+            registers: 11,
+            fixed: None,
+        };
+        let gust = |reach| {
+            let scene = Scene {
+                wind: Wind {
+                    heading: Vec3::Z,
+                    reach,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            floats(instance.fill(&scene, Pass::Buffer, &[]))[20..24].to_vec()
+        };
+        // A unit heading taken down by two thousand, and a last lane the engine zeroes outright.
+        assert!((gust(4.0)[2] - 0.002).abs() < 1e-9);
+        assert_eq!(gust(4.0)[0], 0.0);
+        assert_eq!(gust(4.0)[3], 0.0);
+        // Past thirty the speed stops counting.
+        assert!((gust(200.0)[2] - 0.015).abs() < 1e-9);
+        assert_eq!(gust(200.0), gust(30.0));
+
+        let loop_time = |clock| {
+            let held = Buffer {
+                name: "g_PbrParameterCommon".to_owned(),
+                members: vec![hlsl::layout::Member {
+                    name: "m_LoopTime".to_owned(),
+                    offset: 0,
+                    size: 4,
+                    kind: "float".to_owned(),
+                }],
+                registers: 1,
+                fixed: None,
+            };
+            floats(held.fill(&Scene { clock, ..Default::default() }, Pass::Buffer, &[]))[0]
+        };
+        // Held to a tick, and back to nought where the accumulator wraps.
+        assert_eq!(loop_time(1.0 + 0.5 / 1024.0), 1.0);
+        assert_eq!(loop_time(2048.0), 0.0);
+        assert_eq!(loop_time(2049.0), 1.0);
+    }
+
     /// The register water wanders its whitecaps by, which is the noise texture's own size: the
     /// shader multiplies a world position by `.zw`, so those have to be the reciprocal of a real
     /// texture rather than a one.

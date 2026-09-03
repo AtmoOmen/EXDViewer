@@ -1871,6 +1871,8 @@ mod test {
             [at(-0.5, -0.5), at(0.5, 0.5)]
         };
         assert_eq!(corners(0), [[0.0, 0.0], [0.25, 0.25]]);
+        assert_eq!(corners(1), [[0.25, 0.0], [0.5, 0.25]]);
+        assert_eq!(corners(4), [[0.0, 0.25], [0.25, 0.5]]);
         assert_eq!(corners(5), [[0.25, 0.25], [0.5, 0.5]]);
         assert_eq!(corners(15), [[0.75, 0.75], [1.0, 1.0]]);
         assert_eq!(corners(16), [[0.0, 0.0], [0.25, 0.25]]);
@@ -1930,5 +1932,109 @@ mod test {
         let plain = shown(effect(&held, 0), 0);
         assert_eq!(plain.len(), 1);
         assert_eq!(plain[0].uv, super::program::UV_IDENTITY);
+    }
+
+    fn real(tag: &str, value: f32) -> Vec<u8> {
+        block(tag, &value.to_le_bytes())
+    }
+
+    /// A slot carries a heading off `SIDT` at a speed between `VMin` and `VMax`, an acceleration
+    /// `CGX`..`CGZ` the game applies over its whole age at once, and an angle that starts at `RI`
+    /// and turns by `RA` a frame.
+    #[test]
+    fn a_simple_slot_rises_turns_and_falls_under_what_its_file_states() {
+        let held = [
+            scalar("CCnt", 1),
+            scalar("CrIL", -1),
+            scalar("SIDT", 3),
+            real("VMin", 0.25),
+            real("VMax", 0.25),
+            real("CGZ", 0.5),
+            real("RIZ", 0.5),
+            real("RAZ", 0.25),
+        ];
+        let at = |frame: i32| {
+            let held = &shown(effect(&held, 1), frame)[0];
+            (held.center, held.roll)
+        };
+        assert_eq!(at(0), ([0.0, 0.0, 0.0], 0.5));
+        assert_eq!(at(4), ([0.0, 1.0, 4.0], 1.5));
+
+        // `SIPT` nought spreads a slot over the box `CrAX`..`CrAZ` states rather than standing it
+        // on the particle's own middle.
+        let spread = [scalar("CCnt", 1), scalar("CrIL", -1), real("CrAX", 2.0)];
+        let placed = shown(effect(&spread, 1), 0)[0].center;
+        assert!(placed[0] != 0.0 && placed[0].abs() <= 2.0, "{placed:?}");
+        assert_eq!([placed[1], placed[2]], [0.0, 0.0]);
+    }
+
+    /// The size a slot is drawn at is the one it states scaled by a random between `SRX0` and
+    /// `SRX1`, walked from begin to end along `SC`.
+    #[test]
+    fn a_simple_slot_takes_the_size_random_and_the_curve_beside_it() {
+        let flat = [
+            scalar("CCnt", 1),
+            scalar("CrIL", -1),
+            real("SRX0", 2.0),
+            real("SRX1", 2.0),
+            real("SRY0", 3.0),
+            real("SRY1", 3.0),
+        ];
+        assert_eq!(shown(effect(&flat, 1), 0)[0].scale, [4.0, 6.0, 1.0]);
+
+        let curved = [
+            scalar("CCnt", 1),
+            scalar("CrIL", 4),
+            real("SBX", 1.0),
+            real("SEX", 0.0),
+            real("SC", 2.0),
+        ];
+        assert_eq!(shown(effect(&curved, 1), 2)[0].scale[0], 1.5);
+    }
+
+    /// `bCrN` makes a slot start over where it would have died, and `UvLC` retires it once it has
+    /// walked its atlas that many times.
+    #[test]
+    fn a_simple_slot_starts_over_or_stops_where_its_file_says() {
+        let remade = [scalar("CCnt", 1), scalar("CrIL", 4), block("bCrN", &[1])];
+        let counts: Vec<usize> = (0..9).map(|frame| shown(effect(&remade, 1), frame).len()).collect();
+        assert_eq!(counts, [1; 9]);
+
+        let looped = [
+            scalar("CCnt", 1),
+            scalar("CrIL", -1),
+            scalar("UvCU", 2),
+            scalar("UvCV", 2),
+            scalar("UvIv", 1),
+            scalar("UvLC", 1),
+        ];
+        let counts: Vec<usize> = (0..6).map(|frame| shown(effect(&looped, 1), frame).len()).collect();
+        assert_eq!(counts, [1, 1, 1, 1, 0, 0]);
+    }
+
+    /// `UvNR` is the range a slot draws its first cell from, which is what stands the glow sprites
+    /// of one effect on different frames of the same atlas.
+    #[test]
+    fn a_simple_slot_starts_on_a_cell_uvnr_picks() {
+        let held = |range: i32| {
+            [
+                scalar("CCnt", 16),
+                scalar("CrI", 0),
+                scalar("CrIL", -1),
+                scalar("UvCU", 4),
+                scalar("UvCV", 4),
+                scalar("UvNR", range),
+            ]
+        };
+        let starts = |range: i32| {
+            let mut seen: Vec<[f32; 4]> = shown(effect(&held(range), 1), 0)
+                .into_iter()
+                .map(|one| one.uv[0])
+                .collect();
+            seen.dedup();
+            seen.len()
+        };
+        assert_eq!(starts(0), 1);
+        assert!(starts(15) > 1, "every slot started on the same cell");
     }
 }

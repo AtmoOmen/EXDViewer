@@ -1212,7 +1212,21 @@ impl CharacterBuilder {
                 }
             }
         }
+        // A fist weapon's gauntlets are the visible half of it: its own knuckle models are
+        // three-index stubs, and the game draws the hands from the item's `ModelSub` over whatever
+        // is worn there.
+        if let Some(gauntlets) = self.gauntlets() {
+            outfit[Slot::Hands as usize] = Some(gauntlets);
+            hidden[Slot::Hands as usize] = false;
+        }
         (outfit, hidden)
+    }
+
+    /// The gauntlets the wielded fist weapon puts on the hands, where one is wielded at all.
+    fn gauntlets(&self) -> Option<Gear> {
+        self.main_hand
+            .and_then(|at| self.weapons_main.get(at))?
+            .gauntlets
     }
 
     /// The outfit the picked attire dresses the character in.

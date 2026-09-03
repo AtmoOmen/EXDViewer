@@ -14,6 +14,7 @@ use ironworks::file::atch::AttachPoints;
 use std::io::Cursor;
 
 use crate::backend::Backend;
+use crate::character::Gear;
 use crate::excel::provider::{ExcelProvider, ExcelSheet as _};
 
 /// `Item`'s model quads, name, icon, `ItemUICategory` and `EquipSlotCategory`, as byte offsets.
@@ -26,6 +27,11 @@ const SLOT_CATEGORY: u32 = 154;
 /// Where `EquipSlotCategory` states whether a row fills the main hand or the off hand.
 const MAIN_HAND: u32 = 0;
 const OFF_HAND: u32 = 1;
+
+/// The sets a fist weapon is filed under. `DrawDataContainer::LoadWeapon` reads the off-hand model
+/// of a main hand in this range as the main's own plus fifty rather than off the item, and
+/// `LoadEquipment` then draws the hands from what the item's `ModelSub` names.
+const FISTS: std::ops::RangeInclusive<u16> = 1601..=1650;
 
 /// A weapon model: the set its directory is filed under, the body within it, and the material
 /// colourway. Packed the same shape as [`super::Gear`] but sixteen bits a field rather than eight.
@@ -62,6 +68,9 @@ pub struct Piece {
     /// The other hand's own model, where this item carries one of its own: a fist weapon or a
     /// twinblade is one item with two, rather than a second item worn in the other slot.
     pub off_hand: Option<Weapon>,
+    /// The gauntlets a fist weapon is worn with, which the game draws in the hands slot over
+    /// whatever is worn there.
+    pub gauntlets: Option<Gear>,
     /// Whether this item's own `EquipSlotCategory` covers the off hand, leaving nothing there to
     /// pick by hand.
     pub covers_off_hand: bool,
@@ -152,11 +161,19 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Pieces> {
         if name.is_empty() {
             continue;
         }
+        // A fist weapon's `ModelSub` is a hands equipment id rather than a weapon, and the knuckle
+        // in the other hand is the main's own set plus fifty.
+        let sub = row.read::<u64>(MODEL_SUB).ok().unwrap_or(0);
+        let fists = FISTS.contains(&weapon.set);
         let piece = Piece {
             name,
             icon: row.read::<u16>(ICON).unwrap_or(0).into(),
             weapon,
-            off_hand: row.read::<u64>(MODEL_SUB).ok().and_then(Weapon::read),
+            off_hand: match fists {
+                true => Some(Weapon { set: weapon.set + 50, ..weapon }),
+                false => Weapon::read(sub),
+            },
+            gauntlets: fists.then(|| Gear::read(sub)).flatten(),
             covers_off_hand: covers_off,
             tag: row
                 .read::<u8>(UI_CATEGORY)
@@ -244,6 +261,22 @@ mod tests {
 
         let hora = Weapon::read(0x0000_0002_0009_012d).unwrap();
         assert_eq!((hora.set, hora.base, hora.variant), (301, 9, 2));
+    }
+
+    #[test]
+    fn a_fist_weapon_wears_the_set_past_its_own_and_gauntlets() {
+        // "Ultimate Omega Knuckles": set 1601, and a `ModelSub` naming equipment set 8808.
+        let knuckles = Weapon::read(0x0000_0002_0002_0641).unwrap();
+        assert!(FISTS.contains(&knuckles.set));
+        assert_eq!(
+            Weapon { set: knuckles.set + 50, ..knuckles }.model(),
+            "chara/weapon/w1651/obj/body/b0002/model/w1651b0002.mdl"
+        );
+        let gauntlets = Gear::read(0x0000_0000_0002_2268).unwrap();
+        assert_eq!((gauntlets.set, gauntlets.variant), (8808, 2));
+
+        // "Dated Bone Hora", whose own `ModelSub` is the second knuckle rather than gauntlets.
+        assert!(!FISTS.contains(&301));
     }
 
     #[test]

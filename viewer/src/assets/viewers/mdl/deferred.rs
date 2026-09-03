@@ -37,6 +37,9 @@ const OCCLUSION: u32 = 0x3266_7bd7;
 const SHADOW_MASK: u32 = 0x8187_d13f;
 /// The sun's own depth map, which the resolve compares a pixel against.
 const SHADOW_DEPTH: u32 = 0x58ad_2b38;
+/// What the softening gathers that same map's own depths through rather than comparing against
+/// them, spelled the way `directionalshadow` spells it.
+const GATHER_SAMPLER: &str = "g_SamplerGahter";
 /// The table the subsurface blur reads its taps out of. The engine builds it per frame and no file
 /// states one, so what ships here is the table read whole off a frame the game drew: 32 taps by 64
 /// rows, `.xyz` a weight per channel and `.w` the offset.
@@ -86,7 +89,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 15] = [
+pub const ENGINE: [(u32, &str, u32); 16] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -154,6 +157,14 @@ pub const ENGINE: [(u32, &str, u32); 15] = [
     // to repeat rather than clamp, handled in `Buffers::layered`.
     (WIND_SAMPLE_0, "bgcommon/nature/wind/texture/wind_001.tex", glow::LINEAR),
     (WIND_SAMPLE_1, "bgcommon/nature/wind/texture/wind_002.tex", glow::LINEAR),
+    // The angle the shadow softening turns each pixel's disc of taps by, read at whole texels. The
+    // game holds sixteen of these and steps to the next one every frame, which only pays off where
+    // the frames are accumulated; one alone leaves the dither still rather than crawling.
+    (
+        0x94a1_94c2,
+        "common/graphics/texture/-bn_64_00.tex",
+        glow::NEAREST,
+    ),
 ];
 
 const WIND_SAMPLE_0: u32 = 0x78d3_e3b7;
@@ -678,6 +689,7 @@ pub enum Dead {
     Program(glow::Program),
     Renderbuffer(glow::Renderbuffer),
     Frame(glow::Framebuffer),
+    Sampler(glow::Sampler),
 }
 
 pub fn graveyard() -> &'static std::sync::Mutex<Vec<Dead>> {
@@ -813,6 +825,7 @@ pub fn bury(gl: &glow::Context) {
                 Dead::Program(program) => gl.delete_program(program),
                 Dead::Renderbuffer(held) => gl.delete_renderbuffer(held),
                 Dead::Frame(held) => gl.delete_framebuffer(held),
+                Dead::Sampler(held) => gl.delete_sampler(held),
             }
         }
     }
@@ -1026,6 +1039,8 @@ pub struct Buffers {
     /// The same, for the ones a material names rather than the engine, under the path it named.
     stacked: BTreeMap<String, (u32, glow::Texture)>,
     neutrals: BTreeMap<u32, glow::Texture>,
+    /// A sampler that compares nothing, built once for the unit that gathers the sun's map raw.
+    gather: Option<glow::Sampler>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
     /// The sky the reflection cube was built from, so a frame asking for the same one keeps it.
@@ -3486,6 +3501,31 @@ impl Buffers {
             .map(|(_, held)| *held)
     }
 
+    /// The sampler the sun's own map is gathered through. The map is set to compare, and a texture
+    /// set to compare answers nothing at all where the sampler reading it does not; the softening
+    /// reads it both ways in one draw, so the unit doing the gathering takes a sampler of its own,
+    /// which is where that state sits once one is bound.
+    fn gathering(&mut self, gl: &glow::Context) -> Result<glow::Sampler, String> {
+        if let Some(held) = self.gather {
+            return Ok(held);
+        }
+        let held = unsafe {
+            let held = gl.create_sampler()?;
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_COMPARE_MODE, glow::NONE),
+            ] {
+                gl.sampler_parameter_i32(held, name, value as i32);
+            }
+            held
+        };
+        self.gather = Some(held);
+        Ok(held)
+    }
+
     /// The file a resource id names, where one has arrived and its own target is the one a sampler
     /// of this kind reads through. A file states how many slices it holds and a package states what
     /// it is sampled as, so the two can disagree; a texture bound at the other target is not of the
@@ -3682,6 +3722,7 @@ impl Buffers {
         self.bind(gl, program, held, scene, &[])?;
         self.stand_ins(gl)?;
         let mut unit = 0;
+        let mut gathering = None;
         for texture in &held.textures {
             let bound = match texture.kind {
                 program::Kind::Plane => match over {
@@ -3764,6 +3805,9 @@ impl Buffers {
                 target(texture.kind),
                 0.0,
             );
+            if texture.name.ends_with(GATHER_SAMPLER) {
+                gathering = Some(unit);
+            }
             unit += 1;
         }
         for structured in &held.structured {
@@ -3774,7 +3818,14 @@ impl Buffers {
             sampler(gl, program, &structured.name, unit, bound);
             unit += 1;
         }
+        let gathering = match gathering {
+            Some(unit) => Some((unit, self.gathering(gl)?)),
+            None => None,
+        };
         unsafe {
+            if let Some((unit, held)) = gathering {
+                gl.bind_sampler(unit, Some(held));
+            }
             if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
             }
@@ -3805,6 +3856,11 @@ impl Buffers {
                 _ => gl.draw_arrays(glow::TRIANGLES, 0, 3),
             }
             gl.bind_vertex_array(None);
+            // A sampler stands on its unit until something takes it off, so a later pass reading a
+            // texture there would read it through this one.
+            if let Some((unit, _)) = gathering {
+                gl.bind_sampler(unit, None);
+            }
         }
         Ok(())
     }
@@ -4022,6 +4078,7 @@ impl Drop for Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
+        dead.extend(self.gather.take().map(Dead::Sampler));
         if let Some(held) = self.sheer.take() {
             dead.push(Dead::Frame(held.frame));
             dead.extend(held.color.into_iter().map(Dead::Texture));
@@ -4627,7 +4684,18 @@ pub fn build_pair(
 
 #[cfg(test)]
 mod test {
-    use super::{BAND, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
+    use super::{BAND, ENGINE, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
+
+    /// The id the file the shadow softening dithers by is bound under. Nothing in the table says
+    /// which sampler an entry answers except this number, and the packages derive it from the name.
+    #[test]
+    fn the_shadow_dither_is_bound_under_the_name_its_shader_reads() {
+        let (id, _, _) = ENGINE
+            .into_iter()
+            .find(|(_, path, _)| path.contains("-bn_64_"))
+            .expect("the engine table names a blue noise file");
+        assert_eq!(id, shaders::names::hash(b"tBlueNoise"));
+    }
 
     /// Both meshes and both strips, against what the buffers a capture of the running game bound
     /// hold. The engine builds these rather than reading them out of a file, so the counts and the

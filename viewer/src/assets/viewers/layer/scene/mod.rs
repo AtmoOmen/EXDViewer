@@ -3266,20 +3266,33 @@ impl Scene {
             && lighting.shadow.is_none()
             && matches!(self.packages.get(program::SHADOW), Some(Package::Ready(_)))
         {
-            // Nine taps rather than one: a single comparison shows every texel of the map as a
-            // step. Both keys are asked for here alone, so no other package moves with them.
+            // The strongest softening rather than a fixed square: a square of any width blurs an
+            // edge by as much where it meets the thing casting it as it does far away from it. Both
+            // keys are asked for here alone, so no other package moves with them.
             let shadow = self.screen(
                 program::SHADOW,
                 program::Pass::Lighting,
                 attachments,
                 &[
-                    (program::SHADOW_SOFT, program::SHADOW_SOFT_3X3),
+                    (program::SHADOW_SOFT, program::SHADOW_SOFT_PCSS),
                     (program::TRANSFORM_PROJ, program::TRANSFORM_PROJ_PLANE_FAR),
                 ],
             );
             if shadow.is_none() {
                 self.packages
                     .insert(program::SHADOW.to_owned(), Package::Failed);
+            }
+            // The dither it turns each pixel's disc by, which the engine binds and no material ever
+            // names as a path.
+            for texture in shadow.iter().flat_map(|held| &held.textures) {
+                if let Some((id, path, _)) = mdl::deferred::ENGINE
+                    .iter()
+                    .find(|(held, _, _)| *held == texture.id)
+                {
+                    self.engine
+                        .entry(*id)
+                        .or_insert_with(|| Aside::Wanted(path.to_string()));
+                }
             }
             self.lighting = Some(Arc::new(mdl::gpu::Lighting {
                 shadow,

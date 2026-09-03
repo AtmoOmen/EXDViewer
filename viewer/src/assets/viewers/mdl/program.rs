@@ -540,10 +540,16 @@ const SAMPLING_PARAM: &str = "cParam";
 const SAMPLING_OFFSET: &str = "cSamplingOffset";
 const VIGNETTING_PARAM: &str = "cVignettingParam";
 
-/// How many taps the shadow resolve reads. One is a single comparison and shows every texel of the
-/// map as a step; nine is what softens the edge.
+/// How the shadow resolve softens an edge. The package names its first two levels a single
+/// comparison and a nine-tap square; the strongest it leaves unnamed, and that one is a different
+/// thing rather than a wider square. It gathers the depths under a disc, sizes a penumbra from how
+/// far behind the pixel the blockers it found stand, and filters at that size.
 pub const SHADOW_SOFT: u32 = 0xa89d_89f0;
-pub const SHADOW_SOFT_3X3: u32 = 0x9915_3ff0;
+pub const SHADOW_SOFT_PCSS: u32 = 0x2b16_de56;
+
+/// How wide the sun stands: the penumbra a unit of distance between a blocker and what it falls on
+/// widens by. Read off the five cascades of a captured frame, exact in each.
+const SUN_SOFTNESS: f32 = 0.007;
 
 /// What geometry a pass covers the frame with. The resolve's far-plane variant stands its quad at
 /// the second lane of `m_ShadowDistance`, which is where a split stops.
@@ -3122,10 +3128,11 @@ impl Buffer {
                 Vec4::new(0.0, 0.0, 1.0, 0.0),
                 Vec4::new((column + 0.5) / columns, (row + 0.5) / grid_rows, 0.0, 1.0),
             );
+            let map = half * onto * sun * view.inverse();
             put(
                 DIRECTIONAL_SHADOW_PARAM,
                 "m_ShadowProjectionMatrix",
-                rows(half * onto * sun * view.inverse(), 4),
+                rows(map, 4),
             );
             // Where this split stops, as the depth buffer holds it: the resolve draws a quad there
             // and keeps what stands nearer, which is how a pixel reaches the nearest split that
@@ -3145,6 +3152,19 @@ impl Buffer {
             put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowMapParameter", vec![
                 1.0 / (SHADOW_MAP * ATLAS_COLUMNS as i32) as f32,
                 1.0 / (SHADOW_MAP * ATLAS_ROWS as i32) as f32,
+                0.0,
+                1.0,
+            ]);
+            // What the softening sizes a penumbra with. The second lane turns a depth of the map
+            // back into a distance along the light, which is the whole span the box covers since
+            // its own near plane sits at nought; the first turns such a distance into a radius of
+            // the disc the taps stand on, which the shader states in the shorter side of the whole
+            // image. A negative first lane is also what tells it the map is orthographic.
+            let cell = 1.0 / (ATLAS_ROWS as f32 * map.row(1).truncate().length());
+            let short = (SHADOW_MAP * ATLAS_COLUMNS.min(ATLAS_ROWS) as i32) as f32;
+            put(DIRECTIONAL_SHADOW_PARAM, "m_NearFarParam", vec![
+                -SUN_SOFTNESS * SHADOW_MAP as f32 / (cell * short),
+                -1.0 / map.row(2).truncate().length(),
                 0.0,
                 1.0,
             ]);
@@ -4068,10 +4088,11 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, FXAA_PARAM, Fog,
-        HDAO_PARAM, INSTANCE, INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass,
-        Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode, instance_fields, joints,
-        moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
+        ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, Customize, DECAL,
+        DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
+        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS, SUN_PARAM, WAVING,
+        Pass, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode, instance_fields,
+        joints, moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
     };
 
     /// The two buffers of the post chain no reflection describes, against what the game's own
@@ -4116,6 +4137,55 @@ mod test {
             10.0,
             0.3
         ]);
+    }
+
+    /// What the shadow softening sizes a penumbra with, read back through the arithmetic its own
+    /// shader does: a unit of distance between a blocker and what it falls on has to come out as
+    /// `SUN_SOFTNESS` world units of penumbra, on every split.
+    #[test]
+    fn the_shadow_penumbra_is_as_wide_as_the_sun_stands() {
+        for split in 0..SPLITS {
+            let scene = Scene {
+                view: Mat4::look_at_rh(Vec3::new(0.0, 3.0, 12.0), Vec3::ZERO, Vec3::Y),
+                projection: Mat4::perspective_rh(0.96, 1.6, 0.1, 1000.0),
+                light: Vec3::new(0.3, 0.8, 0.5).normalize(),
+                reach: 300.0,
+                split,
+                ..Default::default()
+            };
+            let held = Buffer {
+                name: DIRECTIONAL_SHADOW_PARAM.to_owned(),
+                members: [("m_ShadowProjectionMatrix", 0, 64), ("m_NearFarParam", 112, 16)]
+                    .into_iter()
+                    .map(|(name, offset, size)| hlsl::layout::Member {
+                        name: name.to_owned(),
+                        offset,
+                        size,
+                        kind: "float4".to_owned(),
+                    })
+                    .collect(),
+                registers: 8,
+                fixed: None,
+            };
+            let filled: Vec<f32> = held
+                .fill(&scene, Pass::Lighting, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect();
+            let row = |at: usize| Vec3::new(filled[at * 4], filled[at * 4 + 1], filled[at * 4 + 2]);
+            let [x, y, z, w] = [filled[28], filled[29], filled[30], filled[31]];
+            // A world unit along the light moves the map's depth by the length of the row that
+            // answers it, and this is what the shader turns that depth back into a distance with.
+            let along = |depth: f32| -(depth * y + z) / w;
+            let step = row(2).length();
+            assert!((along(step) - along(0.0) - 1.0).abs() < 1e-4, "split {split}");
+            // Its disc is stated in the shorter side of the whole image, and that many texels of
+            // one split's own cell is what the penumbra measures in the world. Against the width
+            // the frame was captured at rather than against the constant, which would move with it.
+            let short = (SHADOW_MAP * ATLAS_COLUMNS.min(ATLAS_ROWS) as i32) as f32;
+            let across = -x * short / (SHADOW_MAP as f32 * ATLAS_ROWS as f32 * row(1).length());
+            assert!((across - 0.007).abs() < 1e-6, "split {split}: {across}");
+        }
     }
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game

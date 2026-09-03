@@ -3802,8 +3802,6 @@ impl Buffers {
                 0.0,
             );
             if texture.name.ends_with(GATHER_SAMPLER) {
-                let held = self.gathering(gl)?;
-                unsafe { gl.bind_sampler(unit, Some(held)) };
                 gathering = Some(unit);
             }
             unit += 1;
@@ -3816,7 +3814,14 @@ impl Buffers {
             sampler(gl, program, &structured.name, unit, bound);
             unit += 1;
         }
+        let gathering = match gathering {
+            Some(unit) => Some((unit, self.gathering(gl)?)),
+            None => None,
+        };
         unsafe {
+            if let Some((unit, held)) = gathering {
+                gl.bind_sampler(unit, Some(held));
+            }
             if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
                 gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
             }
@@ -3849,7 +3854,7 @@ impl Buffers {
             gl.bind_vertex_array(None);
             // A sampler stands on its unit until something takes it off, so a later pass reading a
             // texture there would read it through this one.
-            if let Some(unit) = gathering {
+            if let Some((unit, _)) = gathering {
                 gl.bind_sampler(unit, None);
             }
         }

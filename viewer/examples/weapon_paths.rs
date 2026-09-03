@@ -112,9 +112,9 @@ struct Probe {
 }
 
 impl Probe {
-    /// Whether the model is on disk, how many bones it skins to, and which of the materials it
-    /// names at the variant its `.imc` resolves are missing.
-    fn check(&mut self, model: &str, part: u8, variant: u16) -> Option<(usize, Vec<String>)> {
+    /// Whether the model is on disk, how many bones it skins to, the variant its `.imc` sends it
+    /// to, and which of the materials it names there are missing.
+    fn check(&mut self, model: &str, part: u8, variant: u16) -> Option<(usize, u16, Vec<String>)> {
         let container = self.ironworks.file::<ModelContainer>(model).ok()?;
         let high = container.model(Lod::High);
         let bones = high.bone_names().map(|held| held.len()).unwrap_or(0);
@@ -147,7 +147,7 @@ impl Probe {
                 missing.push(format!("{path} for {model}"));
             }
         }
-        Some((bones, missing))
+        Some((bones, resolved, missing))
     }
 
     fn imc(&mut self, path: &str) -> Option<&imc::ImageChange> {
@@ -205,6 +205,9 @@ fn main() {
     let (mut main_miss, mut off_miss, mut glove_miss) = (Vec::new(), Vec::new(), Vec::new());
     let mut material_miss: Vec<String> = Vec::new();
     let mut skinned: Vec<String> = Vec::new();
+    // A material id of nought is the game's own "draw nothing", not a variant to look up.
+    let mut unlit: Vec<String> = Vec::new();
+    let mut dressed: Vec<String> = Vec::new();
     let mut fists: Vec<String> = Vec::new();
     let mut old_off_miss = 0u32;
 
@@ -215,9 +218,14 @@ fn main() {
         mains += 1;
         match probe.check(&model, 0, variant) {
             None => main_miss.push(format!("{held}: {model}")),
-            Some((bones, missing)) => {
+            Some((bones, resolved, missing)) => {
                 if bones > 1 {
-                    skinned.push(format!("{held}: {model} skins {bones} bones"));
+                    skinned.push(format!("{model} skins {bones} bones"));
+                }
+                if resolved == 0 {
+                    unlit.push(format!("{held}: {model}"));
+                } else if resolved != 1 {
+                    dressed.push(format!("{model} draws v{resolved:04}"));
                 }
                 material_miss.extend(missing.into_iter().map(|path| format!("{held}: {path}")));
             }
@@ -235,9 +243,14 @@ fn main() {
             let model = weapon_model(set, base);
             match probe.check(&model, 0, variant) {
                 None => off_miss.push(format!("{held}: {model}")),
-                Some((bones, missing)) => {
+                Some((bones, resolved, missing)) => {
                     if bones > 1 {
-                        skinned.push(format!("{held}: {model} skins {bones} bones"));
+                        skinned.push(format!("{model} skins {bones} bones"));
+                    }
+                    if resolved == 0 {
+                        unlit.push(format!("{held}: {model}"));
+                    } else if resolved != 1 {
+                        dressed.push(format!("{model} draws v{resolved:04}"));
                     }
                     material_miss.extend(missing.into_iter().map(|path| format!("{held}: {path}")));
                 }
@@ -258,7 +271,11 @@ fn main() {
             match model {
                 None => glove_miss.push(format!("{held}: {}", glove_model(101, set))),
                 Some(model) => {
-                    if let Some((_, missing)) = probe.check(&model, 2, u16::from(variant)) {
+                    if let Some((_, resolved, missing)) = probe.check(&model, 2, u16::from(variant))
+                    {
+                        if resolved == 0 {
+                            unlit.push(format!("{held}: {model}"));
+                        }
                         material_miss
                             .extend(missing.into_iter().map(|path| format!("{held}: {path}")));
                     }
@@ -274,7 +291,18 @@ fn main() {
     println!("materials: {} missing", material_miss.len());
     println!("fist range {FISTS:?}: {} pairs", fists.len());
     println!("off hand read as a weapon quad throughout: {old_off_miss} missing");
-    println!("models skinning more than one bone: {}", skinned.len());
+    let distinct = |held: &[String]| {
+        let mut rows: Vec<&String> = held.iter().collect();
+        rows.sort();
+        rows.dedup();
+        rows.len()
+    };
+    println!(
+        "models skinning more than one bone: {}",
+        distinct(&skinned)
+    );
+    println!("models drawing past their first material: {}", distinct(&dressed));
+    println!("entries stating no material at all: {}", unlit.len());
     let show = |title: &str, held: &[String]| {
         println!("\n== {title}");
         for line in held.iter().take(60) {
@@ -288,14 +316,15 @@ fn main() {
     show("off hand misses", &off_miss);
     show("gauntlet misses", &glove_miss);
     show("material misses", &material_miss);
+    show("no material stated", &unlit);
     if flags.contains("--list-fists") {
         show("fist range", &fists);
     }
     if flags.contains("--list-skinned") {
-        let mut held: Vec<&String> = skinned.iter().collect();
-        held.sort();
-        held.dedup();
-        for line in held {
+        let mut rows: Vec<&String> = skinned.iter().collect();
+        rows.sort();
+        rows.dedup();
+        for line in rows {
             println!("  {line}");
         }
     }

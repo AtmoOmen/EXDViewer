@@ -1217,7 +1217,6 @@ impl CharacterBuilder {
         // is worn there.
         if let Some(gauntlets) = self.gauntlets() {
             outfit[Slot::Hands as usize] = Some(gauntlets);
-            hidden[Slot::Hands as usize] = false;
         }
         (outfit, hidden)
     }

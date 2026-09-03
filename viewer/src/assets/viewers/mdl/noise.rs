@@ -94,13 +94,11 @@ pub fn perlin() -> Vec<u8> {
     let field: Vec<f32> = (0..SIZE * SIZE)
         .map(|_| (twister.draw() as f32 + 0.5) / 4_294_967_296.0)
         .collect();
+    // The generator clamps each texel into nought to one before it scales. Every weight below is
+    // positive and each corner's four sum to one, so a texel is a convex combination of a field
+    // that is already in that range and the clamp can never bite.
     let mut plane: Vec<u8> = (0..SIZE * SIZE)
-        .map(|at| {
-            let held = value(&field, at % SIZE, at / SIZE);
-            let held = if held >= 1.0 { 1.0 } else { held };
-            let held = if held <= 0.0 { 0.0 } else { held };
-            (held * 255.0) as u8
-        })
+        .map(|at| (value(&field, at % SIZE, at / SIZE) * 255.0) as u8)
         .collect();
     normalise(&mut plane);
     (0..SIZE * SIZE)
@@ -146,7 +144,7 @@ mod tests {
         let held = perlin();
         for (y, x) in [(0, 0), (7, 200), (223, 224), (255, 255), (100, 31)] {
             let at = 4 * (y * SIZE + x);
-            let from = 4 * ((y + SHIFT) % SIZE * SIZE + (x + SHIFT) % SIZE);
+            let from = 4 * ((y + 32) % SIZE * SIZE + (x + 32) % SIZE);
             assert_eq!(held[at + 1], held[from], "at ({x}, {y})");
         }
     }

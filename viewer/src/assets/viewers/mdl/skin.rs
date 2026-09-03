@@ -351,7 +351,7 @@ struct Layer {
     fade: Cell<f32>,
     over: Cell<f32>,
     /// How long to fade this layer out over once the clip has played through with nothing queued
-    /// behind it. None means it loops, which is what a pose held forever wants.
+    /// behind it. No length leaves it looping, which is what a pose held forever wants.
     settle: Cell<f32>,
 }
 

@@ -263,7 +263,7 @@ impl Rig {
         world
     }
 
-    /// Lays a motion's tracks over `locals` at `time`.
+    /// Lays a motion's tracks over `locals` at `time`, `weight` of the way there.
     ///
     /// A motion's tracks are in the order of the skeleton it was authored against, which need not
     /// be this rig, so `ordering` names that skeleton's bones and the two are matched by name.
@@ -278,7 +278,11 @@ impl Rig {
         ordering: &[String],
         origin: Option<&str>,
         time: f32,
+        weight: f32,
     ) {
+        if weight <= 0.0 {
+            return;
+        }
         let blends = binding.blend_hint() != 0;
         for (track, sampled) in binding.motion().sample(time).into_iter().enumerate() {
             let Some(bone) = binding
@@ -290,9 +294,13 @@ impl Rig {
             else {
                 continue;
             };
-            locals[bone] = match blends {
+            let laid = match blends {
                 true => over(&locals[bone], &sampled),
                 false => sampled,
+            };
+            locals[bone] = match weight >= 1.0 {
+                true => laid,
+                false => mix(&locals[bone], &laid, weight),
             };
         }
     }
@@ -404,6 +412,20 @@ fn over(base: &Transform, delta: &Transform) -> Transform {
     }
 }
 
+/// One transform `weight` of the way to another: the straight line for translation and scale, the
+/// shortest arc for rotation.
+fn mix(from: &Transform, to: &Transform, weight: f32) -> Transform {
+    let translation =
+        Vec3::from_slice(&from.translation).lerp(Vec3::from_slice(&to.translation), weight);
+    let scale = Vec3::from_slice(&from.scale).lerp(Vec3::from_slice(&to.scale), weight);
+    let rotation = Quat::from_array(from.rotation).slerp(Quat::from_array(to.rotation), weight);
+    Transform {
+        translation: [translation.x, translation.y, translation.z, to.translation[3]],
+        rotation: rotation.to_array(),
+        scale: [scale.x, scale.y, scale.z, to.scale[3]],
+    }
+}
+
 /// A name kept apart from whatever the base or another extra already called the same thing,
 /// since two skeletons can each have their own unrelated bone of that name.
 fn scoped(origin: &str, name: &str) -> String {
@@ -468,7 +490,7 @@ mod tests {
 
     use glam::{Quat, Vec3};
 
-    use super::{Rig, Transform, over};
+    use super::{Rig, Transform, mix, over};
 
     fn transform(translation: [f32; 3]) -> Transform {
         Transform {
@@ -623,6 +645,24 @@ mod tests {
             .resolve(Some("face"), "j_f_noanim_ago")
             .expect("added with nothing to collide with");
         assert_eq!(merged.parent(noanim), Some(face_ago));
+    }
+
+    #[test]
+    fn a_mix_stands_at_either_end_and_halfway_between() {
+        let turned = Transform {
+            translation: [4.0, 0.0, 0.0, 0.0],
+            rotation: Quat::from_rotation_z(FRAC_PI_2).to_array(),
+            scale: [3.0, 3.0, 3.0, 0.0],
+        };
+        let rest = transform([0.0, 0.0, 0.0]);
+        assert_eq!(mix(&rest, &turned, 0.0).translation, rest.translation);
+        assert_eq!(mix(&rest, &turned, 1.0).translation, turned.translation);
+
+        let half = mix(&rest, &turned, 0.5);
+        assert_eq!(half.translation[0], 2.0);
+        assert_eq!(half.scale[0], 2.0);
+        let angle = Quat::from_array(half.rotation).to_axis_angle().1;
+        assert!((angle - FRAC_PI_2 / 2.0).abs() < 1e-5, "{angle}");
     }
 
     /// A parent index at or past its own bone would leave the ordered walks below it unreachable,

@@ -3218,7 +3218,7 @@ impl Rendered {
 
     /// Poses the character out of a different pack, which is what picking an emote is.
     pub fn play(&self, path: &str, then: Option<&str>) {
-        self.animation.play(path, then);
+        self.animation.play(path, then, 0.0);
     }
 
     /// Puts an expression on the character's face, which is what picking an emote that only makes

@@ -1752,9 +1752,11 @@ const WIND_SCROLL_INTERVAL: f32 = 30.0;
 const WIND_POWER_SCALE: f32 = 0.15;
 
 /// World units a leaf leans by at the far end of one sway. Measured off `m_WindVector` in real
-/// frames rather than derived: the reach a wind set sums to is several times this and is not what the
-/// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
-/// it is not the set and is not placed here.
+/// frames rather than derived: the reach a wind set sums to is several times this and is not what
+/// the engine hands over. Every frame whose `g_WindInfo` holds the calm pair holds this same length
+/// and a storm's holds a longer one, so the set does decide it, but the engine gets there by
+/// sampling the wind texture itself and leaning each layer by what it reads, and this viewer takes
+/// no such read.
 pub const WIND_REACH: f32 = 1.467_972;
 
 /// What a character's own wind is capped and scaled by before a strand is swayed along it. Both off
@@ -2909,9 +2911,9 @@ impl Buffer {
         // worldScale - uvOffset`. `worldScale` is the plain reading of the file's own stated cycle
         // length. The pair the blade leans between is the stated range rather than the stated
         // strength, both taken down by [`WIND_POWER_SCALE`]. The engine advects `uvOffset` along the
-        // layer's heading by its own strength, so a stronger wind runs the field past faster; it wraps the pair every cycle, which is what
-        // keeps the coordinate exact however long the clock has run. `windViewDir` is read by no
-        // vertex shader this viewer runs, so it is left at nought.
+        // layer's heading by its own strength, so a stronger wind runs the field past faster; it
+        // wraps the pair every cycle, which keeps the coordinate exact however long the clock has
+        // run. `windViewDir` is read by no vertex shader this viewer runs, so it is left at nought.
         if self.name == "g_WindInfo" {
             for (at, layer) in scene.wind.layers.iter().enumerate() {
                 let world_scale = match layer.wavelength > 0.0 {

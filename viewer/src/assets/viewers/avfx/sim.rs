@@ -1150,7 +1150,9 @@ mod test {
     use ironworks::file::File;
     use ironworks::file::avfx::Avfx;
 
-    use super::{Fresnel, Particle, nested};
+    use glam::{Vec3, Vec4};
+
+    use super::{Effect, Fresnel, Live, Place, State, nested};
 
     /// One block as the format writes it: the tag back to front and null-padded, its length, then
     /// a payload rounded up to the next four bytes.
@@ -1197,8 +1199,21 @@ mod test {
         let bytes = block("AVFX", &[scalar("Ver", 0x0001_0000), particle].concat());
 
         let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
-        let held = Particle::read(&file.particles()[0], 0, &[]);
-        let rim = held.fresnel.at(0.0);
+        let effect = Effect::read(&file);
+        let state = State {
+            frame: 0,
+            running: Vec::new(),
+            particles: vec![Live {
+                def: 0,
+                born: 0,
+                life: 1.0,
+                at: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+                place: Place::NONE,
+                tint: Vec4::ONE,
+            }],
+        };
+        let rim = effect.drawn(&state)[0].rim;
         assert_eq!(rim.power, 3.0);
         assert_eq!(rim.begin, [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(rim.end, [0.5, 0.25, 0.125, 1.0]);

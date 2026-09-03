@@ -656,13 +656,14 @@ mod test {
             rim: Rim {
                 power: 3.0,
                 begin: [1.0, 1.0, 1.0, 0.0],
-                end: [1.0; 4],
+                end: [0.25, 0.5, 0.75, 1.0],
             },
             ..Instance::default()
         };
         let bytes = held.fill(&scene, &instance);
         assert_eq!(lane(&bytes, 28), 3.0);
         assert_eq!(lane(&bytes, 44), 0.0);
+        assert_eq!(lane(&bytes, 48), 0.25);
         assert_eq!(lane(&bytes, 60), 1.0);
     }
 

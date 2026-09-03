@@ -1443,7 +1443,7 @@ mod test {
                         entry(0, 0, 0, 0),
                         entry(1, 1, 1, 0),
                         entry(2, 1, 2, 0),
-                        entry(3, 1, 1, 2),
+                        entry(3, 1, 1, 1),
                     ]
                     .concat(),
                 ),
@@ -1475,12 +1475,12 @@ mod test {
             out
         };
 
-        // One burst in, and the delayed entry has not come round yet.
+        // One burst in, which the delayed entry misses by a frame.
         effect.seek(&mut state, 10);
         assert_eq!(alive(&state), [1, 1, 2, 0]);
 
         // A 32-frame life over a 15-frame interval leaves the two bursts before this one still
-        // running, and the delayed entry stays at the one it was made on.
+        // running, and the delayed entry stays at the burst that first cleared its delay.
         effect.seek(&mut state, 330);
         assert_eq!(alive(&state), [3, 1, 2, 1]);
     }

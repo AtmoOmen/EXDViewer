@@ -24,8 +24,10 @@ const VIEW_POSITION: u32 = 0xbc61_5663;
 const WATER_VIEW_POSITION: u32 = 0x34a0_4363;
 /// What water reads for whatever stands behind it, which is the frame as the lighting left it.
 const REFRACTION: u32 = 0xa38e_45e1;
-/// What water reads its own local reflection through. No pass here renders one, so it falls to the
-/// neutral answer below rather than a real march.
+/// What water reads its own local reflection through, and all of it: `river.shpk` reaches no cube.
+/// The game fills this from a chain of its own - `WaterReflectionMaskPS`, a march, two blurs and
+/// `WaterReflectionBlurMergePS` - which is not the frame-wide one [`Reflection`] runs, and nothing
+/// here draws it, so it falls to the neutral answer below.
 const REFLECTION_MAP: u32 = 0xc705_a5b6;
 const LIGHT_DIFFUSE: u32 = 0x23d0_f850;
 const LIGHT_SPECULAR: u32 = 0x6c19_aca4;

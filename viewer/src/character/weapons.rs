@@ -3,9 +3,10 @@
 //! `Item.ModelMain`/`ModelSub` pack a weapon's set, base and variant the same way `Gear` packs
 //! equipment, but sixteen bits a field rather than eight: measured against real weapons (id 100
 //! "Dated Bronze Gladius" reads `201/1/4`, id 124 "Dated Bone Hora" reads `301/9/2`), the top
-//! sixteen bits are unused in every weapon Item sampled. Where a weapon attaches to the skeleton
-//! comes from the character's own `.atch` file, keyed by a three-letter tag this module derives
-//! from the item's `ItemUICategory` (the job the weapon belongs to).
+//! sixteen bits are unused in every weapon Item sampled. `ModelSub` is the other hand's model for
+//! most of them, but a fist weapon's is a hands equipment id: see [`FISTS`]. Where a weapon
+//! attaches to the skeleton comes from the character's own `.atch` file, keyed by a three-letter
+//! tag this module derives from the item's `ItemUICategory` (the job the weapon belongs to).
 
 use anyhow::Result;
 use ironworks::excel::Language;

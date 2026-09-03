@@ -1443,7 +1443,7 @@ mod test {
                         entry(0, 0, 0, 0),
                         entry(1, 1, 1, 0),
                         entry(2, 1, 2, 0),
-                        entry(3, 1, 1, 20),
+                        entry(3, 1, 1, 2),
                     ]
                     .concat(),
                 ),
@@ -1467,15 +1467,22 @@ mod test {
         let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
         let effect = Effect::read(&file);
         let mut state = State::default();
-        effect.seek(&mut state, 330);
+        let alive = |state: &State| {
+            let mut out = [0; 4];
+            for live in &state.particles {
+                out[live.def] += 1;
+            }
+            out
+        };
 
-        let mut alive = [0; 4];
-        for live in &state.particles {
-            alive[live.def] += 1;
-        }
-        // A 32-frame life over a 15-frame interval leaves the two before this burst still running,
-        // and the delayed entry is made on the first burst past its twenty rather than dropped.
-        assert_eq!(alive, [3, 1, 2, 1]);
+        // One burst in, and the delayed entry has not come round yet.
+        effect.seek(&mut state, 10);
+        assert_eq!(alive(&state), [1, 1, 2, 0]);
+
+        // A 32-frame life over a 15-frame interval leaves the two bursts before this one still
+        // running, and the delayed entry stays at the one it was made on.
+        effect.seek(&mut state, 330);
+        assert_eq!(alive(&state), [3, 1, 2, 1]);
     }
 
     /// A file stating no ramp has to leave the lerp an identity rather than a black, invisible one.

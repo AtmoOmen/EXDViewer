@@ -33,10 +33,8 @@ pub use filter::{ComplexFilter, FilterInput, FilterInputType, draw_guide as draw
 pub use global_context::GlobalContext;
 use intmap::IntMap;
 use ironworks::sestring::SeStr;
-#[cfg(not(target_arch = "wasm32"))]
-pub use schema_column::{SchemaColumn, SchemaColumnMeta};
-#[cfg(not(target_arch = "wasm32"))]
-pub use sheet_column::SheetColumnDefinition;
+pub(crate) use schema_column::{SchemaColumn, SchemaColumnMeta};
+pub(crate) use sheet_column::SheetColumnDefinition;
 pub use sheet_table::{SheetTable, SheetTableResponse};
 pub use table_context::TableContext;
 

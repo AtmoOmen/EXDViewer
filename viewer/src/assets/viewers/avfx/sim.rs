@@ -1450,6 +1450,16 @@ mod test {
             ]
             .concat(),
         );
+        // A second emitter counting nothing at all, whose start entry the count never reaches.
+        let idle = block(
+            "Emit",
+            &[
+                span("Life", -1.0),
+                curve("CrC", [1.0, 1.0, 0.0]),
+                block("ItPr", &entry(4, 1, 1, 0)),
+            ]
+            .concat(),
+        );
         let particle = |life: f32| block("Ptcl", &[scalar("PrVT", 1), span("Life", life)].concat());
         let bytes = block(
             "AVFX",
@@ -1459,7 +1469,9 @@ mod test {
                 particle(-1.0),
                 particle(-1.0),
                 particle(-1.0),
+                particle(-1.0),
                 emitter,
+                idle,
             ]
             .concat(),
         );
@@ -1468,7 +1480,7 @@ mod test {
         let effect = Effect::read(&file);
         let mut state = State::default();
         let alive = |state: &State| {
-            let mut out = [0; 4];
+            let mut out = [0; 5];
             for live in &state.particles {
                 out[live.def] += 1;
             }
@@ -1477,12 +1489,12 @@ mod test {
 
         // One burst in, which the delayed entry misses by a frame.
         effect.seek(&mut state, 10);
-        assert_eq!(alive(&state), [1, 1, 2, 0]);
+        assert_eq!(alive(&state), [1, 1, 2, 0, 1]);
 
         // A 32-frame life over a 15-frame interval leaves the two bursts before this one still
         // running, and the delayed entry stays at the burst that first cleared its delay.
         effect.seek(&mut state, 330);
-        assert_eq!(alive(&state), [3, 1, 2, 1]);
+        assert_eq!(alive(&state), [3, 1, 2, 1, 1]);
     }
 
     /// A file stating no ramp has to leave the lerp an identity rather than a black, invisible one.

@@ -37,6 +37,9 @@ const OCCLUSION: u32 = 0x3266_7bd7;
 const SHADOW_MASK: u32 = 0x8187_d13f;
 /// The sun's own depth map, which the resolve compares a pixel against.
 const SHADOW_DEPTH: u32 = 0x58ad_2b38;
+/// What the softening gathers that same map's own depths through rather than comparing against
+/// them, spelled the way `directionalshadow` spells it.
+const GATHER_SAMPLER: &str = "g_SamplerGahter";
 /// The table the subsurface blur reads its taps out of. The engine builds it per frame and no file
 /// states one, so what ships here is the table read whole off a frame the game drew: 32 taps by 64
 /// rows, `.xyz` a weight per channel and `.w` the offset.
@@ -681,6 +684,7 @@ pub enum Dead {
     Program(glow::Program),
     Renderbuffer(glow::Renderbuffer),
     Frame(glow::Framebuffer),
+    Sampler(glow::Sampler),
 }
 
 pub fn graveyard() -> &'static std::sync::Mutex<Vec<Dead>> {
@@ -816,6 +820,7 @@ pub fn bury(gl: &glow::Context) {
                 Dead::Program(program) => gl.delete_program(program),
                 Dead::Renderbuffer(held) => gl.delete_renderbuffer(held),
                 Dead::Frame(held) => gl.delete_framebuffer(held),
+                Dead::Sampler(held) => gl.delete_sampler(held),
             }
         }
     }
@@ -1029,6 +1034,8 @@ pub struct Buffers {
     /// The same, for the ones a material names rather than the engine, under the path it named.
     stacked: BTreeMap<String, (u32, glow::Texture)>,
     neutrals: BTreeMap<u32, glow::Texture>,
+    /// A sampler that compares nothing, built once for the unit that gathers the sun's map raw.
+    gather: Option<glow::Sampler>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
     /// The sky the reflection cube was built from, so a frame asking for the same one keeps it.
@@ -1305,6 +1312,7 @@ impl Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
+        dead.extend(self.gather.take().map(Dead::Sampler));
         if let Some(held) = self.sheer.take() {
             dead.push(Dead::Frame(held.frame));
             dead.extend(held.color.into_iter().map(Dead::Texture));
@@ -3489,6 +3497,31 @@ impl Buffers {
             .map(|(_, held)| *held)
     }
 
+    /// The sampler the sun's own map is gathered through. The map is set to compare, and a texture
+    /// set to compare answers nothing at all where the sampler reading it does not; the softening
+    /// reads it both ways in one draw, so the unit doing the gathering takes a sampler of its own,
+    /// which is where that state sits once one is bound.
+    fn gathering(&mut self, gl: &glow::Context) -> Result<glow::Sampler, String> {
+        if let Some(held) = self.gather {
+            return Ok(held);
+        }
+        let held = unsafe {
+            let held = gl.create_sampler()?;
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_COMPARE_MODE, glow::NONE),
+            ] {
+                gl.sampler_parameter_i32(held, name, value as i32);
+            }
+            held
+        };
+        self.gather = Some(held);
+        Ok(held)
+    }
+
     /// The file a resource id names, where one has arrived and its own target is the one a sampler
     /// of this kind reads through. A file states how many slices it holds and a package states what
     /// it is sampled as, so the two can disagree; a texture bound at the other target is not of the
@@ -3685,6 +3718,7 @@ impl Buffers {
         self.bind(gl, program, held, scene, &[])?;
         self.stand_ins(gl)?;
         let mut unit = 0;
+        let mut gathering = None;
         for texture in &held.textures {
             let bound = match texture.kind {
                 program::Kind::Plane => match over {
@@ -3767,6 +3801,11 @@ impl Buffers {
                 target(texture.kind),
                 0.0,
             );
+            if texture.name.ends_with(GATHER_SAMPLER) {
+                let held = self.gathering(gl)?;
+                unsafe { gl.bind_sampler(unit, Some(held)) };
+                gathering = Some(unit);
+            }
             unit += 1;
         }
         for structured in &held.structured {
@@ -3808,6 +3847,11 @@ impl Buffers {
                 _ => gl.draw_arrays(glow::TRIANGLES, 0, 3),
             }
             gl.bind_vertex_array(None);
+            // A sampler stands on its unit until something takes it off, so a later pass reading a
+            // texture there would read it through this one.
+            if let Some(unit) = gathering {
+                gl.bind_sampler(unit, None);
+            }
         }
         Ok(())
     }

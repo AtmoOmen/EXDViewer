@@ -803,6 +803,8 @@ pub struct Animation {
     /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
     /// is what asks for another rather than every frame re-loading the same pack.
     linked: RefCell<Option<String>>,
+    /// Whether a caller has said what the body stands in, so the pack list stops picking for it.
+    stood: Cell<bool>,
     /// Whether `face` is still the pack `linked` put it on, so its clock tracks the body's own
     /// rather than running free. `express` and a manual face pick from the picker both drop this,
     /// since a pose the creator asked for by name is not the body's to hold or let go of.
@@ -862,6 +864,7 @@ impl Animation {
             action: Default::default(),
             face: Default::default(),
             linked: RefCell::new(None),
+            stood: Cell::new(false),
             synced: Cell::new(false),
             pending: RefCell::new(None),
             poses: Default::default(),
@@ -1038,9 +1041,11 @@ impl Animation {
         };
         // The placeholder set at construction is only ever a guess, so the conventional pack
         // always overrides it once the listing is in; a weapon is named none at all, and only
-        // then does the listing's own first pack stand in.
-        if let Some((path, motion)) =
-            idle.or_else(|| listed.first().map(|pack| (pack.path.clone(), None)))
+        // then does the listing's own first pack stand in. A caller that has already said what
+        // the body stands in keeps it: the conventional idle is the guess, not the answer.
+        if let Some((path, motion)) = idle
+            .or_else(|| listed.first().map(|pack| (pack.path.clone(), None)))
+            .filter(|_| !self.stood.get())
         {
             self.body.load(&path, motion, None, 0.0);
         }
@@ -1225,6 +1230,7 @@ impl Animation {
             .iter()
             .map(|(path, motion)| (path.clone(), (*motion).to_owned()))
             .collect();
+        self.stood.set(true);
         self.body.seek(candidates, fade);
         self.running.set(true);
     }

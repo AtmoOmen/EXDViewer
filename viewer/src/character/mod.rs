@@ -985,9 +985,8 @@ impl CharacterBuilder {
             .as_ref()
             .filter(|stood| stood.held == held && stood.drawn == self.drawn)
         {
-            // Stated again rather than left alone: the pack list landing stands the body in its
-            // own conventional idle, which would otherwise take the class's place under it.
-            model.stand(&poses, 0.0);
+            // Named once the pack has landed rather than when it was asked for: a class with no
+            // drawn pose of its own settles into the sheathed one, and this is what says so.
             if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
                 log::info!("character: {} settled into {name}", stood.held);
             }

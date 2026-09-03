@@ -439,6 +439,18 @@ fn shading(block: &Block, lights: Option<Vec<(u32, u32)>>, sprite: bool) -> Shad
 
     let sets = integer(blocks, "UvSN").unwrap_or_default().clamp(0, 4);
     key("UvSetCount_Table", format!("UvSetCount_{sets}"));
+    // Each blend family is handed a color prepared differently: a multiply lerps it towards white
+    // by the particle's own opacity and a screen scales it by that opacity, where the two families
+    // whose own source factor already carries the opacity take the color as it stands.
+    key(
+        "ComputeFinalColorType_Table",
+        match Blend::from(integer(blocks, "RMT").unwrap_or_default()) {
+            Blend::Multiply => "ComputeFinalColorType_LerpWhite",
+            Blend::Screen => "ComputeFinalColorType_ModulateAlpha",
+            _ => "ComputeFinalColorType_NoneControl",
+        }
+        .to_owned(),
+    );
     key(
         "DepthOffsetType_Table",
         match integer(blocks, "DOTy") == Some(1) {
@@ -1266,6 +1278,29 @@ mod test {
 
         assert_eq!(effect.particles[0].shading.calculate, [0.0, 1.0]);
         assert_eq!(effect.particles[1].shading.calculate, [1.0, 0.0]);
+    }
+
+    /// A multiply is drawn against a color the package has already lerped towards white by the
+    /// particle's opacity, and a screen against one it has scaled by that opacity, so the blend a
+    /// particle names has to reach the key naming which.
+    #[test]
+    fn the_blend_family_names_how_the_color_is_computed() {
+        let final_color = |mode: i32| {
+            let particle = block("Ptcl", &[scalar("PrVT", 1), scalar("RMT", mode)].concat());
+            let bytes = block("AVFX", &[scalar("Ver", 0x0001_0000), particle].concat());
+            let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+            let table = super::program::id("ComputeFinalColorType_Table");
+            Effect::read(&file).particles[0]
+                .shading
+                .keys
+                .iter()
+                .find(|(held, _)| *held == table)
+                .expect("the key the package declares")
+                .1
+        };
+        assert_eq!(final_color(9), super::program::id("ComputeFinalColorType_LerpWhite"));
+        assert_eq!(final_color(4), super::program::id("ComputeFinalColorType_ModulateAlpha"));
+        assert_eq!(final_color(2), super::program::id("ComputeFinalColorType_NoneControl"));
     }
 
     /// A curve ramping to `end` over `span` frames and starting over, as a scroll is written.

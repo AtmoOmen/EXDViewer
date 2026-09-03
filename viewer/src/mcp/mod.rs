@@ -639,8 +639,8 @@ fn process_validate_schema(text: &str) -> String {
 }
 
 fn process_get_icon_paths(icon_id: u32) -> String {
-    let path = crate::data::get_icon_path(icon_id, false);
-    let hires_path = crate::data::get_icon_path(icon_id, true);
+    let path = crate::data::get_icon_path(None, icon_id, false, Language::None);
+    let hires_path = crate::data::get_icon_path(None, icon_id, true, Language::None);
     serde_json::json!({"icon_id": icon_id, "tex_path": path, "hires_tex_path": hires_path})
         .to_string()
 }

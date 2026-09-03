@@ -21,7 +21,7 @@ pub fn draw(ctx: &egui::Context, open: &mut bool) {
                     ui.vertical_centered(|ui| {
                         ui.add(
                             egui::Hyperlink::from_label_and_url(
-                                RichText::new("EXDViewer").size(title_size).strong(),
+                                RichText::new("XIViewer").size(title_size).strong(),
                                 crate::REPO_URL,
                             )
                             .open_in_new_tab(true),

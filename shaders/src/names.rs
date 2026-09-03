@@ -74,6 +74,7 @@ mod tests {
             (0xb554_5fbb, "g_NormalScale"),
             (0x600e_f9df, "GetValuesCompatibility"),
             (0x0c5e_c1f1, "g_SamplerNormal"),
+            (0x738a_241c, "g_ScrollTransTimeU_1"),
         ] {
             assert_eq!(resolve(id), Some(name), "{id:#010x}");
         }

@@ -3,7 +3,7 @@ use crate::{
     worker::{WorkerDirectory, WorkerRequest, WorkerResponse},
 };
 
-use super::{DecodedTexture, FileProvider, get_icon_path, list_url, with_list_id};
+use super::{DecodedTexture, FileProvider, list_url, with_list_id};
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
@@ -135,10 +135,9 @@ impl FileProvider for WorkerFileProvider {
         }
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
-        log::info!("WorkerFileProvider：正在请求图标 {icon_id}，高清：{hires}");
-        let path = get_icon_path(icon_id, hires);
-        Ok(Either::Right(self.read_texture(&path, None).await?.image))
+async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>> {
+        log::info!("WorkerFileProvider：正在请求图标 {path}");
+        Ok(Either::Right(self.read_texture(path, None).await?.image))
     }
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>> {

@@ -1,12 +1,13 @@
 use std::io::{Cursor, Read, Seek};
-use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
-use ironworks::file::File;
+use ironworks::excel::Language;
+use ironworks::file::{File, mdl::Lods};
 use url::Url;
 
+pub mod listing;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sqpack;
 pub mod web;
@@ -23,8 +24,7 @@ pub trait FileProvider {
     /// the header it travels in.
     async fn read_stream(&self, path: &str) -> anyhow::Result<(Option<String>, Vec<u8>)>;
 
-    /// Read a file the game records only as a hash. Unnamed files have no path, so this is the only
-    /// way to reach them.
+    /// Read a file the game records only as a hash.
     async fn read_stream_by_hash(
         &self,
         repository: u8,
@@ -70,7 +70,31 @@ pub trait FileProvider {
         decode_texture(path, self.read(path).await?, max_dim).await
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>>;
+    /// Read a model carrying the geometry for detail level `lod`, alongside the level it actually
+    /// carries: a file need not hold the one asked for.
+    async fn read_model(&self, path: &str, lod: u8) -> anyhow::Result<(Vec<u8>, u8)> {
+        let bytes = self.read(path).await?;
+        let level = Lods::read(&bytes).map_or(lod, |lods| lods.level(lod));
+        Ok((bytes, level))
+    }
+
+    /// Read a shader package, and say whether its bytecode is still to be asked for. Which blobs a
+    /// draw reads is only known once the material naming them is in hand, so a store that serves
+    /// part of a file answers the tables and the string block and leaves the rest a hole.
+    async fn read_package(&self, path: &str) -> anyhow::Result<(Vec<u8>, bool)> {
+        Ok((self.read(path).await?, false))
+    }
+
+    /// The bytes a file holds over `span`.
+    async fn read_span(&self, path: &str, span: std::ops::Range<u32>) -> anyhow::Result<Vec<u8>> {
+        let bytes = self.read(path).await?;
+        bytes
+            .get(span.start as usize..span.end as usize)
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| anyhow::anyhow!("{path} does not reach {}", span.end))
+    }
+
+    async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>>;
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>>;
 }
@@ -131,11 +155,16 @@ async fn decode_texture(
     bytes: Vec<u8>,
     max_dim: Option<u16>,
 ) -> anyhow::Result<DecodedTexture> {
-    let (image, source) = crate::utils::tex_loader::decode_preview_sized(&bytes, path, max_dim)?;
-    Ok(DecodedTexture {
-        image: image.to_rgba8(),
-        source,
+    let path = path.to_owned();
+    blocking::unblock(move || {
+        let (image, source) =
+            crate::utils::tex_loader::decode_preview_sized(&bytes, &path, max_dim)?;
+        anyhow::Ok(DecodedTexture {
+            image: image.to_rgba8(),
+            source,
+        })
     })
+    .await
 }
 
 /// Typed reads layered on [`FileProvider`]. Blanket-implemented for every
@@ -245,27 +274,179 @@ pub fn index_hash(hash: u64, split: bool) -> ironworks::sqpack::IndexHash {
     }
 }
 
-pub fn get_icon_path(icon_id: u32, hires: bool) -> String {
+const HAS_LOW: u8 = 1;
+const HAS_HIRES: u8 = 2;
+const HAS_LOCALE_LOW: u8 = 4;
+const HAS_LOCALE_HIRES: u8 = 8;
+
+/// Which `ui/icon` files an install ships, as four bits per icon id: low-res and `_hr1`, each
+/// unlocalized and under a locale folder.
+pub struct IconIndex {
+    /// Locale folders the install actually carries. A locale it does not ship resolves unlocalized
+    /// rather than to a path nothing can read.
+    locales: Vec<Language>,
+    flags: Box<[u8]>,
+}
+
+impl IconIndex {
+    pub fn build(paths: &pathlist::PathList, presence: &pathlist::Presence) -> Self {
+        let mut locales: Vec<Language> = Vec::new();
+        let mut flags: Vec<u8> = Vec::new();
+
+        for (dir, path) in paths.dirs().iter().enumerate() {
+            let Some(bucket) = path.strip_prefix("ui/icon/") else {
+                continue;
+            };
+            // `hq` sits alongside the locales and is not one of them.
+            let locale = match bucket.split_once('/') {
+                None => None,
+                Some((_, folder)) => {
+                    match Language::iter().find(|language| icon_locale(*language) == Some(folder)) {
+                        Some(language) => Some(language),
+                        None => continue,
+                    }
+                }
+            };
+
+            let (Ok(offset), Ok(names)) = (paths.name_offset(dir), paths.names(dir)) else {
+                continue;
+            };
+            let mut shipped = false;
+            for (index, name) in names.iter().enumerate() {
+                if !presence.contains(offset + index) {
+                    continue;
+                }
+                let Some(stem) = name.strip_suffix(".tex") else {
+                    continue;
+                };
+                let (stem, hires) = match stem.strip_suffix("_hr1") {
+                    Some(stem) => (stem, true),
+                    None => (stem, false),
+                };
+                let Ok(icon_id) = stem.parse::<u32>() else {
+                    continue;
+                };
+
+                let bit = match (locale.is_some(), hires) {
+                    (false, false) => HAS_LOW,
+                    (false, true) => HAS_HIRES,
+                    (true, false) => HAS_LOCALE_LOW,
+                    (true, true) => HAS_LOCALE_HIRES,
+                };
+                let byte = icon_id as usize / 2;
+                if byte >= flags.len() {
+                    flags.resize(byte + 1, 0);
+                }
+                flags[byte] |= bit << (4 * (icon_id & 1));
+                shipped = true;
+            }
+
+            if let Some(locale) = locale.filter(|_| shipped)
+                && !locales.contains(&locale)
+            {
+                locales.push(locale);
+            }
+        }
+
+        Self {
+            locales,
+            flags: flags.into(),
+        }
+    }
+
+    fn flags(&self, icon_id: u32) -> u8 {
+        let byte = self.flags.get(icon_id as usize / 2).copied().unwrap_or(0);
+        (byte >> (4 * (icon_id & 1))) & 0xf
+    }
+
+    pub fn ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.flags
+            .iter()
+            .enumerate()
+            .filter(|(_, byte)| **byte != 0)
+            .flat_map(|(byte, packed)| {
+                [(0, packed & 0xf), (1, packed >> 4)]
+                    .into_iter()
+                    .filter(|(_, flags)| *flags != 0)
+                    .map(move |(half, _)| (byte as u32) * 2 + half)
+            })
+    }
+
+    pub fn localized(&self, icon_id: u32) -> bool {
+        self.flags(icon_id) & (HAS_LOCALE_LOW | HAS_LOCALE_HIRES) != 0
+    }
+
+    pub fn hires(&self, icon_id: u32) -> bool {
+        self.flags(icon_id) & (HAS_HIRES | HAS_LOCALE_HIRES) != 0
+    }
+
+    fn path(&self, icon_id: u32, hires: bool, language: Language) -> String {
+        let flags = self.flags(icon_id);
+        let localized = flags & (HAS_LOCALE_LOW | HAS_LOCALE_HIRES) != 0;
+        let locale = icon_locale(language)
+            .filter(|_| localized && self.locales.contains(&language))
+            // An icon that ships only under locales has no unlocalized file to fall back to.
+            .or_else(|| match localized && flags & (HAS_LOW | HAS_HIRES) == 0 {
+                true => self
+                    .locales
+                    .contains(&Language::English)
+                    .then_some(Language::English)
+                    .or_else(|| self.locales.first().copied())
+                    .and_then(icon_locale),
+                false => None,
+            });
+        let (low, high) = match locale {
+            Some(_) => (HAS_LOCALE_LOW, HAS_LOCALE_HIRES),
+            None => (HAS_LOW, HAS_HIRES),
+        };
+        let (wanted, other) = if hires { (high, low) } else { (low, high) };
+        let hires = if flags & wanted == 0 && flags & other != 0 {
+            !hires
+        } else {
+            hires
+        };
+        icon_path(icon_id, locale, hires)
+    }
+}
+
+/// The locale folder `ui/icon` files sit under, spelled the way [`ironworks::excel::path::exd`]
+/// spells its suffix.
+fn icon_locale(language: Language) -> Option<&'static str> {
+    use Language as L;
+    match language {
+        L::None => None,
+        L::Japanese => Some("ja"),
+        L::English => Some("en"),
+        L::German => Some("de"),
+        L::French => Some("fr"),
+        L::ChineseSimplified => Some("chs"),
+        L::ChineseTraditional => Some("cht"),
+        L::Korean => Some("ko"),
+        L::TaiwanChinese => Some("tc"),
+    }
+}
+
+fn icon_path(icon_id: u32, locale: Option<&str>, hires: bool) -> String {
     format!(
-        "ui/icon/{:03}000/{:06}{}.tex",
+        "ui/icon/{:03}000/{}{icon_id:06}{}.tex",
         icon_id / 1000,
-        icon_id,
+        locale
+            .map(|locale| format!("{locale}/"))
+            .unwrap_or_default(),
         if hires { "_hr1" } else { "" }
     )
 }
 
-static XIVAPI_BASE_URL: LazyLock<Url> = LazyLock::new(|| {
-    Url::parse("https://v2.xivapi.com/api/asset").expect("Failed to parse XIVAPI base URL")
-});
-
-fn get_xivapi_asset_url(path: &str, format: Option<&str>) -> Url {
-    let mut url = XIVAPI_BASE_URL.clone();
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair("path", path);
-        if let Some(format) = format {
-            pairs.append_pair("format", format);
-        }
+/// Where an icon actually lives for `language`. Without an index this is the blind format, which is
+/// right for every icon that ships one unlocalized file at both resolutions.
+pub fn get_icon_path(
+    icons: Option<&IconIndex>,
+    icon_id: u32,
+    hires: bool,
+    language: Language,
+) -> String {
+    match icons {
+        Some(icons) => icons.path(icon_id, hires, language),
+        None => icon_path(icon_id, None, hires),
     }
-    url
 }

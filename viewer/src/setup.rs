@@ -4,6 +4,7 @@ use crate::{
     DEFAULT_API_URL,
     backend::Backend,
     data::web::{VersionInfo, WebFileProvider},
+    github::GithubApi,
     schema::web::WebProvider,
     settings::{
         BACKEND_CONFIG, BackendConfig, GithubSchemaBranch, GithubSchemaLocation, InstallLocation,
@@ -32,7 +33,8 @@ pub struct SetupWindow {
 
     web_version_promise: VersionPromiseHolder<(String, Region), VersionInfo>,
     web_regions_promise: VersionPromiseHolder<String, Vec<String>>,
-    github_branch_promise: VersionPromiseHolder<(String, String), Vec<GithubSchemaBranch>>,
+    /// Keyed on (owner, repo, signed in)
+    github_branch_promise: VersionPromiseHolder<(String, String, bool), Vec<GithubSchemaBranch>>,
 }
 
 impl SetupWindow {
@@ -89,6 +91,8 @@ impl SetupWindow {
     }
 
     pub fn draw(&mut self, ctx: &egui::Context) -> Option<(Backend, BackendConfig)> {
+        let github_token = crate::github::token(ctx);
+
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(handle) = self.location_promises.take_folder() {
@@ -411,6 +415,7 @@ impl SetupWindow {
                         }
                     });
 
+                    let api_url = self.api_url.clone();
                     Frame::group(ui.style()).show(ui, |ui| {
                         ui.vertical_centered(|ui| {
                             ui.heading("表定义");
@@ -559,26 +564,30 @@ impl SetupWindow {
                                     });
                                 });
 
+                                // Signing in is keyed on too, so a listing that failed against a
+                                // used-up rate limit is retried once there is a token to spend.
+                                let key = (owner.clone(), repo.clone(), github_token.is_some());
                                 if !owner.is_empty()
                                     && !repo.is_empty()
-                                    && !self
+                                    && self
                                         .github_branch_promise
                                         .as_ref()
-                                        .is_some_and(|v| &v.0.0 == owner && &v.0.1 == repo)
+                                        .is_none_or(|v| v.0 != key)
                                 {
                                     let owner = owner.clone();
                                     let repo = repo.clone();
+                                    let github = GithubApi::new(&api_url, github_token.clone());
                                     self.github_branch_promise = Some((
-                                        (owner.clone(), repo.clone()),
+                                        key,
                                         ConvertiblePromise::new_promise(
                                             TrackedPromise::spawn_local(async move {
                                                 let branches =
                                                     WebProvider::fetch_github_repository(
-                                                        &owner, &repo,
+                                                        &github, &owner, &repo,
                                                     )
                                                     .await?;
                                                 let prs = WebProvider::fetch_github_pull_requests(
-                                                    &owner, &repo,
+                                                    &github, &owner, &repo,
                                                 )
                                                 .await?;
                                                 let mut all_branches = branches;

@@ -1,6 +1,6 @@
 {
-  "name": "EXDViewer",
-  "short_name": "EXDViewer",
+  "name": "XIViewer",
+  "short_name": "XIViewer",
   "description": "Browse and inspect FFXIV internal data directly from your browser",
   "icons": [
     {

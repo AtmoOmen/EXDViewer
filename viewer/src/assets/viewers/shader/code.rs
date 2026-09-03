@@ -50,23 +50,7 @@ pub fn ui(
     let lines = match cached {
         Some((held, lines)) if held == at => Some(lines),
         _ => {
-            let fresh = bytes
-                .get(shader.blob.clone())
-                .and_then(|blob| Some((program(blob)?, blob)))
-                .map(|(program, blob)| {
-                    Arc::new(match source {
-                        true => {
-                            let read = hlsl::decompile(&program, &names(naming, shader, blob));
-                            (read.lines, read.body)
-                        }
-                        // The assembly names nothing itself, so what a line touches goes in a
-                        // comment beside it. It declares as it goes, so there is nothing to fold.
-                        false => (
-                            annotate(naming, shader, &dxbc::shex::format_program(&program)),
-                            0,
-                        ),
-                    })
-                });
+            let fresh = text(shader, naming, bytes, source).map(Arc::new);
             if let Some(lines) = &fresh {
                 ui.data_mut(|data| data.insert_temp(slot, (at, Arc::clone(lines))));
             }
@@ -84,11 +68,19 @@ pub fn ui(
     let mut hide = ui
         .data(|data| data.get_temp::<bool>(folded))
         .unwrap_or(false);
+    let from = match hide {
+        true => body,
+        false => 0,
+    };
     ui.horizontal(|ui| {
-        ui.label(RichText::new(format!("{} 行", lines.len())).weak().small());
+ui.label(
+            RichText::new(format!("{} 行", lines.len() - from))
+                .weak()
+                .small(),
+        );
         if ui.small_button("复制").clicked() {
-            // Always the whole thing: what is hidden is what makes the rest compile.
-            ui.ctx().copy_text(lines.join("\n"));
+            // What is on screen, so a fold takes the declarations out of the clipboard too.
+            ui.ctx().copy_text(lines[from..].join("\n"));
         }
         if body > 0 {
             ui.checkbox(&mut hide, RichText::new("隐藏声明").small());
@@ -98,23 +90,54 @@ pub fn ui(
         }
     });
     ui.data_mut(|data| data.insert_temp(folded, hide));
-    let from = match hide {
-        true => body,
-        false => 0,
-    };
-    let lines = &lines[from..];
+    listing(
+        ui,
+        "shader_code",
+        lines,
+        from,
+        match source {
+            true => "HLSL",
+            false => "DXBC",
+        },
+    );
+}
+
+/// A shader's text either reading, and where its declarations end: `None` where its blob holds no
+/// program. The one path both the interactive viewer and an export producer read a shader through,
+/// so a save always matches what the panel would have shown for the same shader and reading.
+pub fn text(
+    shader: &Shader,
+    naming: &Naming,
+    bytes: &[u8],
+    hlsl_reading: bool,
+) -> Option<(Vec<String>, usize)> {
+    let blob = bytes.get(shader.blob.clone())?;
+    let program = program(blob)?;
+    Some(match hlsl_reading {
+        true => {
+            let read = hlsl::decompile(&program, &names(naming, shader, blob));
+            (read.lines, read.body)
+        }
+        // The assembly names nothing itself, so what a line touches goes in a comment beside it. It
+        // declares as it goes, so there is nothing to fold.
+        false => (
+            annotate(naming, shader, &dxbc::shex::format_program(&program)),
+            0,
+        ),
+    })
+}
+
+/// The code itself, numbered from `from` and drawn on the theme's own surface.
+pub fn listing(ui: &mut egui::Ui, salt: &str, lines: &[String], from: usize, language: &str) {
+    let lines = &lines[from.min(lines.len())..];
 
     let theme = CODE_SYNTAX_THEME.get(ui.ctx());
-    // A theme's colours are chosen against its own background, so the code is drawn on that rather
-    // than on the panel; the gutter takes the theme's text colour for the same reason. Without one
+    // A theme's colors are chosen against its own background, so the code is drawn on that rather
+    // than on the panel; the gutter takes the theme's text color for the same reason. Without one
     // declared, this is the surface the schema editor's own code sits on.
     let (fill, ink) = theme
         .surface()
         .unwrap_or_else(|| (ui.visuals().text_edit_bg_color(), ui.visuals().text_color()));
-    let language = match source {
-        true => "HLSL",
-        false => "DXBC",
-    };
     let height = ui.text_style_height(&egui::TextStyle::Monospace);
     egui::Frame::new()
         .fill(fill)
@@ -126,7 +149,7 @@ pub fn ui(
             // one line to the next, so a line highlighted alone reads as it would in a whole-file
             // pass.
             ScrollArea::both()
-                .id_salt("shader_code")
+                .id_salt(salt)
                 // What is left of the panel, which is the point of moving everything else out of it.
                 .max_height(ui.available_height().max(height * 12.0))
                 .auto_shrink([false, true])

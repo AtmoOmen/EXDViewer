@@ -17,12 +17,20 @@ pub struct TrackedPromise<T: Send + 'static>(Promise<T>);
 static RUNNING_PROMISES: AtomicUsize = AtomicUsize::new(0);
 static PROMISE_CTX: OnceLock<egui::Context> = OnceLock::new();
 
+/// How long a frame drives the local executor for. `tick_local` polls one task, so a frame that
+/// ticked once carried one file however many were asked for.
+#[cfg(not(target_arch = "wasm32"))]
+const DRIVING: Duration = Duration::from_millis(4);
+
 /// Call this inside `App::update()`
 pub fn tick_promises(ctx: &egui::Context) {
     PROMISE_CTX.get_or_init(|| ctx.clone());
 
     #[cfg(not(target_arch = "wasm32"))]
-    poll_promise::tick_local();
+    {
+        let until = std::time::Instant::now() + DRIVING;
+        while poll_promise::tick_local() && std::time::Instant::now() < until {}
+    }
 
     if RUNNING_PROMISES.load(Ordering::SeqCst) != 0 {
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -61,6 +69,12 @@ impl<T: Send + 'static> TrackedPromise<T> {
 
     pub fn try_get(&self) -> Option<&T> {
         self.0.ready()
+    }
+
+    /// What the promise answered with, handed over rather than borrowed, and the promise itself
+    /// back where it has not answered yet.
+    pub fn try_take(self) -> Result<T, Self> {
+        self.0.try_take().map_err(Self)
     }
 }
 

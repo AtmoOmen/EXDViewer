@@ -520,6 +520,7 @@ g_EnableShadow
 g_EnvMapPower
 g_FadeDistance
 g_FarClip
+g_FogWeightLutSampler
 g_Fresnel
 g_FresnelValue0
 g_FurLength
@@ -610,6 +611,7 @@ g_SamplerGBuffer
 g_SamplerGBuffer1
 g_SamplerGBuffer2
 g_SamplerGBuffer3
+g_SamplerGBuffer4
 g_SamplerIndex
 g_SamplerLight
 g_SamplerLightDiffuse
@@ -618,6 +620,7 @@ g_SamplerMask
 g_SamplerMaskMap
 g_SamplerNoise
 g_SamplerNormal
+g_SamplerNormal2
 g_SamplerNormalMap
 g_SamplerNormalMap0
 g_SamplerNormalMap1
@@ -627,16 +630,20 @@ g_SamplerOmniShadowIndexTable
 g_SamplerOmniShadowStatic
 g_SamplerPalette
 g_SamplerReflection
+g_SamplerReflectionArray
 g_SamplerReflectionMap
 g_SamplerRefractionMap
 g_SamplerShadow
+g_SamplerShadowMask
 g_SamplerSpecular
 g_SamplerSpecularMap
 g_SamplerSpecularMap0
 g_SamplerSpecularMap1
+g_SamplerSphereMap
 g_SamplerTable
 g_SamplerTileDiffuse
 g_SamplerTileNormal
+g_SamplerTileOrb
 g_SamplerVPosition
 g_SamplerViewPosition
 g_SamplerWaveMap
@@ -645,7 +652,16 @@ g_SamplerWaveletMap0
 g_SamplerWaveletMap1
 g_SamplerWaveletNoise
 g_SamplerWhitecapMap
+g_SamplerWrinklesMask
 g_ScatteringLevel
+g_ScrollBaseScaleU_1
+g_ScrollBaseScaleU_2
+g_ScrollBaseScaleV_1
+g_ScrollBaseScaleV_2
+g_ScrollTransTimeU_1
+g_ScrollTransTimeU_2
+g_ScrollTransTimeV_1
+g_ScrollTransTimeV_2
 g_SeaWaveScale
 g_ShaderID
 g_ShadowAlphaThreshold
@@ -712,3 +728,4 @@ g_WhitecapDistortion
 g_WhitecapNoiseScale
 g_WhitecapScale
 g_WhitecapSpeed
+tPerlinNoise2D

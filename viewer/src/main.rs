@@ -15,9 +15,67 @@ mod shortcuts;
 use combined_log::CombinedLogger;
 use viewer::App;
 
+// Must match the `.desktop` file's basename: Wayland has no client-side window-icon protocol in
+// general use, so compositors resolve the taskbar/launcher icon by matching this app_id against an
+// installed .desktop entry. Kept equal to the `run_native` app name below (not reverse-DNS)
+// because eframe derives the persistence directory from this same string when it is set; anything
+// else would silently move existing users' saved window state to a new folder.
+#[cfg(not(target_arch = "wasm32"))]
+const APP_ID: &str = "XIViewer";
+
+/// `viewer --smoke <sqpack-path> <out-dir> <step> [<step> ...]`, where a step is `model:<path>` or
+/// `scene:<path>`. See `smoke/native.sh`.
+#[cfg(not(target_arch = "wasm32"))]
+fn smoke_config(mut args: std::iter::Skip<std::env::Args>) -> viewer::smoke::Config {
+    let usage = "usage: viewer --smoke <sqpack> <out-dir> <step:path>...";
+    let sqpack_path = args.next().expect(usage);
+    let out_dir = args.next().expect(usage).into();
+    let steps = args
+        .map(|arg| {
+            let (kind, path) = arg.split_once(':').expect("step must be kind:path");
+            match kind {
+                "model" => viewer::smoke::Step::Model(path.to_string()),
+                "scene" => viewer::smoke::Step::Scene(path.to_string()),
+                other => panic!("unknown step kind {other}"),
+            }
+        })
+        .collect();
+    viewer::smoke::Config {
+        sqpack_path,
+        schema_path: std::env::var("EXDVIEWER_SCHEMA_PATH").ok(),
+        steps,
+        out_dir,
+        width: 1600,
+        height: 1000,
+        step_timeout: std::time::Duration::from_secs(60),
+    }
+}
+
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+let mut args = std::env::args().skip(1);
+    if args.next().as_deref() == Some("--smoke") {
+        let config = smoke_config(args);
+        let (logger, counters) = viewer::smoke::CountingLogger::new(
+            env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).build(),
+        );
+        logger.init();
+        log::set_max_level(log::LevelFilter::Info);
+        let smoke_options = eframe::NativeOptions {
+            depth_buffer: 24,
+            viewport: egui::ViewportBuilder::default()
+                .with_inner_size([config.width as f32, config.height as f32])
+                .with_visible(false),
+            ..Default::default()
+        };
+        return eframe::run_native(
+            "XIViewer (smoke)",
+            smoke_options,
+            Box::new(|cc| Ok(Box::new(viewer::smoke::SmokeApp::new(cc, config, counters)))),
+        );
+    }
+
     velopack::VelopackApp::build().run();
 
     CombinedLogger(
@@ -28,6 +86,9 @@ fn main() -> eframe::Result {
     log::set_max_level(log::LevelFilter::Info);
 
     let native_options = eframe::NativeOptions {
+// A web canvas comes with depth already; glutin is asked for none unless this says so, and
+        // the model viewer draws into whatever the window hands it.
+        depth_buffer: 24,
         #[cfg(windows)]
         persistence_path: app_data_file(),
         viewport: egui::ViewportBuilder::default()
@@ -36,11 +97,12 @@ fn main() -> eframe::Result {
             .with_icon(
                 eframe::icon_data::from_png_bytes(&include_bytes!("../assets/icon.png")[..])
                     .expect("Failed to load icon"),
-            ),
+            )
+            .with_app_id(APP_ID),
         ..Default::default()
     };
     eframe::run_native(
-        "EXDViewer",
+        "XIViewer",
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
@@ -114,7 +176,7 @@ fn main() {
                     };
                     let key = egui::Key::from_name(&event.key());
                     if let Some(key) = key {
-                        for shortcut in &[GOTO_ROW, GOTO_SHEET] {
+                        for shortcut in &[GOTO_ROW, GOTO_SHEET, PALETTE] {
                             if modifiers.matches_logically(shortcut.modifiers)
                                 && key == shortcut.logical_key
                             {

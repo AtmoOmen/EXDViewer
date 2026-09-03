@@ -44,7 +44,7 @@ impl<T, H: History> Router<T, H> {
         path: &str,
         on_start: impl Fn(&mut T, &mut egui::Ui, &Path, &Params<'_, '_>) -> Redirect + 'static,
         on_render: impl Fn(&mut T, &mut egui::Ui, &Path, &Params<'_, '_>) + 'static,
-        on_title: impl Fn(&T, &Path, &Params<'_, '_>) -> Option<String> + 'static,
+        on_title: impl Fn(&T, &Path, &Params<'_, '_>) -> String + 'static,
     ) -> Result<(), InsertError> {
         let route = route::Route::new(on_start, on_render, on_title);
         self.matcher.insert(path, route)
@@ -148,9 +148,7 @@ impl<T, H: History> Router<T, H> {
     }
 
     fn sync_title(&self, route: &route::Route<T>, state: &T, path: &Path, params: &Params<'_, '_>) {
-        let Some(title) = route.title(state, path, params) else {
-            return;
-        };
+        let title = route.title(state, path, params);
         let mut current = self.current_title.borrow_mut();
         if current.as_deref() == Some(title.as_str()) {
             return;

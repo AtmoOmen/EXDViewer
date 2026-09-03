@@ -1,4 +1,11 @@
-use std::{cell::OnceCell, collections::HashSet, io::Write, num::NonZero, rc::Rc, sync::Arc};
+use std::{
+    cell::OnceCell,
+    collections::{HashMap, HashSet},
+    io::Write,
+    num::NonZero,
+    rc::Rc,
+    sync::Arc,
+};
 
 #[cfg(target_arch = "wasm32")]
 use crate::utils::{PromiseKind, UnsendPromise};
@@ -21,14 +28,17 @@ use zip::{ZipWriter, write::SimpleFileOptions};
 use crate::{
     about, assets,
     backend::Backend,
+    character,
     editable_schema::EditableSchema,
     excel::{
         base::BaseSheet,
         provider::{ExcelHeader, ExcelProvider},
     },
-    github::CALLBACK_PATH,
-    goto, music,
+    github::{CALLBACK_PATH, GithubApi, GithubSession},
+    goto::{self, ListNav},
+    icons, music,
     pr_window::{self, PrAction, PrWindow},
+    quests,
     router::{
         Router,
         path::Path,
@@ -38,27 +48,38 @@ use crate::{
     settings::{
         ALWAYS_HIRES, BACKEND_CONFIG, BackendConfig, CODE_SYNTAX_THEME, COLOR_THEME,
         CURRENT_SHEET_LANGUAGES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, FILTER_GUIDE_VISIBLE,
-        GithubSchemaBranch, LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN, PR_CHANGED_ONLY,
-        SCHEMA_EDITOR_VISIBLE, SELECTED_SHEET, SHEET_FILTER_OPTIONS, SHEET_FILTERS, SHEETS_FILTER,
-        SOLID_SCROLLBAR, SORTED_BY_OFFSET, SchemaLocation, TEMP_HIGHLIGHTED_ROW, TEMP_SCROLL_TO,
-        TEXT_MAX_LINES, TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
+        GithubSchemaBranch, InstallLocation, LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN,
+        PR_CHANGED_ONLY, Region, SCHEMA_EDITOR_VISIBLE, SELECTED_SHEET, SHEET_FILTER_OPTIONS,
+        SHEET_FILTERS, SHEETS_FILTER, SOLID_SCROLLBAR, SORTED_BY_OFFSET, SchemaLocation,
+        TEMP_HIGHLIGHTED_ROW, TEMP_SCROLL_TO, TEXT_MAX_LINES, TEXT_USE_SCROLL, TEXT_WRAP_WIDTH,
     },
     setup::{self, SetupWindow},
     sheet::{
         CellResponse, FilterInputType, GlobalContext, MatchOptions, SheetTable, SheetTableResponse,
         TableContext, draw_filter_guide, export_csv,
     },
-    shortcuts::{GOTO_ROW, GOTO_SHEET},
+    shortcuts::{GOTO_ROW, GOTO_SHEET, PALETTE},
     utils::{
         CodeTheme, CollapsibleSidePanel, ColorTheme, ConvertiblePromise, FuzzyMatcher, IconManager,
-        Side, TrackedPromise, opt_slider, shortcut, tick_promises,
+        Side, TrackedPromise, empty_view, export, install_tex_loader, opt_slider, shortcut,
+        tick_promises,
     },
+    zones,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::mcp::McpHandle;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::update_source::GithubUpdateSource;
+
+const SHEETS_FILTER_ID: &str = "sheets_filter";
+
+const SHEET_LIST_WIDTH: f32 = 320.0;
+/// Below this the filter row's own buttons no longer fit and would pin the panel wider regardless.
+const SHEET_LIST_MIN_WIDTH: f32 = 180.0;
+/// Room the version and GitHub links need beside the tab switcher. Below this they are dropped
+/// rather than drawn on top of it: a right-to-left layout doesn't stop at its own left edge.
+const LINKS_WIDTH: f32 = 280.0;
 
 type CachedSheetEntry = (
     Language, // language
@@ -101,7 +122,7 @@ enum PrChangedState {
     Ready(Rc<HashSet<String>>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CjkFont {
     Japanese,
     Korean,
@@ -110,18 +131,50 @@ enum CjkFont {
 }
 
 impl CjkFont {
-    fn for_language(language: Language) -> Option<Self> {
+    /// Fixed order, so which font answers for a character a later one also carries cannot depend on
+    /// the order they happened to be fetched in.
+    const ALL: [Self; 4] = [
+        Self::Japanese,
+        Self::Korean,
+        Self::ChineseSimplified,
+        Self::ChineseTraditional,
+    ];
+
+    /// Only the languages that name a script. The rest say nothing about what the sheets hold.
+    fn of_language(language: Language) -> Option<Self> {
         match language {
+            Language::Japanese => Some(Self::Japanese),
             Language::Korean => Some(Self::Korean),
             Language::ChineseSimplified => Some(Self::ChineseSimplified),
             Language::ChineseTraditional | Language::TaiwanChinese => {
                 Some(Self::ChineseTraditional)
             }
-            Language::Japanese
-            | Language::None
-            | Language::English
-            | Language::German
-            | Language::French => Some(Self::Japanese),
+            Language::None | Language::English | Language::German | Language::French => None,
+        }
+    }
+
+    /// What a region's own sheets are written in. Reading a Chinese install through an English
+    /// interface still puts simplified characters on screen, and only this font carries them.
+    fn of_region(region: Region) -> Self {
+        match region {
+            Region::Global => Self::Japanese,
+            Region::Korea => Self::Korean,
+            Region::China => Self::ChineseSimplified,
+            Region::Taiwan => Self::ChineseTraditional,
+        }
+    }
+
+    /// [`None`] while there is nothing to go on. The setup screen is Latin, and guessing before the
+    /// install is known would fetch a face that the right answer then replaces.
+    fn wanted(ctx: &egui::Context) -> Option<Self> {
+        if let Some(font) = Self::of_language(LANGUAGE.get(ctx)) {
+            return Some(font);
+        }
+        match BACKEND_CONFIG.get(ctx).map(|config| config.location) {
+            Some(InstallLocation::Web(region, _)) => Some(Self::of_region(region)),
+            // A local install says nothing about its region, which leaves the game's own language.
+            Some(_) => Some(Self::Japanese),
+            None => None,
         }
     }
 
@@ -190,15 +243,27 @@ impl UpdateState {
 enum Tab {
     Sheets,
     Assets,
+    Icons,
     Music,
+    Zones,
+    Quests,
+    Character,
 }
 
 impl Tab {
     fn of(path: &str) -> Self {
         if path.starts_with("/assets") {
             Tab::Assets
+        } else if path.starts_with("/icons") {
+            Tab::Icons
         } else if path.starts_with("/music") {
             Tab::Music
+        } else if path.starts_with("/zones") {
+            Tab::Zones
+        } else if path.starts_with("/quests") {
+            Tab::Quests
+        } else if path.starts_with("/character") {
+            Tab::Character
         } else {
             Tab::Sheets
         }
@@ -206,9 +271,13 @@ impl Tab {
 
     fn title(self) -> &'static str {
         match self {
-            Tab::Sheets => "数据表",
+Tab::Sheets => "数据表",
             Tab::Assets => "资源",
+            Tab::Icons => "图标",
             Tab::Music => "音乐",
+            Tab::Zones => "场景",
+            Tab::Quests => "任务",
+            Tab::Character => "角色",
         }
     }
 }
@@ -227,8 +296,9 @@ pub struct App {
     save_promise: Option<TrackedPromise<()>>,
     export_promise: Option<TrackedPromise<()>>,
     pr_window: PrWindow,
+    github: GithubSession,
     goto_window: Option<goto::GoToWindow>,
-    #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
     mcp_handle: Option<McpHandle>,
     #[cfg(not(target_arch = "wasm32"))]
     update_events: Receiver<UpdateEvent>,
@@ -238,25 +308,33 @@ pub struct App {
     update_state: UpdateState,
     #[cfg(not(target_arch = "wasm32"))]
     update_check_started: bool,
+    sheet_nav: ListNav,
     about_open: bool,
     music: music::MusicPlayer,
     assets: assets::AssetBrowser,
+    icons: icons::IconBrowser,
+    zones: zones::ZoneBrowser,
+    quests: quests::QuestBrowser,
+    character: character::CharacterBuilder,
     last_system_theme: Option<egui::Theme>,
-    /// `None` = Latin only
-    loaded_cjk: Option<CjkFont>,
+    /// Every CJK font whose bytes are in hand. Kept rather than swapped: text that mixes scripts,
+    /// like a Korean name in an otherwise English sheet, needs more than one of them at once.
+    cjk: HashMap<CjkFont, Arc<FontData>>,
+    /// Which of them answers first where two cover the same character but draw it differently.
+    primary_cjk: Option<CjkFont>,
     #[cfg(target_arch = "wasm32")]
     font_promise: Option<(CjkFont, UnsendPromise<anyhow::Result<Vec<u8>>>)>,
 }
 
 fn create_router(ctx: egui::Context) -> Result<Router<App>> {
     let mut builder = Router::<App>::new(ctx);
-    builder.set_title_formatter(|title| format!("{title} - EXDViewer"));
+builder.set_title_formatter(|title| format!("{title} - EXDViewer"));
     builder.add_route("/", App::on_setup, App::draw_setup, static_title("设置"))?;
     builder.add_route(
         "/sheet",
         App::on_unnamed_sheet,
         App::draw_unnamed_sheet,
-        static_title("数据表列表"),
+static_title("数据表列表"),
     )?;
     builder.add_route(
         "/sheet/{*name}",
@@ -276,12 +354,44 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
         App::draw_assets,
         App::title_assets,
     )?;
+    builder.add_route("/icons", App::on_icons, App::draw_icons, App::title_icons)?;
+    builder.add_route(
+        "/icons/{id}",
+        App::on_icon,
+        App::draw_icons,
+        App::title_icons,
+    )?;
     builder.add_route("/music", App::on_music, App::draw_music, App::title_music)?;
     builder.add_route(
         "/music/{id}",
         App::on_music_track,
         App::draw_music,
         App::title_music,
+    )?;
+    builder.add_route("/zones", App::on_zones, App::draw_zones, App::title_zones)?;
+    builder.add_route(
+        "/zones/{*path}",
+        App::on_zone_path,
+        App::draw_zones,
+        App::title_zones,
+    )?;
+    builder.add_route(
+        "/quests",
+        App::on_quests,
+        App::draw_quests,
+        App::title_quests,
+    )?;
+    builder.add_route(
+        "/quests/{id}",
+        App::on_quest,
+        App::draw_quests,
+        App::title_quests,
+    )?;
+    builder.add_route(
+        "/character",
+        App::on_character,
+        App::draw_character,
+        static_title(Tab::Character.title()),
     )?;
     builder.add_route(
         CALLBACK_PATH,
@@ -293,22 +403,55 @@ fn create_router(ctx: egui::Context) -> Result<Router<App>> {
 }
 
 impl App {
-    fn title_named_sheet(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
-        Some(params.get("name")?.to_string())
+    fn title_named_sheet(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        params
+            .get("name")
+            .unwrap_or(Tab::Sheets.title())
+            .to_string()
     }
 
-    fn title_assets(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
+    fn title_assets(&self, _path: &Path, params: &Params<'_, '_>) -> String {
         let Some(asset) = params.get("path") else {
-            return Some("资源".to_string());
+return Tab::Assets.title().to_string();
         };
-        Some(crate::utils::file_name(asset).to_string())
+        crate::utils::file_name(asset).to_string()
     }
 
-    fn title_music(&self, _path: &Path, params: &Params<'_, '_>) -> Option<String> {
+fn title_icons(&self, _path: &Path, params: &Params<'_, '_>) -> String {
         let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
-            return Some("音乐".to_string());
+            return Tab::Icons.title().to_string();
         };
-        Some(self.music.name_of(id).unwrap_or("音乐").to_string())
+        format!("图标 {id:06}")
+    }
+
+    fn title_music(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
+            return Tab::Music.title().to_string();
+        };
+        self.music
+            .name_of(id)
+            .unwrap_or(Tab::Music.title())
+            .to_string()
+    }
+
+    fn title_zones(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        let Some(path) = params.get("path") else {
+            return Tab::Zones.title().to_string();
+        };
+        self.zones
+            .name_of(path)
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::utils::file_name(path).to_string())
+    }
+
+    fn title_quests(&self, _path: &Path, params: &Params<'_, '_>) -> String {
+        let Some(id) = params.get("id").and_then(|id| id.parse::<u32>().ok()) else {
+            return Tab::Quests.title().to_string();
+        };
+        self.quests
+            .name_of(id)
+            .unwrap_or(Tab::Quests.title())
+            .to_string()
     }
 
     fn draw(&mut self, ui: &mut egui::Ui) {
@@ -329,12 +472,20 @@ impl App {
         if tab == Tab::Sheets && shortcut::consume(&ctx, GOTO_SHEET) {
             self.goto_window = Some(goto::GoToWindow::to_sheet());
         }
+        if shortcut::consume(&ctx, PALETTE) {
+            self.open_palette(tab);
+        }
 
         self.update_fonts(&ctx);
         self.update_sheet_languages(&ctx);
-        self.pr_window.poll(&ctx);
+        self.github.poll(&ctx);
+        self.icon_manager.poll_actions();
+        if let Some(icon_id) = self.icon_manager.take_open_request() {
+            self.navigate(format!("/icons/{icon_id}"));
+        }
         about::draw(&ctx, &mut self.about_open);
         self.draw_menubar(ui, tab);
+        crate::report::draw_window(ui.ctx(), self.backend.as_ref());
         self.draw_logger(ui.ctx());
         self.draw_pr_window(ui.ctx());
 
@@ -452,6 +603,18 @@ impl App {
         }
     }
 
+    fn open_palette(&mut self, tab: Tab) {
+        match tab {
+            Tab::Sheets => {}
+            Tab::Assets => self.assets.open_palette(),
+            Tab::Icons => self.icons.open_palette(),
+            Tab::Music => self.music.open_palette(),
+            Tab::Zones => self.zones.open_palette(),
+            Tab::Quests => self.quests.open_palette(),
+            Tab::Character => {}
+        }
+    }
+
     fn draw_menubar(&mut self, ui: &mut egui::Ui, tab: Tab) {
         let ctx = &ui.ctx().clone();
         #[cfg(not(target_arch = "wasm32"))]
@@ -466,7 +629,9 @@ impl App {
                     let bar_left = ui.min_rect().left();
                     let bar_width = ui.available_width();
 
-                    ui.menu_button("程序", |ui| {
+ui.menu_button("程序", |ui| {
+                        self.draw_account_menu(ui);
+                        ui.separator();
                         if ui.button("配置").clicked() {
                             self.navigate("/");
                             ui.close();
@@ -477,18 +642,32 @@ impl App {
                         }
                     });
 
-                    if tab == Tab::Sheets {
-                        ui.menu_button("跳转", |ui| {
-                            if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
-                                self.goto_window = Some(goto::GoToWindow::to_row());
-                                ui.close();
+ui.menu_button("跳转", |ui| {
+                        let palette = match tab {
+                            Tab::Sheets => {
+                                if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
+                                    self.goto_window = Some(goto::GoToWindow::to_row());
+                                    ui.close();
+                                }
+                                if shortcut::button(ui, "跳转到表…", GOTO_SHEET).clicked() {
+                                    self.goto_window = Some(goto::GoToWindow::to_sheet());
+                                    ui.close();
+                                }
+                                return;
                             }
-                            if shortcut::button(ui, "跳转到表…", GOTO_SHEET).clicked() {
-                                self.goto_window = Some(goto::GoToWindow::to_sheet());
-                                ui.close();
-                            }
-                        });
-                    }
+                            Tab::Assets => "查找资源…",
+                            Tab::Icons => "查找图标…",
+                            Tab::Music => "查找曲目…",
+                            Tab::Zones => "查找场景…",
+                            Tab::Quests => "查找任务…",
+                            // Nothing to find: everything the tab offers is already on screen.
+                            Tab::Character => return,
+                        };
+                        if shortcut::button(ui, palette, PALETTE).clicked() {
+                            self.open_palette(tab);
+                            ui.close();
+                        }
+                    });
 
                     ui.menu_button("语言", |ui| {
                         let saved_lang = LANGUAGE.get(ctx);
@@ -670,6 +849,8 @@ impl App {
                             }
                         }
 
+                        crate::report::menu_item(ui);
+
                         {
                             let mut logger_shown = LOGGER_SHOWN.get(ctx);
                             if ui.checkbox(&mut logger_shown, "显示日志窗口").changed() {
@@ -678,18 +859,24 @@ impl App {
                         }
                     });
 
+                    let tabs = [
+                        (Tab::Sheets, "/sheet"),
+                        (Tab::Assets, "/assets"),
+                        (Tab::Icons, "/icons"),
+                        (Tab::Music, "/music"),
+                        (Tab::Zones, "/zones"),
+                        (Tab::Quests, "/quests"),
+                        (Tab::Character, "/character"),
+                    ];
                     let seg = egui::vec2(72.0, ui.spacing().interact_size.y);
-                    let switcher_w = 3.0 * seg.x + 2.0 * ui.spacing().item_spacing.x;
+                    let switcher_w = tabs.len() as f32 * seg.x
+                        + (tabs.len() - 1) as f32 * ui.spacing().item_spacing.x;
                     let target_left = bar_left + bar_width / 2.0 - switcher_w / 2.0;
                     let space = target_left - ui.cursor().left();
                     if space > 0.0 {
                         ui.add_space(space);
                     }
-                    for (target, route) in [
-                        (Tab::Sheets, "/sheet"),
-                        (Tab::Assets, "/assets"),
-                        (Tab::Music, "/music"),
-                    ] {
+                    for (target, route) in tabs {
                         if ui
                             .add_sized(seg, Button::selectable(tab == target, target.title()))
                             .clicked()
@@ -698,7 +885,7 @@ impl App {
                         }
                     }
 
-                    #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
                     add_links(
                         ui,
                         &mut self.about_open,
@@ -710,6 +897,40 @@ impl App {
                     add_links(ui, &mut self.about_open);
                 });
             });
+    }
+
+    fn draw_account_menu(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
+        if let Some(login) = GithubSession::login(ctx) {
+            ui.label(RichText::new(format!("Signed in as {login}")).weak());
+            if ui.button("退出登录").clicked() {
+                GithubSession::sign_out(ctx);
+                ui.close();
+            }
+            return;
+        }
+
+        if self.github.signing_in() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new("正在等待 GitHub 登录…").weak());
+            });
+            return;
+        }
+
+        self.github.prepare();
+        let label = format!("{}  Sign in with GitHub", egui::special_emojis::GITHUB);
+        if ui
+            .add_enabled(self.github.ready(), Button::new(label))
+            .on_hover_text("Raises GitHub's API rate limit and lets you open schema pull requests")
+            .clicked()
+        {
+            self.github.begin_login(ctx);
+            ui.close();
+        }
+        if let Some(error) = self.github.error() {
+            ui.colored_label(ui.visuals().error_fg_color, error);
+        }
     }
 
     fn draw_logger(&mut self, ctx: &egui::Context) {
@@ -747,10 +968,12 @@ impl App {
 
         if self.changed_schemas.as_ref().map(|(k, _)| k) != Some(&key) {
             let (owner, repo, number) = key.clone();
+            let github = GithubApi::from_ctx(ctx);
             self.changed_schemas = Some((
                 key,
                 ConvertiblePromise::new_promise(TrackedPromise::spawn_local(async move {
-                    WebProvider::fetch_github_pull_request_files(&owner, &repo, number).await
+                    WebProvider::fetch_github_pull_request_files(&github, &owner, &repo, number)
+                        .await
                 })),
             ));
         }
@@ -772,185 +995,200 @@ impl App {
     fn draw_sheet_list(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         let pr_changed = self.poll_changed_schemas(ctx);
-        CollapsibleSidePanel::new("sheet_list", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
+        self.sheet_nav.claim(
+            ctx,
+            !CollapsibleSidePanel::is_collapsed(ctx, "sheet_list"),
+            Some(egui::Id::new(SHEETS_FILTER_ID)),
+        );
+        let mut nav = std::mem::take(&mut self.sheet_nav);
+        CollapsibleSidePanel::new("sheet_list", Side::Left)
+            .min_width(SHEET_LIST_MIN_WIDTH)
+            .max_width(SHEET_LIST_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
 
-            Panel::top("sheet_list_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("表格"));
+                Panel::top("sheet_list_header").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("Sheets"));
+                        });
                     });
-                });
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
-                    let mut sheets_filter = SHEETS_FILTER.get(ctx);
-                    let resp = ui
-                        .add_enabled(!sheets_filter.is_empty(), Button::new("↩"))
-                        .on_hover_text("清空");
-                    if resp.clicked() {
-                        sheets_filter.clear();
-                        SHEETS_FILTER.set(ctx, sheets_filter.clone());
-                    }
+                    ui.add_space(4.0);
+                    ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
+                        let mut sheets_filter = SHEETS_FILTER.get(ctx);
+                        let resp = ui
+                            .add_enabled(!sheets_filter.is_empty(), Button::new("↩"))
+                            .on_hover_text("Clear");
+                        if resp.clicked() {
+                            sheets_filter.clear();
+                            SHEETS_FILTER.set(ctx, sheets_filter.clone());
+                        }
 
-                    let mut misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
-                    if ui
-                        .toggle_value(&mut misc_sheets_shown, "🗄")
-                        .on_hover_text("显示杂项表格")
-                        .changed()
-                    {
-                        MISC_SHEETS_SHOWN.set(ctx, misc_sheets_shown);
-                    }
-
-                    if !matches!(pr_changed, PrChangedState::NotPr) {
-                        let mut changed_only = PR_CHANGED_ONLY.get(ctx);
-                        let hover = match &pr_changed {
-                            PrChangedState::Ready(_) => "筛选未修改的表定义",
-                            PrChangedState::Pending => "筛选未修改的表定义（加载中…）",
-                            PrChangedState::Failed => "筛选未修改的表定义（加载失败）",
-                            PrChangedState::NotPr => unreachable!(),
-                        };
+                        let mut misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
                         if ui
-                            .toggle_value(&mut changed_only, "±")
-                            .on_hover_text(hover)
+                            .toggle_value(&mut misc_sheets_shown, "🗄")
+                            .on_hover_text("显示杂项表格")
                             .changed()
                         {
-                            PR_CHANGED_ONLY.set(ctx, changed_only);
+                            MISC_SHEETS_SHOWN.set(ctx, misc_sheets_shown);
                         }
-                    }
 
-                    if ui
-                        .add_sized(
-                            Vec2::new(ui.available_width(), 0.0),
-                            TextEdit::singleline(&mut sheets_filter).hint_text("筛选"),
-                        )
-                        .changed()
-                    {
-                        SHEETS_FILTER.set(ctx, sheets_filter);
-                    }
-                });
-                ui.add_space(4.0);
-            });
-
-            let modified_schemas = self.get_modified_schemas();
-            if !modified_schemas.is_empty() {
-                let count = modified_schemas.len();
-                let modified_tooltip = modified_schemas.iter().map(|(name, _)| name).join("\n");
-                drop(modified_schemas);
-                let save_label = if count > 1 { "全部保存" } else { "保存" };
-
-                Panel::bottom("sheet_list_status").show(ui, |ui| {
-                    let can_pr = pr_window::github_source(ctx).is_some();
-                    ui.vertical_centered(|ui| {
-                        ui.label(format!("已修改 {count} 个表定义"))
-                            .on_hover_text(modified_tooltip);
-                    });
-
-                    let mut save = false;
-                    let mut open_pr = false;
-                    if can_pr {
-                        ui.columns_const(|[c1, c2]| {
-                            c1.vertical_centered_justified(|ui| {
-                                if ui.button("创建 PR").clicked() {
-                                    open_pr = true;
+                        if !matches!(pr_changed, PrChangedState::NotPr) {
+                            let mut changed_only = PR_CHANGED_ONLY.get(ctx);
+                            let hover = match &pr_changed {
+                                PrChangedState::Ready(_) => "筛选未修改的表定义",
+                                PrChangedState::Pending => "筛选未修改的表定义（加载中…）",
+                                PrChangedState::Failed => {
+                                    "筛选未修改的表定义（加载失败）"
                                 }
+                                PrChangedState::NotPr => unreachable!(),
+                            };
+                            if ui
+                                .toggle_value(&mut changed_only, "±")
+                                .on_hover_text(hover)
+                                .changed()
+                            {
+                                PR_CHANGED_ONLY.set(ctx, changed_only);
+                            }
+                        }
+
+                        if ui
+                            .add_sized(
+                                Vec2::new(ui.available_width(), 0.0),
+                                TextEdit::singleline(&mut sheets_filter)
+                                    .id(egui::Id::new(SHEETS_FILTER_ID))
+                                    .hint_text("筛选"),
+                            )
+                            .changed()
+                        {
+                            SHEETS_FILTER.set(ctx, sheets_filter);
+                        }
+                    });
+                    ui.add_space(4.0);
+                });
+
+                let modified_schemas = self.get_modified_schemas();
+                if !modified_schemas.is_empty() {
+                    let count = modified_schemas.len();
+                    let modified_tooltip = modified_schemas.iter().map(|(name, _)| name).join("\n");
+                    drop(modified_schemas);
+                    let save_label = if count > 1 { "全部保存" } else { "保存" };
+
+                    Panel::bottom("sheet_list_status").show(ui, |ui| {
+                        let can_pr = pr_window::github_source(ctx).is_some();
+                        ui.vertical_centered(|ui| {
+                            ui.label(format!(
+                                "已修改 {count} 个表定义",
+                            ))
+                            .on_hover_text(modified_tooltip);
+                        });
+
+                        let mut save = false;
+                        let mut open_pr = false;
+                        if can_pr {
+                            ui.columns_const(|[c1, c2]| {
+                                c1.vertical_centered_justified(|ui| {
+                                    if ui.button("创建 PR").clicked() {
+                                        open_pr = true;
+                                    }
+                                });
+                                c2.vertical_centered_justified(|ui| {
+                                    if ui.button(save_label).clicked() {
+                                        save = true;
+                                    }
+                                });
                             });
-                            c2.vertical_centered_justified(|ui| {
+                        } else {
+                            ui.vertical_centered_justified(|ui| {
                                 if ui.button(save_label).clicked() {
                                     save = true;
                                 }
                             });
-                        });
-                    } else {
-                        ui.vertical_centered_justified(|ui| {
-                            if ui.button(save_label).clicked() {
-                                save = true;
-                            }
-                        });
-                    }
-                    if save {
-                        self.command_save_all_schemas();
-                    }
-                    if open_pr {
-                        self.command_open_pr();
-                    }
-                });
-            }
+                        }
+                        if save {
+                            self.command_save_all_schemas();
+                        }
+                        if open_pr {
+                            self.command_open_pr();
+                        }
+                    });
+                }
 
-            let sheets_filter = SHEETS_FILTER.get(ctx);
-            let misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
-            let backend = self.backend.clone().unwrap();
-            let sheets = self
-                .sheet_filter_data
-                .get_or_insert((sheets_filter.clone(), misc_sheets_shown), || {
-                    let sheets = backend
-                        .excel()
-                        .get_entries()
-                        .iter()
-                        .filter(|(_, id)| misc_sheets_shown || **id >= 0)
-                        .sorted_by_key(|(sheet, _)| *sheet)
-                        .map(|(s, &id)| (s.clone(), id));
-                    let sheets = self.sheet_matcher.match_list_indirect(
-                        (!sheets_filter.is_empty()).then_some(&sheets_filter),
-                        sheets,
-                        |s| &s.0,
-                    );
-                    Rc::new(sheets)
-                })
-                .clone();
+                let sheets_filter = SHEETS_FILTER.get(ctx);
+                let misc_sheets_shown = MISC_SHEETS_SHOWN.get(ctx);
+                let backend = self.backend.clone().unwrap();
+                let sheets = self
+                    .sheet_filter_data
+                    .get_or_insert((sheets_filter.clone(), misc_sheets_shown), || {
+                        let sheets = backend
+                            .excel()
+                            .get_entries()
+                            .iter()
+                            .filter(|(_, id)| misc_sheets_shown || **id >= 0)
+                            .sorted_by_key(|(sheet, _)| *sheet)
+                            .map(|(s, &id)| (s.clone(), id));
+                        let sheets = self.sheet_matcher.match_list_indirect(
+                            (!sheets_filter.is_empty()).then_some(&sheets_filter),
+                            sheets,
+                            |s| &s.0,
+                        );
+                        Rc::new(sheets)
+                    })
+                    .clone();
 
-            let sheets = match &pr_changed {
-                PrChangedState::Ready(changed) if PR_CHANGED_ONLY.get(ctx) => Rc::new(
-                    sheets
-                        .iter()
-                        .filter(|(name, _)| changed.contains(name))
-                        .cloned()
-                        .collect::<Vec<_>>(),
-                ),
-                _ => sheets,
-            };
+                let sheets = match &pr_changed {
+                    PrChangedState::Ready(changed) if PR_CHANGED_ONLY.get(ctx) => Rc::new(
+                        sheets
+                            .iter()
+                            .filter(|(name, _)| changed.contains(name))
+                            .cloned()
+                            .collect::<Vec<_>>(),
+                    ),
+                    _ => sheets,
+                };
 
-            egui::CentralPanel::default().show(ui, |ui| {
-                let row_height = ui.text_style_height(&egui::TextStyle::Button);
-                ScrollArea::both().auto_shrink(false).show_rows(
-                    ui,
-                    row_height,
-                    sheets.len(),
-                    |ui, range| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let row_height = ui.text_style_height(&egui::TextStyle::Button);
+                    let mut opened = nav.apply(sheets.len()).map(|at| sheets[at].0.clone());
+                    let mut area = ScrollArea::both().auto_shrink(false);
+                    if let Some(offset) = nav.scroll(ui, row_height, sheets.len()) {
+                        area = area.vertical_scroll_offset(offset);
+                    }
+                    let output = area.show_rows(ui, row_height, sheets.len(), |ui, range| {
                         ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                            let mut current_sheet = SELECTED_SHEET.get(ctx);
-                            for (sheet, id) in sheets
-                                .iter()
-                                .skip(range.start)
-                                .take(range.end - range.start)
-                            {
+                            let current_sheet = SELECTED_SHEET.get(ctx);
+                            for (at, (sheet, id)) in sheets[range.clone()].iter().enumerate() {
                                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                                 let resp = Button::selectable(
                                     current_sheet.as_ref() == Some(sheet),
                                     sheet.as_str(),
                                 )
                                 .ui(ui)
-                                .on_hover_text(format!("{sheet}\nID: {id}"));
+                                .on_hover_text(format!("{sheet}\nId: {id}"));
+                                nav.mark(ui, range.start + at, resp.rect);
                                 if resp.clicked() {
-                                    current_sheet = Some(sheet.clone());
-                                    SELECTED_SHEET.set(ctx, current_sheet.clone());
-                                    self.navigate(format!("/sheet/{}", sheet.clone()));
+                                    opened = Some(sheet.clone());
                                 }
                             }
                         });
-                    },
-                );
+                    });
+                    nav.seen(&output);
+                    if let Some(sheet) = opened {
+                        SELECTED_SHEET.set(ctx, Some(sheet.clone()));
+                        self.navigate(format!("/sheet/{sheet}"));
+                    }
+                });
             });
-        });
+        self.sheet_nav = nav;
     }
 
     fn draw_sheet_data(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         self.export_promise.take_if(|p| p.try_get().is_some());
-        let mut export_request = None;
 
         egui::CentralPanel::default()
             .frame(
@@ -1199,32 +1437,39 @@ impl App {
                                 }
                             });
 
-                            let exporting = self.export_promise.is_some();
-                            if exporting {
-                                ui.spinner();
+                            let file_name =
+                                format!("{}.csv", table.context().sheet().name().replace('/', "_"));
+                            let context = table.context().clone();
+                            let promise = export::menu(
+                                ui,
+                                "Export",
+                                None,
+                                self.export_promise.is_some(),
+                                vec![
+                                    export::Choice::new(
+                                        "CSV",
+                                        file_name.clone(),
+                                        {
+                                            let context = context.clone();
+                                            move || Box::pin(export_csv(context, true))
+                                        },
+                                    )
+                                    .title("导出 CSV")
+                                    .hover("链接按显示值导出")
+                                    .filter("CSV", &["csv"]),
+                                    export::Choice::new("CSV（原始值）", file_name, move || {
+                                        Box::pin(export_csv(context, false))
+                                    })
+                                    .title("导出 CSV")
+                                    .hover("链接按原始值导出")
+                                    .filter("CSV", &["csv"]),
+                                ],
+                                egui::Vec2::ZERO,
+                            );
+                            if promise.is_some() {
+                                self.export_promise = promise;
                             }
-                            ui.add_enabled_ui(!exporting, |ui| {
-                                ui.menu_button("导出", |ui| {
-                                    if ui
-                                        .button("导出为 CSV")
-                                        .on_hover_text("链接按显示值导出")
-                                        .clicked()
-                                    {
-                                        export_request = Some((table.context().clone(), true));
-                                        ui.close();
-                                    }
-                                    if ui
-                                        .button("导出为 CSV（原始值）")
-                                        .on_hover_text("链接按原始值导出")
-                                        .clicked()
-                                    {
-                                        export_request = Some((table.context().clone(), false));
-                                        ui.close();
-                                    }
-                                });
-                            });
-
-                            let filter_error = table.get_filter_error();
+let filter_error = table.get_filter_error();
 
                             let filter_resp = ui.add_sized(
                                 Vec2::new(ui.available_width(), 0.0),
@@ -1307,10 +1552,6 @@ impl App {
                     },
                 }
             });
-
-        if let Some((context, resolve_display_field)) = export_request {
-            self.command_export_csv(context, resolve_display_field);
-        }
     }
 
     fn on_setup(&mut self, ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
@@ -1331,6 +1572,16 @@ impl App {
             self.sheet_data.clear();
             self.schema_data.clear();
             self.sheet_languages.clear();
+            // The sheet list is keyed on the filter alone, and icons on their id, so neither
+            // notices that they now belong to a different install.
+            self.sheet_filter_data.clear();
+            self.icon_manager.clear();
+            self.assets.reset();
+            self.icons.reset();
+            self.music.reset();
+            self.zones.reset();
+            self.quests.reset();
+            self.character.reset();
             CURRENT_SHEET_LANGUAGES.remove(ui.ctx());
 
             BACKEND_CONFIG.set(ui.ctx(), Some(config));
@@ -1371,10 +1622,7 @@ impl App {
         if let Some(redirect) = self.ensure_backend(path) {
             return Some(redirect);
         }
-
-        if let Some(sheet) = &SELECTED_SHEET.get(ui.ctx()) {
-            return Some(format!("/sheet/{sheet}").into());
-        }
+        SELECTED_SHEET.set(ui.ctx(), None);
         None
     }
 
@@ -1427,6 +1675,18 @@ impl App {
         self.draw_goto(ui.ctx());
 
         self.draw_sheet_list(ui);
+        CentralPanel::default().show(ui, |ui| {
+            if CollapsibleSidePanel::is_collapsed(ui.ctx(), "sheet_list") {
+                Panel::top("sheet_list_reexpand").show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
+                    });
+                    ui.add_space(4.0);
+                });
+            }
+            empty_view(ui, "🗐", "选择要查看的数据表");
+        });
     }
 
     fn draw_named_sheet(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
@@ -1475,6 +1735,39 @@ impl App {
         }
     }
 
+    fn on_icons(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        self.icons
+            .selected()
+            .map(|icon_id| format!("/icons/{icon_id}").into())
+    }
+
+    fn on_icon(&mut self, _ui: &mut egui::Ui, path: &Path, params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        match params.get("id").and_then(|id| id.parse::<u32>().ok()) {
+            Some(icon_id) => {
+                self.icons.request(icon_id);
+                None
+            }
+            None => Some("/icons".into()),
+        }
+    }
+
+    fn draw_icons(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(action) = self.icons.ui(ui, &backend, &self.icon_manager)
+        {
+            match action {
+                icons::Action::Select(icon_id) => self.navigate(format!("/icons/{icon_id}")),
+                icons::Action::Navigate(route) => self.navigate(route),
+            }
+        }
+    }
+
     fn on_music(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
         if let Some(redirect) = self.ensure_backend(path) {
             return Some(redirect);
@@ -1501,9 +1794,100 @@ impl App {
 
     fn draw_music(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
         if let Some(backend) = self.backend.clone()
-            && let Some(row_id) = self.music.ui(ui, &backend)
+            && let Some(action) = self.music.ui(ui, &backend)
         {
-            self.navigate(format!("/music/{row_id}"));
+            match action {
+                music::Action::Select(row_id) => self.navigate(format!("/music/{row_id}")),
+                music::Action::Navigate(asset_path) => {
+                    self.navigate(format!("/assets/{asset_path}"))
+                }
+            }
+        }
+    }
+
+    fn on_zones(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        self.zones
+            .selected()
+            .map(|zone_path| format!("/zones/{zone_path}").into())
+    }
+
+    fn on_zone_path(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        params: &Params<'_, '_>,
+    ) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        let Some(zone_path) = params.get("path") else {
+            return Some("/zones".into());
+        };
+        self.zones.request(zone_path.to_string());
+        None
+    }
+
+    fn draw_zones(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(action) = self.zones.ui(ui, &backend)
+        {
+            match action {
+                zones::Action::Select(zone_path) => self.navigate(format!("/zones/{zone_path}")),
+                zones::Action::Navigate(asset_path) => {
+                    self.navigate(format!("/assets/{asset_path}"))
+                }
+            }
+        }
+    }
+
+    fn on_quests(&mut self, _ui: &mut egui::Ui, path: &Path, _params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        self.quests
+            .selected()
+            .map(|row_id| format!("/quests/{row_id}").into())
+    }
+
+    fn on_quest(&mut self, _ui: &mut egui::Ui, path: &Path, params: &Params<'_, '_>) -> Redirect {
+        if let Some(redirect) = self.ensure_backend(path) {
+            return Some(redirect);
+        }
+        match params.get("id").and_then(|id| id.parse::<u32>().ok()) {
+            Some(row_id) => {
+                self.quests.request(row_id);
+                None
+            }
+            None => Some("/quests".into()),
+        }
+    }
+
+    fn draw_quests(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone()
+            && let Some(action) = self.quests.ui(ui, &backend, &self.icon_manager)
+        {
+            match action {
+                quests::Action::Select(row_id) => self.navigate(format!("/quests/{row_id}")),
+                quests::Action::Navigate(route) => self.navigate(route),
+            }
+        }
+    }
+
+    fn on_character(
+        &mut self,
+        _ui: &mut egui::Ui,
+        path: &Path,
+        _params: &Params<'_, '_>,
+    ) -> Redirect {
+        self.ensure_backend(path)
+    }
+
+    fn draw_character(&mut self, ui: &mut egui::Ui, _path: &Path, _params: &Params<'_, '_>) {
+        if let Some(backend) = self.backend.clone() {
+            self.character.ui(ui, &backend, &self.icon_manager);
         }
     }
 
@@ -1513,7 +1897,7 @@ impl App {
             .iter()
             .map(|(name, _)| (*name).clone())
             .collect();
-        self.pr_window.open(&names);
+        self.pr_window.open(&mut self.github, &names);
     }
 
     fn draw_pr_window(&mut self, ctx: &egui::Context) {
@@ -1524,7 +1908,8 @@ impl App {
             .map(|(name, schema)| ((*name).clone(), schema.invalid_reason()))
             .collect();
         if let Some(PrAction::Submit { title, body }) =
-            self.pr_window.draw(ctx, location.as_ref(), &modified)
+            self.pr_window
+                .draw(ctx, &mut self.github, location.as_ref(), &modified)
             && let Some(location) = &location
         {
             let files: Vec<(String, String)> = self
@@ -1532,7 +1917,7 @@ impl App {
                 .into_iter()
                 .map(|(name, schema)| (format!("{name}.yml"), schema.get_text().clone()))
                 .collect();
-            self.pr_window.submit(location, title, body, files);
+            self.pr_window.submit(ctx, location, title, body, files);
         }
     }
 
@@ -1543,33 +1928,6 @@ impl App {
             .filter_map(|(name, schema)| schema.as_ref().ok().map(|s| (name, s)))
             .filter(|(_, schema)| schema.is_modified())
             .collect()
-    }
-
-    fn command_export_csv(&mut self, context: TableContext, resolve_display_field: bool) {
-        let file_name = format!("{}.csv", context.sheet().name().replace('/', "_"));
-
-        self.export_promise = Some(TrackedPromise::spawn_local(async move {
-            let data = match export_csv(context, resolve_display_field).await {
-                Ok(data) => data,
-                Err(e) => {
-                    log::error!("导出 CSV 失败: {e:?}");
-                    return;
-                }
-            };
-
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title("导出 CSV")
-                .set_file_name(file_name)
-                .save_file()
-                .await
-            {
-                if let Err(e) = file.write(&data).await {
-                    log::error!("写入 CSV 失败: {e}");
-                } else {
-                    log::info!("CSV 导出成功");
-                }
-            }
-        }));
     }
 
     fn command_save_all_schemas(&mut self) {
@@ -1635,7 +1993,8 @@ impl App {
     #[must_use]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         install_image_loaders(&cc.egui_ctx);
-        Self::apply_fonts(&cc.egui_ctx, None);
+        install_tex_loader(&cc.egui_ctx);
+        Self::apply_fonts(&cc.egui_ctx, None, &HashMap::new());
         Self::setup_theme(&cc.egui_ctx);
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1655,8 +2014,9 @@ impl App {
             save_promise: None,
             export_promise: None,
             pr_window: PrWindow::default(),
+            github: GithubSession::default(),
             goto_window: None,
-            #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(target_arch = "wasm32"))]
             mcp_handle: None,
             #[cfg(not(target_arch = "wasm32"))]
             update_events,
@@ -1666,17 +2026,27 @@ impl App {
             update_state: UpdateState::Checking,
             #[cfg(not(target_arch = "wasm32"))]
             update_check_started: false,
+            sheet_nav: ListNav::default(),
             about_open: false,
             music: music::MusicPlayer::default(),
             assets: assets::AssetBrowser::default(),
+            icons: icons::IconBrowser::default(),
+            zones: zones::ZoneBrowser::default(),
+            quests: quests::QuestBrowser::default(),
+            character: character::CharacterBuilder::default(),
             last_system_theme: None,
-            loaded_cjk: None,
+            cjk: HashMap::new(),
+            primary_cjk: None,
             #[cfg(target_arch = "wasm32")]
             font_promise: None,
         }
     }
 
-    fn apply_fonts(ctx: &egui::Context, cjk: Option<(String, Arc<FontData>)>) {
+    fn apply_fonts(
+        ctx: &egui::Context,
+        primary: Option<CjkFont>,
+        loaded: &HashMap<CjkFont, Arc<FontData>>,
+    ) {
         let mut fonts = FontDefinitions::default();
 
         fonts.font_data.insert(
@@ -1688,9 +2058,21 @@ impl App {
         let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
         proportional.push("FFXIV-PrivateUseIcons".to_owned());
 
-        if let Some((name, data)) = cjk {
-            fonts.font_data.insert(name.clone(), data);
-            proportional.push(name);
+        // The first font carrying a character draws it, and these disagree on the shape of the Han
+        // characters they share, so the one matching the text on screen has to lead.
+        let order = primary.into_iter().chain(
+            CjkFont::ALL
+                .into_iter()
+                .filter(|font| Some(*font) != primary),
+        );
+        for font in order {
+            let Some(data) = loaded.get(&font) else {
+                continue;
+            };
+            fonts
+                .font_data
+                .insert(font.family_name().to_owned(), data.clone());
+            proportional.push(font.family_name().to_owned());
         }
 
         ctx.set_fonts(fonts);
@@ -1698,58 +2080,53 @@ impl App {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn update_fonts(&mut self, ctx: &egui::Context) {
-        let wanted = CjkFont::for_language(LANGUAGE.get(ctx));
-        if wanted == self.loaded_cjk {
-            return;
-        }
-        let cjk = wanted.map(|font| {
-            (
-                font.family_name().to_owned(),
-                Arc::new(FontData::from_static(font.embedded_bytes())),
-            )
-        });
-        Self::apply_fonts(ctx, cjk);
-        self.loaded_cjk = wanted;
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn update_fonts(&mut self, ctx: &egui::Context) {
-        let wanted = CjkFont::for_language(LANGUAGE.get(ctx));
-        if wanted == self.loaded_cjk {
-            return;
-        }
-
-        let Some(font) = wanted else {
-            Self::apply_fonts(ctx, None);
-            self.loaded_cjk = None;
-            self.font_promise = None;
+        let Some(wanted) = CjkFont::wanted(ctx) else {
             return;
         };
-
-        if self.font_promise.as_ref().is_some_and(|(f, _)| *f == font) {
-            if !self.font_promise.as_ref().unwrap().1.ready() {
-                return;
-            }
-            let (_, promise) = self.font_promise.take().unwrap();
-            match promise.block_and_take() {
-                Ok(bytes) => Self::apply_fonts(
-                    ctx,
-                    Some((
-                        font.family_name().to_owned(),
-                        Arc::new(FontData::from_owned(bytes)),
-                    )),
-                ),
-                Err(error) => log::error!("获取字体 {} 失败: {error}", font.asset_file()),
-            }
-            self.loaded_cjk = Some(font);
+if self.primary_cjk == Some(wanted) {
             return;
         }
+        self.cjk
+            .entry(wanted)
+            .or_insert_with(|| Arc::new(FontData::from_static(wanted.embedded_bytes())));
+        self.primary_cjk = Some(wanted);
+        Self::apply_fonts(ctx, self.primary_cjk, &self.cjk);
+    }
 
-        let file = font.asset_file().to_owned();
-        self.font_promise = Some((
-            font,
-            UnsendPromise::new(async move { crate::utils::fetch_url(file).await }),
-        ));
+    /// Each face is 5 to 10 MiB over the wire, so one is fetched only once something on screen calls
+    /// for it, and the ones already fetched are kept as fallbacks.
+    #[cfg(target_arch = "wasm32")]
+    fn update_fonts(&mut self, ctx: &egui::Context) {
+        let mut changed = false;
+        if self.font_promise.as_ref().is_some_and(|(_, p)| p.ready()) {
+            let (font, promise) = self.font_promise.take().unwrap();
+            match promise.block_and_take() {
+                Ok(bytes) => {
+                    self.cjk.insert(font, Arc::new(FontData::from_owned(bytes)));
+                    changed = true;
+                }
+                Err(error) => log::error!("Failed to fetch font {}: {error}", font.asset_file()),
+            }
+        }
+
+        if let Some(wanted) = CjkFont::wanted(ctx)
+            && self.primary_cjk != Some(wanted)
+        {
+            if self.cjk.contains_key(&wanted) {
+                self.primary_cjk = Some(wanted);
+                changed = true;
+            } else if self.font_promise.is_none() {
+                let file = wanted.asset_file().to_owned();
+                self.font_promise = Some((
+                    wanted,
+                    UnsendPromise::new(async move { crate::utils::fetch_url(file).await }),
+                ));
+            }
+        }
+
+        if changed {
+            Self::apply_fonts(ctx, self.primary_cjk, &self.cjk);
+        }
     }
 
     fn setup_theme(ctx: &egui::Context) {
@@ -1913,7 +2290,7 @@ fn add_links(
     ctx: &egui::Context,
 ) {
     ui.with_layout(Layout::right_to_left(ui.layout().vertical_align()), |ui| {
-        match update_state {
+match update_state {
             UpdateState::ReadyToRestart(update) => {
                 let color = ui.visuals().warn_fg_color;
                 let response = ui

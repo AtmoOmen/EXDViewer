@@ -1,8 +1,9 @@
 //! What a file is, read from its bytes rather than from its name.
 //!
-//! Most of what the game ships leads with a magic. The two formats here that do not are `.tex`,
-//! recognised by the shape of its fixed header, and `.mtrl`, which is small enough to read outright
-//! and names a shader package that gives it away. Anything left over that decodes cleanly is text.
+//! Most of what the game ships leads with a magic. The formats here that do not are `.tex` and
+//! `.tera`, recognized by the shape of their fixed headers, `.mtrl`, which is small enough to read
+//! outright and names a shader package that gives it away, and `.hwc`, which is a bare pixel buffer
+//! with nothing to go on but its length. Anything left over that decodes cleanly is text.
 
 use std::io::Cursor;
 
@@ -16,6 +17,18 @@ const SAMPLE: usize = 1024;
 
 /// A `.tex` header, which the first surface follows immediately.
 const TEX_HEADER: u32 = 80;
+
+/// A `.tera` header, which the plate list follows immediately.
+const TERA_HEADER: usize = 52;
+
+/// The only `.tera` version the game ships. Earlier ones lay the header out differently.
+const TERA_VERSION: u32 = 0x0100_0003;
+
+/// A `.dic` header, which the character maps it counts follow immediately.
+const DIC_HEADER: usize = 0x8124;
+
+/// A `.hwc`, which is 64x64 pixels of four bytes and nothing else.
+const CURSOR: usize = 64 * 64 * 4;
 
 /// A format as its bytes identify it.
 #[derive(Clone, Copy)]
@@ -48,16 +61,38 @@ const MAGIC: &[(&[u8], Format)] = &[
     (b"uldh", Format::Shown(Viewer::Uld)),
     (b"fcsv", Format::Shown(Viewer::Font)),
     (b"gftd0100", Format::Shown(Viewer::Icons)),
+    (b"\x1bLua", Format::Shown(Viewer::Luab)),
     (b"ShPk", Format::Shown(Viewer::Shpk)),
     (b"ShCd", Format::Shown(Viewer::Shcd)),
-    (b"blks", Format::Named("骨骼")),
-    (b"SEDBSSCF", Format::Named("声音")),
+(b"die\0", Format::Shown(Viewer::Eid)),
+    (b"EVP", Format::Shown(Viewer::Evp)),
+    (b"plks", Format::Shown(Viewer::Skp)),
+    (b"blks", Format::Shown(Viewer::Sklb)),
+    (b"SEDBSSCF", Format::Shown(Viewer::Scd)),
     (b"EXHF", Format::Named("数据表头")),
     (b"EXDF", Format::Named("数据表页")),
+    (b"EXLT", Format::Shown(Viewer::Exl)),
+    (b"LGB1", Format::Shown(Viewer::Lgb)),
+    (b"SGB1", Format::Shown(Viewer::Sgb)),
+    (b"LVB1", Format::Shown(Viewer::Lvb)),
+    (b"SVB1", Format::Shown(Viewer::Svb)),
+    (b"LCB1", Format::Shown(Viewer::Lcb)),
+    (b"UWB1", Format::Shown(Viewer::Uwb)),
+    (b"ENVB", Format::Shown(Viewer::Envb)),
+    (b"OBSB", Format::Shown(Viewer::Obsb)),
+    (b"ESSB", Format::Shown(Viewer::Essb)),
+    (b"AMB\0", Format::Shown(Viewer::Amb)),
+    (b" dgg", Format::Shown(Viewer::Ggd)),
+    (b"dzg\0", Format::Shown(Viewer::Gzd)),
+    (b"pap ", Format::Shown(Viewer::Pap)),
+    (b"TMLB", Format::Shown(Viewer::Tmb)),
+    (b"CUTB", Format::Shown(Viewer::Cutb)),
+    (b"XFVA", Format::Shown(Viewer::Avfx)),
 ];
 
 /// What the bytes say the file is, or `None` where they say nothing. Ordered strongest test first:
-/// a magic settles it outright, and the two guesses below only ever see what no magic claimed.
+/// a magic settles it outright, and the guesses below only ever see what no magic claimed. A cursor
+/// is last of all, since its length is the weakest test here and any binary of that size passes it.
 pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if let Some((_, format)) = MAGIC.iter().find(|(magic, _)| bytes.starts_with(magic)) {
         return Some(*format);
@@ -68,12 +103,19 @@ pub fn sniff(bytes: &[u8]) -> Option<Format> {
     if is_texture(bytes) {
         return Some(Format::Shown(Viewer::Texture));
     }
-    is_text(bytes).then_some(Format::Shown(Viewer::Text))
+    if is_terrain(bytes) {
+        return Some(Format::Shown(Viewer::Tera));
+    }
+    if is_dictionary(bytes) {
+        return Some(Format::Shown(Viewer::Dic));
+    }
+    if is_text(bytes) {
+        return Some(Format::Shown(Viewer::Text));
+    }
+    (bytes.len() == CURSOR).then_some(Format::Shown(Viewer::Hwc))
 }
 
-/// Read as a material and believed only if it names a shader package, which nothing else would. The
-/// header states its own size as a `u16` and every count in it is a byte or a short, so this reads a
-/// bounded amount however little of the file is really a material.
+/// Read as a material and believed only if it names a shader package, which nothing else would.
 fn is_material(bytes: &[u8]) -> bool {
     bytes.len() <= usize::from(u16::MAX)
         && mtrl::Material::read(Cursor::new(bytes.to_vec()))
@@ -94,6 +136,35 @@ fn is_texture(bytes: &[u8]) -> bool {
         && short(10) > 0
         && (1..=13).contains(&(header[14] & 127))
         && word(28) == TEX_HEADER
+}
+
+/// Terrain leads with a version where the formats above lead with a magic, so it is taken on the
+/// shape of its header instead: that one version, a texture slot mask with only three bits defined,
+/// and 28 bytes of padding that is zero in every file the game ships.
+fn is_terrain(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..TERA_HEADER) else {
+        return false;
+    };
+    let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+
+    word(0) == TERA_VERSION && word(20) <= 0b111 && header[24..].iter().all(|byte| *byte == 0)
+}
+
+/// A dictionary leads with a fixed header rather than a magic, so it is taken on two of its words
+/// agreeing: the count of character maps, and the offset of the first word list, which is where
+/// those maps end.
+fn is_dictionary(bytes: &[u8]) -> bool {
+    let Some(header) = bytes.get(..DIC_HEADER) else {
+        return false;
+    };
+    let word = |at: usize| u32::from_le_bytes(header[at..at + 4].try_into().unwrap());
+
+    let maps = word(0x810c);
+    word(0) == 0
+        && word(4) == 0x3f
+        && word(8) == 1
+        && (1..=0x100).contains(&maps)
+        && word(0x8110) == DIC_HEADER as u32 + maps * 0x200
 }
 
 /// The text the game ships is ASCII, so a control byte that is not whitespace rules it out. Only the
@@ -125,14 +196,40 @@ mod tests {
 
     #[test]
     fn reads_a_magic() {
-        assert_eq!(label(b"uldh0100rest of it"), Some("布局"));
+assert_eq!(label(b"uldh0100rest of it"), Some("布局"));
         assert_eq!(label(b"fcsv0100\0\0\0\0"), Some("字体"));
         assert_eq!(label(b"gftd0100\0\0\0\0"), Some("图标"));
         assert_eq!(label(b"ShPk\0\0\0\0"), Some("着色器包"));
+        assert_eq!(label(b"\x1bLua\x51\0\x01\x04"), Some("Lua"));
         assert_eq!(label(b"ShCd\0\0\0\0"), Some("着色器代码"));
         assert_eq!(label(b"\x89PNG\r\n\x1a\n\0\0\0\0"), Some("图像"));
         assert_eq!(label(b"SEDBSSCF\0\0\0\0"), Some("声音"));
         assert_eq!(label(b"blks\0\0\0\0"), Some("骨骼"));
+        assert_eq!(label(b"die\0" as &[u8]), Some("绑定点"));
+        assert_eq!(label(b"EVP\x0b\0\0\0\0"), Some("装备特效参数"));
+        assert_eq!(label(b"plks0031"), Some("骨架参数"));
+        assert_eq!(label(b"LGB1\0\0\0\0"), Some("图层组"));
+        assert_eq!(label(b"SGB1\0\0\0\0"), Some("共享组"));
+        assert_eq!(label(b"LVB1\0\0\0\0"), Some("关卡"));
+        assert_eq!(label(b"SVB1\0\0\0\0"), Some("天空可见性"));
+        assert_eq!(label(b"LCB1\0\0\0\0"), Some("光照剔除"));
+        assert_eq!(label(b"UWB1\0\0\0\0"), Some("水下"));
+        assert_eq!(label(b"ENVB\0\0\0\0"), Some("环境"));
+        assert_eq!(label(b"OBSB\0\0\0\0"), Some("物体行为"));
+        assert_eq!(label(b"ESSB\0\0\0\0"), Some("环境声音"));
+        assert_eq!(label(b"AMB\0\x01\0\0\0"), Some("环境光"));
+        assert_eq!(label(b" dgg\0\0\0\0"), Some("草地网格"));
+        assert_eq!(label(b"dzg\0\0\0\0\0"), Some("草地分区"));
+        assert_eq!(label(b"pap \0\0\0\0"), Some("动画"));
+        assert_eq!(label(b"TMLB\0\0\0\0"), Some("时间轴"));
+        assert_eq!(label(b"CUTB\0\0\0\0"), Some("过场动画"));
+        assert_eq!(label(b"XFVA\0\0\0\0"), Some("视觉效果"));
+    }
+
+    /// A sheet list is the one magic that also passes as text, so the magic has to win.
+    #[test]
+    fn names_a_sheet_list_rather_than_calling_it_text() {
+        assert_eq!(label(b"EXLT,2\r\nAchievement,0\r\n"), Some("表列表"));
     }
 
     #[test]
@@ -160,6 +257,62 @@ mod tests {
             broken[at] = byte;
             assert!(label(&broken) != Some("纹理"), "byte {at} went unchecked");
         }
+    }
+
+    /// The other guess with no magic behind it. Terrain is all zeroes but for three words, so the
+    /// checks that reject a file matter more here than the ones that accept it.
+    #[test]
+    fn reads_a_terrain_header() {
+        let mut header = vec![0u8; TERA_HEADER];
+        header[..4].copy_from_slice(&TERA_VERSION.to_le_bytes());
+        header[20] = 0b111;
+        assert_eq!(label(&header), Some("地形"));
+
+        for (at, byte) in [(0, 0x04), (20, 0x08), (24, 0x01), (51, 0x01)] {
+            let mut broken = header.clone();
+            broken[at] = byte;
+            assert!(
+                label(&broken) != Some("地形"),
+                "byte {at} went unchecked"
+            );
+        }
+        // A header cut short is not a terrain file, however well the part that survived reads.
+        assert!(label(&header[..TERA_HEADER - 1]) != Some("地形"));
+    }
+
+    /// The third guess with no magic behind it, and the one whose header is nearly all zeroes, so
+    /// what rejects a file matters more than what accepts one.
+    #[test]
+    fn reads_a_dictionary_header() {
+        let mut header = vec![0u8; DIC_HEADER];
+        header[4..8].copy_from_slice(&0x3fu32.to_le_bytes());
+        header[8..12].copy_from_slice(&1u32.to_le_bytes());
+        header[0x810c..0x8110].copy_from_slice(&3u32.to_le_bytes());
+        header[0x8110..0x8114].copy_from_slice(&0x8724u32.to_le_bytes());
+        assert_eq!(label(&header), Some("词典"));
+
+        for (at, word) in [(0, 1), (4, 0x40), (8, 0), (0x810c, 4), (0x8110, 0x8724 - 1)] {
+            let mut broken = header.clone();
+            broken[at..at + 4].copy_from_slice(&(word as u32).to_le_bytes());
+            assert!(
+                label(&broken) != Some("词典"),
+                "word {at} went unchecked"
+            );
+        }
+        assert!(label(&header[..DIC_HEADER - 1]) != Some("词典"));
+    }
+
+    /// The weakest test in the file, so it only ever sees what nothing else claimed, and it sees
+    /// that on its length alone.
+    #[test]
+    fn reads_a_cursor_by_its_length() {
+        assert_eq!(label(&[1u8; CURSOR]), Some("光标"));
+        assert!(label(&[1u8; CURSOR - 1]) != Some("光标"));
+        assert!(label(&[1u8; CURSOR + 1]) != Some("光标"));
+        // A file of that length that says what it is keeps saying it.
+        let mut named = vec![0u8; CURSOR];
+        named[..4].copy_from_slice(b"TMLB");
+        assert_eq!(label(&named), Some("时间轴"));
     }
 
     #[test]

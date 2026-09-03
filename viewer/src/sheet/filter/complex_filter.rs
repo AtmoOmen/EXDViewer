@@ -155,12 +155,14 @@ impl Wildcard {
     }
 }
 
+// Flags like `i` are applied through `RegexBuilder` and don't show up in `as_str()`,
+// so identity needs the flags alongside the pattern body.
 #[derive(Debug, Clone)]
-pub struct RegexWrapper(Regex);
+pub struct RegexWrapper(Regex, String);
 
 impl PartialEq for RegexWrapper {
     fn eq(&self, other: &Self) -> bool {
-        self.0.as_str() == other.0.as_str()
+        self.0.as_str() == other.0.as_str() && self.1 == other.1
     }
 }
 
@@ -169,12 +171,13 @@ impl Eq for RegexWrapper {}
 impl std::hash::Hash for RegexWrapper {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.as_str().hash(state);
+        self.1.hash(state);
     }
 }
 
-impl From<Regex> for RegexWrapper {
-    fn from(value: Regex) -> Self {
-        Self(value)
+impl RegexWrapper {
+    pub fn new(regex: Regex, flags: String) -> Self {
+        Self(regex, flags)
     }
 }
 

@@ -1,8 +1,8 @@
-//! `.mtrl` materials: the shader a surface is drawn with, the textures bound to it, and the colour
+//! `.mtrl` materials: the shader a surface is drawn with, the textures bound to it, and the color
 //! table applied to the surfaces that reference it.
 //!
 //! Laid out as three regions rather than one table, because the interesting parts are different
-//! shapes: identity is label/value, the colour table is a grid of swatches, and the textures are
+//! shapes: identity is label/value, the color table is a grid of swatches, and the textures are
 //! images worth previewing in place.
 
 use anyhow::Result;
@@ -15,7 +15,7 @@ use std::io::Cursor;
 
 use shaders::names;
 
-use super::{Preview, link, section};
+use super::{Preview, link, section, swatch};
 use crate::assets::deps::{Dep, Deps};
 use crate::backend::Backend;
 use crate::sheet::draw_color;
@@ -118,7 +118,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         identity.push(("UV 集", format!("{} (#{})", set.name(), set.index()), None));
     }
     for set in material.color_sets() {
-        identity.push(("颜色集", format!("{} (#{})", set.name(), set.index()), None));
+identity.push(("颜色集", format!("{} (#{})", set.name(), set.index()), None));
     }
     for key in material.shader_keys() {
         params.push(Param {
@@ -176,7 +176,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     };
 
     log::info!(
-        "assets/mtrl: {path} shader {}, {} samplers, {} colour rows",
+        "assets/mtrl: {path} shader {}, {} samplers, {} color rows",
         material.shader(),
         material.samplers().len(),
         rows.len()
@@ -193,13 +193,6 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         rows,
         table_kind,
     })))
-}
-
-/// Half-float colours are linear and can exceed 1.0, so they are tone-mapped rather than clamped;
-/// otherwise every bright row renders as flat white.
-fn swatch(color: [f32; 3]) -> Color32 {
-    let map = |v: f32| ((v / (1.0 + v)).clamp(0.0, 1.0) * 255.0) as u8;
-    Color32::from_rgb(map(color[0]), map(color[1]), map(color[2]))
 }
 
 pub fn ui(
@@ -331,7 +324,7 @@ pub fn details_ui(ui: &mut egui::Ui, material: &Rendered, follow: &mut Option<St
                 ui.end_row();
                 for (label, value, raw) in &material.identity {
                     ui.label(RichText::new(*label).weak());
-                    let shown = ui.label(RichText::new(value).monospace());
+                    let shown = ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                     if let Some(raw) = raw {
                         shown.on_hover_text(raw);
                     }

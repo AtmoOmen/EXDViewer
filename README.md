@@ -1,6 +1,10 @@
 # EXDViewer
 <img align="right" src="https://github.com/AtmoOmen/EXDViewer/blob/main/viewer/assets/icon.png?raw=true" width="20%">
 
+[![Native Build](https://img.shields.io/github/actions/workflow/status/AtmoOmen/EXDViewer/build-native.yml?style=for-the-badge&label=Native%20Build
+)](https://github.com/AtmoOmen/EXDViewer/releases)
+[![Web Build](https://img.shields.io/github/actions/workflow/status/AtmoOmen/EXDViewer/build-web.yml?style=for-the-badge&label=Web%20Build
+)](https://github.com/AtmoOmen/EXDViewer/pkgs/container/exdviewer-web)
 [![License](https://img.shields.io/github/license/AtmoOmen/EXDViewer?style=for-the-badge&)](/LICENSE)
 [![FFXIV Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fexd.camora.dev%2Fapi%2F4e9a232b%2Fversions&query=latest&style=for-the-badge&label=Latest%20XIV%20Version
 )](https://thaliak.xiv.dev/repository/4e9a232b)
@@ -62,7 +66,7 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | `check_asset_paths` | 批量检查资源路径是否存在 |
 | `read_asset` | 按路径分页读取资源原始字节和格式识别结果 |
 | `read_asset_by_hash` | 按仓库、分类和索引哈希分页读取未命名资源 |
-| `inspect_asset` | 按路径结构化解析纹理、PNG、材质、字体、图标、ULD、SHPK 和 SHCD |
+| `inspect_asset` | 按路径结构化解析纹理、PNG、材质、字体、图标、ULD、SHPK、SHCD、SCD、LGB 和 SGB |
 | `inspect_asset_by_hash` | 结构化解析未命名哈希资源 |
 | `decode_texture` | 将 TEX 纹理解码为尺寸受限的 PNG 图像内容 |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
@@ -123,6 +127,10 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
     ```bash
     cargo run --bin web --release
     ```
+
+## 测试
+
+`cargo test` 覆盖解析器和 UI 逻辑。3D 查看器只能在浏览器中实际测试，这正是 `smoke/run.sh` 所做的工作：构建 wasm 应用，用无头 Chromium 驱动模型和场景查看器，遇到任何 GL 错误、panic 或 `ERROR` 级日志都会失败。参见 [smoke/README.md](smoke/README.md)。
 
 ## 参与贡献
 

@@ -4,10 +4,7 @@ use itertools::Itertools;
 
 use crate::{
     about::centered_inline,
-    github::{
-        GithubAuth, GithubClient, PrDraft, PrResult, RelayResult, build_auth_start, exchange_code,
-        fetch_client_id, relay_and_close, take_relayed_result,
-    },
+    github::{GithubClient, GithubSession, PrDraft, PrResult, relay_and_close, token},
     settings::{BACKEND_CONFIG, BackendConfig, GithubSchemaLocation, SchemaLocation},
     utils::{PromiseKind, TrackedPromise},
 };
@@ -40,106 +37,32 @@ pub fn draw_auth_callback(ui: &mut egui::Ui) {
         ui.add_space(48.0);
         ui.spinner();
         ui.add_space(8.0);
-        ui.label("正在完成登录，可关闭此标签页");
+        ui.label("正在完成登录…可以关闭此标签页。");
     });
 }
 
 #[derive(Default)]
 pub struct PrWindow {
+    /// A hand-typed personal access token, offered as an alternative to signing in. Deliberately
+    /// not persisted: it is the user's own long-lived secret, not a scoped token the app minted.
     github_token: String,
-    github_auth: Option<GithubAuth>,
-    oauth_client_id: Option<String>,
-    client_id_promise: Option<TrackedPromise<Result<String>>>,
-    /// (verifier, state)
-    oauth_pending: Option<(String, String)>,
-    oauth_exchange: Option<TrackedPromise<Result<GithubAuth>>>,
-    oauth_error: Option<String>,
     draft: Option<Draft>,
     pr_promise: Option<TrackedPromise<Result<PrResult>>>,
     pr_outcome: Option<PrOutcome>,
 }
 
 impl PrWindow {
-    pub fn poll(&mut self, ctx: &egui::Context) {
-        if self
-            .client_id_promise
-            .as_ref()
-            .is_some_and(|p| p.try_get().is_some())
-        {
-            match self.client_id_promise.take().unwrap().block_and_take() {
-                Ok(id) => self.oauth_client_id = Some(id),
-                Err(e) => {
-                    log::error!("获取 OAuth 客户端 ID 失败: {e}");
-                    self.oauth_error = Some(e.to_string());
-                }
-            }
-        }
-
-        if let Some((verifier, state)) = self.oauth_pending.clone() {
-            ctx.request_repaint_after(std::time::Duration::from_millis(200));
-            match take_relayed_result() {
-                Some(RelayResult::Code {
-                    code,
-                    state: got_state,
-                }) => {
-                    self.oauth_pending = None;
-                    if got_state != state {
-                        self.oauth_error = Some("登录失败: 状态不匹配".to_string());
-                    } else {
-                        self.oauth_exchange = Some(TrackedPromise::spawn_local(async move {
-                            exchange_code(code, verifier).await
-                        }));
-                    }
-                }
-                Some(RelayResult::Error(e)) => {
-                    self.oauth_pending = None;
-                    self.oauth_error = Some(e);
-                }
-                None => {}
-            }
-        }
-
-        if self
-            .oauth_exchange
-            .as_ref()
-            .is_some_and(|p| p.try_get().is_some())
-        {
-            match self.oauth_exchange.take().unwrap().block_and_take() {
-                Ok(auth) => {
-                    log::info!("已登录 GitHub，账户: {}", auth.login);
-                    self.oauth_error = None;
-                    self.github_auth = Some(auth);
-                }
-                Err(e) => {
-                    log::error!("GitHub 登录失败: {e}");
-                    self.oauth_error = Some(e.to_string());
-                }
-            }
-        }
-    }
-
-    fn ensure_client_id(&mut self) {
-        if self.oauth_client_id.is_none() && self.client_id_promise.is_none() {
-            self.client_id_promise = Some(TrackedPromise::spawn_local(async move {
-                fetch_client_id().await
-            }));
-        }
-    }
-
-    pub fn open(&mut self, modified_names: &[String]) {
+    pub fn open(&mut self, session: &mut GithubSession, modified_names: &[String]) {
         let title = match modified_names {
-            [one] => format!("更新 {one} 个表定义"),
-            many => format!("更新 {} 个表定义", many.len()),
+            [one] => format!("更新 {one} 的 schema"),
+            many => format!("更新 {} 个 schema", many.len()),
         };
         let body = format!(
-            "已更新的表定义:\n{}",
+            "已更新 schema：\n{}",
             modified_names.iter().map(|n| format!("- {n}")).join("\n")
         );
         self.pr_outcome = None;
-        // Prefetch client id
-        if self.github_auth.is_none() {
-            self.ensure_client_id();
-        }
+        session.prepare();
         self.draft = Some(Draft {
             title,
             body,
@@ -147,27 +70,9 @@ impl PrWindow {
         });
     }
 
-    fn begin_login(&mut self, ctx: &egui::Context) {
-        self.oauth_error = None;
-        let Some(client_id) = self.oauth_client_id.clone() else {
-            self.ensure_client_id();
-            self.oauth_error = Some("正在准备登录，请稍后重试".to_string());
-            return;
-        };
-        match build_auth_start(&client_id) {
-            Ok(start) => {
-                self.oauth_pending = Some((start.verifier, start.state));
-                ctx.open_url(egui::OpenUrl::new_tab(start.url));
-            }
-            Err(e) => {
-                log::error!("启动 GitHub 登录失败: {e}");
-                self.oauth_error = Some(e.to_string());
-            }
-        }
-    }
-
     pub fn submit(
         &mut self,
+        ctx: &egui::Context,
         location: &GithubSchemaLocation,
         title: String,
         body: String,
@@ -184,12 +89,8 @@ impl PrWindow {
             body,
             files,
         };
-        let token = self
-            .github_auth
-            .as_ref()
-            .map(|a| a.token.clone())
-            .unwrap_or_else(|| self.github_token.trim().to_string());
-        let client = GithubClient::new(token);
+        let client =
+            GithubClient::new(token(ctx).unwrap_or_else(|| self.github_token.trim().to_string()));
         self.pr_outcome = None;
         self.pr_promise = Some(TrackedPromise::spawn_local(async move {
             client.submit_pr(&draft).await
@@ -199,6 +100,7 @@ impl PrWindow {
     pub fn draw(
         &mut self,
         ctx: &egui::Context,
+        session: &mut GithubSession,
         location: Option<&GithubSchemaLocation>,
         // (name, invalid_reason)
         modified: &[(String, Option<String>)],
@@ -220,10 +122,10 @@ impl PrWindow {
 
         let invalid_count = modified.iter().filter(|(_, r)| r.is_some()).count();
         let submitting = self.pr_promise.is_some();
-        let signed_in_as = self.github_auth.as_ref().map(|a| a.login.clone());
-        let signing_in = self.oauth_pending.is_some() || self.oauth_exchange.is_some();
-        let client_id_ready = self.oauth_client_id.is_some();
-        let oauth_error = self.oauth_error.clone();
+        let signed_in_as = GithubSession::login(ctx);
+        let signing_in = session.signing_in();
+        let client_id_ready = session.ready();
+        let oauth_error = session.error().map(str::to_owned);
         let mut open = true;
         let mut submit = false;
         let mut begin_login = false;
@@ -245,22 +147,19 @@ impl PrWindow {
                 centered_inline(ui, &format!("合并到 {dest}"), |ui| {
                     ui.label("合并到 ");
                     ui.add(
-                        Hyperlink::from_label_and_url(
-                            dest,
-                            format!(
-                                "https://github.com/{}/{}/tree/{}",
-                                location.owner,
-                                location.repo,
-                                location.base_branch()
-                            ),
-                        )
-                        .open_in_new_tab(true),
+                        Hyperlink::from_label_and_url(dest, format!(
+                            "https://github.com/{}/{}/tree/{}",
+                            location.owner,
+                            location.repo,
+                            location.base_branch()
+                        ))
+                            .open_in_new_tab(true),
                     );
                 });
 
                 if modified.is_empty() {
                     ui.add_space(8.0);
-                    ui.label("没有可提交的已修改表定义");
+                    ui.label("没有修改过的 schema 可提交。");
                     return;
                 }
 
@@ -268,7 +167,7 @@ impl PrWindow {
                 ui.label(RichText::new("标题").strong());
                 ui.add(TextEdit::singleline(&mut window.title).desired_width(f32::INFINITY));
                 ui.add_space(6.0);
-                ui.label(RichText::new("说明").strong());
+                ui.label(RichText::new("描述").strong());
                 ui.add(
                     TextEdit::multiline(&mut window.body)
                         .desired_width(f32::INFINITY)
@@ -277,7 +176,7 @@ impl PrWindow {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("已修改的表定义").strong());
+                    ui.label(RichText::new("变更的 schema").strong());
                     ui.label(RichText::new(format!("({})", modified.len())).weak());
                 });
                 egui::Frame::group(ui.style())
@@ -323,7 +222,7 @@ impl PrWindow {
                 } else if signing_in {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("正在等待 GitHub，请在新标签页完成登录");
+                        ui.label("等待 GitHub 完成登录，请在新标签页完成操作。");
                     });
                     if let Some(err) = &oauth_error {
                         ui.colored_label(ui.visuals().error_fg_color, err);
@@ -365,13 +264,12 @@ impl PrWindow {
 
                             ui.label(RichText::new("需要").small().weak());
                             ui.label(RichText::new("public_repo").monospace().size(small));
-                            ui.label(RichText::new("权限").small().weak());
+                            ui.label(RichText::new("作用域。").small().weak());
                             ui.add(
                                 egui::Hyperlink::from_label_and_url(
-                                    RichText::new("创建令牌").small(),
+                                    RichText::new("创建一个").small(),
                                     crate::CREATE_PAT_URL,
-                                )
-                                .open_in_new_tab(true),
+                                ).open_in_new_tab(true),
                             );
                         });
                     } else if !client_id_ready {
@@ -381,7 +279,8 @@ impl PrWindow {
                     }
                 }
 
-                let authenticated = signed_in_as.is_some() || !self.github_token.trim().is_empty();
+                let authenticated =
+                    signed_in_as.is_some() || !self.github_token.trim().is_empty();
                 let can_submit = !submitting
                     && invalid_count == 0
                     && authenticated
@@ -397,8 +296,7 @@ impl PrWindow {
                         // outcome and allows a fresh submission.
                         if let Some(Ok(pr)) = &self.pr_outcome {
                             if ui.button("查看拉取请求").clicked() {
-                                ui.ctx()
-                                    .open_url(egui::OpenUrl::new_tab(pr.html_url.clone()));
+                                ui.ctx().open_url(egui::OpenUrl::new_tab(pr.html_url.clone()));
                             }
                         } else if ui
                             .add_enabled(can_submit, Button::new("创建拉取请求"))
@@ -410,13 +308,15 @@ impl PrWindow {
                             ui.spinner();
                             ui.label(RichText::new("正在提交…").weak());
                         }
-                        ui.with_layout(
-                            Layout::left_to_right(egui::Align::Center),
-                            |ui| match &self.pr_outcome {
+                        ui.with_layout(Layout::left_to_right(egui::Align::Center), |ui| {
+                            match &self.pr_outcome {
                                 Some(Ok(pr)) => {
                                     ui.label(
-                                        RichText::new(format!("✅ 已创建拉取请求 #{}", pr.number))
-                                            .strong(),
+                                        RichText::new(format!(
+                                            "✅ 已创建拉取请求 #{}",
+                                            pr.number
+                                        ))
+                                        .strong(),
                                     );
                                 }
                                 Some(Err(err)) => {
@@ -428,21 +328,24 @@ impl PrWindow {
                                 None if invalid_count > 0 => {
                                     ui.colored_label(
                                         ui.visuals().warn_fg_color,
-                                        format!("请先修复 {invalid_count} 个无效表定义"),
+                                        format!(
+                                            "先修复 {invalid_count} 个无效 schema{} 再提交。",
+                                            if invalid_count == 1 { "" } else { "s" }
+                                        ),
                                     );
                                 }
                                 None => {}
-                            },
-                        );
+                            }
+                        });
                     });
                 });
             });
 
         if begin_login {
-            self.begin_login(ctx);
+            session.begin_login(ctx);
         }
         if sign_out {
-            self.github_auth = None;
+            GithubSession::sign_out(ctx);
         }
         let action = submit.then(|| PrAction::Submit {
             title: window.title.clone(),

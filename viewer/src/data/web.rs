@@ -1,15 +1,20 @@
-use crate::utils::{GameVersion, HttpResponse, fetch, fetch_url};
+use crate::utils::{GameVersion, HttpResponse, fetch, fetch_range, fetch_url};
 
-use super::{FileProvider, get_icon_path, get_xivapi_asset_url, list_url, with_list_id};
+use super::{DecodedTexture, FileProvider, decode_texture, list_url, with_list_id};
 use async_trait::async_trait;
 use either::Either;
 use image::RgbaImage;
+use ironworks::file::{mdl::Lods, shpk::Spans};
 use serde::Deserialize;
 use url::Url;
 
 /// Header the API names a file's sqpack stream kind in. Absent from a server predating it, which is
 /// why the kind is optional rather than a parse failure.
 const STREAM_KIND: &str = "x-stream-kind";
+
+/// Header the API names the part of a file it served in. Absent from a server predating it, which
+/// is how a whole file is told from a slice of one.
+const SLICE: &str = "x-slice";
 
 pub struct WebFileProvider(Url);
 
@@ -133,6 +138,20 @@ impl WebFileProvider {
         Ok(parsed.repositories)
     }
 
+    fn file_url(&self, path: &str) -> anyhow::Result<Url> {
+        let mut url = self.0.clone();
+        url.path_segments_mut()
+            .map_err(|()| {
+                ironworks::Error::Invalid(
+                    ironworks::ErrorValue::Other("URL".to_string()),
+                    "path parsing error".to_string(),
+                )
+            })?
+            .push("file")
+            .extend(path.split('/'));
+        Ok(url)
+    }
+
     fn presence_url(&self, list_id: u64) -> anyhow::Result<Url> {
         let mut url = self.0.clone();
         url.path_segments_mut()
@@ -148,6 +167,10 @@ impl WebFileProvider {
     }
 }
 
+fn sliced(response: &HttpResponse) -> Option<&str> {
+    response.headers.get(SLICE)
+}
+
 fn stream(response: HttpResponse) -> (Option<String>, Vec<u8>) {
     let kind = response.headers.get(STREAM_KIND).map(str::to_owned);
     (kind, response.bytes)
@@ -156,19 +179,7 @@ fn stream(response: HttpResponse) -> (Option<String>, Vec<u8>) {
 #[async_trait(?Send)]
 impl FileProvider for WebFileProvider {
     async fn read_stream(&self, path: &str) -> anyhow::Result<(Option<String>, Vec<u8>)> {
-        let mut url = self.0.clone();
-
-        url.path_segments_mut()
-            .map_err(|()| {
-                ironworks::Error::Invalid(
-                    ironworks::ErrorValue::Other("URL".to_string()),
-                    "路径解析失败".to_string(),
-                )
-            })?
-            .push("file")
-            .extend(path.split('/'));
-
-        Ok(stream(fetch(url).await?))
+Ok(stream(fetch(self.file_url(path)?).await?))
     }
 
     async fn path_index(&self, api_base: &str) -> anyhow::Result<(Vec<u8>, Vec<u8>)> {
@@ -211,10 +222,73 @@ impl FileProvider for WebFileProvider {
         Ok(stream(fetch(url).await?))
     }
 
-    async fn get_icon(&self, icon_id: u32, hires: bool) -> anyhow::Result<Either<Url, RgbaImage>> {
-        let path = get_icon_path(icon_id, hires);
-        let url = get_xivapi_asset_url(&path, Some("png"));
-        Ok(Either::Left(url))
+    /// Only the mipmap the caller will draw at, cut server side so the levels above it cost
+    /// neither a transfer nor a request of their own.
+    async fn read_texture(
+        &self,
+        path: &str,
+        max_dim: Option<u16>,
+    ) -> anyhow::Result<DecodedTexture> {
+        let mut url = self.file_url(path)?;
+        if let Some(max_dim) = max_dim {
+            url.query_pairs_mut()
+                .append_pair("mip", &max_dim.to_string());
+        }
+        decode_texture(path, fetch(url).await?.bytes, max_dim).await
+    }
+
+    /// Only the detail level the scene will draw, with the head that names it and nothing of the
+    /// levels either side.
+    async fn read_model(&self, path: &str, lod: u8) -> anyhow::Result<(Vec<u8>, u8)> {
+        let mut url = self.file_url(path)?;
+        url.query_pairs_mut().append_pair("lod", &lod.to_string());
+        let held = fetch(url).await?;
+        let level = sliced(&held)
+            .and_then(|held| held.strip_prefix("lod=")?.parse().ok())
+            .or_else(|| Lods::read(&held.bytes).map(|lods| lods.level(lod)))
+            .unwrap_or(lod);
+        Ok((held.bytes, level))
+    }
+
+    /// The tables and the string block alone, with the bytecode left a hole for whatever a draw
+    /// turns out to select.
+    async fn read_package(&self, path: &str) -> anyhow::Result<(Vec<u8>, bool)> {
+        let mut url = self.file_url(path)?;
+        url.query_pairs_mut().append_pair("tables", "1");
+        let held = fetch(url).await?;
+        if sliced(&held) != Some("tables") {
+            return Ok((held.bytes, false));
+        }
+        // The hole is never sent, so it is opened here from the spans the tables state.
+        let Some(spans) = Spans::read(&held.bytes) else {
+            return Ok((held.bytes, false));
+        };
+        let mut bytes = held.bytes;
+        let strings = bytes.split_off(spans.blobs as usize);
+        bytes.resize(spans.strings as usize, 0);
+        bytes.extend(strings);
+        Ok(match bytes.len() == spans.size as usize {
+            true => (bytes, true),
+            false => (self.read(path).await?, false),
+        })
+    }
+
+    async fn read_span(&self, path: &str, span: std::ops::Range<u32>) -> anyhow::Result<Vec<u8>> {
+        let held = fetch_range(
+            self.file_url(path)?,
+            u64::from(span.start),
+            Some(u64::from(span.end) - 1),
+        )
+        .await?;
+        // A store that will not serve part of a file answers with the whole of it.
+        if held.status != 206 || held.bytes.len() != span.len() {
+            anyhow::bail!("{path} answered {} of {} bytes", held.bytes.len(), span.len());
+        }
+        Ok(held.bytes)
+    }
+
+    async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>> {
+        Ok(Either::Left(self.file_url(path)?))
     }
 
     async fn exists_many(&self, paths: &[String]) -> anyhow::Result<Vec<bool>> {

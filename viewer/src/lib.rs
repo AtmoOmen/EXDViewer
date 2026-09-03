@@ -26,27 +26,34 @@ mod app;
 mod assets;
 pub mod audio;
 mod backend;
+mod character;
 mod data;
 mod editable_schema;
 mod excel;
 mod github;
 mod goto;
+mod icons;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
 mod music;
 mod pr_window;
+pub mod quests;
+mod report;
 mod router;
 mod schema;
 mod settings;
 mod setup;
 mod sheet;
 mod shortcuts;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod smoke;
 pub mod stopwatch;
 #[cfg(not(target_arch = "wasm32"))]
 mod update_source;
-mod utils;
+pub mod utils;
 #[cfg(target_arch = "wasm32")]
 pub mod worker;
+mod zones;
 
 pub use app::App;
 use shadow_rs::shadow;
@@ -65,9 +72,11 @@ pub const IRONWORKS_URL: &str = "https://github.com/ackwell/ironworks";
 pub const EGUI_URL: &str = "https://github.com/emilk/egui";
 pub const EFRAME_URL: &str = "https://github.com/emilk/egui/tree/master/crates/eframe";
 pub const CREATE_PAT_URL: &str =
-    "https://github.com/settings/tokens/new?scopes=public_repo&description=EXDViewer";
+    "https://github.com/settings/tokens/new?scopes=public_repo&description=XIViewer";
 
-pub const DEFAULT_API_URL: &str = "https://exd.camora.dev/api";
+/// Still the old host: the new one has no router yet, and a build that names it first cannot load
+/// anything at all.
+pub const DEFAULT_API_URL: &str = "https://xiviewer.app/api";
 pub const DEFAULT_SCHEMA_URL: &str =
     "https://gh.atmoomen.top/raw.githubusercontent.com/xivdev/EXDSchema/refs/heads/latest";
 pub const DEFAULT_GITHUB_REPO: (&str, &str) = ("xivdev", "EXDSchema");

@@ -9,16 +9,50 @@ use egui::{
 use std::sync::Arc;
 
 use super::{Bytes, Channels, MAX_TEXT_PREVIEW};
+use crate::utils::export;
 
+pub mod atch;
+pub mod avfx;
+pub mod chara;
+pub mod cmp;
+pub mod cutb;
+pub mod dic;
+pub mod eid;
+pub mod eqdp;
+pub mod eqp;
+pub mod est;
+pub mod evp;
+pub mod exl;
 pub mod font;
+pub mod gmp;
+pub mod grass;
+pub mod hwc;
 pub mod icons;
+pub mod imc;
+pub mod layer;
+pub mod luab;
 pub mod material;
+pub mod mdl;
+pub mod pap;
+pub mod pbd;
+pub mod pcb;
+pub mod phyb;
+pub mod placed;
 pub mod png;
+pub mod scd;
 mod shader;
 pub mod shcd;
 pub mod shpk;
+pub mod skeleton;
+pub mod sklb;
+pub mod skp;
+pub mod spm;
+pub mod stm;
+pub mod tera;
 pub mod texture;
+pub mod tmb;
 pub mod uld;
+pub mod zone;
 
 /// Space kept around whatever a grid cell holds.
 const PADDING: f32 = 6.0;
@@ -70,15 +104,28 @@ fn missing(ui: &egui::Ui, rect: Rect) {
     );
 }
 
+/// Width held for a fact's label. Fixed rather than natural, so the grid's un-tracked label
+/// column can't push the value column - and the row with it - past whatever room the value's own
+/// wrap was given.
+const FACT_LABEL_WIDTH: f32 = 150.0;
+
 /// A table of label and value, which is most of what a details panel is.
 fn facts(ui: &mut egui::Ui, id: &str, rows: &[(&'static str, String)]) {
+    // A zero-height cell centers the label a half-line off the value's own centering.
+    let label_height = ui.text_style_height(&egui::TextStyle::Body);
     egui::Grid::new(id)
         .num_columns(2)
         .striped(true)
         .show(ui, |ui| {
             for (label, value) in rows {
-                ui.label(RichText::new(*label).weak());
-                ui.label(RichText::new(value).monospace());
+                ui.allocate_ui_with_layout(
+                    vec2(FACT_LABEL_WIDTH, label_height),
+                    Layout::left_to_right(Align::Center),
+                    |ui| ui.add(Label::new(RichText::new(*label).weak()).truncate()),
+                );
+                // Wrapped rather than run on: a grid's cell is as wide as it likes, and one long
+                // row would take the panel and the view beside it with it.
+                ui.add(Label::new(RichText::new(value).monospace()).wrap());
                 ui.allocate_space(vec2(ui.available_width(), 0.0));
                 ui.end_row();
             }
@@ -137,6 +184,86 @@ fn headers(ui: &mut egui::Ui, names: &[&str]) {
     ui.end_row();
 }
 
+/// One row of a monospace table, each cell padded to its column so the header above and every row
+/// below hold the same columns.
+fn line<'a>(columns: &[(&str, usize)], cells: impl IntoIterator<Item = &'a str>) -> String {
+    columns
+        .iter()
+        .zip(cells)
+        .map(|((_, width), cell)| format!("{cell:<width$}  "))
+        .collect()
+}
+
+/// Names the table's scroll area, so the header can be drawn at the offset it was left at. It is
+/// the same for every table, so two of them may not share one `Ui`.
+const TABLE: &str = "table_rows";
+
+/// Where [`table`] keeps its scroll offset. `ScrollArea` hashes the salt it was handed rather than
+/// the string behind it, so asking for the same id means salting it the same way first.
+fn table_id(ui: &egui::Ui) -> egui::Id {
+    ui.make_persistent_id(egui::IdSalt::new(TABLE))
+}
+
+/// A monospace table, virtualised by row for the formats whose row count is whatever the file
+/// holds. The rows scroll both ways, since a wide one runs past a narrow window, and the columns
+/// line up because the header and the rows are padded alike by [`line`].
+///
+/// The header stays above the scroll area rather than moving with the rows, so it is painted at
+/// the rows' own horizontal offset rather than laid out beside them.
+fn table(
+    ui: &mut egui::Ui,
+    columns: &[(&str, usize)],
+    count: usize,
+    mut row: impl FnMut(&mut egui::Ui, usize),
+) {
+    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+
+    let offset =
+        egui::scroll_area::State::load(ui.ctx(), table_id(ui)).map_or(0.0, |state| state.offset.x);
+    let color = ui.visuals().weak_text_color();
+    let header = ui.painter().layout_no_wrap(
+        line(columns, columns.iter().map(|(name, _)| *name)),
+        egui::TextStyle::Monospace.resolve(ui.style()),
+        color,
+    );
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), header.size().y),
+        Sense::hover(),
+    );
+    ui.painter()
+        .with_clip_rect(rect)
+        .galley(rect.min - egui::vec2(offset, 0.0), header, color);
+
+    // `show_rows` adds the spacing between rows itself, so what it wants is one row's own height.
+    let height = ui.text_style_height(&egui::TextStyle::Monospace);
+    ScrollArea::both()
+        .id_salt(TABLE)
+        .auto_shrink(false)
+        .show_rows(ui, height, count, |ui, shown| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            for index in shown {
+                row(ui, index);
+            }
+        });
+}
+
+/// Half-float colors are linear and can exceed 1.0, so they are tone-mapped rather than clamped;
+/// otherwise every bright row renders as flat white.
+/// Side of the square a color is drawn in.
+const CHIP: f32 = 10.0;
+
+/// One color, drawn beside the numbers it came from.
+fn chip(ui: &mut egui::Ui, color: Color32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::splat(CHIP), Sense::hover());
+    ui.painter().rect_filled(rect, 2.0, color);
+    response
+}
+
+fn swatch(color: [f32; 3]) -> Color32 {
+    let map = |v: f32| ((v / (1.0 + v)).clamp(0.0, 1.0) * 255.0) as u8;
+    Color32::from_rgb(map(color[0]), map(color[1]), map(color[2]))
+}
+
 /// A clickable id, with the hover and copy menu every crc-named value in the browser gets.
 fn hashed(ui: &mut egui::Ui, kind: &str, name: &str, id: u32, dim: bool) {
     labelled(ui, kind, name, name, id, dim);
@@ -156,9 +283,9 @@ fn labelled(ui: &mut egui::Ui, kind: &str, name: &str, shown: &str, id: u32, dim
     crate::assets::crc_context(&response, kind, name, id);
 }
 
-/// A path rendered as a link: hyperlink colour, pointer cursor, and the same hover and right-click
+/// A path rendered as a link: hyperlink color, pointer cursor, and the same hover and right-click
 /// menu every other path in the browser gets. Returns whether it was followed.
-fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
+pub(crate) fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
     let response = ui
         .add(
             egui::Label::new(
@@ -166,6 +293,7 @@ fn link(ui: &mut egui::Ui, text: &str, path: &str) -> bool {
                     .monospace()
                     .color(ui.visuals().hyperlink_color),
             )
+            .wrap()
             .sense(Sense::click()),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -189,16 +317,80 @@ pub enum Preview {
     },
     /// A parsed material, rendered as its own layout rather than a flat table.
     Material(Box<material::Rendered>),
+    /// A model, drawn.
+    Model(Box<mdl::Rendered>),
     /// A parsed UI layout.
     Uld(Box<uld::Rendered>),
     /// A parsed font.
     Font(Box<font::Rendered>),
     /// The parsed icon sheet.
     Icons(Box<icons::Rendered>),
+    /// A read Lua chunk.
+    Luab(Box<luab::Rendered>),
     /// A parsed shader package.
     Shpk(Box<shpk::Rendered>),
     /// A parsed shader.
     Shcd(Box<shcd::Rendered>),
+    /// A parsed image change file.
+    Imc(Box<imc::Rendered>),
+    /// A parsed attach point file.
+    Atch(Box<atch::Rendered>),
+    /// A parsed visual effect.
+    Avfx(Box<avfx::Rendered>),
+    /// A parsed bind point file.
+    Eid(Box<eid::Rendered>),
+    /// A parsed skeleton template file.
+    Est(Box<est::Rendered>),
+    /// A parsed sheet list.
+    Exl(Box<exl::Rendered>),
+    /// A parsed skeleton parameter file.
+    Skp(Box<skp::Rendered>),
+    /// A parsed terrain file.
+    Tera(Box<tera::Rendered>),
+    /// A parsed staining template file.
+    Stm(Box<stm::Rendered>),
+    /// A parsed timeline.
+    Tmb(Box<tmb::Rendered>),
+    /// A parsed animation pack.
+    Pap(Box<pap::Rendered>),
+    /// A parsed physics file.
+    Phyb(Box<phyb::Rendered>),
+    /// A parsed skeleton.
+    Sklb(Box<sklb::Rendered>),
+    /// A parsed set of deformer parameters.
+    Eqdp(Box<eqdp::Rendered>),
+    /// A parsed set of equipment parameters.
+    Eqp(Box<eqp::Rendered>),
+    /// A parsed set of gimmick parameters.
+    Gmp(Box<gmp::Rendered>),
+    /// A parsed set of equipment VFX parameters.
+    Evp(Box<evp::Rendered>),
+    /// A parsed layer group, from either of the two files that hold one.
+    Layers(Box<layer::Rendered>),
+    /// A parsed annotation of what a zone's layers placed.
+    Zone(Box<zone::instanced::Rendered>),
+    /// A parsed environment set.
+    Environments(Box<zone::envs::Rendered>),
+    /// A parsed ambient light file.
+    Ambient(Box<zone::amb::Rendered>),
+    /// A parsed shader parameter map.
+    Spm(Box<spm::Rendered>),
+    /// A parsed pre-bone deformer.
+    Pbd(Box<pbd::Rendered>),
+    /// A parsed collision file.
+    Pcb(Box<pcb::Rendered>),
+    /// A parsed character make parameter file.
+    Cmp(Box<cmp::Rendered>),
+    /// A parsed index of a zone's grass grids.
+    GrassZone(Box<grass::Zone>),
+    /// A parsed grass grid.
+    GrassGrid(Box<grass::Grid>),
+    /// A parsed word dictionary.
+    Dic(Box<dic::Rendered>),
+    /// A parsed cutscene.
+    Cutb(Box<cutb::Rendered>),
+    /// A parsed sound container.
+    Scd(Box<scd::Rendered>),
     /// Nothing to render; an empty message means the type simply has no viewer.
     Failed(String),
 }
@@ -219,11 +411,50 @@ impl Preview {
             Viewer::Image => png::decode(ctx, path, bytes, channels),
             Viewer::Texture => texture::decode(ctx, path, bytes, mip, channels),
             Viewer::Material => material::decode(path, bytes),
+            Viewer::Model => mdl::decode(path, bytes),
             Viewer::Uld => uld::decode(path, bytes),
             Viewer::Font => font::decode(path, bytes),
             Viewer::Icons => icons::decode(path, bytes),
+            Viewer::Luab => luab::decode(path, bytes),
             Viewer::Shpk => shpk::decode(path, bytes),
             Viewer::Shcd => shcd::decode(path, bytes),
+            Viewer::Imc => imc::decode(path, bytes),
+            Viewer::Atch => atch::decode(path, bytes),
+            Viewer::Avfx => avfx::decode(path, bytes),
+            Viewer::Eid => eid::decode(path, bytes),
+            Viewer::Est => est::decode(path, bytes),
+            Viewer::Exl => exl::decode(path, bytes),
+            Viewer::Skp => skp::decode(path, bytes),
+            Viewer::Tera => tera::decode(path, bytes),
+            Viewer::Stm => stm::decode(path, bytes),
+            Viewer::Tmb => tmb::decode(path, bytes),
+            Viewer::Pap => pap::decode(path, bytes),
+            Viewer::Phyb => phyb::decode(path, bytes),
+            Viewer::Sklb => sklb::decode(path, bytes),
+            Viewer::Eqdp => eqdp::decode(path, bytes),
+            Viewer::Eqp => eqp::decode(path, bytes),
+            Viewer::Gmp => gmp::decode(path, bytes),
+            Viewer::Evp => evp::decode(path, bytes),
+            Viewer::Hwc => hwc::decode(ctx, path, bytes, channels),
+            Viewer::Lgb => layer::lgb::decode(path, bytes),
+            Viewer::Sgb => layer::sgb::decode(path, bytes),
+            Viewer::Lvb => layer::lvb::decode(path, bytes),
+            Viewer::Svb => zone::instanced::sky_visibility(path, bytes),
+            Viewer::Lcb => zone::instanced::clip_boxes(path, bytes),
+            Viewer::Uwb => zone::instanced::underwater(path, bytes),
+            Viewer::Envb => zone::envs::environment(path, bytes),
+            Viewer::Obsb => zone::envs::object_behavior(path, bytes),
+            Viewer::Essb => zone::envs::sound(path, bytes),
+            Viewer::Amb => zone::amb::decode(path, bytes),
+            Viewer::Spm => spm::decode(path, bytes),
+            Viewer::Pbd => pbd::decode(path, bytes),
+            Viewer::Pcb => pcb::decode(path, bytes),
+            Viewer::Cmp => cmp::decode(path, bytes),
+            Viewer::Gzd => grass::zone(path, bytes),
+            Viewer::Ggd => grass::grid(path, bytes),
+            Viewer::Dic => dic::decode(path, bytes),
+            Viewer::Cutb => cutb::decode(path, bytes),
+            Viewer::Scd => scd::decode(path, bytes),
             Viewer::Raw => return Self::Failed(String::new()),
         };
         result.unwrap_or_else(|e| Self::Failed(e.to_string()))
@@ -263,13 +494,45 @@ impl Preview {
             Self::Material(material) => {
                 follow = material::ui(ui, material, deps, backend);
             }
+            Self::Model(model) => mdl::ui(ui, model, backend),
             Self::Uld(layout) => {
                 follow = uld::ui(ui, layout, deps, backend);
             }
             Self::Font(font) => font::ui(ui, font, deps, backend),
             Self::Icons(icons) => icons::ui(ui, icons, deps, backend),
+            Self::Luab(chunk) => luab::ui(ui, chunk),
             Self::Shpk(package) => shpk::ui(ui, package, bytes),
             Self::Shcd(code) => shcd::ui(ui, code, bytes),
+            Self::Imc(change) => imc::ui(ui, change),
+            Self::Atch(points) => atch::ui(ui, points),
+            Self::Avfx(effect) => follow = avfx::ui(ui, effect, backend),
+            Self::Eid(points) => follow = eid::ui(ui, points),
+            Self::Est(templates) => follow = est::ui(ui, templates),
+            Self::Exl(list) => follow = exl::ui(ui, list),
+            Self::Skp(parameters) => follow = skp::ui(ui, parameters),
+            Self::Tera(terrain) => follow = tera::ui(ui, terrain),
+            Self::Tmb(timeline) => follow = tmb::ui(ui, timeline),
+            Self::Pap(pack) => follow = pap::ui(ui, pack, backend),
+            Self::Phyb(physics) => phyb::ui(ui, physics),
+            Self::Sklb(skeleton) => sklb::ui(ui, skeleton),
+            Self::Eqdp(parameters) => eqdp::ui(ui, parameters),
+            Self::Eqp(parameters) => eqp::ui(ui, parameters),
+            Self::Gmp(parameters) => gmp::ui(ui, parameters),
+            Self::Evp(parameters) => evp::ui(ui, parameters),
+            Self::Layers(layers) => follow = layer::ui(ui, layers, deps, backend),
+            Self::Zone(annotations) => follow = zone::instanced::ui(ui, annotations),
+            Self::Environments(set) => follow = zone::envs::ui(ui, set, deps, backend),
+            Self::Ambient(light) => follow = zone::amb::ui(ui, light),
+            Self::Spm(parameters) => spm::ui(ui, parameters),
+            Self::Pbd(deformers) => pbd::ui(ui, deformers),
+            Self::Pcb(collision) => follow = pcb::ui(ui, collision, backend),
+            Self::Cmp(parameters) => cmp::ui(ui, parameters, deps, backend),
+            Self::GrassZone(zone) => follow = grass::zone_ui(ui, zone, deps, backend),
+            Self::GrassGrid(grid) => grass::grid_ui(ui, grid),
+            Self::Dic(dictionary) => dic::ui(ui, dictionary),
+            Self::Cutb(cutscene) => follow = cutb::ui(ui, cutscene, backend),
+            Self::Stm(templates) => stm::ui(ui, templates, deps, backend),
+            Self::Scd(container) => scd::ui(ui, container),
             Self::Failed(e) if e.is_empty() => {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new("此文件类型暂无查看器，请使用原始字节模式。").weak());
@@ -292,17 +555,22 @@ impl Preview {
                 depth,
                 ..
             } => {
-                // The whole volume is resident, so changing slice is a different uv rect rather
-                // than another decode and upload -- scrubbing costs nothing.
-                let depth = f32::from((*depth).max(1));
-                let top = f32::from(slice) / depth;
+                // The whole volume is resident as a grid of slices, so changing slice is only a
+                // different uv rect into the cell it landed in.
+                let (columns, rows) = crate::utils::tex_loader::grid_layout((*depth).max(1));
+                let (column, row) = (slice % columns, slice / columns);
+                let (columns, rows) = (f32::from(columns), f32::from(rows));
+                let (left, top) = (f32::from(column) / columns, f32::from(row) / rows);
                 let uv = egui::Rect::from_min_max(
-                    egui::pos2(0.0, top),
-                    egui::pos2(1.0, top + 1.0 / depth),
+                    egui::pos2(left, top),
+                    egui::pos2(left + 1.0 / columns, top + 1.0 / rows),
                 );
                 // `uv` only changes what is sampled; the widget still sizes itself from the whole
                 // texture unless the source size is stated as one slice.
-                let slice_size = egui::vec2(size[0] as f32, (size[1] as f32 / depth).max(1.0));
+                let slice_size = egui::vec2(
+                    (size[0] as f32 / columns).max(1.0),
+                    (size[1] as f32 / rows).max(1.0),
+                );
                 ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                     let align = if slice_size.x < ui.available_width() {
                         Align::Center
@@ -325,6 +593,29 @@ impl Preview {
         follow
     }
 
+    /// Export choices beyond the raw file, which the browser always offers on its own. `viewer` is
+    /// what tells apart the several formats that decode into the same [`Self::Image`] shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn export_choices<'a>(
+        &'a self,
+        viewer: Viewer,
+        path: &str,
+        bytes: &'a [u8],
+        mip: u8,
+        ctx: &egui::Context,
+    ) -> Vec<export::Choice<'a>> {
+        match self {
+            Self::Luab(chunk) => luab::export_choices(chunk),
+            Self::Shpk(package) => shpk::export_choices(package, bytes, ctx),
+            Self::Shcd(code) => shcd::export_choices(code, bytes),
+            Self::Image { .. } if viewer == Viewer::Hwc => hwc::export_choices(bytes),
+            Self::Image { .. } if viewer == Viewer::Texture => {
+                texture_export_choices(bytes, path, mip)
+            }
+            _ => Vec::new(),
+        }
+    }
+
     /// The info sidebar: property table, channel toggles, then the mipmap picker. Returns the new
     /// (level, channels) if either changed.
     /// Whether this preview has anything for the Details panel.
@@ -332,8 +623,43 @@ impl Preview {
         match self {
             Self::Image { .. } => true,
             Self::Material(material) => material.has_params(),
+            Self::Model(_) => true,
             Self::Uld(layout) => layout.has_details(),
-            Self::Font(_) | Self::Icons(_) | Self::Shpk(_) | Self::Shcd(_) => true,
+            Self::Font(_)
+            | Self::Icons(_)
+            | Self::Luab(_)
+            | Self::Shpk(_)
+            | Self::Shcd(_)
+            | Self::Imc(_)
+            | Self::Stm(_)
+            | Self::Atch(_)
+            | Self::Avfx(_)
+            | Self::Eid(_)
+            | Self::Est(_)
+            | Self::Exl(_)
+            | Self::Skp(_)
+            | Self::Tera(_)
+            | Self::Tmb(_)
+            | Self::Pap(_)
+            | Self::Phyb(_)
+            | Self::Sklb(_)
+            | Self::Eqdp(_)
+            | Self::Eqp(_)
+            | Self::Gmp(_)
+            | Self::Evp(_)
+            | Self::Layers(_)
+            | Self::Zone(_)
+            | Self::Environments(_)
+            | Self::Ambient(_)
+            | Self::Spm(_)
+            | Self::Pbd(_)
+            | Self::Pcb(_)
+            | Self::Cmp(_)
+            | Self::GrassZone(_)
+            | Self::GrassGrid(_)
+            | Self::Dic(_)
+            | Self::Cutb(_)
+            | Self::Scd(_) => true,
             _ => false,
         }
     }
@@ -352,6 +678,10 @@ impl Preview {
             material::details_ui(ui, material, follow);
             return None;
         }
+        if let Self::Model(model) = self {
+            model.details_ui(ui, follow);
+            return None;
+        }
         if let Self::Uld(layout) = self {
             uld::details_ui(ui, layout, deps, backend);
             return None;
@@ -364,12 +694,136 @@ impl Preview {
             icons.details_ui(ui, follow);
             return None;
         }
+        if let Self::Luab(chunk) = self {
+            chunk.details_ui(ui);
+            return None;
+        }
         if let Self::Shpk(package) = self {
             package.details_ui(ui);
             return None;
         }
         if let Self::Shcd(code) = self {
             code.details_ui(ui);
+            return None;
+        }
+        if let Self::Imc(change) = self {
+            change.details_ui(ui);
+            return None;
+        }
+        if let Self::Stm(templates) = self {
+            templates.details_ui(ui);
+            return None;
+        }
+        if let Self::Atch(points) = self {
+            points.details_ui(ui);
+            return None;
+        }
+        if let Self::Avfx(effect) = self {
+            effect.details_ui(ui, follow);
+            return None;
+        }
+        if let Self::Eid(points) = self {
+            points.details_ui(ui);
+            return None;
+        }
+        if let Self::Est(templates) = self {
+            templates.details_ui(ui);
+            return None;
+        }
+        if let Self::Exl(list) = self {
+            list.details_ui(ui);
+            return None;
+        }
+        if let Self::Skp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Tera(terrain) = self {
+            terrain.details_ui(ui);
+            return None;
+        }
+        if let Self::Tmb(timeline) = self {
+            timeline.details_ui(ui);
+            return None;
+        }
+        if let Self::Pap(pack) = self {
+            pack.details_ui(ui);
+            return None;
+        }
+        if let Self::Phyb(physics) = self {
+            physics.details_ui(ui);
+            return None;
+        }
+        if let Self::Sklb(skeleton) = self {
+            skeleton.details_ui(ui);
+            return None;
+        }
+        if let Self::Eqdp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Eqp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Gmp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Evp(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Layers(layers) = self {
+            layers.details_ui(ui, follow, deps, backend);
+            return None;
+        }
+        if let Self::Zone(annotations) = self {
+            annotations.details_ui(ui);
+            return None;
+        }
+        if let Self::Environments(set) = self {
+            set.details_ui(ui, follow);
+            return None;
+        }
+        if let Self::Ambient(light) = self {
+            light.details_ui(ui);
+            return None;
+        }
+        if let Self::Spm(parameters) = self {
+            parameters.details_ui(ui);
+            return None;
+        }
+        if let Self::Pbd(deformers) = self {
+            deformers.details_ui(ui);
+            return None;
+        }
+        if let Self::Pcb(collision) = self {
+            collision.details_ui(ui);
+            return None;
+        }
+        if let Self::Cmp(parameters) = self {
+            parameters.details_ui(ui, deps, backend);
+            return None;
+        }
+        if let Self::Dic(dictionary) = self {
+            dictionary.details_ui(ui);
+            return None;
+        }
+        if let Self::Cutb(cutscene) = self {
+            cutscene.details_ui(ui);
+            return None;
+        }
+        if let Self::Scd(container) = self {
+            container.details_ui(ui);
+            return None;
+        }
+        if let Self::GrassZone(zone) = self {
+            zone.details_ui(ui);
+            return None;
+        }
+        if let Self::GrassGrid(grid) = self {
+            grid.details_ui(ui);
             return None;
         }
         let Self::Image {
@@ -405,7 +859,7 @@ impl Preview {
                 ui.label(RichText::new("通道").weak());
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    // A single-component format is drawn as grey, so it has no toggles at all.
+                    // A single-component format is drawn as gray, so it has no toggles at all.
                     let offered: &mut [(&str, &mut bool)] = match components {
                         2 => &mut [("R", &mut channels.r), ("G", &mut channels.g)],
                         3 => &mut [
@@ -461,11 +915,50 @@ pub enum Viewer {
     Texture,
     Image,
     Material,
+    Model,
     Uld,
     Font,
     Icons,
+    Luab,
     Shpk,
     Shcd,
+    Imc,
+    Stm,
+    Atch,
+    Avfx,
+    Eid,
+    Est,
+    Exl,
+    Skp,
+    Tera,
+    Tmb,
+    Pap,
+    Phyb,
+    Sklb,
+    Eqdp,
+    Eqp,
+    Gmp,
+    Evp,
+    Hwc,
+    Lgb,
+    Sgb,
+    Lvb,
+    Svb,
+    Lcb,
+    Uwb,
+    Envb,
+    Obsb,
+    Essb,
+    Amb,
+    Spm,
+    Pbd,
+    Pcb,
+    Cmp,
+    Gzd,
+    Ggd,
+    Dic,
+    Cutb,
+    Scd,
     Text,
     Raw,
 }
@@ -473,47 +966,135 @@ pub enum Viewer {
 impl Viewer {
     /// Everything except `Raw`, which the dropdown offers separately. Fixed order, so a given
     /// viewer sits in the same place whatever file is selected.
-    pub const RENDERED: [Self; 9] = [
+    pub const RENDERED: [Self; 48] = [
         Self::Texture,
         Self::Image,
         Self::Material,
+        Self::Model,
         Self::Uld,
         Self::Font,
         Self::Icons,
+        Self::Luab,
         Self::Shpk,
         Self::Shcd,
+        Self::Imc,
+        Self::Stm,
+        Self::Atch,
+        Self::Avfx,
+        Self::Eid,
+        Self::Est,
+        Self::Exl,
+        Self::Skp,
+        Self::Tera,
+        Self::Tmb,
+        Self::Pap,
+        Self::Phyb,
+        Self::Sklb,
+        Self::Eqdp,
+        Self::Eqp,
+        Self::Gmp,
+        Self::Evp,
+        Self::Hwc,
+        Self::Lgb,
+        Self::Sgb,
+        Self::Lvb,
+        Self::Svb,
+        Self::Lcb,
+        Self::Uwb,
+        Self::Envb,
+        Self::Obsb,
+        Self::Essb,
+        Self::Amb,
+        Self::Spm,
+        Self::Pbd,
+        Self::Pcb,
+        Self::Cmp,
+        Self::Gzd,
+        Self::Ggd,
+        Self::Dic,
+        Self::Cutb,
+        Self::Scd,
         Self::Text,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Texture => "纹理",
+Self::Texture => "纹理",
             Self::Image => "图像",
             Self::Material => "材质",
+            Self::Model => "模型",
             Self::Uld => "布局",
             Self::Font => "字体",
             Self::Icons => "图标",
+            Self::Luab => "Lua",
             Self::Shpk => "着色器包",
             Self::Shcd => "着色器代码",
+            Self::Imc => "外貌变更",
+            Self::Stm => "染色模板",
+            Self::Atch => "附加点",
+            Self::Avfx => "视觉效果",
+            Self::Eid => "绑定点",
+            Self::Est => "骨架模板",
+            Self::Exl => "表列表",
+            Self::Skp => "骨架参数",
+            Self::Tera => "地形",
+            Self::Tmb => "时间轴",
+            Self::Pap => "动画",
+            Self::Phyb => "物理",
+            Self::Sklb => "骨骼",
+            Self::Eqdp => "变形参数",
+            Self::Eqp => "装备参数",
+            Self::Gmp => "机关参数",
+            Self::Evp => "装备特效参数",
+            Self::Hwc => "光标",
+            Self::Lgb => "图层组",
+            Self::Sgb => "共享组",
+            Self::Lvb => "关卡",
+            Self::Svb => "天空可见性",
+            Self::Lcb => "光照剔除",
+            Self::Uwb => "水下",
+            Self::Envb => "环境",
+            Self::Obsb => "物体行为",
+            Self::Essb => "环境声音",
+            Self::Amb => "环境光",
+            Self::Spm => "着色器参数",
+            Self::Pbd => "骨骼变形器",
+            Self::Pcb => "碰撞",
+            Self::Cmp => "角色外观",
+            Self::Gzd => "草地分区",
+            Self::Ggd => "草地网格",
+            Self::Dic => "词典",
+            Self::Cutb => "过场动画",
+            Self::Scd => "声音",
             Self::Text => "文本",
             Self::Raw => "原始字节",
         }
     }
 
+    /// The extensions this viewer reads.
+    pub fn extensions(self) -> impl Iterator<Item = &'static str> {
+        super::EXTENSIONS
+            .iter()
+            .filter(move |(_, _, viewer)| *viewer == self)
+            .map(|(extension, ..)| *extension)
+    }
+
+    /// The label with the extensions it reads, for the dropdown.
+    pub fn described(self) -> String {
+        let extensions = self.extensions().collect::<Vec<_>>();
+        match extensions.is_empty() {
+            true => self.label().to_owned(),
+            false => format!("{} ({})", self.label(), extensions.join(", ")),
+        }
+    }
+
     /// What a path's name says it holds. An unnamed file has nothing here to go on.
     pub fn from_extension(path: &str) -> Self {
-        match path.rsplit('.').next().unwrap_or_default() {
-            "tex" | "atex" => Self::Texture,
-            "png" => Self::Image,
-            "mtrl" => Self::Material,
-            "uld" => Self::Uld,
-            "fdt" => Self::Font,
-            "gfd" => Self::Icons,
-            "shpk" => Self::Shpk,
-            "shcd" => Self::Shcd,
-            "txt" | "csv" => Self::Text,
-            _ => Self::Raw,
-        }
+        let extension = path.rsplit('.').next().unwrap_or_default();
+        super::EXTENSIONS
+            .iter()
+            .find(|(name, ..)| *name == extension)
+            .map_or(Self::Raw, |(.., viewer)| *viewer)
     }
 }
 
@@ -525,7 +1106,40 @@ pub struct Mip {
     pub bytes: usize,
 }
 
+/// Beyond the raw file: an exact DDS container, and a lossless PNG (zipped, past one face, layer
+/// or slice) where the format has one. Decoded fresh at click time rather than kept: `Preview`
+/// only holds a `.tex`'s uploaded texture handle, not the container `dds`/`png` read from.
+fn texture_export_choices<'a>(bytes: &'a [u8], path: &str, mip: u8) -> Vec<export::Choice<'a>> {
+    use ironworks::file::{File as _, tex};
+
+    let path = path.to_owned();
+    vec![
+        export::Choice::bytes("DDS", "texture.dds", move || {
+            let texture = tex::Texture::read(std::io::Cursor::new(bytes.to_vec()))?;
+            crate::utils::dds(&texture)
+        })
+        .hover("文件的原始像素块，包含全部渐远层级，分毫不差")
+        .filter("DDS image", &["dds"]),
+        export::Choice::named_bytes("PNG", move || {
+            let texture = tex::Texture::read(std::io::Cursor::new(bytes.to_vec()))?;
+            let level = mip.min(texture.mip_levels().saturating_sub(1));
+            let images = crate::utils::png(&texture, level, &path)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{:?} has no lossless PNG form; use DDS instead",
+                    texture.format()
+                )
+            })?;
+            Ok((images.file_name("texture"), images.bytes()))
+        })
+        .hover(
+            "The mip level shown now; zipped when the texture has more than one face, layer or \
+             slice",
+        ),
+    ]
+}
+
 /// Build the image preview both the image and texture viewers end at.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn upload(
     ctx: &egui::Context,
     path: &str,
@@ -539,20 +1153,51 @@ pub(super) fn upload(
     let mut rgba = image.to_rgba8();
     channels.apply(&mut rgba);
     let size = [rgba.width() as usize, rgba.height() as usize];
-    let pixels = Arc::new(rgba);
+// Sized from the source rather than from what was uploaded, so a texture the renderer made us
+    // scale down still draws at the dimensions the file states.
+    let held = crate::utils::tex_loader::fit(ctx, &rgba);
     let texture = ctx.load_texture(
         format!("asset:{path}"),
-        egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_flat_samples().as_slice()),
+        egui::ColorImage::from_rgba_unmultiplied(
+            [held.width() as usize, held.height() as usize],
+            held.as_flat_samples().as_slice(),
+        ),
         // Nearest keeps a zoomed-in mipmap readable as actual texels rather than a blur.
         egui::TextureOptions::NEAREST,
     );
     Preview::Image {
         texture,
-        pixels,
+        pixels: Arc::new(rgba),
         size,
         depth,
         components,
         facts,
         mips,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TABLE, table, table_id};
+
+    /// The header is painted at the offset the rows were left at, which only works while the id it
+    /// reads is the one the scroll area wrote.
+    #[test]
+    fn the_header_reads_the_offset_the_rows_kept() {
+        let mut id = None;
+        egui::__run_test_ui(|ui| {
+            id = Some(table_id(ui));
+            table(ui, &[("Column", 8)], 4, |ui, index| {
+                ui.label(index.to_string());
+            });
+            assert!(
+                egui::scroll_area::State::load(ui.ctx(), id.unwrap()).is_some(),
+                "the table's scroll area is somewhere else"
+            );
+        });
+        // And the bare string is not it, which is what the salting is for.
+        egui::__run_test_ui(|ui| {
+            assert_ne!(ui.make_persistent_id(TABLE), id.unwrap());
+        });
     }
 }

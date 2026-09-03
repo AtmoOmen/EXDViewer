@@ -1,0 +1,379 @@
+//! What a worn piece does to the body under it, out of `equipmentparameter.eqp` and the gimmicks
+//! `gimmickparameter.gmp` states for the head.
+//!
+//! A set states, per slot, which of the body's own models still draw beneath it. That is what keeps
+//! a character's bare legs out of a full-length coat, and it is the file's answer rather than a
+//! depth bias: the two meshes are the same skin where a race's smallclothes are its own body.
+
+use std::collections::BTreeSet;
+
+use anyhow::Result;
+use ironworks::file::{File, eqp, gmp};
+
+use super::{Outfit, Slot};
+use crate::backend::Backend;
+
+pub const PATH: &str = "chara/xls/equipmentparameter/equipmentparameter.eqp";
+pub const GIMMICKS: &str = "chara/xls/equipmentparameter/gimmickparameter.gmp";
+
+/// The seams themselves, each named for the part of the body it sits at. Nearly every name
+/// belongs to one slot's models, so hiding it by name reaches only the model that owns it.
+const NECK: &str = "atr_nek";
+const UPPER_ARM: &str = "atr_ude";
+const FOREARM: &str = "atr_hij";
+const WAIST: &str = "atr_kod";
+const KNEE: &str = "atr_hiz";
+const CALF: &str = "atr_sne";
+const KNEE_PAD: &str = "atr_lpd";
+const CUFF: &str = "atr_arm";
+const SHAFT: &str = "atr_leg";
+const GORGET: &str = "atr_inr";
+/// A hair model's own parts, hidden by a head set's hair-hiding kind rather than by a seam.
+const HAIR_KAM: &str = "atr_kam";
+const HAIR_BAK: &str = "atr_bak";
+const HAIR_STA: &str = "atr_sta";
+
+/// The files, read once and asked about a set at a time.
+pub struct Worn(eqp::EquipmentParameter, gmp::GimmickParameter);
+
+impl Worn {
+    pub async fn read(backend: &Backend) -> Result<Self> {
+        let bytes = backend.files().read(PATH).await?;
+        let gimmicks = backend.files().read(GIMMICKS).await?;
+        Ok(Self(
+            eqp::EquipmentParameter::read(std::io::Cursor::new(bytes))?,
+            gmp::GimmickParameter::read(std::io::Cursor::new(gimmicks))?,
+        ))
+    }
+
+    /// Whether a head set has a visor to raise at all.
+    pub fn visored(&self, set: u16) -> bool {
+        set != 0 && self.1.set(set).enabled()
+    }
+
+    /// How far a raised visor turns, in radians, one angle per bone it hinges on. The set states
+    /// them in whole degrees, and a visor left down is the pose the model is stored in.
+    pub fn visor(&self, set: u16) -> [f32; 3] {
+        match self.visored(set) {
+            true => self.1.set(set).rotation().map(|held| f32::from(held).to_radians()),
+            false => [0.0; 3],
+        }
+    }
+
+    /// Whether the model for one slot still draws under a piece worn in another: the body's own
+    /// where the slot is gear, and the adornment itself where it is not, since nothing stands in
+    /// for a ring. A set the file leaves disabled says nothing, so both draw as they would bare.
+    ///
+    /// Which earrings a helmet leaves on is stated per race rather than once, ears being where the
+    /// races differ most: a hat that clears a Hyur's ear sits over a Miqo'te's.
+    pub fn shows(&self, worn: Slot, set: u16, under: Slot, race: u32) -> bool {
+        let held = self.0.set(set);
+        match worn {
+            Slot::Head => {
+                let head = held.head();
+                match (head.enabled(), under) {
+                    (false, _) => true,
+                    (_, Slot::Neck) => head.show_necklace(),
+                    (_, Slot::Ears) => match race {
+                        2 | 3 => head.show_earrings_elezen_lalafell(),
+                        4 | 7 | 8 => head.show_earrings_miqote_hrothgar_viera(),
+                        6 => head.show_earrings_au_ra(),
+                        _ => head.show_earrings_hyur_roegadyn(),
+                    },
+                    _ => true,
+                }
+            }
+            Slot::Body => {
+                let body = held.body();
+                match (body.enabled(), under) {
+                    (false, _) => true,
+                    (_, Slot::Legs) => body.show_legs(),
+                    (_, Slot::Hands) => body.show_hands(),
+                    (_, Slot::Head) => body.show_head(),
+                    (_, Slot::Neck) => body.show_necklace(),
+                    (_, Slot::Wrists) => body.show_bracelets(),
+                    _ => true,
+                }
+            }
+            Slot::Hands => {
+                let hands = held.hands();
+                match (hands.enabled(), under) {
+                    (false, _) => true,
+                    (_, Slot::Wrists) => hands.show_bracelets(),
+                    (_, Slot::RingLeft) => hands.show_ring_left(),
+                    (_, Slot::RingRight) => hands.show_ring_right(),
+                    _ => true,
+                }
+            }
+            Slot::Legs => {
+                let legs = held.legs();
+                match (legs.enabled(), under) {
+                    (false, _) => true,
+                    (_, Slot::Feet) => legs.show_feet(),
+                    _ => true,
+                }
+            }
+            _ => true,
+        }
+    }
+
+    /// The parts the outfit covers on the models under it, by the name those models file them
+    /// under. Each is a seam: two pieces reach over the same stretch of body and the geometry of
+    /// one would poke through the other, so the file states which to leave undrawn rather than the
+    /// two being told apart by depth.
+    ///
+    /// A sleeve and a cuff, or a hem and a boot shaft, both claim the same stretch. Which of them
+    /// gives up its own seam is the reach each states rather than either one always winning, so
+    /// the pair is read together and a piece still on its way states nothing.
+    pub fn covers(&self, outfit: &Outfit, race: u32) -> BTreeSet<&'static str> {
+        // Smallclothes have no entry of their own, entry nought being the file's own control word,
+        // and reach over nothing: taking the next set's leaves a bare leg with its knee cut out.
+        let stated = |slot: Slot| {
+            outfit[slot as usize]
+                .map(|gear| gear.set)
+                .filter(|set| *set != 0)
+                .map(|set| self.0.set(set))
+        };
+        let body = stated(Slot::Body);
+        let legs = stated(Slot::Legs);
+        let hands = stated(Slot::Hands);
+        let feet = stated(Slot::Feet);
+        let head = stated(Slot::Head);
+        let sleeve = body.as_ref().map_or(0, |held| held.body().sleeve_reach());
+        let cuff = hands.as_ref().map_or(0, |held| held.hands().cuff_reach());
+        let hem = legs.as_ref().map_or(0, |held| held.legs().hem_reach());
+        let shaft = feet.as_ref().map_or(0, |held| held.feet().shaft_reach());
+
+        let mut found = BTreeSet::new();
+        if let Some(body) = body.as_ref().map(eqp::Set::body).filter(eqp::Body::enabled) {
+            // Both bits sit at the waistband, one for a garment that reaches the waist and one for
+            // a coat that goes on past the knee and takes the pad with it.
+            if body.hide_waist() || body.hide_thighs() {
+                found.insert(WAIST);
+            }
+            if body.hide_thighs() && !body.hide_waist() {
+                found.insert(KNEE_PAD);
+            }
+            if body.hide_gorget() {
+                found.insert(GORGET);
+            }
+            if sleeve > cuff {
+                found.insert(CUFF);
+            }
+        }
+        if let Some(hands) = hands.as_ref().map(eqp::Set::hands).filter(eqp::Hands::enabled)
+            && sleeve <= cuff
+            && hands.hide_forearm()
+        {
+            // The two bits are one reach rather than two seams: a glove ends at the wrist, the
+            // forearm, the elbow or the upper arm, and only the last two reach over anything.
+            found.insert(FOREARM);
+            if hands.hide_elbow() {
+                found.insert(UPPER_ARM);
+            }
+        }
+        if let Some(legs) = legs.as_ref().map(eqp::Set::legs).filter(eqp::Legs::enabled) {
+            if legs.hide_knee_pads() {
+                found.insert(KNEE_PAD);
+            }
+            if hem > shaft {
+                found.insert(SHAFT);
+                found.insert(KNEE_PAD);
+            }
+        }
+        if let Some(feet) = feet.as_ref().map(eqp::Set::feet).filter(eqp::Feet::enabled)
+            && hem <= shaft
+            && feet.hide_calf()
+        {
+            // A reach again: a boot ends at the ankle, the calf or the knee, and the shoe that
+            // ends below the calf covers neither.
+            found.insert(CALF);
+            if feet.hide_knee() {
+                found.insert(KNEE);
+            }
+        }
+        // A helmet takes the collar off what is under it, unless the piece there states a gorget
+        // of its own, which is the helmet's own neck piece rather than the collar.
+        if let Some(head) = head.as_ref().map(eqp::Set::head).filter(eqp::Head::enabled)
+            && head.hide_neck()
+            && !body.as_ref().is_some_and(|held| held.body().hide_gorget())
+        {
+            found.insert(NECK);
+        }
+        if let Some(head) = head.as_ref().map(eqp::Set::head)
+            && let Hair::Trimmed(names) = Self::hair(&head, race)
+        {
+            found.extend(names.iter().copied());
+        }
+        found
+    }
+
+    /// Whether a hat leaves the hair on at all.
+    pub fn keeps_hair(&self, set: u16, race: u32) -> bool {
+        !matches!(Self::hair(&self.0.set(set).head(), race), Hair::Hidden)
+    }
+
+    /// What a head set does to the hair under it. `hide_scalp`, `hide_hair` and
+    /// `show_hair_override` are `ironworks`' names for bits 1..3 of the file's own head word, but
+    /// the client reads the three together as one number rather than as three flags of their own.
+    fn hair(head: &eqp::Head, race: u32) -> Hair {
+        if !head.enabled() {
+            return Hair::Shown;
+        }
+        // A hat that does not itself say it fits a Hrothgar or a Viera leaves their hair alone
+        // rather than applying a kind measured off other races' heads.
+        let exempt = match race {
+            7 => !head.show_on_hrothgar(),
+            8 => !head.show_on_viera(),
+            _ => false,
+        };
+        if exempt {
+            return Hair::Shown;
+        }
+        let kind = u8::from(head.hide_scalp())
+            | u8::from(head.hide_hair()) << 1
+            | u8::from(head.show_hair_override()) << 2;
+        match (kind, race) {
+            (1, _) => Hair::Trimmed(&[HAIR_KAM]),
+            // A Miqo'te keeps its hair where every other race loses it outright, trimmed instead
+            // of the ear tuft the hair model carries under the same name as the kam it also loses.
+            (2 | 4, 4) => Hair::Trimmed(&[HAIR_KAM, HAIR_STA]),
+            (2 | 4, _) | (3, _) => Hair::Hidden,
+            (5, 7 | 8) => Hair::Shown,
+            (5, _) => Hair::Trimmed(&[HAIR_KAM]),
+            (6, _) => Hair::Trimmed(&[HAIR_KAM, HAIR_BAK]),
+            _ => Hair::Shown,
+        }
+    }
+}
+
+/// What a head set does to the hair under it.
+enum Hair {
+    Shown,
+    Hidden,
+    Trimmed(&'static [&'static str]),
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use ironworks::file::{File, eqp, gmp};
+
+    use super::*;
+    use crate::character::Gear;
+
+    /// A single-block .eqp/.gmp file holding one entry at set 1, the same shape `eqp`'s and `gmp`'s
+    /// own fixtures use.
+    fn block(entry: u64) -> Vec<u8> {
+        let mut entries = vec![0u64; 160];
+        entries[0] = 1;
+        entries[1] = entry;
+        entries
+            .iter()
+            .flat_map(|entry| entry.to_le_bytes())
+            .collect()
+    }
+
+    fn worn(head: u64) -> Worn {
+        Worn(
+            eqp::EquipmentParameter::read(Cursor::new(block(head))).unwrap(),
+            gmp::GimmickParameter::read(Cursor::new(block(0))).unwrap(),
+        )
+    }
+
+    /// The head word sits at bit 40 of a set's entry, after body, legs, hands and feet.
+    const fn head_bit(bit: u32) -> u64 {
+        1 << (40 + bit)
+    }
+
+    const ENABLED: u64 = 0; // hide_scalp/hide_hair/show_hair_override are bits 1..3
+    const HIDE_SCALP: u32 = 1;
+    const HIDE_HAIR: u32 = 2;
+    const SHOW_OVERRIDE: u32 = 3;
+    const SHOW_ON_HROTHGAR: u32 = 16;
+    const SHOW_ON_VIERA: u32 = 17;
+
+    fn head(bits: &[u32]) -> u64 {
+        bits.iter()
+            .fold(head_bit(ENABLED as u32), |held, bit| held | head_bit(*bit))
+    }
+
+    fn wearing_head(worn: &Worn, race: u32) -> BTreeSet<&'static str> {
+        let mut outfit = Outfit::default();
+        outfit[Slot::Head as usize] = Some(Gear { set: 1, variant: 1 });
+        worn.covers(&outfit, race)
+    }
+
+    #[test]
+    fn kind_zero_leaves_the_hair_alone() {
+        let worn = worn(head(&[]));
+        assert!(worn.keeps_hair(1, 1));
+        assert!(!wearing_head(&worn, 1).contains(HAIR_KAM));
+    }
+
+    #[test]
+    fn kind_one_trims_the_kam() {
+        let worn = worn(head(&[HIDE_SCALP]));
+        assert!(worn.keeps_hair(1, 1));
+        assert_eq!(wearing_head(&worn, 1), BTreeSet::from([HAIR_KAM]));
+    }
+
+    #[test]
+    fn kind_two_hides_the_hair_except_on_miqote() {
+        let worn = worn(head(&[HIDE_HAIR]));
+        assert!(!worn.keeps_hair(1, 1));
+        assert!(worn.keeps_hair(1, 4));
+        assert_eq!(wearing_head(&worn, 4), BTreeSet::from([HAIR_KAM, HAIR_STA]));
+    }
+
+    #[test]
+    fn kind_four_reads_the_same_as_kind_two() {
+        let worn = worn(head(&[SHOW_OVERRIDE]));
+        assert!(!worn.keeps_hair(1, 1));
+        assert!(worn.keeps_hair(1, 4));
+    }
+
+    #[test]
+    fn kind_three_hides_the_hair_on_every_race() {
+        let worn = worn(head(&[HIDE_SCALP, HIDE_HAIR]));
+        assert!(!worn.keeps_hair(1, 1));
+        assert!(!worn.keeps_hair(1, 4));
+    }
+
+    #[test]
+    fn kind_five_is_a_hat_that_does_not_fit_hrothgar_or_viera() {
+        let worn = worn(head(&[HIDE_SCALP, SHOW_OVERRIDE]));
+        assert!(worn.keeps_hair(1, 7));
+        assert!(wearing_head(&worn, 7).is_empty());
+        assert_eq!(wearing_head(&worn, 1), BTreeSet::from([HAIR_KAM]));
+    }
+
+    #[test]
+    fn kind_six_trims_the_kam_and_the_bak() {
+        let worn = worn(head(&[HIDE_HAIR, SHOW_OVERRIDE]));
+        assert!(worn.keeps_hair(1, 1));
+        assert_eq!(wearing_head(&worn, 1), BTreeSet::from([HAIR_KAM, HAIR_BAK]));
+    }
+
+    #[test]
+    fn a_hat_stated_for_neither_leaves_hrothgar_and_viera_alone() {
+        let worn = worn(head(&[HIDE_HAIR])); // kind 2, hides hair on every other race
+        assert!(worn.keeps_hair(1, 7));
+        assert!(worn.keeps_hair(1, 8));
+    }
+
+    #[test]
+    fn a_hat_stated_for_hrothgar_applies_its_kind() {
+        let worn = worn(head(&[HIDE_HAIR, SHOW_ON_HROTHGAR]));
+        assert!(!worn.keeps_hair(1, 7));
+        assert!(worn.keeps_hair(1, 8));
+    }
+
+    #[test]
+    fn a_hat_stated_for_viera_applies_its_kind() {
+        let worn = worn(head(&[HIDE_HAIR, SHOW_ON_VIERA]));
+        assert!(!worn.keeps_hair(1, 8));
+        assert!(worn.keeps_hair(1, 7));
+    }
+}

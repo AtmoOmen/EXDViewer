@@ -58,7 +58,12 @@ impl FilterCache {
     ) -> anyhow::Result<CompiledFilterInput> {
         let generation = self.generation.get();
         if input.is_empty() {
-            return Ok(CompiledFilterInput::new(None, options, generation));
+            return Ok(CompiledFilterInput::new(
+                None,
+                input.clone(),
+                options,
+                generation,
+            ));
         }
         let data = match input {
             FilterInput::Equals(s) => self.compile_equals(s),
@@ -66,7 +71,12 @@ impl FilterCache {
             FilterInput::Complex(f) => self.compile_complex(f)?,
         };
 
-        Ok(CompiledFilterInput::new(Some(data), options, generation))
+        Ok(CompiledFilterInput::new(
+            Some(data),
+            input.clone(),
+            options,
+            generation,
+        ))
     }
 
     pub fn invalidate_cache(&self, ctx: &TableContext) -> anyhow::Result<()> {
@@ -274,5 +284,111 @@ mod tests {
                 CompactString::const_new("Bronze Sword")
             ]
         );
+    }
+
+    use std::{io::Cursor, str::FromStr};
+
+    use binrw::BinRead;
+    use ironworks::file::exh::ColumnDefinition;
+
+    use super::*;
+    use crate::schema::{Field, Schema};
+
+    fn column_def(offset: u16) -> ColumnDefinition {
+        let mut bytes = [0u8; 4];
+        bytes[2..].copy_from_slice(&offset.to_be_bytes());
+        ColumnDefinition::read_be(&mut Cursor::new(bytes)).unwrap()
+    }
+
+    fn make_cache(names: &[&str]) -> FilterCache {
+        let schema = Schema {
+            name: "Test".into(),
+            fields: names
+                .iter()
+                .map(|name| Field {
+                    name: Some(name.to_string()),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let (schema_columns, _) = SchemaColumn::from_schema(&schema).unwrap();
+        let sheet_columns = (0..names.len() as u16)
+            .map(|i| SheetColumnDefinition {
+                column: column_def(i * 4),
+                id: i as u32,
+            })
+            .collect_vec();
+        FilterCache::new(&schema_columns, &sheet_columns)
+    }
+
+    #[test]
+    fn different_columns_do_not_collide() {
+        let cache = make_cache(&["Name", "Description"]);
+        let options = MatchOptions {
+            case_insensitive: false,
+            use_display_field: false,
+        };
+
+        let name_input = FilterInput::Complex(ComplexFilter::from_str("Name = foo").unwrap());
+        let desc_input =
+            FilterInput::Complex(ComplexFilter::from_str("Description = foo").unwrap());
+
+        let name_compiled = cache.compile(&name_input, options).unwrap();
+        let desc_compiled = cache.compile(&desc_input, options).unwrap();
+
+        assert_ne!(name_compiled, desc_compiled);
+    }
+
+    #[test]
+    fn is_strict_is_part_of_identity() {
+        let cache = make_cache(&["Name"]);
+        let options = MatchOptions {
+            case_insensitive: false,
+            use_display_field: false,
+        };
+
+        let loose = FilterInput::Complex(ComplexFilter::from_str("Name = foo").unwrap());
+        let strict = FilterInput::Complex(ComplexFilter::from_str("Name == foo").unwrap());
+
+        let loose_compiled = cache.compile(&loose, options).unwrap();
+        let strict_compiled = cache.compile(&strict, options).unwrap();
+
+        assert_ne!(loose_compiled, strict_compiled);
+    }
+
+    #[test]
+    fn regex_flags_are_part_of_identity() {
+        let cache = make_cache(&["Name"]);
+        let options = MatchOptions {
+            case_insensitive: false,
+            use_display_field: false,
+        };
+
+        let bare = FilterInput::Complex(ComplexFilter::from_str("Name /= /foo/").unwrap());
+        let case_insensitive =
+            FilterInput::Complex(ComplexFilter::from_str("Name /= /foo/i").unwrap());
+
+        let bare_compiled = cache.compile(&bare, options).unwrap();
+        let case_insensitive_compiled = cache.compile(&case_insensitive, options).unwrap();
+
+        assert_ne!(bare_compiled, case_insensitive_compiled);
+    }
+
+    #[test]
+    fn regex_literal_and_quoted_pattern_do_not_collide() {
+        let cache = make_cache(&["Name"]);
+        let options = MatchOptions {
+            case_insensitive: false,
+            use_display_field: false,
+        };
+
+        let literal = FilterInput::Complex(ComplexFilter::from_str("Name /= /foo/").unwrap());
+        let quoted = FilterInput::Complex(ComplexFilter::from_str(r#"Name /= "/foo/""#).unwrap());
+
+        let literal_compiled = cache.compile(&literal, options).unwrap();
+        let quoted_compiled = cache.compile(&quoted, options).unwrap();
+
+        assert_ne!(literal_compiled, quoted_compiled);
     }
 }

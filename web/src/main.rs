@@ -4,6 +4,7 @@ mod data;
 mod paths;
 mod queue;
 mod routes;
+mod slice;
 mod smart_bufreader;
 
 use ::config::{Config, Environment, File, FileFormat};
@@ -21,7 +22,11 @@ use shadow_rs::shadow;
 use std::{io, sync::Arc};
 use thiserror::Error;
 
-use crate::{paths::PathIndex, queue::MessageQueue, routes::api::STREAM_KIND};
+use crate::{
+    paths::{PathIndex, report::Collector},
+    queue::MessageQueue,
+    routes::api::{SLICE, STREAM_KIND},
+};
 
 shadow!(build);
 
@@ -86,7 +91,10 @@ async fn main() -> Result<(), ServerError> {
         })?;
     let server_config = config.clone();
     let path_index = Arc::new(PathIndex::new(config.path_list.clone()));
+    let collector = Data::new(Collector::new(path_index.clone(), config.report.clone()));
     let server_game_data = MessageQueue::new(game_data.clone(), path_index, config.api_workers)?;
+
+    routes::github::prewarm();
 
     log::info!("Binding to {}", config.server_addr);
     let server = HttpServer::new(move || {
@@ -103,7 +111,7 @@ async fn main() -> Result<(), ServerError> {
                     .allowed_origin_fn(|origin, _req_head| origin.to_str().is_ok_and(is_dev_origin))
                     .allowed_methods(vec!["GET", "POST"])
                     .allowed_headers(vec!["Content-Type"])
-                    .expose_headers(vec![STREAM_KIND]),
+                    .expose_headers(vec![SLICE, STREAM_KIND]),
             )
             .wrap(NormalizePath::new(TrailingSlash::Always))
             .wrap(Condition::new(
@@ -118,6 +126,7 @@ async fn main() -> Result<(), ServerError> {
             )
             .app_data(Data::new(server_config.clone()))
             .app_data(Data::new(server_game_data.clone()))
+            .app_data(collector.clone())
             .service(routes::api::service())
             .service(routes::assets::service())
     })
@@ -202,7 +211,7 @@ mod tests {
         assert!(is_dev_origin("http://127.0.0.1:3000"));
         assert!(is_dev_origin("http://10.0.0.5:3000"));
         assert!(is_dev_origin("https://172.20.1.1"));
-        assert!(!is_dev_origin("https://exd.camora.dev")); // same-origin, no CORS needed
+        assert!(!is_dev_origin("https://xiviewer.app")); // same-origin, no CORS needed
         assert!(!is_dev_origin("https://8.8.8.8"));
         assert!(!is_dev_origin("https://172.32.0.1")); // outside 172.16-31 private range
         assert!(!is_dev_origin("https://evil.com:8080"));

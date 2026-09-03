@@ -1,6 +1,6 @@
 use egui::{
-    Align, Color32, ColorImage, CursorIcon, Id, InnerResponse, Label, Layout, Margin, Modal,
-    RichText, Sense, Spinner, UiBuilder,
+    Align, Color32, CursorIcon, Id, InnerResponse, Label, Layout, Margin, RichText, Sense,
+    UiBuilder,
 };
 use egui_table::TableDelegate;
 use itertools::Itertools;
@@ -17,18 +17,19 @@ use std::{
 use web_time::{Duration, Instant};
 
 use crate::{
+    data::get_icon_path,
     excel::provider::{ExcelHeader, ExcelProvider, ExcelRow, ExcelSheet},
     settings::{SHEET_FILTER_OPTIONS, SHEET_FILTERS, SORTED_BY_OFFSET, TEMP_HIGHLIGHTED_ROW},
     sheet::{
-        ComplexFilter, FilterInput, FilterInputType, filter::CompiledFilterInput,
-        should_ignore_clicks,
+        ComplexFilter, FilterInput, FilterInputType, event_icon_type, filter::CompiledFilterInput,
+        schema_column::SchemaColumnMeta, should_ignore_clicks,
     },
     stopwatch::stopwatches::{
         FILTER_CELL_CREATE_STOPWATCH, FILTER_CELL_GRAB_STOPWATCH, FILTER_CELL_ITER_STOPWATCH,
         FILTER_CELL_READ_STOPWATCH, FILTER_KEY_STOPWATCH, FILTER_MATCH_STOPWATCH,
         FILTER_ROW_STOPWATCH, FILTER_TOTAL_STOPWATCH,
     },
-    utils::{ManagedIcon, PromiseKind, TrackedPromise, tex_loader, yield_to_ui},
+utils::{PromiseKind, TrackedPromise, icon_modal, yield_to_ui},
 };
 
 use super::{cell::CellResponse, table_context::TableContext};
@@ -59,7 +60,8 @@ pub struct SheetTable {
     row_sizes: Vec<f32>,
 
     modal_image: Option<u32>,
-    image_export: Option<TrackedPromise<()>>,
+    /// A copy-to-clipboard or PNG export fetch in flight for `modal_image`'s icon.
+    modal_export: Option<TrackedPromise<()>>,
 
     clicked_cell: Option<CellResponse>,
     go_to_row_requested: bool,
@@ -98,7 +100,7 @@ impl SheetTable {
             subrow_lookup,
             row_sizes: Vec::with_capacity(subrow_count),
             modal_image: None,
-            image_export: None,
+            modal_export: None,
             clicked_cell: None,
             go_to_row_requested: false,
             filtered_rows,
@@ -172,112 +174,27 @@ impl SheetTable {
             table.show(ui, self);
         });
 
-        self.image_export
-            .take_if(|promise| promise.try_get().is_some());
-        let exporting_image = self.image_export.is_some();
-        let mut copy_image = None;
-        let mut export_image = None;
-        if let Some(icon_id) = &self.modal_image {
-            let icon_id = *icon_id;
-            let resp = Modal::new(Id::new("icon-modal"))
-                .area(Modal::default_area(Id::new(format!(
-                    "icon-modal-{icon_id}"
-                ))))
-                .show(ui.ctx(), |ui| {
-                    let (excel, icon_mgr) = (
-                        self.context.global().backend().excel().clone(),
-                        &self.context.global().icon_manager(),
-                    );
-                    let resp = icon_mgr.get_or_insert_icon(icon_id, true, ui.ctx(), move || {
-                        log::debug!("Hires icon not found in cache: {icon_id}");
-                        TrackedPromise::spawn_local(async move {
-                            let icon = excel.get_icon(icon_id, true).await?;
-                            crate::data::resolve_icon(icon).await
-                        })
-                    });
-                    match resp {
-                        ManagedIcon::Loaded { source, image } => {
-                            ui.horizontal(|ui| {
-                                if ui.button("复制图片").clicked() {
-                                    copy_image = Some(image.clone());
-                                }
-                                if ui
-                                    .add_enabled(!exporting_image, egui::Button::new("导出 PNG"))
-                                    .clicked()
-                                {
-                                    export_image = Some((icon_id, image.clone()));
-                                }
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} × {}",
-                                        image.width(),
-                                        image.height()
-                                    ))
-                                    .weak(),
-                                );
-                            });
-                            ui.add(
-                                egui::Image::new(source)
-                                    .maintain_aspect_ratio(true)
-                                    .fit_to_exact_size(ui.available_size()),
-                            )
-                        }
-                        ManagedIcon::Failed(e) => {
-                            ui.label("加载图标失败").on_hover_text(e.to_string())
-                        }
-                        ManagedIcon::Loading => {
-                            let (rect, _) =
-                                ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
-                            ui.scope_builder(
-                                UiBuilder::new()
-                                    .max_rect(rect)
-                                    .layout(Layout::centered_and_justified(ui.layout().main_dir())),
-                                |ui| {
-                                    ui.add(Spinner::new().size(
-                                        ui.text_style_height(&egui::TextStyle::Heading) * 3.0,
-                                    ))
-                                },
-                            )
-                            .inner
-                        }
-                        ManagedIcon::NotLoaded => ui.label("图标未加载"),
-                    }
-                });
-            if resp.should_close() {
+if let Some(icon_id) = self.modal_image {
+            let global = self.context.global();
+            let (excel, icon_mgr) = (global.backend().excel().clone(), global.icon_manager());
+            let path = get_icon_path(global.backend().icons(), icon_id, true, global.language());
+            let icon = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
+                log::debug!("Hires icon not found in cache: {icon_id}");
+                let excel = excel.clone();
+                let path = path.clone();
+                TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
+            });
+            if icon_modal(
+                ui.ctx(),
+                icon_id,
+                icon,
+                &mut self.modal_export,
+                excel,
+                global.backend().files().clone(),
+                &path,
+            ) {
                 self.modal_image = None;
             }
-        }
-
-        if let Some(image) = copy_image {
-            ui.ctx().copy_image(ColorImage::from_rgba_unmultiplied(
-                [image.width() as usize, image.height() as usize],
-                image.as_raw(),
-            ));
-        }
-        if let Some((icon_id, image)) = export_image {
-            self.image_export = Some(TrackedPromise::spawn_local(async move {
-                let data = match tex_loader::write(image.as_ref().clone(), image::ImageFormat::Png)
-                {
-                    Ok(data) => data,
-                    Err(error) => {
-                        log::error!("PNG 编码失败: {error}");
-                        return;
-                    }
-                };
-                if let Some(file) = rfd::AsyncFileDialog::new()
-                    .set_title("导出图片")
-                    .set_file_name(format!("{icon_id}.png"))
-                    .add_filter("PNG 图片", &["png"])
-                    .save_file()
-                    .await
-                {
-                    if let Err(error) = file.write(&data).await {
-                        log::error!("写入图片失败: {error}");
-                    } else {
-                        log::info!("图片导出成功");
-                    }
-                }
-            }));
         }
 
         let clicked_cell = self.clicked_cell.take().unwrap_or_default();
@@ -839,16 +756,41 @@ impl TableDelegate for SheetTable {
             .inner_margin(Margin::symmetric(4, 2))
             .show(ui, |ui| {
                 if let Some(column_idx) = column_idx {
-                    let cell = if sorted_by_offset {
-                        self.context.cell_by_offset(row_data, column_idx as u32)
+                    let offset_idx = if sorted_by_offset {
+                        column_idx as u32
                     } else {
-                        self.context.cell_by_index(row_data, column_idx as u32)
+                        self.context
+                            .convert_column_index_to_offset_index(column_idx as u32)
+                            .unwrap_or(column_idx as u32)
                     };
-                    match cell {
-                        Ok(cell) => cell.show(ui),
-                        Err(e) => {
-                            log::error!("Failed to get column {column_idx}: {e:?}");
-                            InnerResponse::new(CellResponse::None, ui.label(""))
+                    let is_event_icon_type =
+                        self.context.get_column_by_offset(offset_idx).is_ok_and(
+                            |(schema_column, _)| {
+                                matches!(schema_column.meta(), SchemaColumnMeta::Link(sheets) if event_icon_type::links_here(sheets))
+                            },
+                        );
+                    if is_event_icon_type {
+                        let resolved = event_icon_type::resolve(&self.context, offset_idx, row_data);
+                        let clicked = event_icon_type::ui(ui, self.context.global(), &resolved);
+                        let resp = match clicked {
+                            Some(icon_id) if !should_ignore_clicks(ui) => {
+                                CellResponse::Icon(icon_id)
+                            }
+                            _ => CellResponse::None,
+                        };
+                        InnerResponse::new(resp, ui.response())
+                    } else {
+                        let cell = if sorted_by_offset {
+                            self.context.cell_by_offset(row_data, column_idx as u32)
+                        } else {
+                            self.context.cell_by_index(row_data, column_idx as u32)
+                        };
+                        match cell {
+                            Ok(cell) => cell.show(ui),
+                            Err(e) => {
+                                log::error!("Failed to get column {column_idx}: {e:?}");
+                                InnerResponse::new(CellResponse::None, ui.label(""))
+                            }
                         }
                     }
                 } else {

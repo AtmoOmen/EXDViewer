@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
-use image::{DynamicImage, ImageBuffer, ImageFormat};
+use image::{DynamicImage, ImageBuffer, ImageFormat, RgbaImage};
 use image_dds::Surface;
 use ironworks::{Error, Ironworks};
 use ironworks::{Resource, file::tex};
 use itertools::Itertools;
+use std::borrow::Cow;
 use std::io::Cursor;
 
 // https://github.com/ackwell/boilmaster/blob/3d180aae4a3b5719324f5a16d22b392e4859ac07/crates/bm_asset/src/texture.rs
@@ -36,18 +37,14 @@ pub fn decode_preview_sized(
     max_dim: Option<u16>,
 ) -> Result<(DynamicImage, [u16; 2])> {
     let texture = <tex::Texture as ironworks::file::File>::read(Cursor::new(bytes.to_vec()))?;
-    let level = max_dim
-        .and_then(|max_dim| {
-            (0..texture.mip_levels())
-                .take_while(|level| {
-                    let (width, height) = texture.mip_size(*level);
-                    width.max(height) >= max_dim
-                })
-                .last()
-        })
-        .unwrap_or(0);
+    let level = preview_level(&texture, max_dim);
     let size = [texture.width(), texture.height()];
     Ok((decode_mip(&texture, level, path)?, size))
+}
+
+/// The coarsest mipmap that still covers `max_dim` on its longest edge; `None` picks the finest.
+pub fn preview_level(texture: &tex::Texture, max_dim: Option<u16>) -> u8 {
+    max_dim.map_or(0, |max_dim| texture.level_covering(max_dim))
 }
 
 /// Decode an already-read texture. The web backend hands out bytes rather than an
@@ -56,9 +53,21 @@ pub fn decode(texture: tex::Texture, path: &str) -> Result<DynamicImage> {
     decode_mip(&texture, 0, path)
 }
 
-/// Decode one mipmap level. A volume texture comes back with its slices stacked vertically; picking
-/// one is a matter of which band the caller draws, not of decoding again.
+/// Decode one mipmap level. A volume, cube or array texture comes back with its slices tiled into a
+/// grid; picking one is a matter of which cell the caller draws, not of decoding again.
 pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<DynamicImage> {
+    let (_, slice_height) = texture.mip_size(level);
+    let layers = texture.layers(level);
+    Ok(retile(
+        decode_stack(texture, level, path)?,
+        slice_height,
+        layers,
+    ))
+}
+
+/// The same, with the slices left one below the next. That is the layout the card takes a layered
+/// texture in, so an upload reads it straight through rather than picking the grid apart again.
+pub fn decode_stack(texture: &tex::Texture, level: u8, path: &str) -> Result<DynamicImage> {
     if matches!(
         texture.kind(),
         tex::TextureKind::Unknown | tex::TextureKind::D1
@@ -75,7 +84,7 @@ pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<Dynam
     // Volume slices, cube faces and array elements are all stored one after another, so they decode
     // as a single tall image and the caller picks which band to show.
     let (width, slice_height) = texture.mip_size(level);
-    let height = slice_height.saturating_mul(texture.layers());
+    let height = slice_height.saturating_mul(texture.layers(level));
     let plain = || {
         texture
             .mip_data(level)
@@ -83,7 +92,8 @@ pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<Dynam
     };
 
     let buffer = match texture.format() {
-        tex::Format::A8Unorm | tex::Format::L8Unorm => read_gray8(width, height, plain()?)?,
+        tex::Format::A8Unorm => read_alpha8(width, height, plain()?)?,
+        tex::Format::L8Unorm => read_gray8(width, height, plain()?)?,
         tex::Format::R8Unorm | tex::Format::R8Uint => read_channels8(width, height, plain()?, 1)?,
         tex::Format::Rg8Unorm => read_channels8(width, height, plain()?, 2)?,
         tex::Format::Bgrx8Unorm => read_bgrx8(width, height, plain()?)?,
@@ -118,14 +128,81 @@ pub fn decode_mip(texture: &tex::Texture, level: u8, path: &str) -> Result<Dynam
     Ok(buffer)
 }
 
+/// A layer count's grid layout, roughly square. Shared between decoding (to build the grid) and
+/// drawing (to find a slice's cell), so the two never disagree on where a slice landed.
+pub fn grid_layout(layers: u16) -> (u16, u16) {
+    let columns = (f64::from(layers).sqrt().ceil() as u16).max(1);
+    (columns, layers.div_ceil(columns).max(1))
+}
+
+/// Scaled down to what the renderer states it can hold. Both egui and its glow painter assert on an
+/// oversized image rather than refusing it, so an upload past the limit takes the whole app down.
+pub fn fit<'a>(ctx: &egui::Context, image: &'a RgbaImage) -> Cow<'a, RgbaImage> {
+    let most = ctx.input(|input| input.max_texture_side) as u32;
+    let (width, height) = image.dimensions();
+    if width.max(height) <= most {
+        return Cow::Borrowed(image);
+    }
+    let scale = f64::from(most) / f64::from(width.max(height));
+    let side = |of: u32| ((f64::from(of) * scale) as u32).clamp(1, most);
+    Cow::Owned(image::imageops::resize(
+        image,
+        side(width),
+        side(height),
+        image::imageops::FilterType::Triangle,
+    ))
+}
+
+/// Layers decode as a tall single-column stack (see [`read_texture_bc`]), which can reach a height
+/// well past the GPU's max texture side before any single layer would -- 64 layers of a 512-tall
+/// array reach 32768px. Repacking into a grid instead bounds both sides by roughly the layer
+/// count's square root.
+fn retile(image: DynamicImage, slice_height: u16, layers: u16) -> DynamicImage {
+    if layers <= 1 {
+        return image;
+    }
+    let (columns, rows) = grid_layout(layers);
+    let width = image.width();
+    let slice_height = u32::from(slice_height);
+    let mut grid = DynamicImage::new(
+        width * u32::from(columns),
+        slice_height * u32::from(rows),
+        image.color(),
+    );
+    for layer in 0..layers {
+        let slice = image.crop_imm(0, u32::from(layer) * slice_height, width, slice_height);
+        let (column, row) = (layer % columns, layer / columns);
+        image::imageops::replace(
+            &mut grid,
+            &slice,
+            i64::from(u32::from(column) * width),
+            i64::from(u32::from(row) * slice_height),
+        );
+    }
+    grid
+}
+
 fn read_gray8(width: u16, height: u16, data: &[u8]) -> Result<DynamicImage> {
     let buffer = ImageBuffer::from_raw(width.into(), height.into(), data.to_owned())
         .context("创建图像缓冲区失败")?;
     Ok(DynamicImage::ImageLuma8(buffer))
 }
 
-/// Widen an 8-bit-per-channel image to RGBA. One channel shows as grey rather than red, since these
-/// are masks and lookups far more often than they are colour.
+/// Alpha only, whose one channel reaches all four: an effect adding such a texture takes its color
+/// from it and one blending it takes its cutout from it, so leaving the alpha opaque paints the
+/// whole quad rather than the shape the file holds.
+fn read_alpha8(width: u16, height: u16, data: &[u8]) -> Result<DynamicImage> {
+    let pixels = data
+        .iter()
+        .flat_map(|&value| [value; 4])
+        .collect::<Vec<_>>();
+    let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
+        .context("failed to build image buffer")?;
+    Ok(DynamicImage::ImageRgba8(buffer))
+}
+
+/// Widen an 8-bit-per-channel image to RGBA. One channel shows as gray rather than red, since these
+/// are masks and lookups far more often than they are color.
 fn read_channels8(width: u16, height: u16, data: &[u8], channels: usize) -> Result<DynamicImage> {
     let pixels = data
         .chunks_exact(channels)
@@ -159,7 +236,37 @@ fn read_unorm16(width: u16, height: u16, data: &[u8], channels: usize) -> Result
     to_rgba(width, height, data, channels * 2, channels, values)
 }
 
-/// Half and single precision are scene values rather than colours, so they are clamped into the
+/// The same source `read_unorm16` narrows to 8 bits for the on-screen preview (the egui texture it
+/// feeds is 8-bit regardless), kept at full precision for a lossless PNG export.
+pub fn read_unorm16_precise(
+    width: u16,
+    height: u16,
+    data: &[u8],
+    channels: usize,
+) -> Result<DynamicImage> {
+    let texel = |bytes: &[u8]| -> [u16; 2] {
+        let value = |i: usize| u16::from_le_bytes([bytes[i * 2], bytes[i * 2 + 1]]);
+        [value(0), if channels > 1 { value(1) } else { 0 }]
+    };
+    if channels == 1 {
+        let pixels: Vec<u16> = data.chunks_exact(2).map(|t| texel(t)[0]).collect();
+        let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
+            .context("failed to build image buffer")?;
+        return Ok(DynamicImage::ImageLuma16(buffer));
+    }
+    let pixels: Vec<u16> = data
+        .chunks_exact(channels * 2)
+        .flat_map(|t| {
+            let [r, g] = texel(t);
+            [r, g, 0, u16::MAX]
+        })
+        .collect();
+    let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
+        .context("failed to build image buffer")?;
+    Ok(DynamicImage::ImageRgba16(buffer))
+}
+
+/// Half and single precision are scene values rather than colors, so they are clamped into the
 /// unit range instead of being scaled by whatever the maximum in the image happens to be.
 fn read_half(width: u16, height: u16, data: &[u8], channels: usize) -> Result<DynamicImage> {
     let values = |texel: &[u8]| -> Vec<u8> {
@@ -194,7 +301,7 @@ fn to_u8(value: f32) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0) as u8
 }
 
-/// Lay decoded channels out as RGBA: one channel greys, two fill red and green, four map straight.
+/// Lay decoded channels out as RGBA: one channel grays, two fill red and green, four map straight.
 fn to_rgba(
     width: u16,
     height: u16,
@@ -272,34 +379,51 @@ fn read_bgra8(width: u16, height: u16, data: &[u8]) -> Result<DynamicImage> {
     Ok(DynamicImage::ImageRgba8(buffer))
 }
 
+/// The game stores a level's cube faces, volume slices and array elements one after another, where
+/// image_dds expects each layer's whole mip chain before the next layer's. So a level is decoded on
+/// its own, a slice at a time, and the slices are stacked into a tall image here; `decode_mip`
+/// retiles that stack into a grid before handing it back.
+///
+/// Slices are decoded apart rather than as one tall image because each is compressed independently:
+/// down the mip chain a slice shrinks past the 4x4 block grid and is padded back up to it, so a 2x2
+/// slice still occupies a whole block. Reading the level as one image would run those half-empty
+/// blocks together and shear everything below the first one.
 fn read_texture_bc(
     texture: &tex::Texture,
     level: u8,
     image_format: image_dds::ImageFormat,
 ) -> Result<DynamicImage> {
-    let surface = Surface {
-        width: texture.width().into(),
-        // image_dds wants a flat surface, and the game stores a volume's slices stacked, so the
-        // depth is folded into the height rather than declared.
-        height: u32::from(texture.height()) * u32::from(texture.layers()),
-        depth: 1,
-        layers: match texture.kind() {
-            tex::TextureKind::Cube => 6,
-            tex::TextureKind::D2Array => texture.array_size().into(),
-            _other => 1,
-        },
-        mipmaps: texture.mip_levels().into(),
-        image_format,
-        data: texture.data(),
-    };
+    let (width, height) = texture.mip_size(level);
+    let data = texture
+        .mip_data(level)
+        .with_context(|| format!("texture has no mipmap level {level}"))?;
+    let layers = usize::from(texture.layers(level));
+    let stride = data.len() / layers;
+    // A slice is at least one block, so this only trips on a truncated file, where chunking by zero
+    // would panic rather than fail.
+    anyhow::ensure!(stride > 0, "mipmap level {level} holds no {layers} slices");
 
-    let image = surface
-        .decode_rgba8()
-        .with_context(|| format!("解码 {image_format:?} 失败"))?
-        .to_image(level.into())
-        .with_context(|| format!("从渐远纹理层级 {level} 创建图像失败"))?;
+let mut pixels = Vec::with_capacity(data.len());
+    for slice in data.chunks_exact(stride) {
+        let surface = Surface {
+            width: width.into(),
+            height: height.into(),
+            depth: 1,
+            layers: 1,
+            mipmaps: 1,
+            image_format,
+            data: slice,
+        };
+        let decoded = surface
+            .decode_rgba8()
+            .with_context(|| format!("解码 {image_format:?} 失败"))?;
+        pixels.extend_from_slice(&decoded.data);
+    }
 
-    Ok(image.into())
+    let height = u32::from(height) * u32::from(texture.layers(level));
+    let buffer = ImageBuffer::from_raw(width.into(), height, pixels)
+        .context("failed to build image buffer")?;
+    Ok(DynamicImage::ImageRgba8(buffer))
 }
 
 pub fn write(image: impl Into<DynamicImage>, format: ImageFormat) -> Result<Vec<u8>> {

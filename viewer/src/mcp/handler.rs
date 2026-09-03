@@ -431,7 +431,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "识别并结构化解析资源, 支持纹理、PNG 图像、材质、字体、图标、ULD 布局、SHPK 着色器包和 SHCD 着色器代码"
+        description = "识别并结构化解析资源, 支持纹理、PNG 图像、材质、字体、图标、ULD 布局、SHPK 着色器包、SHCD 着色器代码、SCD 声音容器、LGB 图层组和 SGB 共享组"
     )]
     async fn inspect_asset(
         &self,

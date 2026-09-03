@@ -10,9 +10,12 @@ use actix_web::{
     HttpRequest, HttpResponse, Result,
     body::{EitherBody, MessageBody},
     dev::{HttpServiceFactory, ServiceResponse},
-    error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound},
+    error::{ErrorBadRequest, ErrorInternalServerError, ErrorNotFound, ErrorTooManyRequests},
     get,
-    http::header::{self, ContentDisposition, ETag, EntityTag, Header, IfNoneMatch},
+    http::header::{
+        self, ByteRangeSpec, ContentDisposition, ContentRange, ContentRangeSpec, ETag, EntityTag,
+        Header, IfNoneMatch, Range,
+    },
     middleware::{ErrorHandlerResponse, ErrorHandlers},
     web::{self, Bytes},
 };
@@ -25,11 +28,17 @@ use xiv_core::file::{slug::Slug, version::GameVersion};
 use crate::{
     config::Config,
     data::{Region, RepositoryInfo, Target},
+    paths::report::{Collector, Submission},
     queue::MessageQueue,
+    slice::Slice,
 };
 
 /// What format a file was stored as.
 pub const STREAM_KIND: header::HeaderName = header::HeaderName::from_static("x-stream-kind");
+
+/// Header naming which part of a file was served, for a request that asked for one. Absent from a
+/// server predating it, which is how a client knows to take the file whole.
+pub const SLICE: header::HeaderName = header::HeaderName::from_static("x-slice");
 
 pub fn service() -> impl HttpServiceFactory {
     web::scope("/api")
@@ -37,9 +46,11 @@ pub fn service() -> impl HttpServiceFactory {
         // count, but keeping the rule "literals before variables" makes that obvious.
         .service(get_github_oauth_config)
         .service(post_github_oauth_token)
+        .configure(super::github::configure)
         .service(get_repositories)
         .service(get_regions)
         .service(get_list_id)
+        .service(post_report)
         .service(get_global_paths)
         .service(get_songs)
         .service(get_versions_repo)
@@ -135,8 +146,29 @@ async fn redirect_latest(
         .finish())
 }
 
+/// The one span of a file a `Range` header asks for. A set of them would have to be answered as a
+/// multipart body, which nothing asks for.
+fn partial(request: &HttpRequest, bytes: &Bytes) -> Option<(Bytes, ContentRange)> {
+    let length = bytes.len() as u64;
+    let Ok(Range::Bytes(asked)) = Range::parse(request) else {
+        return None;
+    };
+    let [spec] = asked.as_slice() else {
+        return None;
+    };
+    let (from, to) = ByteRangeSpec::to_satisfiable_range(spec, length)?;
+    Some((
+        bytes.slice(from as usize..=to as usize),
+        ContentRange(ContentRangeSpec::Bytes {
+            range: Some((from, to)),
+            instance_length: Some(length),
+        }),
+    ))
+}
+
 async fn serve_file(
     data: &MessageQueue,
+    request: &HttpRequest,
     target: Target,
     version: GameVersion,
     path: String,
@@ -154,12 +186,30 @@ async fn serve_file(
 
     let data = data.get_file(target, Some(version), path.clone()).await;
     match data {
-        Ok(data) => Ok(HttpResponse::Ok()
-            .insert_header(ContentDisposition::attachment(file_name))
-            .insert_header(CacheControl(directives))
-            .insert_header((STREAM_KIND, data.kind.name()))
-            .body(data.bytes.clone())),
-        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),
+        Ok(data) => {
+            let cut = web::Query::<Slice>::from_query(request.query_string())
+                .ok()
+                .and_then(|asked| asked.cut(&data.bytes));
+            let bytes = cut.as_ref().map_or(&data.bytes, |(bytes, _)| bytes);
+            let asked = partial(request, bytes);
+            let mut response = match asked {
+                Some(_) => HttpResponse::PartialContent(),
+                None => HttpResponse::Ok(),
+            };
+            response
+                .insert_header(ContentDisposition::attachment(file_name))
+                .insert_header(CacheControl(directives))
+                .insert_header((header::ACCEPT_RANGES, "bytes"))
+                .insert_header((STREAM_KIND, data.kind.name()));
+            if let Some((_, name)) = &cut {
+                response.insert_header((SLICE, name.clone()));
+            }
+            Ok(match asked {
+                Some((bytes, range)) => response.insert_header(range).body(bytes),
+                None => response.body(bytes.clone()),
+            })
+        }
+        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorNotFound(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
 }
@@ -186,6 +236,50 @@ async fn get_list_id(data: web::Data<MessageQueue>, request: HttpRequest) -> Res
     Ok(response.json(ListInfo {
         list: format!("{current:016x}"),
     }))
+}
+
+/// Who submitted, as far as the edge will say. The peer address is Cloudflare's, so on its own it
+/// would limit every client as one; a header can be forged, which makes this a nuisance limiter
+/// rather than a control.
+fn client_key(request: &HttpRequest) -> String {
+    let header = |name| {
+        request
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+    };
+    header("cf-connecting-ip")
+        .or_else(|| header("x-forwarded-for").and_then(|value| value.split(',').next()))
+        .map(|ip| ip.trim().to_owned())
+        .or_else(|| request.peer_addr().map(|addr| addr.ip().to_string()))
+        .unwrap_or_default()
+}
+
+#[post("/report/")]
+async fn post_report(
+    collector: web::Data<Collector>,
+    request: HttpRequest,
+    body: web::Json<Submission>,
+) -> Result<HttpResponse> {
+    let body = body.into_inner();
+    if body.paths.is_empty() {
+        return Err(ErrorBadRequest("No paths submitted"));
+    }
+    if body.paths.len() > collector.batch_limit() {
+        return Err(ErrorBadRequest(format!(
+            "At most {} paths per submission",
+            collector.batch_limit()
+        )));
+    }
+    if !collector.allow(&client_key(&request)) {
+        return Err(ErrorTooManyRequests("Too many submissions"));
+    }
+
+    let outcome = collector
+        .submit(body)
+        .await
+        .map_err(ErrorInternalServerError)?;
+    Ok(HttpResponse::Accepted().json(outcome))
 }
 
 #[get("/paths/{list_id}/")]
@@ -268,7 +362,7 @@ fn serve_frame(request: &HttpRequest, frame: Bytes, max_age: u32) -> Result<Http
     Ok(response.body(body))
 }
 
-fn accepts(request: &HttpRequest, encoding: &str) -> bool {
+pub fn accepts(request: &HttpRequest, encoding: &str) -> bool {
     request
         .headers()
         .get(header::ACCEPT_ENCODING)
@@ -318,14 +412,8 @@ async fn serve_hash(
             .body(data.bytes.clone())),
         // A whole-path hash can name more than one file, which the caller has to resolve by asking
         // for a path instead.
-        Err(err)
-            if matches!(
-                err,
-                ironworks::Error::NotFound(_) | ironworks::Error::Invalid(..)
-            ) =>
-        {
-            Err(ErrorBadRequest(err))
-        }
+        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorNotFound(err)),
+        Err(err) if matches!(err, ironworks::Error::Invalid(..)) => Err(ErrorBadRequest(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
 }
@@ -364,7 +452,7 @@ async fn serve_exists(
         Ok(exists) => Ok(HttpResponse::Ok()
             .insert_header(CacheControl(directives))
             .json(ExistsResponse { exists })),
-        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorBadRequest(err)),
+        Err(err) if matches!(err, ironworks::Error::NotFound(_)) => Err(ErrorNotFound(err)),
         Err(err) => Err(ErrorInternalServerError(err)),
     }
 }
@@ -421,10 +509,11 @@ async fn get_latest_region(
 #[get("/{region}/{version}/file/{path:.*}/")]
 async fn get_file_region(
     data: web::Data<MessageQueue>,
+    request: HttpRequest,
     path_info: web::Path<(Region, GameVersion, String)>,
 ) -> Result<HttpResponse> {
     let (region, version, path) = path_info.into_inner();
-    serve_file(&data, Target::Region(region), version, path).await
+    serve_file(&data, &request, Target::Region(region), version, path).await
 }
 
 #[get("/{region}/{version}/hash/{repository}/{category}/{hash}/")]
@@ -487,10 +576,11 @@ async fn get_latest_repo(
 #[get("/repo/{slug}/{version}/file/{path:.*}/")]
 async fn get_file_repo(
     data: web::Data<MessageQueue>,
+    request: HttpRequest,
     path_info: web::Path<(Slug, GameVersion, String)>,
 ) -> Result<HttpResponse> {
     let (slug, version, path) = path_info.into_inner();
-    serve_file(&data, Target::Repo(slug), version, path).await
+    serve_file(&data, &request, Target::Repo(slug), version, path).await
 }
 
 #[get("/repo/{slug}/{version}/hash/{repository}/{category}/{hash}/")]
@@ -736,4 +826,58 @@ async fn log_error2<B: MessageBody + 'static>(
         .map_into_right_body();
 
     Ok(res)
+}
+
+/// Every case here is refused before the list is consulted, so no test fetches one. A 429 rather
+/// than a 404 is also what says the route is reachable past `/paths/{list_id}/`.
+#[cfg(test)]
+mod tests {
+    use actix_web::{App, http::StatusCode, test};
+    use serde_json::json;
+
+    use super::*;
+    use crate::{config::Report, paths::PathIndex};
+
+    fn collector() -> web::Data<Collector> {
+        web::Data::new(Collector::new(
+            std::sync::Arc::new(PathIndex::new(crate::config::PathList::default())),
+            Report {
+                enabled: false,
+                forward_url: String::new(),
+                max_paths: 2,
+                per_hour: 0,
+            },
+        ))
+    }
+
+    #[actix_web::test]
+    async fn a_submission_is_refused_before_it_can_cost_anything() {
+        let app = test::init_service(App::new().app_data(collector()).service(service())).await;
+
+        for (body, want) in [
+            (json!({ "paths": [] }), StatusCode::BAD_REQUEST),
+            (
+                json!({ "paths": ["ui/a.uld", "ui/b.uld", "ui/c.uld"] }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({ "entries": ["ui/uld/a.uld"] }),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                json!({ "paths": ["ui/uld/a.uld"] }),
+                StatusCode::TOO_MANY_REQUESTS,
+            ),
+        ] {
+            let request = test::TestRequest::post()
+                .uri("/api/report/")
+                .set_json(&body)
+                .to_request();
+            assert_eq!(
+                test::call_service(&app, request).await.status(),
+                want,
+                "{body}"
+            );
+        }
+    }
 }

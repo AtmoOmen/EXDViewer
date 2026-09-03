@@ -12,20 +12,6 @@ pub struct CompiledComplexFilter {
     pub has_fuzzy: bool,
 }
 
-impl PartialEq for CompiledComplexFilter {
-    fn eq(&self, other: &Self) -> bool {
-        self.filter == other.filter
-    }
-}
-
-impl Eq for CompiledComplexFilter {}
-
-impl std::hash::Hash for CompiledComplexFilter {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.filter.hash(state);
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum CompiledFilterKey {
     RowId,

@@ -1,0 +1,11 @@
+# Capture output. Only the harness sources belong in git.
+*
+!*/
+!.gitignore
+!README.md
+!*.ts
+!*.sh
+!*.js
+!*.py
+# Compile-time input for viewer/examples/shpk_uses.rs.
+!shpk_names.txt

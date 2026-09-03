@@ -13,6 +13,12 @@ struct FuzzyMatcherImpl {
     utf_buf: Vec<char>,
 }
 
+impl Default for FuzzyMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FuzzyMatcher {
     pub fn new() -> Self {
         let mut config = nucleo_matcher::Config::DEFAULT;

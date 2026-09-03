@@ -1,4 +1,6 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -16,7 +18,7 @@ pub struct Player {
     audio: Option<Arc<Decoded>>,
     position: Arc<AtomicU64>,
     volume: f32,
-    spectrum: RefCell<SpectrumAnalyzer>,
+    spectrum: RefCell<Spectrum>,
 }
 
 impl Player {
@@ -27,11 +29,13 @@ impl Player {
             audio: None,
             position: Arc::new(AtomicU64::new(0)),
             volume: 1.0,
-            spectrum: RefCell::new(SpectrumAnalyzer::new()),
+            spectrum: RefCell::new(Spectrum::new()),
         })
     }
 
-    pub fn play(&mut self, audio: Decoded) -> Result<()> {
+    /// `_announce` mirrors the web backend's OS media-session flag; native has no such surface
+    /// yet (souvlaki is deferred), so it is ignored.
+    pub fn play(&mut self, audio: Decoded, _announce: bool) -> Result<()> {
         self.audio = Some(Arc::new(audio));
         self.start_from(0)
     }
@@ -110,11 +114,8 @@ impl Player {
             out.fill(0);
             return;
         };
-        self.spectrum.borrow_mut().analyze(
-            audio,
-            self.position.load(Ordering::Relaxed) as usize,
-            out,
-        );
+        let at = self.position.load(Ordering::Relaxed) as usize;
+        self.spectrum.borrow_mut().read(audio, at, out);
     }
 
     /// No OS media controls on the native backend (souvlaki is deferred).
@@ -127,64 +128,132 @@ impl Player {
     }
 }
 
-const SPECTRUM_SIZE: usize = 8192;
+/// Several looping voices sharing one output device, each with its own gain, for a scene playing
+/// more than one ambient sound at once.
+pub struct Mixer<K> {
+    device: MixerDeviceSink,
+    voices: HashMap<K, (rodio::Player, f32)>,
+    master: f32,
+}
 
-struct SpectrumAnalyzer {
+impl<K: Eq + Hash> Mixer<K> {
+    pub fn new() -> Result<Self> {
+        Ok(Self {
+            device: DeviceSinkBuilder::open_default_sink()?,
+            voices: HashMap::new(),
+            master: 1.0,
+        })
+    }
+
+    /// No-op on native; the web backend needs this called from inside a user gesture instead.
+    pub fn unlock(&self) {}
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.master = volume;
+        for (sink, gain) in self.voices.values() {
+            sink.set_volume(gain * self.master);
+        }
+    }
+
+    pub fn is_playing(&self, key: &K) -> bool {
+        self.voices.contains_key(key)
+    }
+
+    pub fn playing(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// Starts `key` playing, unless it already is: looping if `audio` carries loop points, once
+    /// through otherwise.
+    pub fn play(&mut self, key: K, audio: Arc<Decoded>, gain: f32) -> Result<()> {
+        if self.voices.contains_key(&key) {
+            return Ok(());
+        }
+        let sink = rodio::Player::connect_new(self.device.mixer());
+        sink.set_volume(gain * self.master);
+        sink.append(LoopingSource::new(audio, 0, Arc::new(AtomicU64::new(0))));
+        self.voices.insert(key, (sink, gain));
+        Ok(())
+    }
+
+    pub fn set_gain(&mut self, key: &K, gain: f32) {
+        if let Some((sink, held)) = self.voices.get_mut(key) {
+            *held = gain;
+            sink.set_volume(gain * self.master);
+        }
+    }
+
+    /// Stops whatever `keep` does not hold true for.
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.voices.retain(|key, _| keep(key));
+    }
+
+    pub fn stop_all(&mut self) {
+        self.voices.clear();
+    }
+}
+
+/// Frames the transform runs over. Half of them are bins, which is the length the visualizer reads
+/// and maps across the whole band, so a shorter window would leave its top bars empty.
+const WINDOW: usize = 8192;
+
+/// The web backend takes its bars off an `AnalyserNode`; this stands in for one, reading the
+/// decoded track around the play position rather than the output the device is mixing.
+struct Spectrum {
     fft: Arc<dyn Fft<f32>>,
     buffer: Vec<Complex<f32>>,
 }
 
-impl SpectrumAnalyzer {
+impl Spectrum {
     fn new() -> Self {
-        let mut planner = FftPlanner::new();
         Self {
-            fft: planner.plan_fft_forward(SPECTRUM_SIZE),
-            buffer: vec![Complex::ZERO; SPECTRUM_SIZE],
+            fft: FftPlanner::new().plan_fft_forward(WINDOW),
+            buffer: vec![Complex::ZERO; WINDOW],
         }
     }
 
-    fn analyze(&mut self, audio: &Decoded, position: usize, out: &mut [u8]) {
+    fn read(&mut self, audio: &Decoded, at: usize, out: &mut [u8]) {
         let channels = usize::from(audio.channels);
         if channels == 0 {
             out.fill(0);
             return;
         }
-        let frame_count = audio.samples.len() / channels;
-        let start = position.saturating_sub(SPECTRUM_SIZE / 2);
-        let loop_region = audio
+        let frames = audio.samples.len() / channels;
+        let looping = audio
             .loop_start
             .zip(audio.loop_end)
             .map(|(start, end)| (start as usize, end as usize))
             .filter(|(start, end)| start < end);
+        let start = at.saturating_sub(WINDOW / 2);
         for (offset, value) in self.buffer.iter_mut().enumerate() {
             let mut frame = start + offset;
-            if let Some((loop_start, loop_end)) = loop_region
-                && frame >= loop_end
+            // A window straddling the loop point reads what will actually be heard next rather
+            // than the tail past it, which on most tracks is silence.
+            if let Some((from, to)) = looping
+                && frame >= to
             {
-                frame = loop_start + (frame - loop_start) % (loop_end - loop_start);
+                frame = from + (frame - from) % (to - from);
             }
-            let sample = if frame < frame_count {
-                let sample_start = frame * channels;
-                audio.samples[sample_start..sample_start + channels]
+            let sample = match frame < frames {
+                true => audio.samples[frame * channels..(frame + 1) * channels]
                     .iter()
                     .sum::<f32>()
-                    / channels as f32
-            } else {
-                0.0
+                    / channels as f32,
+                false => 0.0,
             };
-            let window = 0.5
-                - 0.5 * (std::f32::consts::TAU * offset as f32 / (SPECTRUM_SIZE - 1) as f32).cos();
-            *value = Complex::new(sample * window, 0.0);
+            let hann =
+                0.5 - 0.5 * (std::f32::consts::TAU * offset as f32 / (WINDOW - 1) as f32).cos();
+            *value = Complex::new(sample * hann, 0.0);
         }
-
         self.fft.process(&mut self.buffer);
-        let bin_count = out.len().min(SPECTRUM_SIZE / 2);
-        let scale = 2.0 / SPECTRUM_SIZE as f32;
-        for (output, value) in out[..bin_count].iter_mut().zip(&self.buffer[..bin_count]) {
+
+        let bins = out.len().min(WINDOW / 2);
+        let scale = 2.0 / WINDOW as f32;
+        for (slot, value) in out[..bins].iter_mut().zip(&self.buffer[..bins]) {
             let decibels = (value.norm() * scale).max(f32::MIN_POSITIVE).log10() * 20.0;
-            *output = (((decibels + 100.0) / 70.0).clamp(0.0, 1.0) * 255.0).round() as u8;
+            *slot = (((decibels + 100.0) / 70.0).clamp(0.0, 1.0) * 255.0).round() as u8;
         }
-        out[bin_count..].fill(0);
+        out[bins..].fill(0);
     }
 }
 
@@ -253,5 +322,43 @@ impl Source for LoopingSource {
         Some(Duration::from_secs_f64(
             frames / f64::from(self.audio.sample_rate),
         ))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::{Spectrum, WINDOW};
+    use crate::audio::Decoded;
+
+    /// A pure tone has to land in the bin its frequency names, since the visualizer maps the
+    /// output across the whole band on exactly that assumption.
+    #[test]
+    fn tone_lands_in_its_own_bin() {
+        let rate = 44_100;
+        let tone = 1_000.0;
+        let samples = (0..WINDOW * 2)
+            .map(|at| {
+                (std::f32::consts::TAU * tone * at as f32 / rate as f32).sin()
+            })
+            .collect();
+        let audio = Decoded {
+            samples,
+            channels: 1,
+            sample_rate: rate,
+            loop_start: None,
+            loop_end: None,
+        };
+        let mut out = [0u8; WINDOW / 2];
+        Spectrum::new().read(&audio, WINDOW, &mut out);
+
+        let loudest = out
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, level)| **level)
+            .map(|(at, _)| at)
+            .unwrap();
+        let nyquist = rate as f32 / 2.0;
+        let found = loudest as f32 / out.len() as f32 * nyquist;
+        assert!((found - tone).abs() < nyquist / out.len() as f32 * 2.0, "peak at {found} Hz");
     }
 }

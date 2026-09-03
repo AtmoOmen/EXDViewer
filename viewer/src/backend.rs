@@ -1,11 +1,21 @@
 use anyhow::Result;
-use std::{num::NonZeroUsize, rc::Rc};
+use std::{
+    cell::{OnceCell, RefCell},
+    num::NonZeroUsize,
+    rc::Rc,
+};
 
 use crate::{
-    data::{FileProvider, web::WebFileProvider},
+    data::{
+        FileProvider, IconIndex,
+        listing::{Listed, Listing},
+        web::WebFileProvider,
+    },
     excel::base::CachedProvider,
+    report::{Recording, Reporter},
     schema::{boxed::BoxedSchemaProvider, web::WebProvider},
     settings::{BackendConfig, InstallLocation, SchemaLocation},
+    utils::TrackedPromise,
 };
 
 #[derive(Clone)]
@@ -15,10 +25,23 @@ struct BackendImpl {
     files: Rc<dyn FileProvider>,
     excel_provider: CachedProvider,
     schema_provider: BoxedSchemaProvider,
+    icons: OnceCell<IconIndex>,
+    listing: RefCell<Fetch>,
+    reporter: Rc<Reporter>,
+}
+
+/// The shared listing on its way in. Decoding costs a frame and cannot cross a thread, so the
+/// promise carries the bytes and the frame they land on turns them into a [`Listing`].
+enum Fetch {
+    Idle,
+    Fetching(TrackedPromise<Result<(Vec<u8>, Vec<u8>)>>),
+    Ready(Rc<Listing>),
+    Failed(Rc<str>),
 }
 
 impl Backend {
     pub async fn new(config: BackendConfig) -> Result<Self> {
+        let reporter = Rc::new(Reporter::new(&config.api_url));
         let excel = async {
             let (files, cache_size): (Rc<dyn FileProvider>, usize) = match config.location {
                 #[cfg(not(target_arch = "wasm32"))]
@@ -48,6 +71,7 @@ impl Backend {
                     (files, 256)
                 }
             };
+            let files: Rc<dyn FileProvider> = Rc::new(Recording::new(files, reporter.clone()));
             let excel_provider =
                 CachedProvider::new(files.clone(), NonZeroUsize::new(cache_size).unwrap()).await?;
             anyhow::Result::<_>::Ok((files, excel_provider))
@@ -84,6 +108,9 @@ impl Backend {
             files,
             excel_provider,
             schema_provider: schema,
+            icons: OnceCell::new(),
+            listing: RefCell::new(Fetch::Idle),
+            reporter,
         })))
     }
 
@@ -100,6 +127,53 @@ impl Backend {
 
     pub fn schema(&self) -> &BoxedSchemaProvider {
         &self.0.schema_provider
+    }
+
+    /// Which `ui/icon` files this install ships, once the asset browser has decoded the path list.
+    pub fn icons(&self) -> Option<&IconIndex> {
+        self.0.icons.get()
+    }
+
+    pub fn set_icons(&self, icons: IconIndex) {
+        let _ = self.0.icons.set(icons);
+    }
+
+    /// What this install holds, by directory, asking for it the first time anything wants it. The
+    /// asset tree, the icon subset and a model's animation packs all read the same one, so whoever
+    /// gets there first pays for the fetch and the rest are handed it.
+    pub fn listing(&self, api: &str) -> Listed {
+        let mut held = self.0.listing.borrow_mut();
+        if let Fetch::Idle = &*held {
+            let files = self.0.files.clone();
+            let api = api.to_owned();
+            *held = Fetch::Fetching(TrackedPromise::spawn_local(async move {
+                files.path_index(&api).await
+            }));
+        }
+        if let Fetch::Fetching(promise) = &*held
+            && let Some(landed) = promise.try_get()
+        {
+            *held =
+                match landed
+                    .as_ref()
+                    .map_err(ToString::to_string)
+                    .and_then(|(paths, presence)| {
+                        Listing::decode(paths, presence).map_err(|why| why.to_string())
+                    }) {
+                    Ok(listing) => Fetch::Ready(Rc::new(listing)),
+                    Err(why) => Fetch::Failed(why.into()),
+                };
+        }
+        match &*held {
+            Fetch::Idle | Fetch::Fetching(_) => Listed::Loading,
+            Fetch::Ready(listing) => Listed::Ready(listing.clone()),
+            Fetch::Failed(why) => Listed::Failed(why.clone()),
+        }
+    }
+
+    /// Paths this install carries that the community list does not name, waiting on the user.
+    pub fn reporter(&self) -> &Rc<crate::report::Reporter> {
+        &self.0.reporter
     }
 }
 

@@ -19,10 +19,16 @@ use crate::backend::Backend;
 use crate::data::{FileProvider, FileProviderExt};
 use crate::excel::base::CachedProvider;
 use crate::excel::provider::{ExcelHeader, ExcelProvider, ExcelSheet};
+use crate::goto::{ListNav, Palette, SUGGESTIONS};
 use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{
-    CollapsibleSidePanel, FuzzyMatcher, PromiseKind, Side, TrackedPromise, fetch_url_str,
+    CollapsibleSidePanel, FuzzyMatcher, PromiseKind, Side, TrackedPromise, center, empty_view,
+    export, fetch_url_str, file_name,
 };
+
+const FILTER_ID: &str = "music_filter";
+const LIST_WIDTH: f32 = 340.0;
+const LIST_MIN_WIDTH: f32 = 160.0;
 
 #[derive(Deserialize, Default)]
 struct SongInfo {
@@ -87,8 +93,8 @@ struct Loading {
 impl Loading {
     fn phase(&self) -> &'static str {
         match self.stage {
-            Stage::Downloading(_) => "正在下载",
-            Stage::Decoding(..) => "正在解码",
+            Stage::Downloading(_) => "下载中",
+            Stage::Decoding(..) => "解码中",
         }
     }
 }
@@ -128,6 +134,8 @@ pub struct MusicPlayer {
     rows: Vec<TrackRow>,
     rows_stale: bool,
     matcher: FuzzyMatcher,
+    palette: Option<Palette>,
+    nav: ListNav,
     scrub: Option<f64>,
     viz: Vec<f32>,
     export_promise: Option<TrackedPromise<()>>,
@@ -152,11 +160,20 @@ impl Default for MusicPlayer {
             rows: Vec::new(),
             rows_stale: true,
             matcher: FuzzyMatcher::new(),
+            palette: None,
+            nav: ListNav::default(),
             scrub: None,
             viz: Vec::new(),
             export_promise: None,
         }
     }
+}
+
+pub enum Action {
+    /// A track was picked from the list or the palette; reflect it in the URL.
+    Select(u32),
+    /// The now-playing panel's path was followed to the Assets tab.
+    Navigate(String),
 }
 
 enum Cmd {
@@ -165,18 +182,18 @@ enum Cmd {
     Seek(f64),
     Volume(f32),
     ToggleVisualizer,
-    Export(ExportFormat),
-}
-
-#[derive(Clone, Copy)]
-enum ExportFormat {
-    Original,
-    Wav,
+    OpenInAssets,
 }
 
 impl MusicPlayer {
+    /// The track playing, or the one about to be, so that entering the bare route restores the
+    /// same URL either way.
     pub fn now_playing_row(&self) -> Option<u32> {
-        self.now_playing.as_ref().map(|track| track.row_id)
+        self.now_playing
+            .as_ref()
+            .map(|track| track.row_id)
+            .or_else(|| self.loading.as_ref().map(|track| track.row_id))
+            .or(self.pending)
     }
 
     pub fn name_of(&self, row_id: u32) -> Option<&str> {
@@ -190,12 +207,38 @@ impl MusicPlayer {
         self.pending = Some(row_id);
     }
 
-    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<u32> {
-        self.export_promise
-            .take_if(|promise| promise.try_get().is_some());
+    /// Drop everything that came from the install, so a reconnect reads it all again.
+    ///
+    /// The track playing is stopped here rather than left for `begin_load`, which never runs if the
+    /// new install has no such row, and re-armed as pending so it plays again from the new one.
+    pub fn reset(&mut self) {
+        if let Some(player) = &mut self.player {
+            player.stop();
+        }
+        self.index = Index::Idle;
+        self.avail = Avail::Idle;
+        self.rows_stale = true;
+        // Both have to be cleared before the re-arm: `poll` drops a pending row that is already
+        // loading or playing, which after a reset is exactly the row that has to be fetched again.
+        self.pending = self
+            .loading
+            .take()
+            .map(|track| track.row_id)
+            .or(self.now_playing.take().map(|track| track.row_id))
+            .or(self.pending);
+    }
+
+    pub fn open_palette(&mut self) {
+        self.palette = Some(Palette::new("查找曲目…", "筛选", self.search.clone()));
+    }
+
+    pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<Action> {
         self.poll(backend, &api_base(ui.ctx()), LANGUAGE.get(ui.ctx()));
         if let Some(player) = &mut self.player {
             player.take_media_action();
+        }
+        if self.rows_stale {
+            self.rebuild_rows();
         }
 
         let playing = self.player.as_ref().is_some_and(Player::is_playing);
@@ -205,9 +248,36 @@ impl MusicPlayer {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
 
+        let picked = self.draw_palette(ui.ctx());
+        let listed = matches!(self.index, Index::Loaded(_))
+            && !CollapsibleSidePanel::is_collapsed(ui.ctx(), "music_list");
+        self.nav
+            .claim(ui.ctx(), listed, Some(egui::Id::new(FILTER_ID)));
+
         let clicked = self.side_panel(ui);
-        self.now_playing_panel(ui);
-        clicked
+        let navigate = self.now_playing_panel(ui);
+        picked
+            .or(clicked)
+            .map(Action::Select)
+            .or_else(|| navigate.map(Action::Navigate))
+    }
+
+    fn draw_palette(&mut self, ctx: &egui::Context) -> Option<u32> {
+        let palette = self.palette.take()?;
+        match palette.draw(ctx, |query| {
+            self.search = query.to_owned();
+            self.matches()
+                .into_iter()
+                .take(SUGGESTIONS)
+                .map(|row| (row.row_id, row.name.clone()))
+                .collect()
+        }) {
+            Ok(picked) => picked,
+            Err(palette) => {
+                self.palette = Some(palette);
+                None
+            }
+        }
     }
 
     fn poll(&mut self, backend: &Backend, api_url: &str, lang: Language) {
@@ -245,7 +315,7 @@ impl MusicPlayer {
                     self.songs = songs;
                     self.rows_stale = true;
                 }
-                Err(error) => log::warn!("BGM 曲目列表不可用，改用文件名: {error}"),
+                Err(error) => log::warn!("BGM song list unavailable, using file names: {error}"),
             }
             self.songs_load = Songs::Done;
         }
@@ -311,15 +381,15 @@ impl MusicPlayer {
             Stage::Downloading(promise) => match promise.block_and_take() {
                 Ok((container, file_size)) => {
                     let Some(info) = stream_info(&container, file_size) else {
-                        log::error!("{path} 中没有音频流");
+                        log::error!("no audio streams in {path}");
                         return;
                     };
                     let decode = TrackedPromise::spawn_local(async move {
                         let entry = container
                             .entries()
                             .first()
-                            .ok_or_else(|| anyhow!("没有音频流"))?;
-                        let stream: Arc<[u8]> = entry.data().to_vec().into();
+                            .ok_or_else(|| anyhow!("no audio streams"))?;
+                        let stream: Arc<[u8]> = Arc::from(entry.data().as_slice());
                         Ok((audio::decode(entry)?, stream))
                     });
                     self.loading = Some(Loading {
@@ -329,11 +399,11 @@ impl MusicPlayer {
                         stage: Stage::Decoding(info, decode),
                     });
                 }
-                Err(error) => log::error!("BGM 下载失败: {error}"),
+                Err(error) => log::error!("BGM download failed: {error}"),
             },
             Stage::Decoding(info, promise) => match promise.block_and_take() {
                 Ok((decoded, stream)) => self.start(row_id, name, path, info, decoded, stream),
-                Err(error) => log::error!("BGM 解码失败: {error}"),
+                Err(error) => log::error!("BGM decode failed: {error}"),
             },
         }
     }
@@ -385,6 +455,12 @@ impl MusicPlayer {
             return;
         }
         let rate = f64::from(decoded.sample_rate);
+        // OS media-session integration is only for a track that actually loops; a fanfare-length
+        // BGM entry with no real loop region gets no more OS surface than an Assets tab preview.
+        let announce = decoded
+            .loop_start
+            .zip(decoded.loop_end)
+            .is_some_and(|(start, end)| end > start);
         let now_playing = NowPlaying {
             name: name.clone(),
             path,
@@ -400,11 +476,11 @@ impl MusicPlayer {
         };
         let player = self.player.as_mut().unwrap();
         player.set_volume(self.volume);
-        player.set_metadata(&name);
-        if let Err(error) = player.play(decoded) {
-            log::error!("BGM 播放失败: {error}");
+        if let Err(error) = player.play(decoded, announce) {
+            log::error!("BGM playback failed: {error}");
             return;
         }
+        player.set_metadata(&name);
         self.now_playing = Some(now_playing);
     }
 
@@ -413,7 +489,7 @@ impl MusicPlayer {
             match Player::new() {
                 Ok(player) => self.player = Some(player),
                 Err(error) => {
-                    log::error!("音频初始化失败: {error}");
+                    log::error!("audio init failed: {error}");
                     return false;
                 }
             }
@@ -450,99 +526,112 @@ impl MusicPlayer {
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) -> Option<u32> {
-        if self.rows_stale {
-            self.rebuild_rows();
-        }
         let mut clicked = None;
-        CollapsibleSidePanel::new("music_list", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
-            Panel::top("music_list_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "music_list", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("曲目"));
-                    });
-                });
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui
-                        .add_enabled(!self.search.is_empty(), Button::new("↩"))
-                        .on_hover_text("清除")
-                        .clicked()
-                    {
-                        self.search.clear();
-                    }
-                    let unavailable = self.rows.iter().filter(|row| !row.available).count();
-                    if unavailable > 0 {
-                        ui.toggle_value(&mut self.show_unavailable, "🚫")
-                            .on_hover_text(format!("显示 {unavailable} 个不可用曲目"));
-                    }
-                    ui.add_sized(
-                        Vec2::new(ui.available_width(), 0.0),
-                        TextEdit::singleline(&mut self.search).hint_text("筛选"),
-                    );
-                });
-                ui.add_space(4.0);
-            });
-
-            CentralPanel::default().show(ui, |ui| match &self.index {
-                Index::Idle | Index::Loading(_) => {
+        let mut nav = std::mem::take(&mut self.nav);
+        CollapsibleSidePanel::new("music_list", Side::Left)
+            .min_width(LIST_MIN_WIDTH)
+            .max_width(LIST_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
+                Panel::top("music_list_header").show(ui, |ui| {
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("正在加载 BGM 列表…");
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "music_list", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("曲目"));
+                        });
                     });
-                }
-                Index::Failed(error) => {
-                    ui.colored_label(Color32::RED, format!("加载 BGM 列表失败: {error}"));
-                }
-                Index::Loaded(_) => clicked = self.draw_rows(ui),
+                    ui.add_space(4.0);
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if ui
+                            .add_enabled(!self.search.is_empty(), Button::new("↩"))
+                            .on_hover_text("清除")
+                            .clicked()
+                        {
+                            self.search.clear();
+                        }
+                        let unavailable = self.rows.iter().filter(|row| !row.available).count();
+                        if unavailable > 0 {
+                            ui.toggle_value(&mut self.show_unavailable, "🚫")
+                                .on_hover_text(format!("显示 {unavailable} 个不可用曲目"));
+                        }
+                        ui.add_sized(
+                            Vec2::new(ui.available_width(), 0.0),
+                            TextEdit::singleline(&mut self.search)
+                                .id(egui::Id::new(FILTER_ID))
+                                .hint_text("筛选"),
+                        );
+                    });
+                    ui.add_space(4.0);
+                });
+
+                CentralPanel::default().show(ui, |ui| match &self.index {
+                    Index::Idle | Index::Loading(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("正在加载 BGM 列表…");
+                        });
+                    }
+                    Index::Failed(error) => {
+                        ui.colored_label(Color32::RED, format!("加载 BGM 列表失败: {error}"));
+                    }
+                    Index::Loaded(_) => clicked = self.draw_rows(ui, &mut nav),
+                });
             });
-        });
+        self.nav = nav;
         clicked
     }
 
-    fn draw_rows(&self, ui: &mut egui::Ui) -> Option<u32> {
-        let selected = self
-            .now_playing
-            .as_ref()
-            .map(|n| n.row_id)
-            .or_else(|| self.loading.as_ref().map(|l| l.row_id));
+    /// The tracks the filter leaves, best match first.
+    fn matches(&self) -> Vec<&TrackRow> {
         let query = (!self.search.is_empty()).then_some(self.search.as_str());
-        let filtered: Vec<&TrackRow> = self.matcher.match_list_indirect(
+        self.matcher.match_list_indirect(
             query,
             self.rows
                 .iter()
                 .filter(|row| self.show_unavailable || row.available),
             |row| row.name.as_str(),
-        );
+        )
+    }
 
-        let mut clicked = None;
+    fn draw_rows(&self, ui: &mut egui::Ui, nav: &mut ListNav) -> Option<u32> {
+        let selected = self
+            .now_playing
+            .as_ref()
+            .map(|n| n.row_id)
+            .or_else(|| self.loading.as_ref().map(|l| l.row_id));
+        let filtered = self.matches();
+
+        let mut clicked = nav
+            .apply(filtered.len())
+            .filter(|at| filtered[*at].available)
+            .map(|at| filtered[at].row_id);
         let row_height = ui.text_style_height(&egui::TextStyle::Button);
-        ScrollArea::vertical().auto_shrink(false).show_rows(
-            ui,
-            row_height,
-            filtered.len(),
-            |ui, range| {
-                ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
-                    for row in &filtered[range] {
-                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                        let response = ui
-                            .add_enabled_ui(row.available, |ui| {
-                                Button::selectable(selected == Some(row.row_id), row.name.as_str())
-                                    .ui(ui)
-                            })
-                            .inner
-                            .on_hover_ui(|ui| self.row_hover(ui, row));
-                        if response.clicked() {
-                            clicked = Some(row.row_id);
-                        }
+        let mut area = ScrollArea::vertical().auto_shrink(false);
+        if let Some(offset) = nav.scroll(ui, row_height, filtered.len()) {
+            area = area.vertical_scroll_offset(offset);
+        }
+        let output = area.show_rows(ui, row_height, filtered.len(), |ui, range| {
+            ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                for (at, row) in filtered[range.clone()].iter().enumerate() {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let response = ui
+                        .add_enabled_ui(row.available, |ui| {
+                            Button::selectable(selected == Some(row.row_id), row.name.as_str())
+                                .ui(ui)
+                        })
+                        .inner
+                        .on_hover_ui(|ui| self.row_hover(ui, row));
+                    nav.mark(ui, range.start + at, response.rect);
+                    if response.clicked() {
+                        clicked = Some(row.row_id);
                     }
-                });
-            },
-        );
+                }
+            });
+        });
+        nav.seen(&output);
         clicked
     }
 
@@ -550,30 +639,37 @@ impl MusicPlayer {
         ui.strong(&row.name);
         if let Some(song) = self.songs.get(&row.row_id) {
             if !song.alt.is_empty() {
-                ui.label(format!("别名: {}", song.alt));
+                ui.label(format!("别名：{}", song.alt));
             }
             if !song.special.is_empty() {
-                ui.label(format!("特殊模式: {}", song.special));
+                ui.label(format!("特殊模式：{}", song.special));
             }
             if !song.locations.is_empty() {
-                ui.label(format!("出现地点: {}", song.locations));
+                ui.label(format!("出现地点：{}", song.locations));
             }
             if !song.info.is_empty() {
-                ui.label(format!("备注: {}", song.info));
+                ui.label(format!("备注：{}", song.info));
             }
             if song.duration > 0 {
-                ui.label(format!("时长: {}", format_time(f64::from(song.duration))));
+                ui.label(format!(
+                    "时长：{}",
+                    format_time(f64::from(song.duration))
+                ));
             }
         }
         ui.separator();
         ui.label(RichText::new(&row.path).weak());
         ui.label(RichText::new(format!("BGM #{}", row.row_id)).weak());
         if !row.available {
-            ui.colored_label(Color32::from_rgb(0xE0, 0x8C, 0x3C), "当前数据源不可用");
+            ui.colored_label(
+                Color32::from_rgb(0xE0, 0x8C, 0x3C),
+                "此数据源中不可用",
+            );
         }
     }
 
-    fn now_playing_panel(&mut self, ui: &mut egui::Ui) {
+    fn now_playing_panel(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        let mut navigate = None;
         CentralPanel::default().show(ui, |ui| {
             if CollapsibleSidePanel::is_collapsed(ui.ctx(), "music_list") {
                 Panel::top("music_reexpand").show(ui, |ui| {
@@ -585,7 +681,7 @@ impl MusicPlayer {
                 });
             }
             if self.now_playing.is_some() {
-                self.draw_player(ui);
+                navigate = self.draw_player(ui);
             } else if let Some(loading) = &self.loading {
                 let phase = loading.phase();
                 let name = loading.name.clone();
@@ -596,15 +692,15 @@ impl MusicPlayer {
                     ui.label(RichText::new(name).weak());
                 });
             } else {
-                center(ui, |ui| {
-                    ui.label(RichText::new("♪").size(56.0).weak());
-                    ui.label(RichText::new("选择一首曲目开始播放").weak());
-                });
+                empty_view(ui, "♪", "选择要播放的曲目");
             }
         });
+        navigate
     }
 
-    fn draw_player(&mut self, ui: &mut egui::Ui) {
+    fn draw_player(&mut self, ui: &mut egui::Ui) -> Option<String> {
+        self.export_promise
+            .take_if(|promise| promise.try_get().is_some());
         let now = self.now_playing.as_ref().unwrap();
         let (name, path, loop_range, channels, sample_rate, info, row_id, stream) = (
             now.name.clone(),
@@ -648,6 +744,7 @@ impl MusicPlayer {
             vec2(col_w, outer.height()),
         );
         let mut cmd = None;
+        let mut export_start = None;
         ui.scope_builder(
             UiBuilder::new()
                 .max_rect(col_rect)
@@ -698,30 +795,45 @@ impl MusicPlayer {
                     }
                     if ui
                         .add_sized(vec2(40.0, 34.0), Button::selectable(show_viz, "📊"))
-                        .on_hover_text("可视化效果")
+                        .on_hover_text("可视化器")
                         .clicked()
                     {
                         cmd = Some(Cmd::ToggleVisualizer);
                     }
-                    ui.add_enabled_ui(!exporting, |ui| {
-                        ui.menu_button(
-                            if exporting {
-                                "正在导出…"
-                            } else {
-                                "导出"
-                            },
-                            |ui| {
-                                if ui.button("原始音频").clicked() {
-                                    cmd = Some(Cmd::Export(ExportFormat::Original));
-                                    ui.close();
-                                }
-                                if ui.button("WAV 音频").clicked() {
-                                    cmd = Some(Cmd::Export(ExportFormat::Wav));
-                                    ui.close();
-                                }
-                            },
-                        );
-                    });
+                    // `Original` hands back the entry's own bytes untouched, multichannel and all;
+                    // `Wav` re-decodes them, so it carries the same stereo downmix the player is
+                    // producing.
+                    let codec = info.codec;
+                    let extension = codec_extension(codec);
+                    export_start = export::menu(
+                        ui,
+                        "📤",
+                        Some("导出"),
+                        exporting,
+                        vec![
+                            export::Choice::bytes(
+                                "原始文件",
+                                format!("{}.{extension}", safe_file_name(&name)),
+                                {
+                                    let stream = stream.clone();
+                                    move || Ok(stream.to_vec())
+                                },
+                            )
+                            .title("导出原始音频")
+                            .filter(extension.to_ascii_uppercase(), &[extension]),
+                            export::Choice::bytes(
+                                "WAV",
+                                format!("{}.wav", safe_file_name(&name)),
+                                move || {
+                                    audio::decode_data(codec, &stream)
+                                        .and_then(|decoded| audio::encode_wav(&decoded))
+                                },
+                            )
+                            .title("导出 WAV 音频")
+                            .filter("WAV", &["wav"]),
+                        ],
+                        vec2(40.0, 34.0),
+                    );
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         ui.spacing_mut().slider_width = 150.0;
@@ -736,7 +848,7 @@ impl MusicPlayer {
                 });
                 ui.add_space(18.0);
 
-                draw_info(
+                if draw_info(
                     ui,
                     &info,
                     channels,
@@ -744,9 +856,15 @@ impl MusicPlayer {
                     duration,
                     loop_range,
                     &path,
-                );
+                ) {
+                    cmd = Some(Cmd::OpenInAssets);
+                }
             },
         );
+
+        if export_start.is_some() {
+            self.export_promise = export_start;
+        }
 
         match cmd {
             Some(Cmd::Toggle) => {
@@ -757,61 +875,33 @@ impl MusicPlayer {
                         player.resume();
                     }
                 }
+                None
             }
-            Some(Cmd::Scrub(seconds)) => self.scrub = Some(seconds),
+            Some(Cmd::Scrub(seconds)) => {
+                self.scrub = Some(seconds);
+                None
+            }
             Some(Cmd::Seek(seconds)) => {
                 if let Some(player) = &mut self.player {
                     player.seek(seconds);
                 }
                 self.scrub = None;
+                None
             }
             Some(Cmd::Volume(value)) => {
                 self.volume = value;
                 if let Some(player) = &mut self.player {
                     player.set_volume(value);
                 }
+                None
             }
-            Some(Cmd::ToggleVisualizer) => self.show_visualizer = !self.show_visualizer,
-            Some(Cmd::Export(format)) => self.export(name, info.codec, stream, format),
-            None => {}
+            Some(Cmd::ToggleVisualizer) => {
+                self.show_visualizer = !self.show_visualizer;
+                None
+            }
+            Some(Cmd::OpenInAssets) => Some(path),
+            None => None,
         }
-    }
-
-    fn export(&mut self, name: String, codec: Codec, stream: Arc<[u8]>, format: ExportFormat) {
-        let (extension, title) = match format {
-            ExportFormat::Original => (codec_extension(codec), "导出原始音频"),
-            ExportFormat::Wav => ("wav", "导出 WAV 音频"),
-        };
-        let file_name = format!("{}.{}", safe_file_name(&name), extension);
-        self.export_promise = Some(TrackedPromise::spawn_local(async move {
-            let data = match format {
-                ExportFormat::Original => stream.to_vec(),
-                ExportFormat::Wav => {
-                    let result = audio::decode_data(codec, &stream)
-                        .and_then(|decoded| audio::encode_wav(&decoded));
-                    match result {
-                        Ok(data) => data,
-                        Err(error) => {
-                            log::error!("WAV 编码失败: {error}");
-                            return;
-                        }
-                    }
-                }
-            };
-            if let Some(file) = rfd::AsyncFileDialog::new()
-                .set_title(title)
-                .set_file_name(file_name)
-                .add_filter(extension.to_ascii_uppercase(), &[extension])
-                .save_file()
-                .await
-            {
-                if let Err(error) = file.write(&data).await {
-                    log::error!("写入音频失败: {error}");
-                } else {
-                    log::info!("音频导出成功");
-                }
-            }
-        }));
     }
 
     fn viz_bars(&mut self, spectrum: &[u8], sample_rate: u32, playing: bool) -> Vec<f32> {
@@ -872,7 +962,7 @@ fn draw_info(
     duration: f64,
     loop_range: Option<(f64, f64)>,
     path: &str,
-) {
+) -> bool {
     let looping = loop_range.is_some();
     let bitrate = if duration > 0.0 {
         (info.stream_size as f64 * 8.0 / duration / 1000.0).round() as u64
@@ -888,13 +978,13 @@ fn draw_info(
         1 => "单声道".to_string(),
         2 => "立体声".to_string(),
         6 => "5.1".to_string(),
-        n => format!("{n} 声道"),
+        n => format!("{n} ch"),
     };
     let sep = "   ·   ";
     let line1 = [codec_name(info.codec).to_string(), freq, chan].join(sep);
     let mut parts = vec![format!("{bitrate} kbps"), format_size(info.file_size)];
     if looping {
-        parts.push("循环播放".to_string());
+        parts.push("循环".to_string());
     }
     let line2 = parts.join(sep);
 
@@ -903,21 +993,13 @@ fn draw_info(
     let stats = ui.label(RichText::new(line2).weak());
     if let Some((start, end)) = loop_range {
         stats.on_hover_text(format!(
-            "循环区间 {} → {}",
+            "循环 {} → {}",
             format_time(start),
             format_time(end)
         ));
     }
     ui.add_space(4.0);
-    ui.label(RichText::new(path).weak().small());
-}
-
-fn center<R>(ui: &mut egui::Ui, contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.35);
-        contents(ui)
-    })
-    .inner
+    crate::assets::viewers::link(ui, file_name(path), path)
 }
 
 fn codec_name(codec: Codec) -> &'static str {
@@ -928,35 +1010,39 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::MsAdpcm => "MS ADPCM",
         Codec::Atrac9 => "ATRAC9",
         Codec::Pcm => "PCM",
-        Codec::Empty => "空",
-        Codec::Unknown(_) => "未知",
+        Codec::Empty => "Empty",
+        Codec::Unknown(_) => "Unknown",
     }
 }
 
+/// Ogg and Hca are the only codecs `audio::decode` ever hands back a `NowPlaying` for, so
+/// anything else here is unreachable; the fallback stays honest rather than naming a container
+/// the raw entry bytes do not actually have.
 fn codec_extension(codec: Codec) -> &'static str {
     match codec {
         Codec::OggVorbis => "ogg",
         Codec::Hca => "hca",
-        Codec::Mp3 => "mp3",
-        Codec::MsAdpcm | Codec::Pcm => "wav",
-        Codec::Atrac9 => "at9",
-        Codec::Empty | Codec::Unknown(_) => "bin",
+        Codec::MsAdpcm => "wav",
+        _ => "bin",
     }
 }
 
 fn safe_file_name(name: &str) -> String {
-    let name: String = name
+    let cleaned: String = name
         .chars()
-        .map(|character| match character {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
-            _ => character,
+        .map(|character| {
+            if "<>:\"/\\|?*".contains(character) {
+                '_'
+            } else {
+                character
+            }
         })
         .collect();
-    let name = name.trim().trim_end_matches(['.', ' ']);
-    if name.is_empty() {
+    let trimmed = cleaned.trim().trim_end_matches(['.', ' ']);
+    if trimmed.is_empty() {
         "music".to_string()
     } else {
-        name.to_string()
+        trimmed.to_string()
     }
 }
 
@@ -1014,7 +1100,7 @@ async fn load_index(excel: CachedProvider) -> Result<Vec<BgmTrack>> {
         sheet
             .columns()
             .first()
-            .ok_or_else(|| anyhow!("BGM 表没有列"))?
+            .ok_or_else(|| anyhow!("BGM sheet has no columns"))?
             .offset(),
     );
 
@@ -1048,4 +1134,51 @@ async fn check_availability(
         }
     }
     Ok(available)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `poll` drops a pending row that is already playing, so re-arming the track before clearing
+    /// it would leave the previous install's audio playing and never fetch it again.
+    #[test]
+    fn reconnecting_rearms_the_playing_track() {
+        let mut music = MusicPlayer {
+            index: Index::Loaded(Vec::new()),
+            avail: Avail::Ready(HashSet::new()),
+            now_playing: Some(NowPlaying {
+                name: "Prelude".to_string(),
+                path: "music/ffxiv/bgm_system_title.scd".to_string(),
+                row_id: 7,
+                channels: 2,
+                sample_rate: 44100,
+                loop_range_secs: None,
+                info: StreamInfo {
+                    codec: Codec::OggVorbis,
+                    file_size: 0,
+                    stream_size: 0,
+                },
+                stream: Arc::from(&[][..]),
+            }),
+            ..Default::default()
+        };
+
+        music.reset();
+
+        assert_eq!(
+            music.pending,
+            Some(7),
+            "the track has to be read again from the new install"
+        );
+        assert!(
+            music.now_playing.is_none(),
+            "or poll sees the row as already playing and drops it"
+        );
+        assert!(
+            matches!(music.index, Index::Idle),
+            "the BGM sheet is per version"
+        );
+        assert!(matches!(music.avail, Avail::Idle), "as is which files ship");
+    }
 }

@@ -351,7 +351,7 @@ fn inspect_texture(bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
         "height": texture.height(),
         "depth": texture.depth(),
         "array_size": texture.array_size(),
-        "layers": texture.layers(),
+        "layers": texture.layers(0),
         "mip_levels": mips
     }))
 }
@@ -591,7 +591,7 @@ fn inspect_shpk(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Va
             "system": package.system_keys().iter().take(max_items).map(|key| serde_json::json!({"id": key.id(), "default": key.default_value()})).collect::<Vec<_>>(),
             "scene": package.scene_keys().iter().take(max_items).map(|key| serde_json::json!({"id": key.id(), "default": key.default_value()})).collect::<Vec<_>>(),
             "material": package.material_keys().iter().take(max_items).map(|key| serde_json::json!({"id": key.id(), "default": key.default_value()})).collect::<Vec<_>>(),
-            "subview_defaults": package.subview_defaults()
+            "subview_defaults": package.technique_subview()
         },
         "key_counts": {"system": package.system_keys().len(), "scene": package.scene_keys().len(), "material": package.material_keys().len()},
         "nodes": package.nodes().iter().take(max_items).map(|node| serde_json::json!({"id": node.id(), "keys": node.keys(), "pass_count": node.passes().len()})).collect::<Vec<_>>(),
@@ -619,6 +619,110 @@ fn inspect_shcd(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Va
     }))
 }
 
+fn inspect_scd(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Value> {
+    let container = ironworks::file::scd::SoundContainer::read(Cursor::new(bytes.to_vec()))?;
+    let entries = container
+        .entries()
+        .iter()
+        .take(max_items)
+        .map(|entry| {
+            serde_json::json!({
+                "slot": entry.slot(),
+                "codec": format!("{:?}", entry.format()),
+                "channels": entry.channel_count(),
+                "sample_rate": entry.sample_rate(),
+                "loop_start": entry.loop_start(),
+                "loop_end": entry.loop_end(),
+                "markers": entry.markers(),
+                "bytes": entry.data().len()
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "sound_count": container.sound_count(),
+        "track_count": container.track_count(),
+        "stream_count": container.entries().len(),
+        "truncated": container.entries().len() > max_items,
+        "entries": entries
+    }))
+}
+
+fn inspect_sgb(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Value> {
+    let file = ironworks::file::sgb::SharedGroupFile::read(Cursor::new(bytes.to_vec()))?;
+    let scene = file.scene();
+    let layers = scene
+        .layer_groups()
+        .iter()
+        .take(max_items)
+        .map(|group| {
+            serde_json::json!({
+                "id": group.id(),
+                "name": group.name(),
+                "layer_count": group.layers().len(),
+                "layers": group.layers().iter().take(max_items).map(|layer| {
+                    serde_json::json!({
+                        "id": layer.id(),
+                        "name": layer.name(),
+                        "visible": layer.visible(),
+                        "instance_count": layer.instances().len()
+                    })
+                }).collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "group_count": scene.layer_groups().len(),
+        "environment_count": scene.environments().len(),
+        "filter_count": scene.filters().len(),
+        "timeline_count": scene.timelines().len(),
+        "animation_count": scene.animations().len(),
+        "truncated": scene.layer_groups().len() > max_items,
+        "groups": layers
+    }))
+}
+
+fn inspect_lgb(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Value> {
+    let file = ironworks::file::lgb::LayerGroupFile::read(Cursor::new(bytes.to_vec()))?;
+    let group = file.group();
+    let layers = group
+        .layers()
+        .iter()
+        .take(max_items)
+        .map(|layer| {
+            serde_json::json!({
+                "id": layer.id(),
+                "name": layer.name(),
+                "visible": layer.visible(),
+                "festival_id": layer.festival_id(),
+                "festival_phase_id": layer.festival_phase_id(),
+                "instance_count": layer.instances().len(),
+                "instances": layer.instances().iter().take(max_items).map(|instance| {
+                    let data = instance.data();
+                    serde_json::json!({
+                        "kind": format!("{:?}", instance.kind()),
+                        "id": instance.id(),
+                        "name": instance.name(),
+                        "data": match data {
+                            ironworks::file::layer::InstanceData::SharedGroup(group) => serde_json::json!({"shared_group": group.asset_path()}),
+                            ironworks::file::layer::InstanceData::BgPart(part) => serde_json::json!({"bg_part": part.asset_path()}),
+                            ironworks::file::layer::InstanceData::Vfx(vfx) => serde_json::json!({"vfx": vfx.asset_path()}),
+                            ironworks::file::layer::InstanceData::Sound(sound) => serde_json::json!({"sound": sound.asset_path()}),
+                            _ => serde_json::Value::Null
+                        }
+                    })
+                }).collect::<Vec<_>>()
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "id": group.id(),
+        "name": group.name(),
+        "layer_count": group.layers().len(),
+        "truncated": group.layers().len() > max_items,
+        "layers": layers
+    }))
+}
+
 pub fn inspect(path: &str, bytes: &[u8], max_items: usize) -> anyhow::Result<String> {
     let max_items = max_items.min(MAX_ITEMS);
     let format = magic::sniff(bytes);
@@ -633,6 +737,9 @@ pub fn inspect(path: &str, bytes: &[u8], max_items: usize) -> anyhow::Result<Str
         Some(crate::assets::viewers::Viewer::Uld) => inspect_uld(bytes, max_items),
         Some(crate::assets::viewers::Viewer::Shpk) => inspect_shpk(bytes, max_items),
         Some(crate::assets::viewers::Viewer::Shcd) => inspect_shcd(bytes, max_items),
+        Some(crate::assets::viewers::Viewer::Scd) => inspect_scd(bytes, max_items),
+        Some(crate::assets::viewers::Viewer::Lgb) => inspect_lgb(bytes, max_items),
+        Some(crate::assets::viewers::Viewer::Sgb) => inspect_sgb(bytes, max_items),
         Some(crate::assets::viewers::Viewer::Text) => Ok(serde_json::json!({
             "text": String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)]),
             "truncated": bytes.len() > MAX_BYTES

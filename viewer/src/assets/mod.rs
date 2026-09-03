@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
@@ -9,16 +9,25 @@ use web_time::{Duration, Instant};
 
 use anyhow::Result;
 use egui::{
-    Align, Button, CentralPanel, Color32, ColorImage, Label, Layout, Rect, RichText, ScrollArea,
-    TextEdit, TextStyle, UiBuilder, Vec2, Widget, collapsing_header::paint_default_icon,
-    containers::panel::Panel, pos2, vec2,
+    Align, Button, CentralPanel, Color32, Label, Layout, Rect, RichText, ScrollArea, Sense,
+    TextEdit, TextStyle, UiBuilder, Vec2, Widget,
+    collapsing_header::paint_default_icon,
+    containers::panel::Panel,
+    pos2,
+    text::{CCursor, LayoutJob, TextFormat},
+    vec2,
 };
+use ironworks::excel::Language;
 use nucleo_matcher::pattern::Pattern;
+use regex_lite::{Regex, RegexBuilder};
 
 use crate::backend::Backend;
+use crate::data::IconIndex;
+use crate::data::listing::{Listed, Listing};
 use crate::excel::provider::ExcelProvider;
-use crate::settings::api_base;
-use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise};
+use crate::goto::{ListNav, Palette, SUGGESTIONS};
+use crate::settings::{LANGUAGE, api_base};
+use crate::utils::{CollapsibleSidePanel, FuzzyMatcher, Side, TrackedPromise, empty_view, export};
 
 use pathlist::{PathList, Presence};
 
@@ -35,6 +44,17 @@ const SCAN_BATCH: usize = 600;
 const MAX_RESULTS: usize = 500;
 /// How long a typed path has to stand still before the install is asked whether it holds it.\
 const EXISTS_DELAY: Duration = Duration::from_millis(250);
+/// Width the extension menu is held to.
+const EXTENSION_MENU_WIDTH: f32 = 50.0;
+/// Widest the tree panel may stand.
+const TREE_WIDTH: f32 = 360.0;
+/// Narrowest the tree panel can go before its own header (tree toggle, mode and extension menus,
+/// clear button) no longer fits.
+const TREE_MIN_WIDTH: f32 = 200.0;
+/// Widest the details panel beside a preview may stand.
+pub(crate) const DETAILS_WIDTH: f32 = 400.0;
+const DETAILS_MIN_WIDTH: f32 = 200.0;
+const SEARCH_ID: &str = "asset_search";
 
 /// One entry in the flattened view of the tree that is currently on screen.
 enum Row {
@@ -79,29 +99,13 @@ impl fmt::Display for Millis {
     }
 }
 
-/// Decode both payloads and build the tree, timing each stage. The whole thing runs on the frame
-/// that the fetch lands, so anything slow here is a visible hitch rather than a background cost.
-fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
-    let at = Instant::now();
-    let paths = PathList::decode(paths).map_err(|e| e.to_string())?;
-    let paths_took = at.elapsed();
+/// Build the tree over the shared listing, timing each stage. The whole thing runs on the frame
+/// that the listing lands, so anything slow here is a visible hitch rather than a background cost.
+fn build_index(list: Rc<Listing>) -> Result<Loaded, String> {
+    let (paths, presence) = (list.paths(), list.presence());
 
     let at = Instant::now();
-    let presence = Presence::decode(presence).map_err(|e| e.to_string())?;
-    let presence_took = at.elapsed();
-
-    // The map is indexed by position in the list, so a pair from different builds would hide and
-    // reveal the wrong files rather than fail.
-    if paths.list_id() != presence.list_id() {
-        return Err(format!(
-            "当前版本的文件映射基于路径列表 {:016x}，当前列表为 {:016x}。",
-            presence.list_id(),
-            paths.list_id(),
-        ));
-    }
-
-    let at = Instant::now();
-    let mut live = live_dirs(&paths, &presence);
+    let mut live = live_dirs(paths, presence);
     let live_took = at.elapsed();
 
     let at = Instant::now();
@@ -130,15 +134,6 @@ fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
     let tree_took = at.elapsed();
 
     log::info!(
-        "assets/decode: path list {} ({} dirs, {} paths), presence {} ({} present, {} unnamed)",
-        Millis(paths_took),
-        paths.dirs().len(),
-        paths.len(),
-        Millis(presence_took),
-        presence.len(),
-        presence.unnamed().len(),
-    );
-    log::info!(
         "assets/build: live dirs {} ({} kept), unnamed {} ({} placed in named dirs, {} in {} hash dirs), tree {} ({} nodes, {} roots)",
         Millis(live_took),
         live.len(),
@@ -152,13 +147,12 @@ fn build_index(paths: &[u8], presence: &[u8]) -> Result<Loaded, String> {
     );
     log::info!(
         "assets/total: {} to first frame, {} resident",
-        Millis(paths_took + presence_took + live_took + tree_took),
+        Millis(live_took + unnamed_took + tree_took),
         Bytes(paths.resident_bytes()),
     );
 
     Ok(Loaded {
-        paths,
-        presence,
+        list,
         nodes,
         roots,
         extra_dirs,
@@ -304,6 +298,28 @@ fn category_name(category: u8) -> Option<&'static str> {
     })
 }
 
+/// A listed directory's ancestors, for the hashes asked about, as `(directory, byte length)` so the
+/// name can be sliced back out without owning it. Only walked when something failed to place, since
+/// the large majority of unnamed files land on a directory that holds listed files of its own.
+fn ancestors(dirs: &[Box<str>], wanted: &HashSet<u32>) -> HashMap<u32, (usize, usize)> {
+    use ironworks::sqpack::IndexHash;
+
+    let mut found = HashMap::new();
+    if wanted.is_empty() {
+        return found;
+    }
+    for (index, dir) in dirs.iter().enumerate() {
+        let name = dir.to_ascii_lowercase();
+        for (at, _) in name.match_indices('/') {
+            let hash = IndexHash::directory(&name[..at]);
+            if wanted.contains(&hash) {
+                found.entry(hash).or_insert((index, at));
+            }
+        }
+    }
+    found
+}
+
 /// Give every unnamed file a home. The install records these only as hashes, but the directory half
 /// of a split hash can be matched against the directories we do know, which lands the large majority
 /// of them in their real folder. The rest fall back to a folder named for their directory hash.
@@ -317,20 +333,31 @@ fn place_unnamed(
 
     let mut by_hash: HashMap<u32, usize> = HashMap::with_capacity(dirs.len());
     for (index, dir) in dirs.iter().enumerate() {
-        by_hash.insert(IndexHash::directory(dir), index);
+        // The install is keyed on the lowercased path, and a few listed directories carry a capital.
+        let name = dir.to_ascii_lowercase();
+        let hash = IndexHash::directory(&name);
+        // Some directories are listed under both spellings. Prefer the one already lowercase, so
+        // which of the two nodes takes the files does not depend on iteration order.
+        if name == **dir || !by_hash.contains_key(&hash) {
+            by_hash.insert(hash, index);
+        }
     }
+
+    // `.index2` records a whole-path hash with no directory half, so there is nothing to match on;
+    // none are present today, but they would have to go somewhere else.
+    let split = || unnamed_files.iter().filter(|file| file.split);
+    let unplaced: HashSet<u32> = split()
+        .map(|file| (file.hash >> 32) as u32)
+        .filter(|directory| !by_hash.contains_key(directory))
+        .collect();
+    let ancestors = ancestors(dirs, &unplaced);
 
     let mut extra_dirs: Vec<Box<str>> = Vec::new();
     let mut synthesised: HashMap<(u8, u8, u32), usize> = HashMap::new();
     let mut unnamed: HashMap<usize, Vec<pathlist::Unnamed>> = HashMap::new();
     let mut resolved = 0;
 
-    for file in unnamed_files {
-        // `.index2` records a whole-path hash with no directory half, so there is nothing to
-        // match on; none are present today, but they would have to go somewhere else.
-        if !file.split {
-            continue;
-        }
+    for file in split() {
         let directory = (file.hash >> 32) as u32;
         let dir = match by_hash.get(&directory) {
             Some(known) => {
@@ -340,15 +367,23 @@ fn place_unnamed(
             None => {
                 let key = (file.category, file.repository, directory);
                 *synthesised.entry(key).or_insert_with(|| {
-                    let category = category_name(file.category)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| format!("category{:02x}", file.category));
-                    let repository = match file.repository {
-                        0 => "ffxiv".to_owned(),
-                        n => format!("ex{n}"),
+                    let name = match ancestors.get(&directory) {
+                        // A directory holding nothing but other directories is not a key above, yet
+                        // the tree already draws it, so its files belong there and not in a hash
+                        // folder.
+                        Some(&(index, length)) => dirs[index][..length].to_owned(),
+                        None => {
+                            let category = category_name(file.category)
+                                .map(str::to_owned)
+                                .unwrap_or_else(|| format!("category{:02x}", file.category));
+                            let repository = match file.repository {
+                                0 => "ffxiv".to_owned(),
+                                n => format!("ex{n}"),
+                            };
+                            format!("{category}/{repository}/{directory:08x}")
+                        }
                     };
-                    extra_dirs
-                        .push(format!("{category}/{repository}/{directory:08x}").into_boxed_str());
+                    extra_dirs.push(name.into_boxed_str());
                     dirs.len() + extra_dirs.len() - 1
                 })
             }
@@ -427,8 +462,7 @@ struct Names {
 }
 
 struct Loaded {
-    paths: PathList,
-    presence: Presence,
+    list: Rc<Listing>,
     nodes: Vec<Node>,
     roots: Vec<usize>,
     /// Directories that exist only because unnamed files hash into them. Indexed past the end of
@@ -454,10 +488,10 @@ impl Loaded {
 
     /// Path of a directory, whether it came from the list or was synthesised for unnamed files.
     fn dir_path(&self, dir: usize) -> &str {
-        let listed = self.paths.dirs().len();
+        let listed = self.list.paths().dirs().len();
         match dir.checked_sub(listed) {
             Some(extra) => &self.extra_dirs[extra],
-            None => &self.paths.dirs()[dir],
+            None => &self.list.paths().dirs()[dir],
         }
     }
 
@@ -488,14 +522,14 @@ impl Loaded {
     /// Names without caching. The search sweep touches every directory, so caching there would end
     /// up holding the whole corpus in memory.
     fn decode(&mut self, dir: usize) -> Vec<String> {
-        let offset = match self.paths.name_offset(dir) {
+        let offset = match self.list.paths().name_offset(dir) {
             Ok(offset) => offset,
             Err(e) => {
                 log::error!("No offset for directory {dir}: {e}");
                 return Vec::new();
             }
         };
-        let names = self.paths.names(dir).unwrap_or_else(|e| {
+        let names = self.list.paths().names(dir).unwrap_or_else(|e| {
             log::error!("Failed to decode directory {dir}: {e}");
             Vec::new()
         });
@@ -503,7 +537,7 @@ impl Loaded {
         names
             .into_iter()
             .enumerate()
-            .filter(|(i, _)| self.presence.contains(offset + i))
+            .filter(|(i, _)| self.list.presence().contains(offset + i))
             .map(|(_, name)| name)
             .collect()
     }
@@ -517,10 +551,79 @@ enum Load<T: Send + 'static, R = T> {
     Failed(String),
 }
 
+/// How the text of a query is matched against a path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchMode {
+    Fuzzy,
+    Strict,
+    Regex,
+}
+
+impl SearchMode {
+    const ALL: [Self; 3] = [Self::Fuzzy, Self::Strict, Self::Regex];
+
+    fn emoji(self) -> &'static str {
+        match self {
+            Self::Fuzzy => "🔍",
+            Self::Strict => "≈",
+            Self::Regex => "\u{ff0a}",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fuzzy => "Fuzzy",
+            Self::Strict => "Contains",
+            Self::Regex => "Regex",
+        }
+    }
+}
+
+/// What a query matches with, compiled once when the scan starts.
+enum Match {
+    /// Every name the filters left, which is what `ext:stm` on its own has to mean. The fuzzy
+    /// matcher scores nothing against an empty pattern, so it cannot answer that itself.
+    All,
+    Fuzzy(Pattern),
+    Contains(String),
+    Regex(Regex),
+    /// A pattern that would not compile, as the reason it did not.
+    Invalid(String),
+}
+
+/// Compile the query text, which is what the sweep then holds rather than the text itself.
+///
+/// Only a fuzzy query takes a `/` to mean the path: the other two modes are already spelled against
+/// whole paths, and a regex is full of separators that mean nothing of the sort.
+fn matching(mode: SearchMode, query: &Query) -> Match {
+    if query.text.is_empty() {
+        return Match::All;
+    }
+    match mode {
+        SearchMode::Fuzzy if !query.literal => {
+            Match::Fuzzy(FuzzyMatcher::parse_pattern(&query.text))
+        }
+        SearchMode::Fuzzy | SearchMode::Strict => Match::Contains(query.text.clone()),
+        // Compiled from the query as typed: the sweep is case-insensitive throughout, and lowercasing
+        // a pattern would turn `\S` into `\s` and flatten every class along with it.
+        SearchMode::Regex => match RegexBuilder::new(&query.text)
+            .case_insensitive(true)
+            .build()
+        {
+            Ok(regex) => Match::Regex(regex),
+            Err(e) => Match::Invalid(e.to_string()),
+        },
+    }
+}
+
 struct Scan {
-    pattern: Pattern,
+    matching: Match,
+    /// The suffix a name has to end with, `.` included, or empty for no extension filter.
+    suffix: String,
     cursor: usize,
     hits: Vec<(u32, String)>,
+    /// Everything that matched, which outruns `hits` once the cap is reached.
+    matched: usize,
     direct: Option<String>,
     exists: Load<bool>,
     typed: Instant,
@@ -546,6 +649,134 @@ enum Revealed {
     Hash(pathlist::Unnamed),
     /// A hash the list has since learned a name for, so the link moves to the name.
     Renamed(String),
+}
+
+/// What a typed query asks for, once its filter terms have been read off the front.
+struct Query {
+    /// What is left to match on, which is empty when the query was nothing but filters.
+    text: String,
+    /// The suffix a name has to end with, `.` included, or empty for no extension filter.
+    suffix: String,
+    /// Whether to match the path itself rather than score it fuzzily.
+    literal: bool,
+}
+
+/// Read the filter terms out of a query, leaving the rest to match on.
+///
+/// `ext:` is spelled the way the Everything search box spells it, and a query carrying a `/` is
+/// taken to be part of a path rather than a fuzzy fragment, which is the same rule: nobody types a
+/// separator into a fuzzy search, and typing `exd/` should leave that folder alone on screen.
+fn parse_query(search: &str) -> Query {
+    let mut suffix = String::new();
+    let mut rest = Vec::new();
+    for term in search.split_whitespace() {
+        match term.strip_prefix("ext:") {
+            Some(extension) => {
+                let extension = extension.trim_start_matches('.');
+                if !extension.is_empty() {
+                    suffix = format!(".{}", extension.to_lowercase());
+                }
+            }
+            None => rest.push(term),
+        }
+    }
+    let text = rest.join(" ");
+    Query {
+        literal: text.contains('/'),
+        text,
+        suffix,
+    }
+}
+
+/// Put `ext:extension` in the query, replacing whatever extension filter it already carried. It
+/// leads so the rest of the query stays where the user left it.
+fn set_extension(search: &str, extension: &str) -> String {
+    let rest = search
+        .split_whitespace()
+        .filter(|term| !term.starts_with("ext:"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match rest.is_empty() {
+        true => format!("ext:{extension}"),
+        false => format!("ext:{extension} {rest}"),
+    }
+}
+
+/// `haystack.contains(needle)` without folding a copy of either. Game paths are ASCII, and folding
+/// one per name would allocate more over a sweep than the matching itself costs.
+///
+/// `needle` is never empty: an empty query is answered before anything gets this far.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let (haystack, needle) = (haystack.as_bytes(), needle.as_bytes());
+    haystack.len() >= needle.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+/// One line of the result tree: a folder holding matches, or a match itself.
+enum Hit<'a> {
+    Dir {
+        path: &'a str,
+        depth: usize,
+        collapsed: bool,
+    },
+    File {
+        path: &'a str,
+        depth: usize,
+        name: &'a str,
+    },
+}
+
+/// Every directory a path passes through, outermost first, each as a whole path.
+fn lineage(dir: &str) -> impl Iterator<Item = &str> {
+    dir.match_indices('/')
+        .map(move |(at, _)| &dir[..at])
+        .chain(std::iter::once(dir))
+}
+
+/// Lay sorted matches out as the folders they sit in, so a search keeps the shape of the tree.
+///
+/// The rows are built from what matched rather than by pruning the real tree, which would mean
+/// deciding which of six figures of directories hold a match before anything could be drawn.
+fn group<'a>(paths: &[&'a str], collapsed: &HashSet<String>) -> Vec<Hit<'a>> {
+    let mut rows = Vec::new();
+    let mut open: Vec<&str> = Vec::new();
+    for path in paths {
+        let Some((dir, name)) = path.rsplit_once('/') else {
+            continue;
+        };
+        let want: Vec<&str> = lineage(dir).collect();
+        let common = open
+            .iter()
+            .zip(&want)
+            .take_while(|(open, want)| open == want)
+            .count();
+        open.truncate(common);
+        // A folder the user shut still gets its row, so it can be opened again; everything under it
+        // is walked but not drawn.
+        let mut hidden = open.iter().any(|dir| collapsed.contains(*dir));
+        for (depth, dir) in want.iter().enumerate().skip(common) {
+            open.push(dir);
+            let shut = collapsed.contains(*dir);
+            if !hidden {
+                rows.push(Hit::Dir {
+                    path: dir,
+                    depth,
+                    collapsed: shut,
+                });
+            }
+            hidden |= shut;
+        }
+        if !hidden {
+            rows.push(Hit::File {
+                path,
+                depth: want.len(),
+                name,
+            });
+        }
+    }
+    rows
 }
 
 /// The listed name a synthesised one stands for.
@@ -596,7 +827,8 @@ pub struct AssetBrowser {
     sniffed: Option<Format>,
     /// Rendered view of `bytes`, decoded once per selection.
     preview: Option<Preview>,
-    image_export: Option<TrackedPromise<()>>,
+    /// An export in flight, or what the last one finished as.
+    export: Option<TrackedPromise<()>>,
     /// Assets the current preview references, such as a material's textures.
     deps: deps::Deps,
     /// Set when the selection is an unnamed file, which has to be read by hash rather than by path.
@@ -606,15 +838,28 @@ pub struct AssetBrowser {
     slice: u16,
     channels: Channels,
     viewer: Option<Viewer>,
-    hex_page: usize,
+    hex: Hex,
     goto: Option<String>,
     search: String,
+    mode: SearchMode,
+    /// Show matches in the folders they sit in rather than as one flat list.
+    grouped: bool,
     scan: Option<Scan>,
     matcher: FuzzyMatcher,
+    palette: Option<Palette>,
+    /// Keyboard cursor over the flat search results.
+    nav: ListNav,
     expanded: HashMap<usize, bool>,
+    /// Folders the user collapsed in the results, keyed by path: the result tree is rebuilt from
+    /// whatever matched, so it has no stable node indices to key on the way the full tree does.
+    collapsed: HashSet<String>,
     selected: Option<String>,
     pending: Option<String>,
     redirect: Option<String>,
+    /// The Zones tab's own resolution of a `.lvb` to its display name, reused for the companion
+    /// button rather than reading `TerritoryType` and `PlaceName` a second time.
+    zone_names: Load<HashMap<String, String>>,
+    zone_names_lang: Option<Language>,
 }
 
 impl Default for AssetBrowser {
@@ -626,28 +871,37 @@ impl Default for AssetBrowser {
             sniffed: None,
             deps: deps::Deps::default(),
             preview: None,
-            image_export: None,
+            export: None,
             selected_unnamed: None,
             mip: 0,
             slice: 0,
             channels: Channels::default(),
             viewer: None,
-            hex_page: 0,
+            hex: Hex::default(),
             goto: None,
             search: String::new(),
+            mode: SearchMode::Fuzzy,
+            grouped: true,
             scan: None,
             matcher: FuzzyMatcher::new(),
+            palette: None,
+            nav: ListNav::default(),
             expanded: HashMap::new(),
+            collapsed: HashSet::new(),
             selected: None,
             pending: None,
             redirect: None,
+            zone_names: Load::Idle,
+            zone_names_lang: None,
         }
     }
 }
 
 impl AssetBrowser {
+    /// The file on show, or the one about to be once there is an index to place it in, so that
+    /// entering the bare route restores the same URL either way.
     pub fn selected(&self) -> Option<&str> {
-        self.selected.as_deref()
+        self.selected.as_deref().or(self.pending.as_deref())
     }
 
     /// Select the path from a deep link once the index is available.
@@ -655,6 +909,25 @@ impl AssetBrowser {
         if self.selected.as_deref() != Some(path.as_str()) {
             self.pending = Some(path);
         }
+    }
+
+    /// Drop everything that came from the install, so a reconnect reads it all again.
+    ///
+    /// The selection becomes pending rather than being thrown away: the new install is asked for
+    /// the same file, and whether it is named there is decided against its presence map, not the
+    /// one that happened to be loaded when it was picked.
+    pub fn reset(&mut self) {
+        self.state = Load::Idle;
+        self.bytes = Load::Idle;
+        // Everything decoded from the bytes hangs off this, and `ensure_bytes` clears the lot when
+        // it does not match the selection.
+        self.bytes_of = None;
+        self.deps = deps::Deps::default();
+        self.selected_unnamed = None;
+        self.scan = None;
+        self.pending = self.pending.take().or(self.selected.take());
+        self.zone_names = Load::Idle;
+        self.zone_names_lang = None;
     }
 
     /// Apply a deep link, once there is an index to place it in.
@@ -692,53 +965,85 @@ impl AssetBrowser {
         }
     }
 
+    pub fn open_palette(&mut self) {
+        self.palette = Some(Palette::new(
+            "查找资源…",
+            "搜索路径",
+            self.search.clone(),
+        ));
+    }
+
     pub fn ui(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<Action> {
         self.poll(ui.ctx(), backend);
         self.apply_pending();
+
+        let picked = self.draw_palette(ui.ctx(), backend);
+        let listed = !self.grouped
+            && !self.search.is_empty()
+            && !CollapsibleSidePanel::is_collapsed(ui.ctx(), "asset_tree");
+        self.nav
+            .claim(ui.ctx(), listed, Some(egui::Id::new(SEARCH_ID)));
+
         let clicked = self.side_panel(ui, backend);
         let followed = self.detail_panel(ui, backend);
         let moved = self
             .goto
             .take()
             .map(Action::Navigate)
-            .or_else(|| clicked.or(followed).map(Action::Select));
+            .or_else(|| picked.or(clicked).or(followed).map(Action::Select));
         // A redirect only restores a URL the app is already showing the right file for, so anything
         // the user did this frame supersedes it rather than firing over the top a frame later.
         let redirect = self.redirect.take().map(Action::Redirect);
         moved.or(redirect)
     }
 
-    fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
-        if matches!(self.state, Load::Idle) {
-            let files = backend.files().clone();
-            let api = api_base(ctx);
-            self.state = Load::Loading(TrackedPromise::spawn_local(async move {
-                // The list is version-independent and cached hard; the presence map is the only
-                // per-version part, and it is a bit per path.
-                let at = Instant::now();
-                // Served prebuilt by the API; a local install builds its own from the same list.
-                let (paths, presence) = files.path_index(&api).await?;
-                log::info!(
-                    "assets/fetch: path list {}, presence {}, in {}",
-                    Bytes(paths.len()),
-                    Bytes(presence.len()),
-                    Millis(at.elapsed()),
-                );
-                Ok((paths, presence))
-            }));
+    /// Writes the side panel's query and reads its sweep, so the corpus is walked once however the
+    /// search was started.
+    fn draw_palette(&mut self, ctx: &egui::Context, backend: &Backend) -> Option<String> {
+        let palette = self.palette.take()?;
+        match palette.draw(ctx, |query| {
+            if self.search != query {
+                query.clone_into(&mut self.search);
+                self.scan = None;
+            }
+            if self.search.is_empty() {
+                self.scan = None;
+                return Vec::new();
+            }
+            self.advance_scan(ctx, backend);
+            self.scan
+                .iter()
+                .flat_map(|scan| &scan.hits)
+                .take(SUGGESTIONS)
+                .map(|(_, path)| (path.clone(), path.clone()))
+                .collect()
+        }) {
+            Ok(picked) => picked,
+            Err(palette) => {
+                self.palette = Some(palette);
+                None
+            }
         }
+    }
 
-        if let Load::Loading(promise) = &self.state
-            && let Some(result) = promise.try_get()
-        {
-            self.state = match result.as_ref().map_err(|e| e.to_string()) {
-                Ok((paths, presence)) => match build_index(paths, presence) {
-                    Ok(loaded) => Load::Ready(Box::new(loaded)),
-                    Err(e) => Load::Failed(e),
-                },
-                Err(e) => Load::Failed(e),
-            };
+    fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
+        if !matches!(self.state, Load::Idle) {
+            return;
         }
+        self.state = match backend.listing(&api_base(ctx)) {
+            Listed::Loading => return,
+            Listed::Ready(list) => match build_index(list) {
+                Ok(loaded) => {
+                    backend.set_icons(IconIndex::build(
+                        loaded.list.paths(),
+                        loaded.list.presence(),
+                    ));
+                    Load::Ready(Box::new(loaded))
+                }
+                Err(e) => Load::Failed(e),
+            },
+            Listed::Failed(why) => Load::Failed(why.to_string()),
+        };
     }
 
     /// Expand the tree down to `path` so a deep link lands somewhere visible, and report how the
@@ -790,60 +1095,113 @@ impl AssetBrowser {
 
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
         let mut clicked = None;
-        CollapsibleSidePanel::new("asset_tree", Side::Left).show(ui, |ui, is_open| {
-            if !is_open {
-                return;
-            }
-            Panel::top("asset_tree_header").show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                        CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left);
-                        ui.vertical_centered_justified(|ui| ui.heading("资源"));
-                    });
-                });
-                ui.add_space(4.0);
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    if ui
-                        .add_enabled(!self.search.is_empty(), Button::new("↩"))
-                        .on_hover_text("清空")
-                        .clicked()
-                    {
-                        self.search.clear();
-                    }
-                    if ui
-                        .add_sized(
-                            Vec2::new(ui.available_width(), 0.0),
-                            TextEdit::singleline(&mut self.search).hint_text("搜索路径"),
-                        )
-                        .changed()
-                    {
-                        self.scan = None;
-                    }
-                });
-                ui.add_space(4.0);
-            });
-
-            CentralPanel::default().show(ui, |ui| match &mut self.state {
-                Load::Idle | Load::Loading(_) => {
+        let mut nav = std::mem::take(&mut self.nav);
+        CollapsibleSidePanel::new("asset_tree", Side::Left)
+            .min_width(TREE_MIN_WIDTH)
+            .max_width(TREE_WIDTH)
+            .show(ui, |ui, is_open| {
+                if !is_open {
+                    return;
+                }
+                Panel::top("asset_tree_header").show(ui, |ui| {
+                    ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("正在加载路径列表…");
+                        ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                            CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left);
+                            ui.vertical_centered_justified(|ui| ui.heading("资源"));
+                        });
                     });
-                }
-                Load::Failed(error) => {
-                    ui.colored_label(Color32::RED, error.clone());
-                }
-                Load::Ready(_) => {
-                    clicked = if self.search.is_empty() {
+                    ui.add_space(4.0);
+                    let mut restart = false;
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                        if ui
+                            .add_enabled(!self.search.is_empty(), Button::new("↩"))
+                            .on_hover_text("清空")
+                            .clicked()
+                        {
+                            self.search.clear();
+                            restart = true;
+                        }
+                        ui.toggle_value(&mut self.grouped, "🌳")
+                            .on_hover_text("以树状查看");
+                        let mode = self.mode;
+                        ui.menu_button(mode.emoji(), |ui| {
+                            for option in SearchMode::ALL {
+                                if ui
+                                    .selectable_label(mode == option, option.emoji())
+                                    .on_hover_text(option.label())
+                                    .clicked()
+                                {
+                                    self.mode = option;
+                                    restart = true;
+                                    ui.close();
+                                }
+                            }
+                        })
+                        .response
+                        .on_hover_text(format!("Search mode: {}", mode.label()));
+                        let picked = parse_query(&self.search).suffix;
+                        ui.menu_button("📄", |ui| {
+                            ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                // Three-letter names leave a menu too narrow to aim at, and too narrow
+                                // for the scroll bar to sit clear of them.
+                                ui.set_min_width(EXTENSION_MENU_WIDTH);
+                                for (extension, what, _) in EXTENSIONS {
+                                    let on = picked.trim_start_matches('.') == *extension;
+                                    if ui
+                                        .selectable_label(on, *extension)
+                                        .on_hover_text(*what)
+                                        .clicked()
+                                    {
+                                        self.search = set_extension(&self.search, extension);
+                                        restart = true;
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        })
+                        .response
+                        .on_hover_text("Filter by extension");
+                        restart |= ui
+                            .add_sized(
+                                Vec2::new(ui.available_width(), 0.0),
+                                TextEdit::singleline(&mut self.search)
+                                    .id(egui::Id::new(SEARCH_ID))
+                                    .hint_text("搜索路径"),
+                            )
+                            .on_hover_text(
+                                "ext:stm for one extension, or include a / to match a fuzzy query \
+                             against the path itself",
+                            )
+                            .changed();
+                    });
+                    if restart {
                         self.scan = None;
-                        self.draw_tree(ui)
-                    } else {
-                        self.draw_search(ui, backend)
-                    };
-                }
+                    }
+                    ui.add_space(4.0);
+                });
+
+                CentralPanel::default().show(ui, |ui| match &mut self.state {
+                    Load::Idle | Load::Loading(_) => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("正在加载路径列表…");
+                        });
+                    }
+                    Load::Failed(error) => {
+                        ui.colored_label(Color32::RED, error.clone());
+                    }
+                    Load::Ready(_) => {
+                        clicked = if self.search.is_empty() {
+                            self.scan = None;
+                            self.draw_tree(ui)
+                        } else {
+                            self.draw_search(ui, backend, &mut nav)
+                        };
+                    }
+                });
             });
-        });
+        self.nav = nav;
         clicked
     }
 
@@ -894,7 +1252,7 @@ impl AssetBrowser {
                                 ));
                                 let named = loaded.nodes[*node]
                                     .dir
-                                    .is_none_or(|dir| dir < loaded.paths.dirs().len());
+                                    .is_none_or(|dir| dir < loaded.list.paths().dirs().len());
                                 let row = Button::selectable(
                                     false,
                                     if named { text } else { text.weak() },
@@ -950,7 +1308,12 @@ impl AssetBrowser {
         clicked
     }
 
-    fn draw_search(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
+    fn draw_search(
+        &mut self,
+        ui: &mut egui::Ui,
+        backend: &Backend,
+        nav: &mut ListNav,
+    ) -> Option<String> {
         self.advance_scan(ui.ctx(), backend);
         let Some(scan) = &self.scan else {
             return None;
@@ -958,7 +1321,7 @@ impl AssetBrowser {
         let Load::Ready(loaded) = &self.state else {
             return None;
         };
-        let total = loaded.paths.dirs().len();
+        let total = loaded.list.paths().dirs().len();
         let mut clicked = None;
         // Offered above the matches, because someone typing a whole path already knows what they
         // want and the sweep for it takes a moment.
@@ -991,7 +1354,9 @@ impl AssetBrowser {
                     let selected = self.selected.as_deref() == Some(path.as_str());
                     if Button::selectable(selected, path.as_str())
                         .ui(ui)
-                        .on_hover_text("直接从游戏文件中读取此路径，不受路径列表影响")
+                        .on_hover_text(
+                            "Read this path from the install, whether or not the list names it",
+                        )
                         .clicked()
                     {
                         clicked = Some(path);
@@ -1002,7 +1367,9 @@ impl AssetBrowser {
         }
 
         let scanning = scan.cursor < total;
-        if scanning {
+        if let Match::Invalid(error) = &scan.matching {
+            ui.label(RichText::new(error).weak());
+        } else if scanning {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(format!(
@@ -1013,41 +1380,115 @@ impl AssetBrowser {
         } else if scan.hits.is_empty() {
             ui.label("没有匹配项");
         } else {
+            // Count everything that matched, not only what is shown.
             ui.label(
-                RichText::new(format!(
-                    "{} 个匹配项{}",
-                    scan.hits.len(),
-                    if scan.hits.len() >= MAX_RESULTS {
-                        " (已达上限)"
-                    } else {
-                        ""
-                    }
-                ))
+                RichText::new(if scan.matched > scan.hits.len() {
+                    format!("{} / {} 个匹配项", scan.hits.len(), scan.matched)
+                } else {
+                    format!("{} 个匹配项", scan.matched)
+                })
                 .weak(),
             );
         }
 
         let row_height = ui.text_style_height(&egui::TextStyle::Button);
+        if !self.grouped {
+            let picked = nav.apply(scan.hits.len()).map(|at| scan.hits[at].1.clone());
+            let mut area = ScrollArea::vertical().auto_shrink(false);
+            if let Some(offset) = nav.scroll(ui, row_height, scan.hits.len()) {
+                area = area.vertical_scroll_offset(offset);
+            }
+            let output = area.show_rows(ui, row_height, scan.hits.len(), |ui, range| {
+                ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                    for (at, (_, path)) in scan.hits[range.clone()].iter().enumerate() {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        let selected = self.selected.as_deref() == Some(path.as_str());
+                        let response = Button::selectable(selected, path.as_str())
+                            .ui(ui)
+                            .on_hover_text(path);
+                        nav.mark(ui, range.start + at, response.rect);
+                        if response.clicked() {
+                            clicked = Some(path.clone());
+                        }
+                    }
+                });
+            });
+            nav.seen(&output);
+            return clicked.or(picked);
+        }
+
+        // Score order is what ranks a flat list, but a tree only reads as one in path order.
+        let mut paths: Vec<&str> = scan.hits.iter().map(|(_, path)| path.as_str()).collect();
+        paths.sort_unstable();
+        let rows = group(&paths, &self.collapsed);
+
+        let mut toggle = None;
+        let space_width =
+            ui.fonts_mut(|f| f.glyph_width(&TextStyle::Button.resolve(ui.style()), ' '));
+        let icon_width = ui.spacing().icon_width;
         ScrollArea::vertical().auto_shrink(false).show_rows(
             ui,
             row_height,
-            scan.hits.len(),
+            rows.len(),
             |ui, range| {
                 ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
-                    for (_, path) in &scan.hits[range] {
+                    for row in &rows[range] {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                        let selected = self.selected.as_deref() == Some(path.as_str());
-                        if Button::selectable(selected, path.as_str())
-                            .ui(ui)
-                            .on_hover_text(path)
-                            .clicked()
-                        {
-                            clicked = Some(path.clone());
+                        match row {
+                            Hit::Dir {
+                                path,
+                                depth,
+                                collapsed,
+                            } => {
+                                let segment = path.rsplit('/').next().unwrap_or(path);
+                                let text = RichText::new(format!(
+                                    "{}    {segment}",
+                                    "    ".repeat(*depth)
+                                ));
+                                let response = Button::selectable(false, text).ui(ui);
+                                let icon = Rect::from_center_size(
+                                    pos2(
+                                        response.rect.left()
+                                            + space_width * 4.0 * *depth as f32
+                                            + icon_width / 2.0,
+                                        response.rect.center().y,
+                                    ),
+                                    Vec2::splat(icon_width),
+                                );
+                                paint_default_icon(
+                                    ui,
+                                    if *collapsed { 0.0 } else { 1.0 },
+                                    &response.clone().with_new_rect(icon),
+                                );
+                                if response.clicked() {
+                                    toggle = Some((*path, !*collapsed));
+                                }
+                            }
+                            Hit::File { path, depth, name } => {
+                                let text =
+                                    RichText::new(format!("{}{name}", "    ".repeat(*depth)));
+                                let selected = self.selected.as_deref() == Some(*path);
+                                if Button::selectable(selected, text)
+                                    .ui(ui)
+                                    .on_hover_text(*path)
+                                    .clicked()
+                                {
+                                    clicked = Some((*path).to_owned());
+                                }
+                            }
                         }
                     }
                 });
             },
         );
+
+        if let Some((path, collapsed)) = toggle {
+            if collapsed {
+                self.collapsed.insert(path.to_owned());
+            } else {
+                self.collapsed.remove(path);
+            }
+        }
         clicked
     }
 
@@ -1055,18 +1496,24 @@ impl AssetBrowser {
         let Load::Ready(loaded) = &mut self.state else {
             return;
         };
-        let scan = self.scan.get_or_insert_with(|| Scan {
-            pattern: FuzzyMatcher::parse_pattern(&self.search),
-            cursor: 0,
-            hits: Vec::new(),
-            direct: direct_path(&self.search, |root| {
-                loaded
-                    .roots
-                    .iter()
-                    .any(|&node| &*loaded.nodes[node].segment == root)
-            }),
-            exists: Load::Idle,
-            typed: Instant::now(),
+        let mode = self.mode;
+        let scan = self.scan.get_or_insert_with(|| {
+            let query = parse_query(&self.search);
+            Scan {
+                matching: matching(mode, &query),
+                suffix: query.suffix,
+                cursor: 0,
+                hits: Vec::new(),
+                matched: 0,
+                direct: direct_path(&query.text, |root| {
+                    loaded
+                        .roots
+                        .iter()
+                        .any(|&node| &*loaded.nodes[node].segment == root)
+                }),
+                exists: Load::Idle,
+                typed: Instant::now(),
+            }
         });
 
         if let Some(path) = &scan.direct {
@@ -1100,18 +1547,47 @@ impl AssetBrowser {
             }
         }
 
-        let total = loaded.paths.dirs().len();
+        let total = loaded.list.paths().dirs().len();
+        // A pattern that will not compile matches nothing, and sweeping the corpus to find that out
+        // would stall on every keystroke of one still being typed.
+        if matches!(scan.matching, Match::Invalid(_)) {
+            scan.cursor = total;
+            return;
+        }
         if scan.cursor >= total {
             return;
         }
 
         let end = (scan.cursor + SCAN_BATCH).min(total);
         for dir in scan.cursor..end {
-            let dir_path = loaded.paths.dirs()[dir].clone();
+            let dir_path = loaded.list.paths().dirs()[dir].clone();
             for name in loaded.decode(dir) {
+                // Cheapest test first: an extension rules a name out without building its path or
+                // scoring it, which is what keeps an extension-only sweep of the whole list quick.
+                // Compared as bytes because folding the case of every one of a million-odd names
+                // would allocate more than the rest of the sweep put together; a path is ASCII.
+                let tail = name.len().checked_sub(scan.suffix.len());
+                if !tail.is_some_and(|at| {
+                    name.as_bytes()[at..].eq_ignore_ascii_case(scan.suffix.as_bytes())
+                }) {
+                    continue;
+                }
                 let path = format!("{dir_path}/{name}");
-                if let Some(score) = self.matcher.score_one(&scan.pattern, &path) {
-                    scan.hits.push((score.get(), path));
+                let score = match &scan.matching {
+                    Match::All => Some(0),
+                    Match::Fuzzy(pattern) => self
+                        .matcher
+                        .score_one(pattern, &path)
+                        .map(|score| score.get()),
+                    Match::Contains(needle) => {
+                        contains_ignore_ascii_case(&path, needle).then_some(0)
+                    }
+                    Match::Regex(regex) => regex.is_match(&path).then_some(0),
+                    Match::Invalid(_) => None,
+                };
+                if let Some(score) = score {
+                    scan.matched += 1;
+                    scan.hits.push((score, path));
                 }
             }
         }
@@ -1121,12 +1597,33 @@ impl AssetBrowser {
         ctx.request_repaint();
     }
 
+    /// The name the Zones tab would show for a `.lvb`, fetched the same way it does. `None` until
+    /// the sheets have loaded or where the zone names neither a place nor itself.
+    fn zone_name(&mut self, ctx: &egui::Context, backend: &Backend, lvb: &str) -> Option<String> {
+        let language = LANGUAGE.get(ctx);
+        if self.zone_names_lang != Some(language) && !matches!(self.zone_names, Load::Loading(_)) {
+            self.zone_names_lang = Some(language);
+            let excel = backend.excel().clone();
+            self.zone_names = Load::Loading(TrackedPromise::spawn_local(async move {
+                crate::zones::resolve_names(excel, language).await
+            }));
+        }
+        if let Load::Loading(promise) = &self.zone_names
+            && let Some(result) = promise.try_get()
+        {
+            self.zone_names = match result {
+                Ok(names) => Load::Ready(names.clone()),
+                Err(error) => Load::Failed(error.to_string()),
+            };
+        }
+        match &self.zone_names {
+            Load::Ready(names) => names.get(lvb).cloned(),
+            _ => None,
+        }
+    }
+
     fn detail_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) -> Option<String> {
-        self.image_export
-            .take_if(|promise| promise.try_get().is_some());
-        let exporting_image = self.image_export.is_some();
-        let mut copy_image = false;
-        let mut export_image = false;
+        self.export.take_if(|promise| promise.try_get().is_some());
         // A material links through to the textures it binds, so the panel can ask for a new
         // selection the same way the tree does.
         let mut follow = None;
@@ -1137,9 +1634,7 @@ impl AssetBrowser {
                         CollapsibleSidePanel::draw_arrow(ui, "asset_tree", Side::Left)
                     });
                 }
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("选择文件以查看详情").weak());
-                });
+                empty_view(ui, "🗀", "选择文件以查看详情");
                 return;
             };
 
@@ -1189,15 +1684,21 @@ impl AssetBrowser {
                             if !empty {
                                 self.viewer_picker(ui, &path);
                             }
-                            if self.preview.as_ref().is_some_and(Preview::has_image) {
-                                if ui
-                                    .add_enabled(!exporting_image, egui::Button::new("导出 PNG"))
-                                    .clicked()
-                                {
-                                    export_image = true;
+                            if !empty
+                                && let Load::Ready((_, bytes)) = &self.bytes
+                            {
+                                let viewer = self.viewer.unwrap_or(self.recommended(&path));
+                                let name = crate::utils::file_name(&path);
+                                let mut choices = vec![export::Choice::raw(bytes, name)];
+                                if let Some(preview) = &self.preview {
+                                    choices.extend(preview.export_choices(
+                                        viewer, &path, bytes, self.mip, ui.ctx(),
+                                    ));
                                 }
-                                if ui.button("复制图片").clicked() {
-                                    copy_image = true;
+                                let busy = self.export.is_some();
+                                let promise = export::menu(ui, "导出 PNG", None, busy, choices, egui::Vec2::ZERO);
+                                if promise.is_some() {
+                                    self.export = promise;
                                 }
                             }
                             match Kind::of(&path) {
@@ -1214,14 +1715,30 @@ impl AssetBrowser {
                                         self.goto = Some("/sheet".to_string());
                                     }
                                 }
-                                Kind::Other(_) => {}
+                                Kind::Level(lvb) => {
+                                    let label = match lvb == path {
+                                        true => "打开场景页签".to_owned(),
+                                        false => {
+                                            let name = self
+                                                .zone_name(ui.ctx(), backend, &lvb)
+                                                .unwrap_or_else(|| {
+                                                    crate::utils::file_name(&lvb).to_owned()
+                                                });
+                                            format!("Open “{name}” in Zones")
+                                        }
+                                    };
+                                    if ui.button(label).clicked() {
+                                        self.goto = Some(format!("/zones/{lvb}"));
+                                    }
+                                }
+                                Kind::Other => {}
                             }
                         })
                         .response
                         .rect;
 
-                    // Centred on the row rather than on the gap the two sides leave, which is off
-                    // centre whenever they differ in width. Never wide enough to reach either of
+                    // Centered on the row rather than on the gap the two sides leave, which is off
+                    // center whenever they differ in width. Never wide enough to reach either of
                     // them, so a long path truncates rather than running underneath one.
                     let font = TextStyle::Body.resolve(ui.style());
                     let width = ui
@@ -1253,82 +1770,41 @@ impl AssetBrowser {
                 ui.add_space(4.0);
             });
 
-            if copy_image
-                && let Some(image) = self
-                    .preview
-                    .as_ref()
-                    .and_then(|preview| preview.image(self.slice))
-            {
-                ui.ctx().copy_image(ColorImage::from_rgba_unmultiplied(
-                    [image.width() as usize, image.height() as usize],
-                    image.as_raw(),
-                ));
-            }
-            if export_image
-                && let Some(image) = self
-                    .preview
-                    .as_ref()
-                    .and_then(|preview| preview.image(self.slice))
-            {
-                let name = crate::utils::file_name(&path);
-                let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
-                let file_name = format!("{stem}.png");
-                self.image_export = Some(TrackedPromise::spawn_local(async move {
-                    let data = match crate::utils::tex_loader::write(image, image::ImageFormat::Png)
-                    {
-                        Ok(data) => data,
-                        Err(error) => {
-                            log::error!("PNG 编码失败: {error}");
-                            return;
-                        }
-                    };
-                    if let Some(file) = rfd::AsyncFileDialog::new()
-                        .set_title("导出图片")
-                        .set_file_name(file_name)
-                        .add_filter("PNG 图片", &["png"])
-                        .save_file()
-                        .await
-                    {
-                        if let Err(error) = file.write(&data).await {
-                            log::error!("写入图片失败: {error}");
-                        } else {
-                            log::info!("图片导出成功");
-                        }
-                    }
-                }));
-            }
-
             // Only textures and images have anything to put in the sidebar.
             if self.preview.as_ref().is_some_and(Preview::has_details) {
                 let mut change = None;
-                CollapsibleSidePanel::new("asset_info", Side::Right).show(ui, |ui, is_open| {
-                    if !is_open {
-                        return;
-                    }
-                    Panel::top("asset_info_header").show(ui, |ui| {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            // Mirror of the tree panel: the arrow goes against this panel's outer
-                            // edge, which is the left one, and the heading centres in the rest.
-                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                CollapsibleSidePanel::draw_arrow(ui, "asset_info", Side::Right);
-                                ui.vertical_centered_justified(|ui| ui.heading("详情"));
-                            });
-                        });
-                        ui.add_space(4.0);
-                    });
-                    CentralPanel::default().show(ui, |ui| {
-                        if let Some(preview) = &self.preview {
-                            change = preview.info_ui(
-                                ui,
-                                (self.mip, self.slice, self.channels),
-                                &mut follow,
-                                &mut self.deps,
-                                backend,
-                            );
+                CollapsibleSidePanel::new("asset_info", Side::Right)
+                    .min_width(DETAILS_MIN_WIDTH)
+                    .max_width(DETAILS_WIDTH)
+                    .show(ui, |ui, is_open| {
+                        if !is_open {
+                            return;
                         }
+                        Panel::top("asset_info_header").show(ui, |ui| {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                // Mirror of the tree panel: the arrow goes against this
+                                // panel's outer edge, which is the left one, and the heading
+                                // centers in the rest.
+                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                    CollapsibleSidePanel::draw_arrow(ui, "asset_info", Side::Right);
+                                    ui.vertical_centered_justified(|ui| ui.heading("详情"));
+                                });
+                            });
+                            ui.add_space(4.0);
+                        });
+                        CentralPanel::default().show(ui, |ui| {
+                            if let Some(preview) = &self.preview {
+                                change = preview.info_ui(
+                                    ui,
+                                    (self.mip, self.slice, self.channels),
+                                    &mut follow,
+                                    &mut self.deps,
+                                    backend,
+                                );
+                            }
+                        });
                     });
-                });
                 if let Some((mip, slice, channels)) = change {
                     // The slice is chosen at draw time, so only the settings that change the pixels
                     // are worth throwing the decoded preview away for.
@@ -1367,9 +1843,7 @@ impl AssetBrowser {
                         });
                     }
                     Load::Ready((_, bytes)) if showing == Viewer::Raw => {
-                        let mut page = self.hex_page;
-                        hex_dump(ui, bytes, &mut page);
-                        self.hex_page = page;
+                        hex_dump(ui, bytes, &mut self.hex);
                     }
                     Load::Ready((_, bytes)) => {
                         if let Some(preview) = &self.preview
@@ -1407,8 +1881,7 @@ impl AssetBrowser {
             Some(viewer) => viewer.label(),
             None => named,
         };
-        // A real dropdown, not a bare button: ComboBox draws the indicator and closes itself on
-        // click, which is why the arms below never call `close`.
+        // ComboBox closes itself on click; the arms below never call `close`.
         egui::ComboBox::from_id_salt("asset_viewer")
             .selected_text(chosen)
             .show_ui(ui, |ui| {
@@ -1420,7 +1893,7 @@ impl AssetBrowser {
                 };
                 pick(ui, None, format!("{named}（推荐）"));
                 // Only where the name claims something of its own, and something else: an
-                // unrecognised extension has nothing to say that `Bytes` below does not.
+                // unrecognized extension has nothing to say that `Bytes` below does not.
                 if extension != recommended && extension != Viewer::Raw {
                     pick(
                         ui,
@@ -1434,9 +1907,9 @@ impl AssetBrowser {
                     // The recommended one is already the entry at the top. It stays in the list,
                     // disabled, so every viewer keeps the same place.
                     if viewer == recommended {
-                        ui.add_enabled(false, Button::selectable(false, viewer.label()));
+                        ui.add_enabled(false, Button::selectable(false, viewer.described()));
                     } else {
-                        pick(ui, Some(viewer), viewer.label().to_owned());
+                        pick(ui, Some(viewer), viewer.described());
                     }
                 }
             });
@@ -1452,7 +1925,7 @@ impl AssetBrowser {
             self.slice = 0;
             self.channels = Channels::default();
             self.viewer = None;
-            self.hex_page = 0;
+            self.hex = Hex::default();
             let files = backend.files().clone();
             // An unnamed file has no path to ask for, so it is fetched by hash instead.
             let unnamed = self.selected_unnamed;
@@ -1510,89 +1983,101 @@ impl AssetBrowser {
             self.preview = Some(preview);
         }
     }
-
-    fn sheet_shortcut(&mut self, ui: &mut egui::Ui, backend: &Backend, path: &str) {
-        let sheet = sheet_name(backend.excel().get_entries(), path);
-        ui.vertical_centered(|ui| match sheet {
-            Some(sheet) => {
-                ui.label("Excel 数据表内容");
-                ui.add_space(8.0);
-                if ui.button(format!("在数据表中打开 {sheet}")).clicked() {
-                    self.goto = Some(format!("/sheet/{sheet}"));
-                }
-            }
-            None => {
-                ui.label("Excel 数据表内容");
-                ui.add_space(8.0);
-                ui.label(RichText::new("无法确定此文件所属的数据表").weak());
-            }
-        });
-    }
 }
 
+/// Whether a file is reachable from the Sheets or Zones tab, which is the only thing its extension
+/// decides here. What it holds is [`EXTENSIONS`].
 enum Kind {
     Sheet,
     SheetList,
-    Other(&'static str),
+    /// The `.lvb` to open in the Zones tab: the file itself, or the one a companion resolves to.
+    Level(String),
+    Other,
 }
 
 impl Kind {
-    fn describe(&self) -> &'static str {
-        match self {
-            Kind::Sheet => "Excel 数据表内容",
-            Kind::SheetList => "游戏内全部数据表的列表",
-            Kind::Other(what) => what,
-        }
-    }
-
-    /// Covers every extension present in the path list, so nothing shows up as merely unknown.
     fn of(path: &str) -> Self {
         match path.rsplit('.').next().unwrap_or_default() {
             "exd" | "exh" => Kind::Sheet,
             "exl" => Kind::SheetList,
-            "tex" => Kind::Other("纹理"),
-            "atex" => Kind::Other("动画纹理"),
-            "mdl" => Kind::Other("模型"),
-            "mtrl" => Kind::Other("材质"),
-            "shpk" => Kind::Other("着色器包"),
-            "shcd" => Kind::Other("着色器代码"),
-            "scd" => Kind::Other("声音容器"),
-            "ggd" => Kind::Other("碰撞网格组"),
-            "pcb" => Kind::Other("碰撞网格"),
-            "nvm" => Kind::Other("导航网格"),
-            "sklb" => Kind::Other("骨骼"),
-            "skp" => Kind::Other("骨骼参数"),
-            "pap" => Kind::Other("动画"),
-            "tmb" => Kind::Other("动画时间轴"),
-            "phyb" => Kind::Other("物理骨骼"),
-            "eid" => Kind::Other("骨骼绑定"),
-            "atch" => Kind::Other("附着点"),
-            "avfx" => Kind::Other("视觉效果"),
-            "uld" => Kind::Other("UI 布局"),
-            "lgb" => Kind::Other("层组, 区域中放置的对象"),
-            "sgb" => Kind::Other("共享组, 可复用的对象集合"),
-            "lvb" => Kind::Other("关卡, 区域层级树的顶层"),
-            "svb" | "uwb" | "envb" | "lcb" | "obsb" | "essb" => Kind::Other("区域边界或环境体积"),
-            "luab" => Kind::Other("已编译 Lua"),
-            "cutb" => Kind::Other("过场动画"),
-            "imc" => Kind::Other("物品变体"),
-            "eqdp" | "eqp" | "gmp" | "est" | "evp" => Kind::Other("装备参数"),
-            "pbd" => Kind::Other("骨骼变形器"),
-            "amb" => Kind::Other("环境音效布置"),
-            "tera" => Kind::Other("地形"),
-            "hwc" => Kind::Other("手写样本"),
-            "fdt" => Kind::Other("位图字体"),
-            "gfd" => Kind::Other("外字, 文本内的图标字形"),
-            "stm" => Kind::Other("染色图"),
-            "cmp" => Kind::Other("颜色图"),
-            "plt" => Kind::Other("调色板"),
-            "png" => Kind::Other("PNG 图像"),
-            "csv" | "txt" => Kind::Other("纯文本"),
-            "" => Kind::Other("无扩展名"),
-            _ => Kind::Other("无法识别的文件类型"),
+            "lvb" => Kind::Level(path.to_owned()),
+            "lgb" | "svb" | "lcb" | "uwb" => match owning_level(path) {
+                Some(lvb) => Kind::Level(lvb),
+                None => Kind::Other,
+            },
+            _ => Kind::Other,
         }
     }
 }
+
+/// The `.lvb` a companion file sits beside: `lgb`, `svb`, `lcb` and `uwb` all live only under a
+/// zone's own `level/` directory, at a path shaped `<zone>/level/<anything>`, and the level itself
+/// is always `<zone>/level/<zone>.lvb`.
+fn owning_level(path: &str) -> Option<String> {
+    let (prefix, _) = path.rsplit_once("/level/")?;
+    let zone = prefix.rsplit('/').next()?;
+    Some(format!("{prefix}/level/{zone}.lvb"))
+}
+
+/// Every extension the path list carries, with what it holds. Also the menu the search box offers,
+/// so the order is the order they are listed in.
+const EXTENSIONS: &[(&str, &str, Viewer)] = &[
+    ("exd", "Excel 数据表数据", Viewer::Raw),
+    ("exh", "Excel 数据表头", Viewer::Raw),
+    ("exl", "Excel 数据表列表", Viewer::Exl),
+    ("tex", "纹理", Viewer::Texture),
+    ("atex", "动画纹理", Viewer::Texture),
+    ("png", "PNG 图像", Viewer::Image),
+    ("mdl", "模型", Viewer::Model),
+    ("mtrl", "材质", Viewer::Material),
+    ("shpk", "着色器包", Viewer::Shpk),
+    ("shcd", "着色器代码", Viewer::Shcd),
+    ("scd", "声音容器", Viewer::Scd),
+    ("ggd", "草地网格数据", Viewer::Ggd),
+    ("gzd", "草地分区数据", Viewer::Gzd),
+    ("pcb", "玩家碰撞二进制", Viewer::Pcb),
+    ("sklb", "骨骼", Viewer::Sklb),
+    ("skp", "骨骼参数", Viewer::Skp),
+    ("pap", "动画", Viewer::Pap),
+    ("tmb", "动画时间轴", Viewer::Tmb),
+    ("phyb", "物理骨骼", Viewer::Phyb),
+    ("eid", "骨骼绑定", Viewer::Eid),
+    ("atch", "附着点", Viewer::Atch),
+    ("avfx", "动画特效", Viewer::Avfx),
+    ("uld", "UI 布局", Viewer::Uld),
+    ("lgb", "层组，区域内放置的对象", Viewer::Lgb),
+    (
+        "sgb",
+        "共享组，可复用的对象集合",
+        Viewer::Sgb,
+    ),
+    ("lvb", "关卡变量二进制", Viewer::Lvb),
+    ("svb", "天空可见性二进制", Viewer::Svb),
+    ("uwb", "水下设置", Viewer::Uwb),
+    ("envb", "环境二进制", Viewer::Envb),
+    ("lcb", "光照剔除二进制", Viewer::Lcb),
+    ("obsb", "物体行为集二进制", Viewer::Obsb),
+    ("essb", "环境声音二进制", Viewer::Essb),
+    ("luab", "Lua 字节码", Viewer::Luab),
+    ("cutb", "过场动画", Viewer::Cutb),
+    ("imc", "物品变体数据", Viewer::Imc),
+    ("eqdp", "装备变形参数", Viewer::Eqdp),
+    ("eqp", "装备参数", Viewer::Eqp),
+    ("gmp", "机关参数", Viewer::Gmp),
+    ("est", "装备骨架模板", Viewer::Est),
+    ("evp", "装备特效参数", Viewer::Evp),
+    ("pbd", "骨骼变形器", Viewer::Pbd),
+    ("amb", "环境光", Viewer::Amb),
+    ("tera", "地形", Viewer::Tera),
+    ("hwc", "硬件光标", Viewer::Hwc),
+    ("fdt", "字体数据表", Viewer::Font),
+    ("gfd", "图形字体数据", Viewer::Icons),
+    ("stm", "染色图", Viewer::Stm),
+    ("cmp", "角色外观参数", Viewer::Cmp),
+    ("plt", "PAP 加载表", Viewer::Raw),
+    ("spm", "着色器参数映射", Viewer::Spm),
+    ("dic", "词典", Viewer::Dic),
+];
 
 /// `exd/item_0_en.exd` -> `Item`, `exd/content/foo_0_en.exd` -> `content/Foo`.
 ///
@@ -1613,10 +2098,8 @@ fn sheet_name(entries: &HashMap<String, i32>, path: &str) -> Option<String> {
         {
             return Some(name.clone());
         }
-        match candidate[split..].rfind('_') {
-            Some(i) => candidate = &candidate[..split + i],
-            None => return None,
-        }
+        let at = candidate[split..].rfind('_')?;
+        candidate = &candidate[..split + at];
     }
 }
 
@@ -1659,6 +2142,23 @@ mod tests {
     }
 
     #[test]
+    fn resolves_a_companion_to_its_level() {
+        for (path, want) in [
+            (
+                "bg/ffxiv/sea_s1/twn/s1t1/level/bg.lgb",
+                Some("bg/ffxiv/sea_s1/twn/s1t1/level/s1t1.lvb"),
+            ),
+            (
+                "bg/ffxiv/sea_s1/twn/s1t1/level/s1t1.uwb",
+                Some("bg/ffxiv/sea_s1/twn/s1t1/level/s1t1.lvb"),
+            ),
+            ("bgcommon/env/global/ffxiv_genv/genv_s1t1.envb", None),
+        ] {
+            assert_eq!(owning_level(path).as_deref(), want, "resolving {path}");
+        }
+    }
+
+    #[test]
     fn builds_intermediate_tree_levels() {
         // `bg` and `bg/ffxiv` hold no files of their own and are never listed, but the tree needs them.
         let dirs = ["bg/ffxiv/sea_s1", "bg/ffxiv/wil_w1", "exd"];
@@ -1696,19 +2196,30 @@ mod tests {
     fn unnamed_files_land_in_their_real_directory_when_it_is_known() {
         use ironworks::sqpack::IndexHash;
 
-        let dirs: Vec<Box<str>> = ["common/savedata", "music/ffxiv"]
-            .iter()
-            .map(|d| (*d).into())
-            .collect();
+        let dirs: Vec<Box<str>> = [
+            "common/savedata",
+            "music/ffxiv",
+            // The list carries some directories with a capital, and a few under both spellings.
+            "sound/voice/Vo_Emote",
+            "sound/voice/Vo_Line",
+            "sound/voice/vo_line",
+            // Nothing is listed directly in common/graphics, only below it.
+            "common/graphics/texture",
+        ]
+        .iter()
+        .map(|d| (*d).into())
+        .collect();
+
+        let entry = |directory: &str, file: u64| pathlist::Unnamed {
+            repository: 0,
+            category: 0x00,
+            hash: (u64::from(IndexHash::directory(directory)) << 32) | file,
+            split: true,
+        };
 
         let unnamed = [
             // hashes into "common/savedata", which the list knows
-            pathlist::Unnamed {
-                repository: 0,
-                category: 0x00,
-                hash: (u64::from(IndexHash::directory("common/savedata")) << 32) | 0xdead_beef,
-                split: true,
-            },
+            entry("common/savedata", 0xdead_beef),
             // a directory nothing in the list hashes to
             pathlist::Unnamed {
                 repository: 4,
@@ -1716,18 +2227,38 @@ mod tests {
                 hash: (0x1234_5678u64 << 32) | 0x0000_00ff,
                 split: true,
             },
+            // the install hashes the lowercased name, whatever spelling the list recorded
+            entry("sound/voice/vo_emote", 0x0000_0001),
+            entry("sound/voice/vo_line", 0x0000_0002),
+            // a directory the list only ever mentions as the parent of another
+            entry("common/graphics", 0x0000_0003),
+            entry("common/graphics", 0x0000_0004),
         ];
         let (extra_dirs, placed, resolved) = place_unnamed(&dirs, &unnamed);
-        assert_eq!(resolved, 1, "one of the two hashes to a known directory");
+        assert_eq!(
+            resolved, 3,
+            "the ancestor is not a directory the list holds"
+        );
         assert_eq!(
             &*extra_dirs,
-            &["music/ex4/12345678".into()],
-            "the other is synthesised"
+            &["music/ex4/12345678".into(), "common/graphics".into()],
+            "an unknown directory is named for its hash, a known ancestor for itself"
         );
 
-        let savedata = dirs.iter().position(|d| &**d == "common/savedata").unwrap();
-        assert_eq!(placed[&savedata], vec![unnamed[0]]);
+        let at = |name: &str| dirs.iter().position(|d| &**d == name).unwrap();
+        assert_eq!(placed[&at("common/savedata")], vec![unnamed[0]]);
         assert_eq!(placed[&dirs.len()], vec![unnamed[1]]);
+        assert_eq!(placed[&at("sound/voice/Vo_Emote")], vec![unnamed[2]]);
+        assert_eq!(
+            placed[&at("sound/voice/vo_line")],
+            vec![unnamed[3]],
+            "the lowercase spelling wins over the capitalised duplicate"
+        );
+        assert_eq!(
+            placed[&(dirs.len() + 1)],
+            vec![unnamed[4], unnamed[5]],
+            "both files share the one synthesised common/graphics"
+        );
     }
 
     /// A path in the URL arrives many frames before the index has loaded. Holding it until then is
@@ -1767,13 +2298,317 @@ mod tests {
         assert!(dirs_mapped.contains(&Some(0)) && dirs_mapped.contains(&Some(2)));
         assert!(!dirs_mapped.contains(&Some(1)));
     }
+
+    /// An extension on its own has to match every file carrying it. The fuzzy matcher scores
+    /// nothing against an empty pattern, so leaving the query to it answered `ext:stm` with no
+    /// matches unless something else was typed too.
+    #[test]
+    fn an_extension_on_its_own_leaves_nothing_to_match_on() {
+        let query = parse_query("ext:stm");
+        assert_eq!(query.suffix, ".stm");
+        assert!(
+            query.text.is_empty(),
+            "the filter term is not left to match on"
+        );
+        assert!(!query.literal);
+    }
+
+    /// A `/` means the path only where a query is scored fuzzily. The other two modes are spelled
+    /// against whole paths already, and a regex is full of separators that mean nothing of the sort.
+    #[test]
+    fn only_a_fuzzy_query_reads_a_slash_as_the_path() {
+        let query = parse_query("bg/ffxiv/.*");
+        assert!(matches!(
+            matching(SearchMode::Fuzzy, &query),
+            Match::Contains(_)
+        ));
+        assert!(matches!(
+            matching(SearchMode::Strict, &query),
+            Match::Contains(_)
+        ));
+        assert!(matches!(
+            matching(SearchMode::Regex, &query),
+            Match::Regex(_)
+        ));
+    }
+
+    /// A pattern still being typed must leave the browser usable rather than throwing.
+    #[test]
+    fn an_uncompilable_pattern_is_kept_as_the_reason_it_did_not_compile() {
+        let Match::Invalid(reason) = matching(SearchMode::Regex, &parse_query("bg/(")) else {
+            panic!("expected an invalid pattern")
+        };
+        assert!(!reason.is_empty());
+    }
+
+    /// The extension filter has to answer with everything it left, whatever mode is on.
+    #[test]
+    fn a_query_of_nothing_but_filters_matches_everything() {
+        let query = parse_query("ext:stm");
+        for mode in SearchMode::ALL {
+            assert!(matches!(matching(mode, &query), Match::All));
+        }
+    }
+
+    /// Case is folded for every mode, so the same file is found however it was typed.
+    #[test]
+    fn a_regex_ignores_case() {
+        let Match::Regex(regex) = matching(SearchMode::Regex, &parse_query("SEA_S1")) else {
+            panic!("expected a regex")
+        };
+        assert!(regex.is_match("bg/ffxiv/sea_s1/twn/s1t1/level/bg.lgb"));
+    }
+
+    /// Picking from the menu is a replacement rather than another term, so picking twice does not
+    /// leave a query no file can satisfy.
+    #[test]
+    fn picking_an_extension_replaces_the_one_already_there() {
+        assert_eq!(set_extension("", "tex"), "ext:tex");
+        assert_eq!(set_extension("chara", "tex"), "ext:tex chara");
+        assert_eq!(set_extension("ext:stm chara", "tex"), "ext:tex chara");
+        assert_eq!(set_extension("chara ext:stm", "tex"), "ext:tex chara");
+        assert_eq!(parse_query(&set_extension("ext:stm", "tex")).suffix, ".tex");
+    }
+
+    /// [`EXTENSIONS`] is the one place an extension is named, so a viewer offering one the table
+    /// does not list would be unreachable, and a name listed twice would shadow itself.
+    #[test]
+    fn every_viewer_is_reachable_from_the_extension_table() {
+        let mut seen = HashSet::new();
+        for (extension, ..) in EXTENSIONS {
+            assert!(seen.insert(extension), "{extension} is listed twice");
+        }
+        for viewer in Viewer::RENDERED {
+            let mut extensions = viewer.extensions().peekable();
+            // Text is reached by reading a file rather than by its name: nothing the game still
+            // ships carries a text extension.
+            assert!(
+                extensions.peek().is_some() || matches!(viewer, Viewer::Text),
+                "{} reads nothing the table lists",
+                viewer.label()
+            );
+            for extension in extensions {
+                assert!(
+                    Viewer::from_extension(&format!("a/b.{extension}")) == viewer,
+                    "{extension} does not come back to the viewer that claims it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn filter_terms_come_out_of_the_query_wherever_they_sit() {
+        let query = parse_query("ext:.STM chara");
+        assert_eq!(
+            (query.suffix.as_str(), query.text.as_str()),
+            (".stm", "chara")
+        );
+
+        // A separator is what tells a path apart from a fuzzy fragment, so `uld/mkd` is a path and
+        // `mkd` is not.
+        assert!(parse_query("bg/ffxiv").literal);
+        assert!(!parse_query("terrain").literal);
+        assert!(parse_query("exd/ ext:exh").literal);
+    }
+
+    #[test]
+    fn a_path_matches_anywhere_in_it_whatever_its_case() {
+        assert!(contains_ignore_ascii_case(
+            "chara/xls/attachOffset/d1040.atch",
+            "attachoffset"
+        ));
+        assert!(contains_ignore_ascii_case("exd/root.exl", "exd/"));
+        assert!(!contains_ignore_ascii_case("exd/root.exl", "exdx"));
+        assert!(
+            !contains_ignore_ascii_case("ab", "abc"),
+            "a needle longer than the haystack should not index past it"
+        );
+    }
+
+    /// Rows as `depth:name`, so a layout reads the way it is drawn.
+    fn laid_out(paths: &[&str], collapsed: &[&str]) -> Vec<String> {
+        let shut = collapsed.iter().map(|dir| (*dir).to_owned()).collect();
+        group(paths, &shut)
+            .iter()
+            .map(|row| match row {
+                Hit::Dir { path, depth, .. } => {
+                    format!("{depth}:{}/", path.rsplit('/').next().unwrap())
+                }
+                Hit::File { depth, name, .. } => format!("{depth}:{name}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn matches_keep_the_folders_they_sit_in() {
+        let rows = laid_out(
+            &[
+                "bg/ffxiv/fst_f1/bgplate/terrain.tera",
+                "bg/ffxiv/sea_s1/bgplate/terrain.tera",
+                "chara/base_material/stainingtemplate.stm",
+            ],
+            &[],
+        );
+        assert_eq!(
+            rows,
+            [
+                "0:bg/",
+                "1:ffxiv/",
+                "2:fst_f1/",
+                "3:bgplate/",
+                "4:terrain.tera",
+                // Only the part that differs is reopened; `bg/ffxiv` is not drawn twice.
+                "2:sea_s1/",
+                "3:bgplate/",
+                "4:terrain.tera",
+                "0:chara/",
+                "1:base_material/",
+                "2:stainingtemplate.stm",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_shut_folder_keeps_its_row_and_hides_what_is_under_it() {
+        let paths = [
+            "bg/ffxiv/fst_f1/bgplate/terrain.tera",
+            "bg/ffxiv/sea_s1/bgplate/terrain.tera",
+            "chara/base_material/stainingtemplate.stm",
+        ];
+        let rows = laid_out(&paths, &["bg/ffxiv"]);
+        assert_eq!(
+            rows,
+            [
+                "0:bg/",
+                "1:ffxiv/",
+                "0:chara/",
+                "1:base_material/",
+                "2:stainingtemplate.stm"
+            ],
+            "the shut folder should still be there to reopen, and nothing below it drawn"
+        );
+    }
+
+    /// Where a click lands is read off the row it landed on, so the two have to agree on which
+    /// character each byte occupies.
+    #[test]
+    fn a_row_holds_its_bytes_where_a_click_looks_for_them() {
+        let row = hex_row(0x10, b"AB\x00");
+        assert_eq!(&row[..HEX_AT], "00000010  ");
+        assert_eq!(&row[hex_at(0)..hex_at(0) + 2], "41");
+        assert_eq!(&row[hex_at(2)..hex_at(2) + 2], "00");
+        assert_eq!(&row[TEXT_AT..], "AB.");
+        assert_eq!(hex_row(0, &[0; HEX_COLS]).len(), ROW_CHARS);
+
+        for col in 0..HEX_COLS {
+            assert_eq!(byte_at(hex_at(col)), Some(col));
+            assert_eq!(byte_at(hex_at(col) + 1), Some(col));
+            assert_eq!(byte_at(TEXT_AT + col), Some(col));
+        }
+        // The offset, the space that splits the halves, and the one before the text column.
+        assert_eq!(byte_at(0), None);
+        assert_eq!(byte_at(HEX_AT - 1), None);
+        assert_eq!(hex_at(HEX_COLS / 2) - hex_at(HEX_COLS / 2 - 1), 4);
+        assert_eq!(byte_at(TEXT_AT - 1), None);
+        assert_eq!(byte_at(ROW_CHARS), None);
+    }
+
+    /// A click lands on a byte, and a copy hands back what the hex column shows of it.
+    #[test]
+    fn a_click_picks_out_a_byte_and_a_copy_hands_it_over() {
+        let bytes: Vec<u8> = (0..=u8::MAX).collect();
+        let mut state = Hex::default();
+        let ctx = egui::Context::default();
+        let at = pos2(300.0, 100.0);
+        let frame = |events: Vec<egui::Event>, state: &mut Hex| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(700.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| hex_dump(ui, &bytes, state))
+        };
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        frame(vec![egui::Event::PointerMoved(at)], &mut state);
+        frame(vec![press(true)], &mut state);
+        frame(vec![press(false)], &mut state);
+        let picked = state.range().expect("the click landed on no byte");
+
+        let output = frame(vec![egui::Event::Copy], &mut state);
+        let copied = output
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.as_str()),
+                _ => None,
+            });
+        assert_eq!(copied, Some(hex_text(&bytes[picked]).as_str()));
+    }
+
+    /// The scroll area keeps its offset across selections, so a short file is drawn with whatever a
+    /// long one was left at until the area itself pulls it back.
+    #[test]
+    fn a_short_file_survives_the_offset_a_long_one_left() {
+        let ctx = egui::Context::default();
+        let at = pos2(300.0, 100.0);
+        let draw = |bytes: &[u8], events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(700.0, 400.0))),
+                events,
+                ..Default::default()
+            };
+            let mut state = Hex::default();
+            let _ = ctx.run_ui(input, |ui| hex_dump(ui, bytes, &mut state));
+        };
+        let wheel = egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: Vec2::new(0.0, -100_000.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        let long = vec![0u8; 8 << 20];
+        draw(&long, vec![egui::Event::PointerMoved(at)]);
+        draw(&long, vec![wheel]);
+        draw(&[0u8; 64], vec![]);
+    }
+
+    /// A file of hundreds of megabytes is drawn a screen at a time, so what it costs to draw is
+    /// what is on screen rather than what the file holds.
+    #[test]
+    fn a_large_file_only_draws_the_rows_on_screen() {
+        let drawn = |size: usize| {
+            let bytes = vec![0u8; size];
+            let mut state = Hex::default();
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(600.0, 300.0))),
+                ..Default::default()
+            };
+            let at = Instant::now();
+            let _ = egui::Context::default().run_ui(input, |ui| hex_dump(ui, &bytes, &mut state));
+            at.elapsed()
+        };
+        let screen = drawn(64 << 10);
+        let whole = drawn(256 << 20);
+        assert!(
+            whole < screen * 10,
+            "a screenful took {screen:?} where a file four thousand times the size took {whole:?}"
+        );
+    }
 }
 
 /// Text is capped because the hex dump below it already covers the whole file, and a multi-megabyte
 /// label is not something egui should be asked to lay out.
 pub const MAX_TEXT_PREVIEW: usize = 256 * 1024;
 
-/// Which colour channels of an image to show. Masking them off is how a packed texture (normal
+/// Which color channels of an image to show. Masking them off is how a packed texture (normal
 /// maps, masks, occlusion) is read: the interesting data is rarely the RGB composite.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Channels {
@@ -1799,7 +2634,7 @@ impl Channels {
         self.r && self.g && self.b && self.a
     }
 
-    /// Zero the unselected channels, or, when exactly one is picked, show it as greyscale so a
+    /// Zero the unselected channels, or, when exactly one is picked, show it as grayscale so a
     /// single packed channel is actually readable.
     fn apply(self, image: &mut image::RgbaImage) {
         if self.all() {
@@ -1819,7 +2654,7 @@ impl Channels {
                     let value = pixel.0[channel];
                     [value, value, value, u8::MAX]
                 }
-                // Alpha is forced opaque when deselected, so the colour channels stay visible.
+                // Alpha is forced opaque when deselected, so the color channels stay visible.
                 None => [
                     if self.r { r } else { 0 },
                     if self.g { g } else { 0 },
@@ -1838,67 +2673,253 @@ const HEX_COLS: usize = 16;
 /// exact past ~16.7M pixels, so a big enough file would scroll unevenly or fail to reach its end.
 /// One page is 1 MiB, comfortably inside that, and files below it get no pagination at all.
 const HEX_PAGE_ROWS: usize = 64 * 1024;
+/// Where a row's hex column starts, and where the text beside it does, in characters.
+const HEX_AT: usize = 10;
+const TEXT_AT: usize = 60;
+/// Characters in a full row.
+const ROW_CHARS: usize = TEXT_AT + HEX_COLS;
 
-/// Offset, hex, ASCII. Rows are virtualised, so only what is on screen is ever formatted.
-fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], page: &mut usize) {
+/// What the byte view is looking at: which page of a long file, and the stretch of it picked out.
+#[derive(Default)]
+struct Hex {
+    page: usize,
+    /// Where a selection was anchored and where it was taken to, as offsets into the file.
+    selection: Option<(usize, usize)>,
+}
+
+impl Hex {
+    fn range(&self) -> Option<std::ops::RangeInclusive<usize>> {
+        self.selection.map(|(from, to)| from.min(to)..=from.max(to))
+    }
+}
+
+/// The character a byte's hex pair starts at. An extra space splits the row in half.
+fn hex_at(col: usize) -> usize {
+    HEX_AT + col * 3 + usize::from(col >= HEX_COLS / 2)
+}
+
+/// Which byte of a row a character sits on, whether it is in the hex or in the text beside it.
+/// `None` over the offset and the gaps that separate the three.
+fn byte_at(at: usize) -> Option<usize> {
+    if (TEXT_AT..ROW_CHARS).contains(&at) {
+        return Some(at - TEXT_AT);
+    }
+    let within = at.checked_sub(HEX_AT).filter(|at| *at <= HEX_COLS * 3)?;
+    Some(match within < HEX_COLS / 2 * 3 {
+        true => within / 3,
+        false => (within - 1) / 3,
+    })
+}
+
+/// One row of the dump: its offset, sixteen bytes in hex, then those bytes as text.
+fn hex_row(start: usize, chunk: &[u8]) -> String {
     use std::fmt::Write as _;
 
+    let mut line = String::with_capacity(ROW_CHARS);
+    let _ = write!(line, "{start:08X}  ");
+    for col in 0..HEX_COLS {
+        if col == HEX_COLS / 2 {
+            line.push(' ');
+        }
+        match chunk.get(col) {
+            Some(byte) => {
+                let _ = write!(line, "{byte:02X} ");
+            }
+            None => line.push_str("   "),
+        }
+    }
+    line.push(' ');
+    line.extend(chunk.iter().map(printable));
+    line
+}
+
+/// A byte as the text column shows it.
+fn printable(byte: &u8) -> char {
+    match byte {
+        0x20..=0x7e => *byte as char,
+        _ => '.',
+    }
+}
+
+/// The bytes behind a selection, in the form the hex column shows them.
+fn hex_text(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Offset, hex and text, painted rather than laid out as widgets so that a byte is one thing in
+/// both columns: dragging picks out a stretch of the file, and the hex and the text light up over
+/// the same bytes. Only the rows on screen are ever formatted.
+fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], state: &mut Hex) {
     let rows = bytes.len().div_ceil(HEX_COLS);
     let pages = rows.div_ceil(HEX_PAGE_ROWS).max(1);
-    *page = (*page).min(pages - 1);
+    state.page = state.page.min(pages - 1);
 
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("{}（{} 字节）", Bytes(bytes.len()), bytes.len())).weak());
         if pages > 1 {
             ui.separator();
-            if ui.add_enabled(*page > 0, Button::new("◀")).clicked() {
-                *page -= 1;
+            if ui.add_enabled(state.page > 0, Button::new("◀")).clicked() {
+                state.page -= 1;
             }
-            ui.label(format!("第 {} / {pages} 页", *page + 1));
+            ui.label(format!("page {} / {pages}", state.page + 1));
             if ui
-                .add_enabled(*page + 1 < pages, Button::new("▶"))
+                .add_enabled(state.page + 1 < pages, Button::new("▶"))
                 .clicked()
             {
-                *page += 1;
+                state.page += 1;
             }
             ui.label(
-                RichText::new(format!("起始 {:#010X}", *page * HEX_PAGE_ROWS * HEX_COLS)).weak(),
+                RichText::new(format!(
+                    "from {:#010X}",
+                    state.page * HEX_PAGE_ROWS * HEX_COLS
+                ))
+                .weak(),
             );
+        }
+        if let Some(picked) = state.range() {
+            ui.separator();
+            ui.label(
+                RichText::new(format!(
+                    "{:#010X}..{:#010X} ({} bytes)",
+                    picked.start(),
+                    picked.end(),
+                    picked.end() - picked.start() + 1
+                ))
+                .weak(),
+            );
+            let picked = &bytes[picked];
+            if ui.small_button("复制十六进制").clicked() {
+                ui.ctx().copy_text(hex_text(picked));
+            }
+            if ui.small_button("复制文本").clicked() {
+                ui.ctx()
+                    .copy_text(picked.iter().map(printable).collect::<String>());
+            }
         }
     });
     ui.add_space(4.0);
 
-    let first_row = *page * HEX_PAGE_ROWS;
+    let first_row = state.page * HEX_PAGE_ROWS;
     let page_rows = (rows - first_row).min(HEX_PAGE_ROWS);
-    let row_height = ui.text_style_height(&TextStyle::Monospace);
+    let font = TextStyle::Monospace.resolve(ui.style());
+    let height = ui.text_style_height(&TextStyle::Monospace);
+    let ink = ui.visuals().text_color();
+    let dim = ui.visuals().weak_text_color();
+    let fill = ui.visuals().selection.bg_fill;
+    let width = ui
+        .painter()
+        .layout_no_wrap("0".repeat(ROW_CHARS), font.clone(), Color32::PLACEHOLDER)
+        .size()
+        .x;
+    let shift = ui.input(|input| input.modifiers.shift);
+
     ScrollArea::both()
         .auto_shrink(false)
-        .id_salt(*page)
-        .show_rows(ui, row_height, page_rows, |ui, range| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
-            let mut line = String::with_capacity(80);
-            for row in range {
+        .id_salt(state.page)
+        .show_viewport(ui, |ui, viewport| {
+            let origin = ui.cursor().left_top();
+            ui.set_width(width);
+            ui.set_height(page_rows as f32 * height);
+
+            // A scroll offset kept from a longer file outlives the switch to a shorter one, so the
+            // first row is held to the last rather than trusted to sit above it.
+            let last = ((viewport.max.y / height).ceil() as usize).min(page_rows);
+            let first = ((viewport.min.y / height).floor().max(0.0) as usize).min(last);
+
+            let laid = |row: usize| {
                 let start = (first_row + row) * HEX_COLS;
-                let chunk = &bytes[start..(start + HEX_COLS).min(bytes.len())];
-                line.clear();
-                let _ = write!(line, "{start:08X}  ");
-                for i in 0..HEX_COLS {
-                    if i == HEX_COLS / 2 {
-                        line.push(' ');
-                    }
-                    match chunk.get(i) {
-                        Some(b) => {
-                            let _ = write!(line, "{b:02X} ");
-                        }
-                        None => line.push_str("   "),
+                let text = hex_row(start, &bytes[start..(start + HEX_COLS).min(bytes.len())]);
+                let mut job = LayoutJob::default();
+                job.append(&text[..8], 0.0, TextFormat::simple(font.clone(), dim));
+                job.append(&text[8..], 0.0, TextFormat::simple(font.clone(), ink));
+                ui.painter().layout_job(job)
+            };
+            // The galley that painted a row is what says where its characters are, so a click lands
+            // on the byte under it whatever the display is scaled by.
+            let under = |at: egui::Pos2| {
+                let row = ((at.y - origin.y) / height).floor().max(0.0) as usize;
+                let row = row.min(page_rows - 1);
+                let top = origin + vec2(0.0, row as f32 * height);
+                let cursor = laid(row).cursor_from_pos(at - top).index.0;
+                let byte = (first_row + row) * HEX_COLS + byte_at(cursor)?;
+                Some(byte.min(bytes.len() - 1))
+            };
+
+            let shown = Rect::from_min_size(
+                origin + vec2(0.0, first as f32 * height),
+                vec2(width, (last - first) as f32 * height),
+            );
+            let response = ui
+                .interact(shown, ui.id().with("bytes"), Sense::click_and_drag())
+                .on_hover_cursor(egui::CursorIcon::Text);
+
+            // Pressing on the dump is what puts the keyboard on it, so a copy comes from here rather
+            // than from whatever was focused before.
+            if response.clicked() || response.drag_started() {
+                response.request_focus();
+            }
+            match response.interact_pointer_pos().and_then(&under) {
+                Some(at) if response.drag_started() || response.clicked() => {
+                    state.selection = match (shift, state.selection) {
+                        (true, Some((from, _))) => Some((from, at)),
+                        _ => Some((at, at)),
+                    };
+                }
+                Some(at) if response.dragged() => {
+                    if let Some((from, _)) = state.selection {
+                        state.selection = Some((from, at));
                     }
                 }
-                line.push(' ');
-                line.extend(chunk.iter().map(|b| match b {
-                    0x20..=0x7e => *b as char,
-                    _ => '.',
-                }));
-                ui.label(RichText::new(&line).monospace());
+                // Clicking the offset column, which is on no byte, is how a selection is dropped.
+                None if response.clicked() => state.selection = None,
+                _ => {}
+            }
+
+            // The event rather than the key, since that is what a browser delivers, and only while
+            // this is what the keyboard is on, so a copy out of the search box is left alone.
+            if response.has_focus()
+                && let Some(picked) = state.range()
+                && ui.input(|input| input.events.contains(&egui::Event::Copy))
+            {
+                ui.ctx().copy_text(hex_text(&bytes[picked]));
+            }
+
+            let picked = state.range();
+            let hovered = response.hover_pos().and_then(&under);
+            for row in first..last {
+                let start = (first_row + row) * HEX_COLS;
+                let held = (bytes.len() - start).min(HEX_COLS);
+                let top = origin + vec2(0.0, row as f32 * height);
+                let galley = laid(row);
+
+                let mark = |from: usize, to: usize, fill: Color32| {
+                    let x = |at: usize| galley.pos_from_cursor(CCursor::new(at)).left();
+                    for (from, to) in [
+                        (hex_at(from), hex_at(to) + 2),
+                        (TEXT_AT + from, TEXT_AT + to + 1),
+                    ] {
+                        let rect =
+                            Rect::from_min_max(top + vec2(x(from), 0.0), top + vec2(x(to), height));
+                        ui.painter().rect_filled(rect, 2.0, fill);
+                    }
+                };
+                if let Some(at) = hovered
+                    && (start..start + held).contains(&at)
+                {
+                    mark(at - start, at - start, fill.gamma_multiply(0.4));
+                }
+                if let Some(picked) = &picked {
+                    let from = (*picked.start()).max(start);
+                    let to = (*picked.end()).min(start + held - 1);
+                    if from <= to {
+                        mark(from - start, to - start, fill);
+                    }
+                }
+                ui.painter().galley(top, galley, ink);
             }
         });
 }

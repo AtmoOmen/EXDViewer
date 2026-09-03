@@ -64,22 +64,22 @@ jobs:
       - name: Rename Binary
         shell: bash
         run: |
-          mv -f target/${{ matrix.platform.target }}/release/viewer${{ matrix.platform.binary-ext }} exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+          mv -f target/${{ matrix.platform.target }}/release/viewer${{ matrix.platform.binary-ext }} xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
       - name: Attest
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: |
-            exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+            xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: exdviewer-${{ matrix.platform.os-name }}
+          name: xiviewer-${{ matrix.platform.os-name }}
           path: |
-            exdviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
+            xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
-  release:
+release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'CN-')
     needs: build
     runs-on: windows-latest
@@ -128,14 +128,14 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force package\win-x64 | Out-Null
-          Copy-Item exdviewer-win-x64\exdviewer-win-x64.exe package\win-x64\viewer.exe
+          Copy-Item xiviewer-win-x64\xiviewer-win-x64.exe package\win-x64\viewer.exe
           vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-x64 -e viewer.exe -r win-x64 -c win -i viewer\assets\icon.ico --packTitle EXDViewer --packAuthors AtmoOmen
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
 
           New-Item -ItemType Directory -Force package\win-arm64 | Out-Null
-          Copy-Item exdviewer-win-arm64\exdviewer-win-arm64.exe package\win-arm64\viewer.exe
+          Copy-Item xiviewer-win-arm64\xiviewer-win-arm64.exe package\win-arm64\viewer.exe
           vpk pack -u EXDViewer -v "${{ steps.version.outputs.version }}" -p package\win-arm64 -e viewer.exe -r win-arm64 -c win-arm64 -i viewer\assets\icon.ico --packTitle EXDViewer --packAuthors AtmoOmen
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
@@ -162,9 +162,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload $env:GITHUB_REF_NAME `
-            exdviewer-linux-x64\exdviewer-linux-x64 `
-            exdviewer-linux-arm64\exdviewer-linux-arm64 `
-            exdviewer-win-x64\exdviewer-win-x64.exe `
-            exdviewer-win-arm64\exdviewer-win-arm64.exe `
-            exdviewer-osx-x64\exdviewer-osx-x64 `
-            exdviewer-osx-arm64\exdviewer-osx-arm64
+            xiviewer-linux-x64\xiviewer-linux-x64 `
+            xiviewer-linux-arm64\xiviewer-linux-arm64 `
+            xiviewer-win-x64\xiviewer-win-x64.exe `
+            xiviewer-win-arm64\xiviewer-win-arm64.exe `
+            xiviewer-osx-x64\xiviewer-osx-x64 `
+            xiviewer-osx-arm64\xiviewer-osx-arm64

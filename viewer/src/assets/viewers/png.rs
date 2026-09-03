@@ -14,7 +14,7 @@ pub fn decode(
 ) -> Result<Preview> {
     let image = image::load_from_memory(bytes)?;
     let facts = vec![
-        ("格式", "PNG".to_string()),
+("格式", "PNG".to_string()),
         ("尺寸", format!("{} x {}", image.width(), image.height())),
         ("颜色", format!("{:?}", image.color())),
         ("文件大小", Bytes(bytes.len()).to_string()),

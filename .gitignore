@@ -21,3 +21,8 @@ callgrind.out.*
 # Local secrets / dotenv
 .env
 .secrets.env
+
+.claude/worktrees/
+
+# Scratch output from a local luac run.
+luac.out

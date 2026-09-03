@@ -18,11 +18,12 @@ use crate::{
     settings::{ALWAYS_HIRES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, TEXT_MAX_LINES},
     sheet::{
         compact_sestring::CompactSeString,
+        event_icon_type,
         schema_column::{ResolvedTableContext, SheetLink},
         should_ignore_clicks, string_label_wrapped, wrap_string_lines_estimate,
     },
     stopwatch::stopwatches::MULTILINE_STOPWATCH,
-    utils::{ManagedIcon, TrackedPromise},
+    utils::{ManagedIcon, TrackedPromise, icon_context_menu},
 };
 
 use super::{
@@ -424,7 +425,13 @@ impl<'a> Cell<'a> {
                 SchemaColumnMeta::Icon => 32.0,
                 SchemaColumnMeta::ModelId => self.size_text(ui),
                 SchemaColumnMeta::Color => self.size_text(ui),
-                SchemaColumnMeta::Link(sheets) => self.size_internal_link(ui, Some(sheets))?,
+                SchemaColumnMeta::Link(sheets) => {
+                    if event_icon_type::links_here(sheets) {
+                        event_icon_type::cell_height(ui)
+                    } else {
+                        self.size_internal_link(ui, Some(sheets))?
+                    }
+                }
                 SchemaColumnMeta::ConditionalLink { column_idx, links } => {
                     let (_, switch_column) =
                         self.table_context.get_column_by_offset(*column_idx)?;
@@ -636,7 +643,7 @@ fn read_string(
     }
 }
 
-fn read_integer<T: num_traits::NumCast>(
+pub(crate) fn read_integer<T: num_traits::NumCast>(
     row: ExcelRow<'_>,
     offset: u32,
     kind: ColumnKind,
@@ -727,22 +734,33 @@ impl CellValue {
 fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Response {
     let (excel, icon_mgr) = (ctx.backend().excel().clone(), &ctx.icon_manager());
     let hires = ALWAYS_HIRES.get(ui.ctx());
-    let image_source = icon_mgr.get_or_insert_icon(icon_id, hires, ui.ctx(), move || {
+    let path = get_icon_path(ctx.backend().icons(), icon_id, hires, ctx.language());
+    let image_source = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
         log::debug!("Icon not found in cache: {icon_id}");
-        TrackedPromise::spawn_local(async move {
-            let icon = excel.get_icon(icon_id, hires).await?;
-            crate::data::resolve_icon(icon).await
-        })
+let excel = excel.clone();
+        let path = path.clone();
+        TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
+    let loaded = match &image_source {
+        ManagedIcon::Loaded(source) => Some(source.clone()),
+        _ => None,
+    };
     let resp = match image_source {
-        ManagedIcon::Loaded { source, .. } => {
+        ManagedIcon::Loaded(source) => {
             ui.with_layout(
                 Layout::centered_and_justified(Direction::LeftToRight),
                 |ui| {
+                    // A wide banner icon reports its whole aspect-corrected width, which in a side
+                    // panel becomes a floor the panel can never shrink under. Table cells keep the
+                    // unbounded width: it is what tells the table how wide the column wants to be.
+                    let widest = match super::wrapping_to_panel() {
+                        true => ui.available_width(),
+                        false => f32::INFINITY,
+                    };
                     egui::Image::new(source)
                         .sense(Sense::click())
                         .maintain_aspect_ratio(true)
-                        .fit_to_exact_size(Vec2::new(f32::INFINITY, 32.0))
+                        .fit_to_exact_size(Vec2::new(widest, 32.0))
                         .ui(ui)
                 },
             )
@@ -760,20 +778,20 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
             unreachable!()
         }
     };
-    let resp = resp.on_hover_text(format!(
-        "ID: {icon_id}\n路径: {}",
-        get_icon_path(icon_id, hires)
-    ));
-    resp.context_menu(|ui| {
-        if ui.button("复制 ID").clicked() {
-            ui.ctx().copy_text(icon_id.to_string());
-            ui.close();
-        }
-    });
+let resp = resp.on_hover_text(format!("ID: {icon_id}\n路径: {path}"));
+    icon_context_menu(
+        &resp,
+        icon_mgr,
+        excel,
+        ctx.backend().files().clone(),
+        icon_id,
+        &path,
+        loaded,
+    );
     resp
 }
 
-/// A color cell: the swatch, its hex on hover, and a right-click copy. Shared so every colour in
+/// A color cell: the swatch, its hex on hover, and a right-click copy. Shared so every color in
 /// the app reads and behaves the same way.
 pub(crate) fn draw_color(ui: &mut egui::Ui, color: Color32) -> egui::Response {
     let resp = {

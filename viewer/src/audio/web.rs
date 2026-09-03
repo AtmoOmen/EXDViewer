@@ -1,5 +1,8 @@
 use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
 use base64::{Engine as _, prelude::BASE64_STANDARD};
@@ -37,6 +40,10 @@ pub struct Player {
     started_at: f64,
     seek_req: SeekCell,
     generation: Generation,
+    /// Whether the current track claims OS media-session integration (lock-screen/hardware-key
+    /// controls, the focus-token anchor). Set by [`Self::play`]; a one-shot preview never sets it.
+    announce: bool,
+    session_ready: bool,
     _handlers: Vec<Closure<dyn FnMut()>>,
     _seek_handlers: Vec<Closure<dyn FnMut(MediaSessionActionDetails)>>,
     _ended_handler: Option<Closure<dyn FnMut()>>,
@@ -57,10 +64,38 @@ impl Player {
             .connect_with_audio_node(&context.destination())
             .map_err(js("connect analyser"))?;
 
-        let mut handlers = Vec::new();
+        let seek_req: SeekCell = Rc::new(RefCell::new(None));
+
+        Ok(Self {
+            context,
+            gain,
+            analyser,
+            anchor: None,
+            source: Rc::new(RefCell::new(None)),
+            buffer: None,
+            loop_region: None,
+            duration: 0.0,
+            started_at: 0.0,
+            seek_req,
+            generation: Rc::new(std::cell::Cell::new(0)),
+            announce: false,
+            session_ready: false,
+            _handlers: Vec::new(),
+            _seek_handlers: Vec::new(),
+            _ended_handler: None,
+        })
+    }
+
+    /// Wires the lock-screen/hardware-key surface the first time a track claims it, so a preview
+    /// player that never plays an announced track never touches `navigator.mediaSession` at all.
+    fn ensure_session(&mut self) {
+        if self.session_ready {
+            return;
+        }
+        self.session_ready = true;
         let anchor = match focus_token() {
             Ok(anchor) => {
-                handlers.extend(bind_anchor(&context, &anchor));
+                self._handlers.extend(bind_anchor(&self.context, &anchor));
                 Some(anchor)
             }
             Err(error) => {
@@ -68,29 +103,13 @@ impl Player {
                 None
             }
         };
-
-        let source: SourceCell = Rc::new(RefCell::new(None));
-        handlers.extend(register_media_session(&context, &source, anchor.as_ref()));
-
-        let seek_req: SeekCell = Rc::new(RefCell::new(None));
-        let seek_handlers = register_seek_handlers(&seek_req);
-
-        Ok(Self {
-            context,
-            gain,
-            analyser,
-            anchor,
-            source,
-            buffer: None,
-            loop_region: None,
-            duration: 0.0,
-            started_at: 0.0,
-            seek_req,
-            generation: Rc::new(std::cell::Cell::new(0)),
-            _handlers: handlers,
-            _seek_handlers: seek_handlers,
-            _ended_handler: None,
-        })
+        self._handlers.extend(register_media_session(
+            &self.context,
+            &self.source,
+            anchor.as_ref(),
+        ));
+        self._seek_handlers = register_seek_handlers(&self.seek_req);
+        self.anchor = anchor;
     }
 
     pub fn spectrum(&self, out: &mut [u8]) {
@@ -109,7 +128,9 @@ impl Player {
         }
     }
 
-    pub fn play(&mut self, audio: Decoded) -> Result<()> {
+    /// `announce` claims OS media-session integration (lock-screen/hardware-key controls) for
+    /// this playback; only a looping track played from the Music tab should pass `true`.
+    pub fn play(&mut self, audio: Decoded, announce: bool) -> Result<()> {
         self.stop();
 
         let channels = audio.channels as usize;
@@ -140,13 +161,19 @@ impl Player {
             .zip(audio.loop_end)
             .map(|(start, end)| (f64::from(start) / rate, f64::from(end) / rate));
         self.buffer = Some(buffer);
+        self.announce = announce;
+        if announce {
+            self.ensure_session();
+        }
 
         self.start_source(0.0)?;
         let _ = self.context.resume();
-        if let Some(anchor) = &self.anchor {
-            let _ = anchor.play();
+        if self.announce {
+            if let Some(anchor) = &self.anchor {
+                let _ = anchor.play();
+            }
+            set_playback_state(MediaSessionPlaybackState::Playing);
         }
-        set_playback_state(MediaSessionPlaybackState::Playing);
         self.publish_position();
         Ok(())
     }
@@ -198,15 +225,18 @@ impl Player {
             let attached_at = generation.get();
             let cell = self.source.clone();
             let anchor = self.anchor.clone();
+            let announce = self.announce;
             let handler = Closure::<dyn FnMut()>::new(move || {
                 if generation.get() != attached_at {
                     return;
                 }
                 cell.borrow_mut().take();
-                if let Some(anchor) = &anchor {
-                    let _ = anchor.pause();
+                if announce {
+                    if let Some(anchor) = &anchor {
+                        let _ = anchor.pause();
+                    }
+                    set_playback_state(MediaSessionPlaybackState::None);
                 }
-                set_playback_state(MediaSessionPlaybackState::None);
             });
             #[allow(deprecated)]
             source.set_onended(Some(handler.as_ref().unchecked_ref()));
@@ -234,6 +264,9 @@ impl Player {
     }
 
     pub fn set_metadata(&self, title: &str) {
+        if !self.announce {
+            return;
+        }
         if let Some(session) = media_session()
             && let Ok(metadata) = MediaMetadata::new()
         {
@@ -243,31 +276,45 @@ impl Player {
     }
 
     pub fn pause(&self) {
-        if let Some(anchor) = &self.anchor {
+        if self.announce
+            && let Some(anchor) = &self.anchor
+        {
             let _ = anchor.pause();
         }
         let _ = self.context.suspend();
-        set_playback_state(MediaSessionPlaybackState::Paused);
+        if self.announce {
+            set_playback_state(MediaSessionPlaybackState::Paused);
+        }
     }
 
     pub fn resume(&self) {
-        if let Some(anchor) = &self.anchor {
+        if self.announce
+            && let Some(anchor) = &self.anchor
+        {
             let _ = anchor.play();
         }
         let _ = self.context.resume();
-        set_playback_state(MediaSessionPlaybackState::Playing);
+        if self.announce {
+            set_playback_state(MediaSessionPlaybackState::Playing);
+        }
         self.publish_position();
     }
 
     pub fn stop(&mut self) {
         self.discard_source();
-        if let Some(anchor) = &self.anchor {
-            let _ = anchor.pause();
+        if self.announce {
+            if let Some(anchor) = &self.anchor {
+                let _ = anchor.pause();
+            }
+            set_playback_state(MediaSessionPlaybackState::None);
+            if let Some(session) = media_session() {
+                session.set_metadata(None);
+            }
         }
         self.buffer = None;
         self.loop_region = None;
         self.duration = 0.0;
-        set_playback_state(MediaSessionPlaybackState::None);
+        self.announce = false;
     }
 
     pub fn set_volume(&mut self, volume: f32) {
@@ -283,7 +330,7 @@ impl Player {
     }
 
     fn publish_position(&self) {
-        if self.duration <= 0.0 {
+        if !self.announce || self.duration <= 0.0 {
             return;
         }
         if let Some(session) = media_session() {
@@ -522,4 +569,139 @@ fn bind_anchor(context: &AudioContext, anchor: &HtmlAudioElement) -> Vec<Closure
 
 fn js(context: &'static str) -> impl Fn(JsValue) -> anyhow::Error {
     move |error| anyhow!("{context}: {error:?}")
+}
+
+/// Several looping voices sharing one context and one master gain, for a scene playing more than
+/// one ambient sound at once.
+pub struct Mixer<K> {
+    context: AudioContext,
+    master: GainNode,
+    voices: HashMap<K, Voice>,
+}
+
+struct Voice {
+    source: AudioBufferSourceNode,
+    gain: GainNode,
+}
+
+impl<K: Eq + Hash> Mixer<K> {
+    pub fn new() -> Result<Self> {
+        let context = AudioContext::new().map_err(js("AudioContext"))?;
+        let master = context.create_gain().map_err(js("create_gain"))?;
+        master
+            .connect_with_audio_node(&context.destination())
+            .map_err(js("connect master"))?;
+        Ok(Self {
+            context,
+            master,
+            voices: HashMap::new(),
+        })
+    }
+
+    /// Resumes the context; browsers only grant that from inside a real user gesture.
+    pub fn unlock(&self) {
+        let _ = self.context.resume();
+    }
+
+    pub fn set_master_volume(&mut self, volume: f32) {
+        self.master.gain().set_value(volume);
+    }
+
+    pub fn is_playing(&self, key: &K) -> bool {
+        self.voices.contains_key(key)
+    }
+
+    pub fn playing(&self) -> usize {
+        self.voices.len()
+    }
+
+    /// Starts `key` playing, unless it already is: looping if `audio` carries loop points, once
+    /// through otherwise.
+    pub fn play(&mut self, key: K, audio: Arc<Decoded>, gain: f32) -> Result<()> {
+        if self.voices.contains_key(&key) {
+            return Ok(());
+        }
+        let channels = audio.channels as usize;
+        let frames = audio.samples.len() / channels.max(1);
+        let buffer = self
+            .context
+            .create_buffer(
+                audio.channels as u32,
+                frames as u32,
+                audio.sample_rate as f32,
+            )
+            .map_err(js("create_buffer"))?;
+        let mut channel = vec![0f32; frames];
+        for ch in 0..channels {
+            for (frame, slot) in channel.iter_mut().enumerate() {
+                *slot = audio.samples[frame * channels + ch];
+            }
+            buffer
+                .copy_to_channel(&channel, ch as i32)
+                .map_err(js("copy_to_channel"))?;
+        }
+
+        let node_gain = self.context.create_gain().map_err(js("create_gain"))?;
+        node_gain.gain().set_value(gain);
+        node_gain
+            .connect_with_audio_node(&self.master)
+            .map_err(js("connect voice"))?;
+
+        let source = self
+            .context
+            .create_buffer_source()
+            .map_err(js("create_buffer_source"))?;
+        source.set_buffer(Some(&buffer));
+        let rate = f64::from(audio.sample_rate);
+        if let Some((start, end)) = audio.loop_start.zip(audio.loop_end) {
+            source.set_loop(true);
+            source.set_loop_start(f64::from(start) / rate);
+            source.set_loop_end(f64::from(end) / rate);
+        }
+        source
+            .connect_with_audio_node(&node_gain)
+            .map_err(js("connect source"))?;
+        source.start().map_err(js("start"))?;
+
+        self.voices.insert(
+            key,
+            Voice {
+                source,
+                gain: node_gain,
+            },
+        );
+        Ok(())
+    }
+
+    pub fn set_gain(&mut self, key: &K, gain: f32) {
+        if let Some(voice) = self.voices.get_mut(key) {
+            voice.gain.gain().set_value(gain);
+        }
+    }
+
+    /// Stops whatever `keep` does not hold true for.
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.voices.retain(|key, voice| match keep(key) {
+            true => true,
+            false => {
+                #[allow(deprecated)]
+                let _ = voice.source.stop();
+                false
+            }
+        });
+    }
+
+    pub fn stop_all(&mut self) {
+        self.retain(|_| false);
+    }
+}
+
+impl<K> Drop for Mixer<K> {
+    /// Each one opens its own `AudioContext`; left open, enough of these across a session's worth
+    /// of character views hits the browser's per-page limit and the next one fails to construct.
+    fn drop(&mut self) {
+        if let Err(error) = self.context.close() {
+            log::warn!("audio: context did not close: {error:?}");
+        }
+    }
 }

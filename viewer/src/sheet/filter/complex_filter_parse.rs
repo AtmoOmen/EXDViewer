@@ -7,7 +7,9 @@ use pest_derive::Parser;
 use regex_lite::Regex;
 use wildmatch::WildMatch;
 
-use crate::sheet::filter::complex_filter::{ComplexFilter, FilterKey, FilterRange, FilterValue};
+use crate::sheet::filter::complex_filter::{
+    ComplexFilter, FilterKey, FilterRange, FilterValue, RegexWrapper,
+};
 
 #[derive(Parser)]
 #[grammar = "sheet/filter/filter.pest"]
@@ -192,7 +194,7 @@ fn parse_comparator(pair: Pair<'_, Rule>) -> Result<(FilterValue, bool), String>
         Rule::CONTAINS => FilterValue::Contains(parse_string_value(value)?),
         Rule::FUZZY => FilterValue::Fuzzy(parse_string_value(value)?.into()),
         Rule::WILDCARD => FilterValue::Wildcard(WildMatch::new(&parse_string_value(value)?).into()),
-        Rule::REGEX => FilterValue::Regex(parse_regex_value(value)?.into()),
+        Rule::REGEX => FilterValue::Regex(parse_regex_value(value)?),
         Rule::RANGE => {
             let ret = parse_range_value(value)?;
             match ret {
@@ -241,7 +243,7 @@ fn parse_string_value(pair: Pair<'_, Rule>) -> Result<String, String> {
     }
 }
 
-fn parse_regex_value(pair: Pair<'_, Rule>) -> Result<Regex, String> {
+fn parse_regex_value(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
     assert_eq!(pair.as_rule(), Rule::regex_value);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
         "Expected exactly one token inside regex_value (either regex or string_value)".to_string()
@@ -250,7 +252,9 @@ fn parse_regex_value(pair: Pair<'_, Rule>) -> Result<Regex, String> {
         Rule::regex => parse_regex(inner),
         Rule::string_value => {
             let s = parse_string_value(inner)?;
-            Regex::new(&s).map_err(|e| format!("Failed to compile regex from string: {e}"))
+            let regex =
+                Regex::new(&s).map_err(|e| format!("Failed to compile regex from string: {e}"))?;
+            Ok(RegexWrapper::new(regex, String::new()))
         }
         _ => unreachable!("Unexpected rule in regex_value: {:?}", inner.as_rule()),
     }
@@ -296,7 +300,7 @@ fn parse_bare_string(pair: Pair<'_, Rule>) -> &'_ str {
     pair.as_str()
 }
 
-fn parse_regex(pair: Pair<'_, Rule>) -> Result<Regex, String> {
+fn parse_regex(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
     assert_eq!(pair.as_rule(), Rule::regex);
     let (slash, str_value, flags) = pair.into_inner().collect_tuple().ok_or_else(|| {
         "Expected exactly three tokens inside regex (slash, string_value, flags)".to_string()
@@ -337,9 +341,10 @@ fn parse_regex(pair: Pair<'_, Rule>) -> Result<Regex, String> {
             }
         }
     }
-    regex_builder
+    let regex = regex_builder
         .build()
-        .map_err(|e| format!("Failed to build regex: {e}"))
+        .map_err(|e| format!("Failed to build regex: {e}"))?;
+    Ok(RegexWrapper::new(regex, flags_str.to_string()))
 }
 
 fn parse_number(pair: Pair<'_, Rule>) -> Result<i128, String> {

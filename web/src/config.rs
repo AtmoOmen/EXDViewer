@@ -15,8 +15,20 @@ pub struct AssetCache {
 #[serde(default)]
 pub struct PathList {
     pub url: String,
+    pub extra_urls: Vec<String>,
     pub ttl_minutes: u64,
     pub cache_directory: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Report {
+    /// Whether submissions reach ResLogger. Off until a deployment says otherwise, so a dev server
+    /// collects and logs without a third party hearing about it.
+    pub enabled: bool,
+    pub forward_url: String,
+    pub max_paths: usize,
+    pub per_hour: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +45,18 @@ pub struct Config {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub path_list: PathList,
+    pub report: Report,
+}
+
+impl Default for Report {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            forward_url: "https://rl2.perchbird.dev/api/upload".to_string(),
+            max_paths: 250,
+            per_hour: 60,
+        }
+    }
 }
 
 impl Default for AssetCache {
@@ -50,6 +74,10 @@ impl Default for PathList {
     fn default() -> Self {
         Self {
             url: "https://rl2.perchbird.dev/download/export/PathList.gz".to_string(),
+            extra_urls: vec![
+                "https://raw.githubusercontent.com/WorkingRobot/XIViewer/main/paths/extra.txt"
+                    .to_string(),
+            ],
             ttl_minutes: 12 * 60,
             cache_directory: Some(PathBuf::from("cache/paths")),
         }
@@ -62,16 +90,17 @@ impl Default for Config {
             server_addr: "0.0.0.0:80".to_string(),
             metrics_server_addr: None,
             log_filter: Some(
-                "debug,exdviewer_web=debug,tracing::span=warn,foyer_memory::raw=warn".to_string(),
+                "debug,web=debug,tracing::span=warn,foyer_memory::raw=warn".to_string(),
             ),
             log_access_format: None,
             cache: ServerBuilder::default(),
             assets: AssetCache::default(),
             file_readahead: 0x800000, // 8 MiB
-            api_workers: 1,
+            api_workers: 4,
             github_client_id: String::new(),
             github_client_secret: String::new(),
             path_list: PathList::default(),
+            report: Report::default(),
         }
     }
 }

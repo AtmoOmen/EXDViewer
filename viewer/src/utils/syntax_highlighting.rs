@@ -74,18 +74,19 @@ impl CodeTheme {
 
     pub fn surface(&self) -> Option<(egui::Color32, egui::Color32)> {
         let held = THEME_SET.themes.get(&self.theme)?;
-        let colour =
+        let color =
             |from: syntect::highlighting::Color| egui::Color32::from_rgb(from.r, from.g, from.b);
         Some((
-            colour(held.settings.background?),
-            colour(held.settings.foreground?),
+            color(held.settings.background?),
+            color(held.settings.foreground?),
         ))
     }
 }
 
-const BUNDLED: [&str; 2] = [
+const BUNDLED: [&str; 3] = [
     include_str!("../../assets/hlsl.sublime-syntax"),
     include_str!("../../assets/dxbc.sublime-syntax"),
+    include_str!("../../assets/luab.sublime-syntax"),
 ];
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(|| {

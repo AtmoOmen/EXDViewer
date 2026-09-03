@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 
 use crate::utils::{HttpResponse, request, yield_to_ui};
 
-const API: &str = "https://api.github.com";
+use super::API;
 
 #[derive(Debug, Clone)]
 pub struct PrDraft {
@@ -44,7 +44,7 @@ impl GithubClient {
             ("Accept", "application/vnd.github+json"),
             ("X-GitHub-Api-Version", "2022-11-28"),
             // Ignored by browsers but required on native
-            ("User-Agent", "EXDViewer"),
+            ("User-Agent", "XIViewer"),
         ];
         let body_bytes = match body {
             Some(value) => {
@@ -277,7 +277,7 @@ fn generate_branch_name(base_sha: &str, files: &[(String, String)]) -> String {
     let digest = hasher.finalize();
     let suffix: String = digest.iter().take(4).map(|b| format!("{b:02x}")).collect();
 
-    format!("exdviewer/{label}-{suffix}")
+    format!("xiviewer/{label}-{suffix}")
 }
 
 fn str_field<'a>(value: &'a Value, key: &str) -> Result<&'a str> {

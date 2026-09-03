@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     let mut player = Player::new()?;
-    player.play(decoded)?;
+    player.play(decoded, false)?;
     println!("playing for {seconds}s...");
     std::thread::sleep(Duration::from_secs(seconds));
     Ok(())

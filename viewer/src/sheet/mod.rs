@@ -2,6 +2,7 @@ mod cell;
 mod cell_iter;
 mod compact_sestring;
 mod csv;
+mod event_icon_type;
 mod filter;
 mod global_context;
 mod schema_column;
@@ -9,12 +10,16 @@ mod sheet_column;
 mod sheet_table;
 mod table_context;
 
-use std::{cell::RefCell, fmt::Write, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    fmt::Write,
+    sync::Arc,
+};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
 #[cfg(not(target_arch = "wasm32"))]
 pub use cell::CellValue;
-pub(crate) use cell::draw_color;
+pub(crate) use cell::{draw_color, read_integer};
 pub use cell::{CellResponse, MatchOptions};
 use compact_str::ToCompactString;
 pub use csv::export_csv;
@@ -135,16 +140,45 @@ fn string_label_wrapped(ui: &mut egui::Ui, value: &SeStr) -> Response {
     resp
 }
 
+thread_local! {
+    // Ambient rather than a parameter: the path into `create_galley` runs through `Cell::show`,
+    // a signature every table cell shares.
+    static WRAP_TO_PANEL_WIDTH: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Wraps sheet cells rendered inside `f` to the panel's own available width instead of the fixed
+/// `TEXT_WRAP_WIDTH` setting.
+pub fn wrap_to_panel_width<R>(f: impl FnOnce() -> R) -> R {
+    let previous = WRAP_TO_PANEL_WIDTH.with(|c| c.replace(true));
+    let result = f();
+    WRAP_TO_PANEL_WIDTH.with(|c| c.set(previous));
+    result
+}
+
+/// Whether the caller is inside [`wrap_to_panel_width`], for the widgets a galley cannot speak for.
+pub(crate) fn wrapping_to_panel() -> bool {
+    WRAP_TO_PANEL_WIDTH.with(Cell::get)
+}
+
 fn create_galley(ui: &egui::Ui, text: String, try_elide: bool) -> Arc<Galley> {
-    let max_width = TEXT_WRAP_WIDTH
+    let setting_width = TEXT_WRAP_WIDTH
         .get(ui.ctx())
         .map_or(f32::INFINITY, |w| w.get().into());
+    let constrained = WRAP_TO_PANEL_WIDTH.with(Cell::get);
+    let max_width = if constrained {
+        setting_width.min(ui.available_width())
+    } else {
+        setting_width
+    };
     let mut layout = LayoutJob::simple(
         text,
         FontSelection::default().resolve(ui.style()),
         Color32::PLACEHOLDER,
         max_width,
     );
+    if constrained {
+        layout.wrap.break_anywhere = true;
+    }
     if try_elide && let Some(max_lines) = TEXT_MAX_LINES.get(ui.ctx()) {
         layout.wrap.max_rows = max_lines.get().into();
         if max_lines.get() == 1 {

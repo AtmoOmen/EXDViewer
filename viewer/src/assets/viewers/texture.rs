@@ -66,12 +66,19 @@ pub fn decode(
         })
         .collect();
     let image = crate::utils::tex_loader::decode_mip(&texture, mip, path)?;
+// An alpha-only texture decodes to four channels carrying the one it holds, so it is worth the
+    // toggles even though the format states a single component: without them a coverage map draws
+    // as a ghost of itself over the panel and there is no way back to reading it.
+    let shown = match format {
+        tex::Format::A8Unorm => 4,
+        _ => format.components(),
+    };
     Ok(upload(
         ctx,
         path,
         image,
-        texture.layers(),
-        texture.format().components(),
+        texture.layers(mip),
+        shown,
         facts,
         mips,
         channels,

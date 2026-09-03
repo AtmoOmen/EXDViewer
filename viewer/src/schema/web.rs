@@ -1,4 +1,4 @@
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::HashMap};
 
 use async_trait::async_trait;
 use itertools::Itertools;
@@ -6,6 +6,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::{
+    github::{API, GithubApi},
     settings::{GithubSchemaBranch, GithubSchemaLocation},
     utils::{GameVersion, fetch_url, fetch_url_str},
 };
@@ -82,18 +83,19 @@ impl WebProvider {
     }
 
     pub async fn fetch_github_repository(
+        api: &GithubApi,
         owner: &str,
         repo: &str,
     ) -> anyhow::Result<Vec<GithubSchemaBranch>> {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
             return Err(anyhow::anyhow!("Invalid GitHub repository format"));
         }
-        let url = Url::parse(&format!(
-            "https://api.github.com/repos/{owner}/{repo}/branches?per_page=100"
-        ))?;
-        let resp = fetch_github_url(&url).await?;
-
-        let branches: Vec<GithubBranch> = serde_json::from_slice(&resp)?;
+let branches: Vec<GithubBranch> = api
+            .get(
+                &format!("{owner}/{repo}/branches/"),
+                &format!("{API}/repos/{owner}/{repo}/branches?per_page=100"),
+            )
+            .await?;
 
         let mut ret = Vec::new();
         for branch in branches {
@@ -116,18 +118,19 @@ impl WebProvider {
     }
 
     pub async fn fetch_github_pull_requests(
+        api: &GithubApi,
         owner: &str,
         repo: &str,
     ) -> anyhow::Result<Vec<GithubSchemaBranch>> {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
             return Err(anyhow::anyhow!("Invalid GitHub repository format"));
         }
-        let url = Url::parse(&format!(
-            "https://api.github.com/repos/{owner}/{repo}/pulls?per_page=100"
-        ))?;
-        let resp = fetch_github_url(&url).await?;
-
-        let pulls: Vec<GithubPullRequest> = serde_json::from_slice(&resp)?;
+let pulls: Vec<GithubPullRequest> = api
+            .get(
+                &format!("{owner}/{repo}/pulls/"),
+                &format!("{API}/repos/{owner}/{repo}/pulls?per_page=100"),
+            )
+            .await?;
 
         let pulls = pulls
             .into_iter()
@@ -145,6 +148,7 @@ impl WebProvider {
     }
 
     pub async fn fetch_github_pull_request_files(
+        api: &GithubApi,
         owner: &str,
         repo: &str,
         number: u32,
@@ -157,12 +161,14 @@ impl WebProvider {
         let mut ret = Vec::new();
         let mut page = 1u32;
         loop {
-            let url = Url::parse(&format!(
-                "https://api.github.com/repos/{owner}/{repo}/pulls/{number}/files?per_page={PER_PAGE}&page={page}"
-            ))?;
-            let resp = fetch_github_url(&url).await?;
-
-            let files: Vec<GithubPullRequestFile> = serde_json::from_slice(&resp)?;
+let files: Vec<GithubPullRequestFile> = api
+                .get(
+                    &format!("{owner}/{repo}/pulls/{number}/files/?page={page}"),
+                    &format!(
+                        "{API}/repos/{owner}/{repo}/pulls/{number}/files?per_page={PER_PAGE}&page={page}"
+                    ),
+                )
+                .await?;
             let count = files.len();
 
             ret.extend(files.into_iter().filter_map(|file| {
@@ -178,6 +184,20 @@ impl WebProvider {
         }
 
         Ok(ret)
+    }
+
+    /// Every schema at a ref in one response, which only the server can answer: reading them from
+    /// GitHub one file at a time is around 1200 round trips.
+    pub async fn fetch_github_schemas(
+        api: &GithubApi,
+        location: &GithubSchemaLocation,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        let (owner, repo, branch) = location.source();
+        if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
+            return Err(anyhow::anyhow!("Invalid GitHub repository format"));
+        }
+        api.get_from_server(&format!("{owner}/{repo}/schemas/{branch}/"))
+            .await
     }
 }
 

@@ -51,13 +51,13 @@ const SNIPPET: usize = 24;
 /// this is better off without the smudge.
 const LEGIBLE: f32 = 4.0;
 
-/// Bits of a text node's second flag byte that hand its colours to the current UI theme, leaving
-/// the colour fields holding a palette row rather than a colour.
+/// Bits of a text node's second flag byte that hand its colors to the current UI theme, leaving
+/// the color fields holding a palette row rather than a color.
 const THEME_FILL: u8 = 0x02;
 const THEME_EDGE: u8 = 0x04;
 
-/// How deep component instancing is followed. Components can only reference ones defined before
-/// them, so this is a backstop against a file that says otherwise rather than an expected limit.
+/// How deep component instancing is followed. Components may only reference ones defined before
+/// them.
 const MAX_DEPTH: usize = 16;
 
 /// How many repeats a tiling piece is drawn as before it is simply stretched. A window background
@@ -135,7 +135,7 @@ struct TextRef {
     row: u32,
     align: Align2,
     size: f32,
-    /// `None` where the node takes the current UI theme's colour, which is what nearly all of them
+    /// `None` where the node takes the current UI theme's color, which is what nearly all of them
     /// do; the rest state one outright.
     color: Option<Color32>,
 }
@@ -241,7 +241,7 @@ fn text_ref(node: &uld::Node) -> Option<TextRef> {
     })
 }
 
-/// A colour as a text node states it: the channels in memory order, so the byte written first is
+/// A color as a text node states it: the channels in memory order, so the byte written first is
 /// red rather than the alpha the hex reading suggests.
 fn color_of(value: u32) -> Color32 {
     let [r, g, b, a] = value.to_le_bytes();
@@ -372,8 +372,8 @@ fn describe(node: &uld::Node, layout: &uld::UiLayout) -> (String, String) {
     }
 }
 
-/// One of a text node's two colour fields as written: a row of the theme's palette where the node
-/// defers to it, and a colour of its own otherwise.
+/// One of a text node's two color fields as written: a row of the theme's palette where the node
+/// defers to it, and a color of its own otherwise.
 fn stated(value: u32, themed: bool) -> String {
     if themed {
         return format!("主题 {value}");
@@ -529,7 +529,7 @@ fn properties(node: &uld::Node, layout: &uld::UiLayout, rect: Rect) -> Vec<(&'st
                     sheet => format!("{}（数据表 {sheet}）", text.text_id),
                 },
             ));
-            props.push(("字体", format!("{:?} {}", text.font, text.font_size)));
+props.push(("字体", format!("{:?} {}", text.font, text.font_size)));
             props.push(("颜色", stated(text.color, text.flags2 & THEME_FILL != 0)));
             props.push((
                 "描边",
@@ -1461,7 +1461,7 @@ pub fn details_ui(ui: &mut egui::Ui, layout: &Rendered, deps: &mut Deps, backend
                 .show(ui, |ui| {
                     for (label, value) in &node.props {
                         ui.label(RichText::new(*label).weak());
-                        ui.label(RichText::new(value).monospace());
+                        ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                         ui.allocate_space(vec2(ui.available_width(), 0.0));
                         ui.end_row();
                     }
@@ -1476,7 +1476,7 @@ pub fn details_ui(ui: &mut egui::Ui, layout: &Rendered, deps: &mut Deps, backend
             .show(ui, |ui| {
                 for (label, value) in &layout.identity {
                     ui.label(RichText::new(*label).weak());
-                    ui.label(RichText::new(value).monospace());
+                    ui.add(egui::Label::new(RichText::new(value).monospace()).wrap());
                     ui.allocate_space(vec2(ui.available_width(), 0.0));
                     ui.end_row();
                 }

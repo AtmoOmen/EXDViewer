@@ -86,7 +86,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 15] = [
+pub const ENGINE: [(u32, &str, u32); 16] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -154,6 +154,14 @@ pub const ENGINE: [(u32, &str, u32); 15] = [
     // to repeat rather than clamp, handled in `Buffers::layered`.
     (WIND_SAMPLE_0, "bgcommon/nature/wind/texture/wind_001.tex", glow::LINEAR),
     (WIND_SAMPLE_1, "bgcommon/nature/wind/texture/wind_002.tex", glow::LINEAR),
+    // The angle the shadow softening turns each pixel's disc of taps by, read at whole texels. The
+    // game holds sixteen of these and steps to the next one every frame, which only pays off where
+    // the frames are accumulated; one alone leaves the dither still rather than crawling.
+    (
+        0x94a1_94c2,
+        "common/graphics/texture/-bn_64_00.tex",
+        glow::NEAREST,
+    ),
 ];
 
 const WIND_SAMPLE_0: u32 = 0x78d3_e3b7;

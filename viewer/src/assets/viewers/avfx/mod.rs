@@ -1793,9 +1793,9 @@ mod tests {
         let set = nest("UvSt", &[axes("Scl", [2.0, 2.0]), axes("Scr", [0.25, 0.0])]);
         let effect = &playing(&[life(-1.0), set], (0, 0)).effect;
         let uv = at(effect, 0)[0].uv;
-        assert_eq!(uv[0], [2.0, 0.0, 0.0, -0.25]);
-        assert_eq!(uv[1], [0.0, 2.0, 0.0, -0.5]);
-        assert_eq!(uv[2], [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(uv[0], [2.0, 0.0, 0.0, 0.75]);
+        assert_eq!(uv[1], [0.0, 2.0, 0.0, 0.5]);
+        assert_eq!(uv[2], [1.0, 0.0, 0.0, 0.5]);
     }
 
     /// Naming no rotation base leaves a sprite in its own plane rather than against the screen, and

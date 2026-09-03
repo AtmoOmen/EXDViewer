@@ -22,15 +22,16 @@ pub const UV_SETS: usize = 4;
 pub const UV_REGISTERS: usize = 2;
 
 /// Two rows of an affine on each uv set, read as `dot(vec3(uv, 1), row.xyw)`, transforming nothing.
+/// The coordinate they take is centered on the texture's middle, so the half is what puts it back.
 pub const UV_IDENTITY: [[f32; 4]; UV_SETS * UV_REGISTERS] = [
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
-    [1.0, 0.0, 0.0, 0.0],
-    [0.0, 1.0, 0.0, 0.0],
+    [1.0, 0.0, 0.0, 0.5],
+    [0.0, 1.0, 0.0, 0.5],
+    [1.0, 0.0, 0.0, 0.5],
+    [0.0, 1.0, 0.0, 0.5],
+    [1.0, 0.0, 0.0, 0.5],
+    [0.0, 1.0, 0.0, 0.5],
+    [1.0, 0.0, 0.0, 0.5],
+    [0.0, 1.0, 0.0, 0.5],
 ];
 
 /// What the sprite packages read an integer attribute as: the shader scales by a thousandth.

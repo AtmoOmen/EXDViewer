@@ -862,6 +862,8 @@ pub struct Scene {
     /// The one that darkens its corners, and what the passes past the composite are run with.
     vignette: Option<Arc<program::Program>>,
     reflection: Option<Arc<mdl::deferred::Reflection>>,
+    /// The chain that fills what water reflects itself through, which is not that one.
+    water_mirror: Option<Arc<mdl::deferred::WaterMirror>>,
     look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
@@ -1149,6 +1151,7 @@ impl Scene {
             occlusion: None,
             vignette: None,
             reflection: None,
+            water_mirror: None,
             look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
@@ -2796,6 +2799,7 @@ impl Scene {
         }
         wanted.extend(program::GLARE.map(str::to_owned));
         wanted.extend(program::REFLECTION.map(str::to_owned));
+        wanted.extend(program::WATER_MIRROR.map(str::to_owned));
         wanted.extend([
             program::FXAA_LUMA.to_owned(),
             program::FXAA.to_owned(),
@@ -3129,6 +3133,37 @@ impl Scene {
         }))
     }
 
+    /// The chain that fills what water reflects itself through, translated once its ten shaders
+    /// have arrived. Each member is drawn with the vertex shader the game pairs it with, and the two
+    /// that run over the water itself with the one shared vertex shader.
+    fn watering(&self) -> Option<Arc<mdl::deferred::WaterMirror>> {
+        let ready = |path: &str| match self.packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let held = |path: &str, vertex: &str| {
+            let mut held = program::Program::sampling(path, ready(path)?, ready(vertex)?)
+                .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+                .ok()?;
+            held.pass = program::Pass::WaterMirror;
+            Some(Arc::new(held))
+        };
+        let over = |path: &str| held(path, program::WATER_MIRROR_VERTEX);
+        Some(Arc::new(mdl::deferred::WaterMirror {
+            mask: over(program::WATER_MIRROR_MASK)?,
+            march: over(program::WATER_MIRROR_MARCH)?,
+            blur: [
+                held(program::WATER_MIRROR_BLUR, program::WATER_MIRROR_BLUR_X)?,
+                held(program::WATER_MIRROR_BLUR, program::WATER_MIRROR_BLUR_Y)?,
+            ],
+            wide: held(program::WATER_MIRROR_WIDE, program::WATER_MIRROR_WIDE_X)?,
+            merge: held(
+                program::WATER_MIRROR_MERGE,
+                program::WATER_MIRROR_MERGE_VERTEX,
+            )?,
+        }))
+    }
+
     /// The pair that smooths the frame's edges, and the three that work out how much sky reaches
     /// each pixel, each translated once all of its own shaders have arrived.
     fn edges(&self) -> Option<Arc<mdl::gpu::Smoothing>> {
@@ -3362,6 +3397,9 @@ impl Scene {
         }
         if self.reflection.is_none() {
             self.reflection = self.mirror();
+        }
+        if self.water_mirror.is_none() {
+            self.water_mirror = self.watering();
         }
         if self.smoothing.is_none() {
             self.smoothing = self.edges();
@@ -3786,6 +3824,7 @@ impl Scene {
             (held.clouds[1], "sheet"),
             (held.fog, "fog"),
             (held.reflection, "reflection"),
+            (held.water, "water mirror"),
             (held.vignette, "vignette"),
             (
                 !self.effects.is_empty()
@@ -4041,6 +4080,7 @@ impl Scene {
             occlusion: self.occlusion.clone(),
             vignette: self.look.vignette.then(|| self.vignette.clone()).flatten(),
             reflection: self.look.reflect.then(|| self.reflection.clone()).flatten(),
+            water_mirror: self.look.reflect.then(|| self.water_mirror.clone()).flatten(),
             lamps: self.lamps(),
             batches,
             grass: self.sward.clone(),

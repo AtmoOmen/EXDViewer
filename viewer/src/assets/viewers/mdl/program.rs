@@ -482,6 +482,57 @@ pub const REFLECTION_FADE: [f32; 4] = [16.0, 32.0, 0.0625, 0.0];
 pub const REFLECTION_POWER: f32 = 2.5;
 pub const REFLECTION_ROUGHNESS: f32 = 0.8;
 
+/// The chain water reflects itself off, which is not the one above: `river.shpk` and `water.shpk`
+/// reach no cube and read a screen-wide `g_SamplerReflectionMap` this fills. The mask stamps a
+/// stencil over the water the frame covers, the march walks the same pyramid the frame-wide chain
+/// does for what each of those pixels reflects, a blur pair spreads it, a second one spreads it
+/// further and the merge picks between the two per pixel.
+///
+/// The march ships under no name; the crc32 of `WaterRaytracingHighPS.shcd` is the hash its
+/// directory records it under, which is how it is asked for.
+pub const WATER_MIRROR_VERTEX: &str = "shader/sm5/shcd/WaterReflectionVS.shcd";
+pub const WATER_MIRROR_MASK: &str = "shader/sm5/shcd/WaterReflectionMaskPS.shcd";
+pub const WATER_MIRROR_MARCH: &str = "shader/sm5/shcd/9402c299";
+pub const WATER_MIRROR_BLUR_X: &str = "shader/sm5/shcd/WaterReflectionFirstBlurXVS.shcd";
+pub const WATER_MIRROR_BLUR_Y: &str = "shader/sm5/shcd/WaterReflectionFirstBlurYVS.shcd";
+pub const WATER_MIRROR_BLUR: &str = "shader/sm5/shcd/WaterReflectionFirstBlurPS.shcd";
+pub const WATER_MIRROR_WIDE_X: &str = "shader/sm5/shcd/WaterReflectionSecondBlurXVS.shcd";
+pub const WATER_MIRROR_WIDE: &str = "shader/sm5/shcd/WaterReflectionSecondBlurPS.shcd";
+pub const WATER_MIRROR_MERGE_VERTEX: &str = "shader/sm5/shcd/WaterReflectionBlurMergeVS.shcd";
+pub const WATER_MIRROR_MERGE: &str = "shader/sm5/shcd/WaterReflectionBlurMergePS.shcd";
+
+/// Every file that chain takes, for one fetch list.
+pub const WATER_MIRROR: [&str; 10] = [
+    WATER_MIRROR_VERTEX,
+    WATER_MIRROR_MASK,
+    WATER_MIRROR_MARCH,
+    WATER_MIRROR_BLUR_X,
+    WATER_MIRROR_BLUR_Y,
+    WATER_MIRROR_BLUR,
+    WATER_MIRROR_WIDE_X,
+    WATER_MIRROR_WIDE,
+    WATER_MIRROR_MERGE_VERTEX,
+    WATER_MIRROR_MERGE,
+];
+
+/// The reference the mask stamps and every member after it draws against.
+pub const WATER_MIRROR_STENCIL: i32 = 1;
+
+/// What the reflection is taken over by with distance, and how far it takes: the color, the most of
+/// it that ever arrives in the last lane, then the view depth the fade starts at and how much of it
+/// a unit past that adds. Read whole off a frame the game drew, since nothing on disk states them.
+pub const WATER_MIRROR_FOG: [f32; 4] = [0.734_657, 0.543_774, 0.758_775, 0.860_343];
+pub const WATER_MIRROR_REACH: [f32; 4] = [0.0001, 200.0, 3500.0, 1.0];
+
+/// The weights each blur reads its sixteen taps through, eight of them since the kernel is
+/// symmetric. A Gaussian of variance twenty-five taken between texels and normalized over the whole
+/// kernel, which is the game's own upload to six figures.
+fn blur_weights() -> [f32; 8] {
+    let held: [f32; 8] = std::array::from_fn(|at| (-(at as f32 + 0.5).powi(2) / 50.0).exp());
+    let total = held.iter().sum::<f32>() * 2.0;
+    held.map(|weight| weight / total)
+}
+
 /// The buffers the chain reads itself out of, and the one every stage of the engine takes the camera
 /// from.
 const REFLECTION_PARAM: &str = "g_ReflectionParameter";
@@ -844,6 +895,9 @@ pub enum Pass {
     BlendedLighting,
     /// What water shades itself with, reading the lit frame back rather than filling the G-buffer.
     Water,
+    /// A member of the chain that fills what water reads its own reflection through, which reads
+    /// the same buffer as the frame-wide one under a layout of its own.
+    WaterMirror,
     /// A shaft of light a zone places, added to the frame the lighting left.
     Shaft,
     /// A slab of fog a zone places, blended into that same frame.
@@ -864,7 +918,7 @@ impl Pass {
             Self::Composite => PASS_COMPOSITE_OPAQUE,
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
             Self::BlendedLighting => PASS_LIGHTING_SEMITRANSPARENCY,
-            Self::Water => PASS_WATER,
+            Self::Water | Self::WaterMirror => PASS_WATER,
             Self::Shaft => PASS_SEMITRANSPARENCY,
             Self::Layer => PASS_WATER_Z,
         }
@@ -2462,6 +2516,24 @@ impl Program {
         signatures(blob, &mut names);
         let extents = hlsl::glsl::extents(&program, &names);
         let mut held = Self::effect(path, bytes, "", &extents)?;
+        // What a member drawn over geometry rather than over a quad reads a vertex through. A quad
+        // pass carries a layout of its own and never looks at these.
+        held.attributes = names
+            .inputs
+            .iter()
+            .filter_map(|(register, entry)| {
+                Some(Attribute {
+                    location: *register,
+                    field: field(&entry.name)?,
+                    components: match entry.kind.as_str() {
+                        held if held.starts_with("uint") => Components::Unsigned,
+                        held if held.starts_with("int") => Components::Signed,
+                        _ => Components::Float,
+                    },
+                })
+            })
+            .collect();
+        held.attributes.sort_by_key(|held| held.location);
         for (name, registers) in extents {
             match held.buffers.iter_mut().find(|buffer| buffer.name == name) {
                 Some(buffer) => buffer.registers = buffer.registers.max(registers),
@@ -2905,12 +2977,57 @@ impl Buffer {
             }
             return out;
         }
+        // The one register run the water chain's own vertex shader takes an object through, for a
+        // pass whose reflection gives no members either. It takes a vertex straight into view space
+        // and the projection above carries it from there.
+        if self.name == INSTANCE && self.members.is_empty() {
+            for (at, row) in rows(view * model, 3).chunks(4).enumerate() {
+                write(&mut out, at, row);
+            }
+            return out;
+        }
+        // The march steps its ray one cell of this at a time, and the cells it counts are of the
+        // buffer it is drawing into rather than of the frame. What the game's own upload holds here
+        // could not be recovered: the window it stands in had been written over by the time the
+        // capture was taken.
+        if matches!(pass, Pass::WaterMirror) && self.name == SCREEN_PARAM {
+            let texel = scene.reflect.texel;
+            write(&mut out, 0, &[1.0 / texel.x, 1.0 / texel.y, texel.x, texel.y]);
+            return out;
+        }
         if self.name == SCREEN_PARAM {
             let (width, height) = (size.0.max(1.0), size.1.max(1.0));
             for at in 0..2 {
                 write(&mut out, at, &[width, height, 1.0 / width, 1.0 / height]);
             }
             write(&mut out, 2, &[1.0, 1.0, 1.0, 1.0]);
+            return out;
+        }
+        // The same buffer as below under the layout water's own chain names its fields by: a texel
+        // and a half-texel of each buffer it addresses, then what the reflection fades toward, the
+        // blur weights and how much of the frame a dynamic resolution is standing at. What the
+        // chain draws into and the pyramid it walks are both half the frame, which is why the
+        // first and third of these are the same register twice, as the game's own upload has them.
+        // The mip the march starts at is the last register and stays at nought, which is the top
+        // of the pyramid.
+        if matches!(pass, Pass::WaterMirror) && self.name == REFLECTION_PARAM {
+            let texel = scene.reflect.texel;
+            let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+            let weights = blur_weights();
+            let step = [texel.x, texel.y, texel.x * 0.5, texel.y * 0.5];
+            write(&mut out, 0, &step);
+            write(&mut out, 1, &[
+                1.0 / width,
+                1.0 / height,
+                0.5 / width,
+                0.5 / height,
+            ]);
+            write(&mut out, 2, &step);
+            write(&mut out, 3, &WATER_MIRROR_FOG);
+            write(&mut out, 4, &WATER_MIRROR_REACH);
+            write(&mut out, 5, &weights[..4]);
+            write(&mut out, 6, &weights[4..]);
+            write(&mut out, 7, &[1.0, 1.0, 0.0, 0.0]);
             return out;
         }
         if self.name == REFLECTION_PARAM {
@@ -4084,15 +4201,16 @@ pub fn table(held: &mtrl::ColorTable) -> Option<(Vec<u16>, usize, usize)> {
 mod test {
     use std::io::Cursor;
 
-    use glam::{Mat3, Mat4, Vec3, Vec4};
+    use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
         ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, Customize, DECAL,
         DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
-        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS, SUN_PARAM, WAVING,
-        Pass, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode, instance_fields,
-        joints, moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
+        INSTANCING, JOINT, REFLECTION_PARAM, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS,
+        SUN_PARAM, WAVING, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field,
+        encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
+        selector, shader_types, sun,
     };
 
     /// The two buffers of the post chain no reflection describes, against what the game's own
@@ -4278,6 +4396,85 @@ mod test {
             .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
             .collect();
         assert_eq!(filled[2], SETTLE);
+    }
+
+    /// Water's own reflection chain reads one buffer for everything it is told, against the bytes a
+    /// capture of the running game held in it: the frame there is 2560 by 1440 and the chain runs at
+    /// half of it, which is why the game's own upload writes the same register twice.
+    #[test]
+    fn the_water_reflection_buffer_comes_out_as_the_game_held_it() {
+        let scene = Scene {
+            size: (2560.0, 1440.0),
+            reflect: Reflect {
+                level: 0,
+                texel: Vec2::new(1.0 / 1280.0, 1.0 / 720.0),
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: REFLECTION_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 9,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::WaterMirror, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        let step = [1.0 / 1280.0, 1.0 / 720.0, 1.0 / 2560.0, 1.0 / 1440.0];
+        assert_eq!(filled[0..4], step);
+        assert_eq!(filled[4..8], [
+            1.0 / 2560.0,
+            1.0 / 1440.0,
+            1.0 / 5120.0,
+            1.0 / 2880.0
+        ]);
+        assert_eq!(filled[8..12], step);
+        assert_eq!(filled[12..16], [0.734657, 0.543774, 0.758775, 0.860343]);
+        assert_eq!(filled[16..20], [0.0001, 200.0, 3500.0, 1.0]);
+        for (at, want) in [
+            0.0891034, 0.0856096, 0.0790276, 0.0700912, 0.0597278, 0.048901, 0.0384669, 0.0290726,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                (filled[20 + at] - want).abs() < 1e-6,
+                "tap {at} came out {} rather than {want}",
+                filled[20 + at]
+            );
+        }
+        assert_eq!(filled[28..32], [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(filled[32], 0.0);
+    }
+
+    /// The two members of that chain drawn over the water itself take a vertex into view space
+    /// through one register run, and the reflection their file carries names no field for a write to
+    /// land in.
+    #[test]
+    fn water_reflection_takes_a_vertex_into_view_space() {
+        let scene = Scene {
+            view: Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0)),
+            model: Mat4::from_scale(Vec3::new(2.0, 2.0, 2.0)),
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: INSTANCE.to_owned(),
+            members: Vec::new(),
+            registers: 4,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::WaterMirror, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        // One row per register, the way the shader dots them: the scale down the diagonal and the
+        // translation in the last lane.
+        assert_eq!(filled[0..4], [2.0, 0.0, 0.0, 1.0]);
+        assert_eq!(filled[4..8], [0.0, 2.0, 0.0, 2.0]);
+        assert_eq!(filled[8..12], [0.0, 0.0, 2.0, 3.0]);
     }
 
     /// The instance record a character is drawn with, against the bytes a capture of the running

@@ -25,9 +25,8 @@ const WATER_VIEW_POSITION: u32 = 0x34a0_4363;
 /// What water reads for whatever stands behind it, which is the frame as the lighting left it.
 const REFRACTION: u32 = 0xa38e_45e1;
 /// What water reads its own local reflection through, and all of it: `river.shpk` reaches no cube.
-/// The game fills this from a chain of its own - `WaterReflectionMaskPS`, a march, two blurs and
-/// `WaterReflectionBlurMergePS` - which is not the frame-wide one [`Reflection`] runs, and nothing
-/// here draws it, so it falls to the neutral answer below.
+/// [`WaterMirror`] fills it, which is not the frame-wide chain [`Reflection`] runs; where that chain
+/// has not drawn, it falls to the neutral answer below.
 const REFLECTION_MAP: u32 = 0xc705_a5b6;
 const LIGHT_DIFFUSE: u32 = 0x23d0_f850;
 const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
@@ -217,6 +216,11 @@ const REFLECT: usize = 31;
 /// range, since several of their own upper bounds are sized off the frame or the lamp count rather
 /// than fixed.
 const STAR: usize = 70;
+
+/// The four members of water's own reflection chain drawn over a quad: the blur pair, the wide
+/// blur's first half and the merge. The two drawn over the water itself are linked by the caller
+/// that holds the geometry.
+const WATER_REFLECT: usize = 80;
 
 /// One slot per kind of lamp and falloff power, so a frame holding both a linear and a cubic light
 /// of the same kind does not relink one of them on every lamp it draws.
@@ -605,6 +609,8 @@ pub struct Drawn {
     pub sky: bool,
     /// Whether the frame was reflected off itself this frame.
     pub reflection: bool,
+    /// Whether water's own chain filled the map it reflects itself through.
+    pub water: bool,
     pub sun: bool,
     pub moon: bool,
     pub stars: bool,
@@ -899,6 +905,19 @@ pub struct Reflection {
     pub copy: std::sync::Arc<program::Program>,
 }
 
+/// The chain that fills what water reflects itself through, in the order it runs. Not the one above:
+/// `river.shpk` and `water.shpk` reach no cube and read a screen-wide map this leaves, and the two
+/// chains share only the depth pyramid and the frame.
+pub struct WaterMirror {
+    pub mask: std::sync::Arc<program::Program>,
+    pub march: std::sync::Arc<program::Program>,
+    /// The two halves of the first blur, across and then down.
+    pub blur: [std::sync::Arc<program::Program>; 2],
+    /// The first half of the second, which is what the merge is handed.
+    pub wide: std::sync::Arc<program::Program>,
+    pub merge: std::sync::Arc<program::Program>,
+}
+
 /// The chain that works out how much of the sky reaches each pixel, in the order it runs.
 pub struct Occlusion {
     pub scale: std::sync::Arc<program::Program>,
@@ -928,6 +947,27 @@ struct Mirrored {
     mask: (glow::Framebuffer, glow::Texture),
     chain: [(glow::Texture, Vec<glow::Framebuffer>); 2],
     size: (i32, i32),
+}
+
+/// What water's own reflection chain draws into: the marched reflection, the buffer each blur half
+/// hands the next, and what the merge leaves for water to read. One stencil across all three, since
+/// every member past the mask is cut to the pixels the mask stamped.
+struct Watered {
+    sharp: (glow::Framebuffer, glow::Texture),
+    scratch: (glow::Framebuffer, glow::Texture),
+    merged: (glow::Framebuffer, glow::Texture),
+    stencil: glow::Renderbuffer,
+    size: (i32, i32),
+}
+
+/// What the two members of that chain drawn over the water itself need: where they write, the
+/// pyramid the march walks and the frame it reads, and how much of the screen they cover.
+#[derive(Clone, Copy)]
+pub struct Watering {
+    pub into: glow::Framebuffer,
+    pub depth: glow::Texture,
+    pub frame: glow::Texture,
+    pub size: (i32, i32),
 }
 
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
@@ -994,6 +1034,8 @@ pub struct Buffers {
     sourced: Option<(glow::Framebuffer, glow::Texture)>,
     /// The reflection chain's own buffers, at a fraction of the frame.
     mirrored: Option<Mirrored>,
+    /// Water's own chain's, at the same fraction.
+    watered: Option<Watered>,
     /// The program that builds the pyramid the march walks. The game builds it in a compute shader,
     /// which a context this draws through has none of.
     hierarchy: Option<glow::Program>,
@@ -1363,6 +1405,13 @@ impl Buffers {
         {
             dead.push(Dead::Frame(frame));
             dead.extend(textures.into_iter().map(Dead::Texture));
+        }
+        if let Some(held) = self.watered.take() {
+            dead.push(Dead::Renderbuffer(held.stencil));
+            for (frame, texture) in [held.sharp, held.scratch, held.merged] {
+                dead.push(Dead::Frame(frame));
+                dead.push(Dead::Texture(texture));
+            }
         }
         if let Some(held) = self.mirrored.take() {
             let (texture, frames) = held.depth;
@@ -2610,6 +2659,173 @@ impl Buffers {
         drawn
     }
 
+    /// What water's own reflection chain draws into, built where the frame has moved under it. The
+    /// same fraction of the frame as the chain above, which is what makes the pyramid's texel and
+    /// this chain's the one register the game's own upload writes twice.
+    ///
+    /// The marched reflection carries more than a byte a channel: what it holds is the frame as the
+    /// lighting left it, before anything took that into range.
+    fn waters(&mut self, gl: &glow::Context) -> Result<&Watered, String> {
+        let size = (
+            (self.size.0 / program::REFLECTION_SCALE).max(1),
+            (self.size.1 / program::REFLECTION_SCALE).max(1),
+        );
+        if self.watered.as_ref().is_some_and(|held| held.size == size) {
+            return Ok(self.watered.as_ref().expect("just measured"));
+        }
+        let sharp = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+        smooth(gl, sharp);
+        let scratch = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+        smooth(gl, scratch);
+        let merged = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+        smooth(gl, merged);
+        let stencil = unsafe {
+            let held = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(held));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH24_STENCIL8, size.0, size.1);
+            held
+        };
+        let mut frames = Vec::new();
+        for texture in [sharp, scratch, merged] {
+            let held = frame_of(gl, &[texture], None)?;
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(held));
+                gl.framebuffer_renderbuffer(
+                    glow::FRAMEBUFFER,
+                    glow::DEPTH_STENCIL_ATTACHMENT,
+                    glow::RENDERBUFFER,
+                    Some(stencil),
+                );
+                let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                if status != glow::FRAMEBUFFER_COMPLETE {
+                    return Err(format!("water's reflection would not complete: {status:#x}"));
+                }
+            }
+            frames.push(held);
+        }
+        self.watered = Some(Watered {
+            sharp: (frames[0], sharp),
+            scratch: (frames[1], scratch),
+            merged: (frames[2], merged),
+            stencil,
+            size,
+        });
+        Ok(self.watered.as_ref().expect("just built"))
+    }
+
+    /// The buffers that chain draws into, with the pyramid built, everything cleared and the state
+    /// the two members drawn over the water itself want already standing.
+    ///
+    /// The frame the march reads is the one the composite resolved, which is what stands behind the
+    /// water at the point this runs.
+    pub fn watering(
+        &mut self,
+        gl: &glow::Context,
+        scene: &program::Scene,
+    ) -> Result<Watering, String> {
+        self.hierarchy(gl, scene)?;
+        let frame = self.resolved.ok_or("no resolved frame")?;
+        let depth = self.mirrors(gl)?.depth.0;
+        let held = self.waters(gl)?;
+        let (into, size) = (held.sharp.0, held.size);
+        let frames = [held.sharp.0, held.scratch.0, held.merged.0];
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+            gl.color_mask(true, true, true, true);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear_stencil(0);
+            gl.stencil_mask(0xff);
+            for held in frames {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(held));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.clear(glow::COLOR_BUFFER_BIT | glow::STENCIL_BUFFER_BIT);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.viewport(0, 0, size.0, size.1);
+            gl.enable(glow::STENCIL_TEST);
+        }
+        Ok(Watering {
+            into,
+            depth,
+            frame,
+            size,
+        })
+    }
+
+    /// The four members of that chain drawn over a quad: the blur across and down, the wide blur's
+    /// first half, and the merge that picks between the sharp answer and the spread one per pixel.
+    ///
+    /// The game runs a second wide half after this one, into the same buffer the merge writes and
+    /// with nothing between them, so its answer never reaches water; what the merge is handed is the
+    /// first half, which is what the game's own bindings hand it.
+    pub fn water_mirror(
+        &mut self,
+        gl: &glow::Context,
+        held: &WaterMirror,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let buffers = self.waters(gl)?;
+        let (sharp, scratch, merged, size) =
+            (buffers.sharp, buffers.scratch, buffers.merged, buffers.size);
+        let reads = Reflecting {
+            depth: sharp.1,
+            frame: sharp.1,
+            normal: sharp.1,
+            mask: sharp.1,
+            blurred: sharp.1,
+        };
+        let scene = &program::Scene {
+            reflect: program::Reflect {
+                level: 0,
+                texel: glam::Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32),
+            },
+            ..scene.clone()
+        };
+        unsafe {
+            gl.stencil_func(glow::NOTEQUAL, 0, 0xff);
+            gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+            gl.stencil_mask(0);
+        }
+        for (at, program, into, source) in [
+            (0, &held.blur[0], scratch.0, sharp.1),
+            (1, &held.blur[1], sharp.0, scratch.1),
+            (2, &held.wide, scratch.0, sharp.1),
+        ] {
+            self.pass(
+                gl,
+                WATER_REFLECT + at,
+                program,
+                into,
+                scene,
+                Over::Reflecting(size, Member::Blur, Reflecting {
+                    blurred: source,
+                    ..reads
+                }),
+            )?;
+        }
+        let drawn = self.pass(
+            gl,
+            WATER_REFLECT + 3,
+            &held.merge,
+            merged.0,
+            scene,
+            Over::Reflecting(size, Member::Blur, Reflecting {
+                frame: sharp.1,
+                blurred: scratch.1,
+                ..reads
+            }),
+        );
+        unsafe {
+            gl.disable(glow::STENCIL_TEST);
+            gl.stencil_mask(0xff);
+        }
+        self.drawn.water = drawn.is_ok();
+        drawn
+    }
+
     /// What the reflection chain draws into, built where the frame has moved under it.
     fn mirrors(&mut self, gl: &glow::Context) -> Result<&Mirrored, String> {
         let size = (
@@ -3588,6 +3804,12 @@ impl Buffers {
         }
         if let Some(held) = self.supplied(program::Kind::Plane, id) {
             return Ok(held);
+        }
+        // Before the neutral below, which is what water reads where nothing drew its chain.
+        if id == REFLECTION_MAP
+            && let Some(held) = self.watered.as_ref()
+        {
+            return Ok(held.merged.1);
         }
         if let Some(held) = self.neutrals.get(&id) {
             return Ok(*held);

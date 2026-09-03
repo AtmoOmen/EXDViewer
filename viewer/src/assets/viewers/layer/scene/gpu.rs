@@ -238,6 +238,8 @@ pub struct Frame {
     pub occlusion: Option<Arc<Occlusion>>,
     /// The chain that reflects the frame off itself.
     pub reflection: Option<Arc<deferred::Reflection>>,
+    /// The one that fills what water reflects itself through.
+    pub water_mirror: Option<Arc<deferred::WaterMirror>>,
     /// The one that darkens its corners, which runs after all of them.
     pub vignette: Option<Arc<program::Program>>,
     /// Every light the zone places that reaches the frame.
@@ -271,6 +273,9 @@ pub struct Renderer {
     types: Option<Vec<u32>>,
     /// One linked pair per material, pass and page of the G-buffer.
     programs: BTreeMap<(usize, bool, bool, usize), Linked>,
+    /// The two members of water's own reflection chain drawn over the water itself, which are one
+    /// program each however many materials the zone's water is made of.
+    water_programs: BTreeMap<usize, Linked>,
     tables: BTreeMap<usize, glow::Texture>,
     /// Every object of the frame, in the layout the packages read them, and how far apart its
     /// windows sit.
@@ -299,6 +304,7 @@ impl Renderer {
             stacks: Vec::new(),
             types: None,
             programs: BTreeMap::new(),
+            water_programs: BTreeMap::new(),
             tables: BTreeMap::new(),
             instances: None,
             shadow_instances: None,
@@ -801,6 +807,14 @@ impl Renderer {
             gl.enable(glow::DEPTH_TEST);
             gl.depth_mask(false);
         }
+        self.mirror_water(gl, frame, scene)?;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.viewport(0, 0, size.0, size.1);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+        }
         self.leg(gl, painter, frame, scene, offsets, false, false)?;
         unsafe {
             gl.depth_func(glow::LESS);
@@ -808,6 +822,133 @@ impl Renderer {
             gl.disable(glow::DEPTH_TEST);
         }
         Ok(())
+    }
+
+    /// The two members of water's own reflection chain that are drawn over the water itself: the
+    /// mask, which stamps a stencil wherever the frame covers water, and the march, which walks the
+    /// depth pyramid for what each of those pixels reflects. Everything past them is a quad and
+    /// belongs to the graph.
+    ///
+    /// Its own projection rather than the frame's, which is what the camera buffer these read
+    /// already holds where nothing named its fields: the near plane at the ordering the pyramid is
+    /// stored in, and the second row negated. That negation turns the winding inside out, so the
+    /// side culled is the other one, and it puts the answer the way round water addresses this map.
+    fn mirror_water(
+        &mut self,
+        gl: &glow::Context,
+        frame: &Frame,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let Some(chain) = frame.water_mirror.clone() else {
+            return Ok(());
+        };
+        if !frame
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.surfaces)
+            .filter_map(|surface| surface.shaded.as_ref())
+            .any(watery)
+        {
+            return Ok(());
+        }
+        let watering = self.buffers.watering(gl, scene)?;
+        // Every member of the chain reads the texel of what it is drawing into out of the same
+        // buffer, which is the one the two below fill.
+        let scene = &program::Scene {
+            reflect: program::Reflect {
+                level: 0,
+                texel: glam::Vec2::new(
+                    1.0 / watering.size.0 as f32,
+                    1.0 / watering.size.1 as f32,
+                ),
+            },
+            ..scene.clone()
+        };
+        // Both faces. The game culls the back one, which it can only do because it knows which way
+        // its own water is wound; drawn under a projection whose second row is negated the winding
+        // is the other way round, and culling the wrong side leaves the whole chain empty.
+        unsafe { gl.disable(glow::CULL_FACE) };
+        for (at, member) in [&chain.mask, &chain.march].into_iter().enumerate() {
+            let program = deferred::link(gl, &mut self.water_programs, at, member)?;
+            unsafe {
+                gl.use_program(Some(program));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                match at {
+                    // The mask writes no color at all: what it leaves behind is the stencil the
+                    // march and every quad past it are cut to.
+                    0 => {
+                        gl.color_mask(false, false, false, false);
+                        gl.stencil_mask(0xff);
+                        gl.stencil_func(glow::ALWAYS, program::WATER_MIRROR_STENCIL, 0xff);
+                        gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
+                    }
+                    _ => {
+                        gl.color_mask(true, true, true, true);
+                        gl.stencil_mask(0);
+                        gl.stencil_func(glow::EQUAL, program::WATER_MIRROR_STENCIL, 0xff);
+                        gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+                    }
+                }
+                if let Some(location) = deferred::uniform(gl, program, "dx_Viewport") {
+                    gl.uniform_2_f32(
+                        Some(&location),
+                        watering.size.0 as f32,
+                        watering.size.1 as f32,
+                    );
+                }
+            }
+            for (unit, texture) in member.textures.iter().enumerate() {
+                let bound = match texture.name.as_str() {
+                    program::REFLECTION_DEPTH => watering.depth,
+                    program::REFLECTION_FRAME => watering.frame,
+                    _ => self.buffers.engine(gl, texture.id)?,
+                };
+                deferred::bind(
+                    gl,
+                    program,
+                    &texture.name,
+                    unit as u32,
+                    bound,
+                    deferred::target(texture.kind),
+                    0.0,
+                );
+            }
+            for batch in &frame.batches {
+                let meshes: Vec<i32> = match self
+                    .models
+                    .get(batch.model)
+                    .and_then(Option::as_ref)
+                    .and_then(|model| model.levels.get(batch.level))
+                {
+                    Some(level) => level.meshes.iter().map(|mesh| mesh.count).collect(),
+                    None => continue,
+                };
+                for (mesh, (indices, surface)) in meshes.iter().zip(&batch.surfaces).enumerate() {
+                    if surface.hidden || !surface.shaded.as_ref().is_some_and(watery) {
+                        continue;
+                    }
+                    let Some(array) = self.array(gl, batch, mesh, &member.attributes)? else {
+                        continue;
+                    };
+                    for instance in &batch.instances {
+                        let held = program::Scene {
+                            model: instance.transform,
+                            ..scene.clone()
+                        };
+                        self.buffers.bind(gl, program, member, &held, &[])?;
+                        unsafe {
+                            gl.bind_vertex_array(Some(array));
+                            gl.draw_elements(glow::TRIANGLES, *indices, glow::UNSIGNED_SHORT, 0);
+                            gl.bind_vertex_array(None);
+                        }
+                    }
+                }
+            }
+        }
+        unsafe {
+            gl.color_mask(true, true, true, true);
+        }
+        self.buffers.water_mirror(gl, &chain, scene)
     }
 
     /// Every placed effect, one draw per unique file no matter how many placements share it. Tested
@@ -1497,6 +1638,14 @@ fn filled(shaded: &Shaded) -> Option<&Arc<program::Program>> {
         .buffer
         .first()
         .filter(|held| held.pass == program::Pass::Blended)
+}
+
+/// Whether a surface is water, which is the one thing the chain that fills its reflection draws.
+fn watery(shaded: &Shaded) -> bool {
+    shaded
+        .resolve
+        .as_ref()
+        .is_some_and(|held| held.pass == program::Pass::Water)
 }
 
 /// The next offset a uniform buffer will let a window start on.

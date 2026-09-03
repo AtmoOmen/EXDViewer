@@ -168,7 +168,8 @@ impl Pair {
 
 /// One of the up to four uv sets a particle carries, `UvSt`. The sprite packages read a coordinate
 /// the viewer has already transformed and the model packages read the transform itself, so both take
-/// the same two rows: `uv' = dot(vec3(uv, 1), row.xyw)`.
+/// the same two rows: `uv' = dot(vec3(uv, 1), row.xyw)`, over a coordinate an effect's own models
+/// write centered on the texture's middle.
 struct UvSet {
     scale: Pair,
     scroll: Pair,
@@ -189,13 +190,9 @@ impl UvSet {
         let [width, height] = self.scale.at(frame);
         let [across, down] = self.scroll.at(frame);
         let (sin, cos) = self.turn.at(frame).sin_cos();
-        let (a, b) = (cos * width, -sin * height);
-        let (c, d) = (sin * width, cos * height);
-        // The turn and the scale are about the texture's own middle, so a set that only spins keeps
-        // what it was showing.
         [
-            [a, b, 0.0, 0.5 - (a + b) * 0.5 + across],
-            [c, d, 0.0, 0.5 - (c + d) * 0.5 + down],
+            [cos * width, -sin * height, 0.0, 0.5 + across],
+            [sin * width, cos * height, 0.0, 0.5 + down],
         ]
     }
 }
@@ -1217,6 +1214,91 @@ mod test {
         assert_eq!(rim.power, 3.0);
         assert_eq!(rim.begin, [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(rim.end, [0.5, 0.25, 0.125, 1.0]);
+    }
+
+    /// A curve ramping to `end` over `span` frames and starting over, as a scroll is written.
+    fn ramp(tag: &str, span: i16, end: f32) -> Vec<u8> {
+        let mut keys = Vec::new();
+        for (time, value) in [(0i16, 0.0f32), (span, end)] {
+            keys.extend(time.to_le_bytes());
+            keys.extend(1i16.to_le_bytes());
+            for float in [1.0, 1.0, value] {
+                keys.extend(f32::to_le_bytes(float));
+            }
+        }
+        block(tag, &[block("Keys", &keys), scalar("BvPo", 1)].concat())
+    }
+
+    fn uv_set(width: f32, height: f32, scroll: &[u8]) -> Vec<u8> {
+        let scale = [curve("X", [1.0, 1.0, width]), curve("Y", [1.0, 1.0, height])].concat();
+        block(
+            "UvSt",
+            &[block("Scl", &scale), block("Scr", scroll)].concat(),
+        )
+    }
+
+    /// The rows the game hands `apricot_model` for the Elpis waterfall, taken out of a capture of
+    /// it: `n5f104taki1_h1.avfx` particle 1, at the age the two lanes nothing randomizes solve to
+    /// together. The other two sets carry a per-particle random the viewer does not draw.
+    #[test]
+    fn a_uv_set_lands_where_the_game_puts_it() {
+        let particle = block(
+            "Ptcl",
+            &[
+                scalar("PrVT", 5),
+                uv_set(2.0, 1.0, &ramp("Y", 100, -1.0)),
+                uv_set(0.5, 0.5, &[ramp("X", 300, 1.0), ramp("Y", 150, 1.0)].concat()),
+                uv_set(2.0, 1.0, &ramp("Y", 120, -1.0)),
+                uv_set(1.0, 1.0, &ramp("Y", 80, -1.0)),
+            ]
+            .concat(),
+        );
+        let bytes = block("AVFX", &[scalar("Ver", 0x0001_0000), particle].concat());
+        let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+        let effect = Effect::read(&file);
+        let rows = super::transform(&effect.particles[0].uv, 164.9012);
+
+        assert_eq!(rows[4], [2.0, 0.0, 0.0, 0.5]);
+        assert_eq!(rows[6], [1.0, 0.0, 0.0, 0.5]);
+        assert_eq!([rows[5][0], rows[5][1]], [0.0, 1.0]);
+        assert_eq!([rows[7][0], rows[7][1]], [0.0, 1.0]);
+        assert!((rows[5][3] - 0.125_823).abs() < 1e-5, "{}", rows[5][3]);
+        assert!((rows[7][3] - 0.438_735).abs() < 1e-5, "{}", rows[7][3]);
+    }
+
+    /// Whatever angle a set turns through, the game leaves both offsets at a half, so the turn is
+    /// about the middle of the texture and not the corner.
+    #[test]
+    fn a_turned_uv_set_stays_on_the_middle_of_its_texture() {
+        let turned = |angle: f32| {
+            let particle = block(
+                "Ptcl",
+                &[
+                    scalar("PrVT", 5),
+                    block(
+                        "UvSt",
+                        &[
+                            block(
+                                "Scl",
+                                &[curve("X", [1.0, 1.0, 1.0]), curve("Y", [1.0, 1.0, 1.0])].concat(),
+                            ),
+                            curve("Rot", [1.0, 1.0, angle]),
+                        ]
+                        .concat(),
+                    ),
+                ]
+                .concat(),
+            );
+            let bytes = block("AVFX", &[scalar("Ver", 0x0001_0000), particle].concat());
+            let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+            super::transform(&Effect::read(&file).particles[0].uv, 0.0)
+        };
+        for angle in [0.0, 0.566_55, 1.570_796_3, 3.141_592_7] {
+            let rows = turned(angle);
+            assert_eq!([rows[0][3], rows[1][3]], [0.5, 0.5], "at {angle}");
+            assert!((rows[0][0] - angle.cos()).abs() < 1e-6, "at {angle}");
+            assert!((rows[1][0] - angle.sin()).abs() < 1e-6, "at {angle}");
+        }
     }
 
     /// A file stating no ramp has to leave the lerp an identity rather than a black, invisible one.

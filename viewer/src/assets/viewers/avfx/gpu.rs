@@ -581,7 +581,8 @@ fn build_pair(gl: &glow::Context, vertex: &str, fragment: &str) -> Result<glow::
 /// particle's own place and turn, with its color and uv sets written as the fixed point the shader
 /// reads them back through.
 ///
-/// The sprite packages put no transform on a texture coordinate, so each set arrives transformed.
+/// The sprite packages put no transform on a texture coordinate, so each set arrives transformed,
+/// over a corner centered the way an effect's own models write theirs.
 pub fn quad(
     center: glam::Vec3,
     right: glam::Vec3,
@@ -597,7 +598,8 @@ pub fn quad(
         fixed(color[2]),
         fixed(color[3]),
     ];
-    let corner = |x: f32, y: f32, u: f32, v: f32| {
+    let corner = |x: f32, y: f32| {
+        let (u, v) = (x, -y);
         let set = |at: usize| {
             let rows = &uv[at * program::UV_REGISTERS..];
             [
@@ -620,10 +622,10 @@ pub fn quad(
         }
     };
     let corners = [
-        corner(-0.5, -0.5, 0.0, 1.0),
-        corner(0.5, -0.5, 1.0, 1.0),
-        corner(0.5, 0.5, 1.0, 0.0),
-        corner(-0.5, 0.5, 0.0, 0.0),
+        corner(-0.5, -0.5),
+        corner(0.5, -0.5),
+        corner(0.5, 0.5),
+        corner(-0.5, 0.5),
     ];
     into.extend([
         corners[0], corners[1], corners[2], corners[0], corners[2], corners[3],
@@ -637,8 +639,8 @@ mod test {
     #[test]
     fn a_uv_set_reaches_the_corners_it_is_written_into() {
         let mut uv = program::UV_IDENTITY;
-        uv[0] = [2.0, 0.0, 0.0, -0.5];
-        uv[1] = [0.0, 2.0, 0.0, -0.5];
+        uv[0] = [2.0, 0.0, 0.0, 0.5];
+        uv[1] = [0.0, 2.0, 0.0, 0.5];
         let mut into = Vec::new();
         quad(
             glam::Vec3::ZERO,
@@ -650,5 +652,25 @@ mod test {
         );
         // The first corner takes the bottom left, which the second set leaves where it was.
         assert_eq!(into[0].uv01, [-500, 1500, 0, 1000]);
+    }
+
+    /// A half-scale set covers the middle half of its texture, which is what the game bakes into a
+    /// sprite's own corners: elpfall draw 61053 reads 0.25 and 0.75 down every quad it draws.
+    #[test]
+    fn a_half_scale_set_bakes_the_middle_of_the_texture() {
+        let mut uv = program::UV_IDENTITY;
+        uv[0] = [0.5, 0.0, 0.0, 0.5];
+        uv[1] = [0.0, 0.5, 0.0, 0.5];
+        let mut into = Vec::new();
+        quad(
+            glam::Vec3::ZERO,
+            glam::Vec3::X,
+            glam::Vec3::Y,
+            [1.0; 4],
+            &uv,
+            &mut into,
+        );
+        assert_eq!([into[0].uv01[0], into[0].uv01[1]], [250, 750]);
+        assert_eq!([into[2].uv01[0], into[2].uv01[1]], [750, 250]);
     }
 }

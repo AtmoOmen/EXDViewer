@@ -2808,6 +2808,9 @@ impl Scene {
             program::MOON.to_owned(),
             program::SHADOW.to_owned(),
             program::VIGNETTE.to_owned(),
+            program::DOWN_SCALE.to_owned(),
+            program::GATHER.to_owned(),
+            self.look.occluder(),
         ]);
         // Only where the weather states a fog of its own, the same way the exposure chain is only
         // asked for where there is something to run it under.
@@ -3198,13 +3201,15 @@ impl Scene {
         }))
     }
 
-    /// Withheld until its thresholds mean something here. The occlusion pass takes the distance past
-    /// which two samples stop being one surface as a fraction of the depth the frame spans, and the
-    /// fractions are the model viewer's, where a frame spans one model. A zone spans thousands of
-    /// units, so the same fraction is hundreds of them: every tap would read as the same surface. No
-    /// file states the pass's own constants, so there is nothing to scale them by yet.
+    /// The chain that works out how much of the sky reaches each pixel, translated once its three
+    /// shaders have arrived. The taps ship as a file per quality, so a change there is a chain of
+    /// its own rather than a constant.
     fn occluders(&self) -> Option<Arc<mdl::gpu::Occlusion>> {
-        None
+        Some(Arc::new(mdl::gpu::Occlusion {
+            scale: self.effect(program::DOWN_SCALE, program::POST_VERTEX)?,
+            gather: self.effect(program::GATHER, program::GATHER_VERTEX)?,
+            occlude: self.effect(&self.look.occluder(), program::POST_VERTEX)?,
+        }))
     }
 
     /// The exposure chain, translated once all six of its shaders have arrived. The three that
@@ -4077,7 +4082,7 @@ impl Scene {
             clouds: self.clouds.clone(),
             glare: self.glare.clone(),
             smoothing: self.smoothing.clone(),
-            occlusion: self.occlusion.clone(),
+            occlusion: self.look.occlude.then(|| self.occlusion.clone()).flatten(),
             vignette: self.look.vignette.then(|| self.vignette.clone()).flatten(),
             reflection: self.look.reflect.then(|| self.reflection.clone()).flatten(),
             water_mirror: self.look.reflect.then(|| self.water_mirror.clone()).flatten(),
@@ -4608,6 +4613,23 @@ impl Scene {
                         .add(egui::Slider::new(&mut self.fov, 20.0..=120.0).suffix("\u{b0}"))
                         .changed();
                 }
+            }
+            let quality = self.look.quality;
+            ui.checkbox(&mut self.look.occlude, "Occlusion").on_hover_text(
+                "Shade the creases with the game's own HDAO, which every light past the sun and \
+                 the composite weight what they work out by",
+            );
+            ui.add_enabled_ui(self.look.occlude, |ui| {
+                egui::ComboBox::from_id_salt("layer-occluder")
+                    .selected_text(program::OCCLUDERS[self.look.quality])
+                    .show_ui(ui, |ui| {
+                        for (at, what) in program::OCCLUDERS.iter().enumerate() {
+                            ui.selectable_value(&mut self.look.quality, at, *what);
+                        }
+                    });
+            });
+            if self.look.quality != quality {
+                self.occlusion = None;
             }
             ui.checkbox(&mut self.look.vignette, "Vignette").on_hover_text(
                 "Darken the frame's corners with the game's own pass. The ellipse it spreads over \

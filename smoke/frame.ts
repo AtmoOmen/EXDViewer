@@ -115,7 +115,7 @@ async function click(cdp: Cdp, x: number, y: number) {
 // a loading zone is simply lost, and the box keeps what the last press put in it.
 async function paste(cdp: Cdp, text: string) {
     for (let step = 0; step < 3; step++) {
-        await click(cdp, WIDTH - 200, 182);
+        await click(cdp, WIDTH - 200, 113);
         await sleep(400);
         for (const type of ["keyDown", "keyUp"]) {
             await cdp.send("Input.dispatchKeyEvent", {
@@ -184,15 +184,11 @@ async function main() {
         await cdp.send("Emulation.setDeviceMetricsOverride", {
             width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, mobile: false,
         });
-        await cdp.send("Page.navigate", { url: `${origin}/assets/${level}` });
+        // The Zones route, not the asset listing: a `.lvb` opened as an asset offers Tree and
+        // Sounds and no scene at all, since only that route turns the placed view on.
+        await cdp.send("Page.navigate", { url: `${origin}/zones/${level}` });
         await cdp.eval("localStorage.clear()").catch(() => {});
-        // The scene is a tab over the level's file listing, and that tab only exists once the file
-        // has been read. Clicked over a spread of waits: a single click timed against a guess lands
-        // on the listing and shoots the wrong panel.
-        for (const at of [6000, 6000, 8000, 10000, 10000]) {
-            await sleep(at);
-            await click(cdp, 287, 116);
-        }
+        await sleep(40_000);
         await paste(cdp, preset);
 
         const began = Date.now();

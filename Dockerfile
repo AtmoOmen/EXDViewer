@@ -1,8 +1,9 @@
 FROM rust:alpine AS builder
 USER root
 WORKDIR /app
-RUN rustup target add wasm32-unknown-unknown
-RUN apk add musl-dev trunk openssl-dev openssl-libs-static
+# reqwest is on rustls and the lock carries no openssl-sys, so no OpenSSL headers are needed.
+RUN apk add --no-cache musl-dev trunk \
+ && rustup target add wasm32-unknown-unknown
 
 COPY . .
 RUN cargo build --bin web --release --features trunk_assets

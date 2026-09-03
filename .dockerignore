@@ -1,2 +1,11 @@
-dist
-target
+# Build artifacts, at any depth: the submodules under deps/ carry their own, and a bare
+# `target` only ever matched the root one.
+**/target
+**/dist
+
+.git
+.github
+
+# The headless test harness and its shots, none of which the image builds from.
+smoke
+capture

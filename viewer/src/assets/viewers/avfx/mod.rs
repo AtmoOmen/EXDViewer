@@ -1922,13 +1922,14 @@ mod tests {
         assert_eq!(at(effect, 1000).len(), settled);
     }
 
-    /// Where the emitter itself never stops either, a particle stating no life of its own would
-    /// otherwise pile up forever: it is capped to `length`, the same as under a bounded effect.
+    /// Where the emitter itself never stops either, only the pass an entry names bounds how many
+    /// pile up. This one is made on the emitter's interval, so one lands every frame it comes round
+    /// and nothing the file states clears them.
     #[test]
-    fn a_particle_with_no_life_is_capped_where_its_emitter_never_stops_either() {
+    fn a_particle_with_no_life_piles_up_where_its_emitter_never_stops_either() {
         let effect = &playing(&[life(-1.0)], (0, -1)).effect;
         assert!(!effect.bounded);
-        assert_eq!(at(effect, 1000).len(), 301);
+        assert_eq!(at(effect, 1000).len(), 1001);
     }
 
     #[test]

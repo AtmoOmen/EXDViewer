@@ -236,6 +236,46 @@ mod tests {
         assert_eq!(held.fade("from", "to"), 12.0 / FPS);
     }
 
+    /// Polls a future to completion on the current thread with no real waker, which is enough for
+    /// the local install's own I/O.
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::Wake;
+        struct NoopWaker;
+        impl Wake for NoopWaker {
+            fn wake(self: std::sync::Arc<Self>) {}
+        }
+        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
+        let mut cx = std::task::Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut cx) {
+                std::task::Poll::Ready(value) => return value,
+                std::task::Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+
+    /// The install's own tables, read end to end: the classes a gladius and a shield are in, and
+    /// the twelve frames the blend table gives a change of standing pose.
+    #[test]
+    fn the_installs_own_tables_name_a_gladius_and_shield_stance() {
+        let backend = block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(
+                "/home/asriel/.xlcore/ffxiv/game/sqpack".to_owned(),
+            ),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .expect("the local install");
+        let held = block_on(Stance::read(&backend, Language::English)).expect("the tables");
+        assert_eq!(held.class(Some(201)), "swd", "a gladius");
+        assert_eq!(held.class(Some(101)), "sld", "a shield");
+        assert_eq!(held.directory(Some(201), Some(101)), "bt_swd_sld");
+        assert_eq!(held.directory(Some(401), None), "bt_2ax_emp", "a two-hander");
+        assert_eq!(held.fade(SHEATHED, DRAWN), 12.0 / FPS);
+        assert_eq!(held.fade(DRAWN, DRAW), 4.0 / FPS);
+    }
+
     #[test]
     fn a_blend_of_no_frames_still_runs_for_one() {
         let mut held = stance(&[]);

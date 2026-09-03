@@ -1234,6 +1234,7 @@ pub(crate) fn batches(
                                 Vec3::from(drawn.center),
                             ),
                             color: Vec4::from(drawn.color),
+                            rim: drawn.rim,
                             uv: drawn.uv,
                             ..program::Instance::default()
                         });

@@ -101,11 +101,32 @@ impl Default for Scene {
     }
 }
 
+/// The rim ramp a model particle draws with: the shader lerps `begin` into `end` by
+/// `pow(dot(view, normal), power)`, carrying alpha with the colour.
+#[derive(Clone, Copy)]
+pub struct Rim {
+    pub power: f32,
+    pub begin: [f32; 4],
+    pub end: [f32; 4],
+}
+
+impl Default for Rim {
+    /// Equal ends leave the lerp an identity, which is what a sprite draws with.
+    fn default() -> Self {
+        Self {
+            power: 1.0,
+            begin: [1.0; 4],
+            end: [1.0; 4],
+        }
+    }
+}
+
 /// One object drawn, as `g_VS_PerInstanceParameters` holds one.
 #[derive(Clone, Copy)]
 pub struct Instance {
     pub transform: Mat4,
     pub color: Vec4,
+    pub rim: Rim,
     /// How far towards the camera the depth is pulled, which is what keeps an effect off a surface
     /// it sits against.
     pub depth_offset: f32,
@@ -118,6 +139,7 @@ impl Default for Instance {
         Self {
             transform: Mat4::IDENTITY,
             color: Vec4::ONE,
+            rim: Rim::default(),
             depth_offset: 0.0,
             uv: UV_IDENTITY,
         }
@@ -530,24 +552,26 @@ impl Buffer {
         put("FogParam", vec![0.0, 0.0, 0.0, 0.0]);
         put("CameraParam", vec![eye.x, eye.y, eye.z, 1.0]);
 
-        // The fresnel term lerps between two colors, so equal ones leave the particle its own.
+        // The axis the rim ramp is measured against, which the modifier below turns into a real
+        // per-pixel view vector by subtracting the surface it is read at.
         put("EyePosition", vec![eye.x, eye.y, eye.z, 1.0]);
         put(
             "FresnelParameter",
             [
                 eye.to_array().to_vec(),
-                vec![1.0],
-                vec![1.0; 4],
-                vec![1.0; 4],
+                vec![instance.rim.power],
+                instance.rim.begin.to_vec(),
+                instance.rim.end.to_vec(),
             ]
             .concat(),
         );
         put("WorldPosition", vec![0.0, 0.0, 0.0, 1.0]);
         put("ViewportPosition", vec![0.0, 0.0, width, height]);
 
-        // How much of each texture's own contribution reaches the color, and whether the tone map
-        // does. All the way, and it does not.
-        put("FresnelAxisModifier", vec![0.0]);
+        // Scaling the world position out of the axis above, so it reads as `eye - surface`. What
+        // follows is how much of each texture's own contribution reaches the color, and whether the
+        // tone map does: all the way, and it does not.
+        put("FresnelAxisModifier", vec![1.0]);
         put("CalculateColor", vec![1.0]);
         put("CalculateAlpha", vec![1.0]);
         put("ApplyToneMap", vec![0.0]);
@@ -592,7 +616,69 @@ fn write_rows(out: &mut [u8], register: usize, values: &[f32]) {
 
 #[cfg(test)]
 mod test {
-    use super::{id, selector};
+    use super::{Buffer, Instance, Rim, Scene, id, selector};
+
+    fn buffer(name: &str, members: &[(&str, u32, u32)], registers: u32) -> Buffer {
+        Buffer {
+            name: name.to_owned(),
+            members: members
+                .iter()
+                .map(|(name, offset, size)| hlsl::layout::Member {
+                    name: (*name).to_owned(),
+                    offset: *offset,
+                    size: *size,
+                    kind: "float4".to_owned(),
+                })
+                .collect(),
+            registers,
+        }
+    }
+
+    fn lane(bytes: &[u8], at: usize) -> f32 {
+        f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+    }
+
+    /// `g_PS_ModelSpecificParameters` holds the power in the axis register's last lane and the two
+    /// ends of the lerp in the two after it, alpha with them.
+    #[test]
+    fn the_rim_ramp_reaches_the_registers_the_package_lerps() {
+        let held = buffer(
+            "g_PS_ModelSpecificParameters",
+            &[("EyePosition", 0, 16), ("FresnelParameter", 16, 48)],
+            6,
+        );
+        let scene = Scene::default();
+
+        let bytes = held.fill(&scene, &Instance::default());
+        assert_eq!(bytes[32..48], bytes[48..64], "a sprite has to lerp nowhere");
+
+        let instance = Instance {
+            rim: Rim {
+                power: 3.0,
+                begin: [1.0, 1.0, 1.0, 0.0],
+                end: [1.0; 4],
+            },
+            ..Instance::default()
+        };
+        let bytes = held.fill(&scene, &instance);
+        assert_eq!(lane(&bytes, 28), 3.0);
+        assert_eq!(lane(&bytes, 44), 0.0);
+        assert_eq!(lane(&bytes, 60), 1.0);
+    }
+
+    /// The axis is only a view vector where the world position is scaled out of it whole.
+    #[test]
+    fn the_fresnel_axis_carries_the_surface_out_of_the_eye() {
+        let held = buffer(
+            "g_PS_InstanceExtraParameters",
+            &[("FresnelAxisModifier", 0, 4)],
+            2,
+        );
+        assert_eq!(
+            lane(&held.fill(&Scene::default(), &Instance::default()), 0),
+            1.0
+        );
+    }
 
     #[test]
     fn the_selector_is_a_polynomial_in_thirty_one() {

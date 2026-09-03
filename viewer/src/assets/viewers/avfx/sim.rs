@@ -381,6 +381,32 @@ pub struct Shading {
     pub sprite: bool,
 }
 
+/// What a model particle's rim ramp is written as, `FrC` against `ColB` and `ColE`. A file that
+/// states none reads as two white ends, which the shader lerps to nothing.
+struct Fresnel {
+    power: Track,
+    begin: Tint,
+    end: Tint,
+}
+
+impl Fresnel {
+    fn read(blocks: &[Block]) -> Self {
+        Self {
+            power: Track::read(blocks, "FrC", 1.0),
+            begin: Tint::read(blocks, "ColB"),
+            end: Tint::read(blocks, "ColE"),
+        }
+    }
+
+    fn at(&self, frame: f32) -> program::Rim {
+        program::Rim {
+            power: self.power.at(frame),
+            begin: self.begin.at(frame).to_array(),
+            end: self.end.at(frame).to_array(),
+        }
+    }
+}
+
 struct Particle {
     life: Option<f32>,
     gravity: Track,
@@ -390,6 +416,7 @@ struct Particle {
     scale: Axes,
     spin: [Track; 3],
     color: Tint,
+    fresnel: Fresnel,
     uv: Vec<UvSet>,
     texture: Option<usize>,
     shape: Shape,
@@ -551,6 +578,7 @@ impl Particle {
             scale: Axes::read(blocks, "Scl", 1.0),
             spin: triple(blocks, ["VRX", "VRY", "VRZ"], 0.0),
             color: Tint::read(blocks, "Col"),
+            fresnel: Fresnel::read(data),
             uv: blocks
                 .iter()
                 .filter(|block| block.name() == "UvSt")
@@ -822,6 +850,8 @@ pub struct Drawn {
     /// a quad facing the camera can carry.
     pub roll: f32,
     pub color: [f32; 4],
+    /// The rim ramp, which only the model packages read.
+    pub rim: program::Rim,
     /// What each uv set does to a texture coordinate, two registers a set.
     pub uv: [[f32; 4]; UV_SETS * UV_REGISTERS],
     pub texture: Option<usize>,
@@ -1045,6 +1075,7 @@ impl Effect {
                     turn: place.turn.to_array(),
                     roll: angles.z,
                     color: (live.tint * def.color.at(age)).to_array(),
+                    rim: def.fresnel.at(age),
                     uv: transform(&def.uv, age),
                     texture: def.texture,
                     shape: def.shape,

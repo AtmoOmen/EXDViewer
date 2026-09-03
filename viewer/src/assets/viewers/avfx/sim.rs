@@ -545,6 +545,14 @@ pub enum Axis {
     Z,
 }
 
+/// What a bill turns to meet: the eye itself, or the plane the frame is drawn on. `RBDT` names the
+/// second by `Billboard` and the first by `CameraBillboard`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Toward {
+    Eye,
+    Screen,
+}
+
 /// Which way a sprite is turned to be drawn, `RBDT`. The two that read a velocity are drawn against
 /// the screen.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -554,7 +562,7 @@ pub enum Facing {
     /// Turned to look at the eye.
     Camera,
     /// Billed about the world's up axis, so it turns with the camera but never leans.
-    Upright,
+    Upright(Toward),
     /// Left lying in the world, across the two axes the one it names stands out of.
     Still(Axis),
 }
@@ -571,7 +579,8 @@ impl Facing {
             (_, 0) => Self::Still(Axis::X),
             (_, 1) => Self::Still(Axis::Y),
             (_, 2 | 10) => Self::Still(Axis::Z),
-            (_, 4 | 8 | 9) => Self::Upright,
+            (_, 8) => Self::Upright(Toward::Eye),
+            (_, 4 | 9) => Self::Upright(Toward::Screen),
             (_, 6) => Self::Camera,
             _ => Self::Screen,
         }

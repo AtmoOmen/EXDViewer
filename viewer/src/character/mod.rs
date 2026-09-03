@@ -237,11 +237,12 @@ type Read = Vec<(String, Vec<u8>)>;
 /// The race a `.atch` fetch was asked for, alongside the bytes once it lands.
 type AtchRead = (u16, Vec<u8>);
 
-/// The stance the body was last put in: the class directory its weapons name, and whether they
-/// were drawn.
+/// The stance the body was last put in: the class directory its weapons name, whether they were
+/// drawn, and whether the pose it settled on has been named yet.
 struct Stood {
     held: String,
     drawn: bool,
+    told: Cell<bool>,
 }
 
 /// What a picked set is made of, and what to call it.
@@ -957,36 +958,45 @@ impl CharacterBuilder {
         let wielded = self.wielded();
         let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
         let held = stance.directory(set(0), set(1));
-        let sheathed = (stance::sheathed_pack(self.code), stance::SHEATHED);
-        let poses = match self.drawn {
-            true => vec![
-                (
-                    stance::pack(self.code, &held, "resident/idle.pap"),
-                    stance::DRAWN,
-                ),
-                sheathed,
-            ],
-            false => vec![sheathed],
+        // Over the whole lineage rather than this body alone: most bodies file no animation of
+        // their own and play the one they are built on, which is the same tree their clothes come
+        // from.
+        let lineage = match self.lineage() {
+            found if found.is_empty() => vec![format!("c{:04}", self.code)],
+            found => found,
         };
+        let mut poses = Vec::new();
+        if self.drawn {
+            poses.extend(lineage.iter().map(|code| {
+                (
+                    stance::pack(code, &held, "resident/idle.pap"),
+                    stance::DRAWN,
+                )
+            }));
+        }
+        poses.extend(
+            lineage
+                .iter()
+                .map(|code| (stance::sheathed_pack(code), stance::SHEATHED)),
+        );
+
         let mut stood = self.stood_in.borrow_mut();
-        if stood
+        if let Some(stood) = stood
             .as_ref()
-            .is_some_and(|stood| stood.held == held && stood.drawn == self.drawn)
+            .filter(|stood| stood.held == held && stood.drawn == self.drawn)
         {
             // Stated again rather than left alone: the pack list landing stands the body in its
             // own conventional idle, which would otherwise take the class's place under it.
             model.stand(&poses, 0.0);
+            if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
+                log::info!("character: {} settled into {name}", stood.held);
+            }
             return;
         }
 
-        let fade = model
-            .standing()
-            .map_or(0.0, |from| stance.fade(&from, poses[0].1));
-        log::info!(
-            "character: {held} stands in {} from {}, blending over {fade:.3}s",
-            poses[0].1,
-            poses[0].0
-        );
+        let wanted = poses[0].1;
+        let fade = model.standing().map_or(0.0, |from| stance.fade(&from, wanted));
+        log::info!("character: {held} asks for {wanted}, blending over {fade:.3}s");
         model.stand(&poses, fade);
 
         if stood.as_ref().is_some_and(|stood| stood.drawn != self.drawn) {
@@ -994,14 +1004,18 @@ impl CharacterBuilder {
                 true => stance::DRAW,
                 false => stance::SHEATHE,
             };
-            let transition = stance::pack(self.code, &held, "resident/sub.pap");
+            let packs: Vec<String> = lineage
+                .iter()
+                .map(|code| stance::pack(code, &held, "resident/sub.pap"))
+                .collect();
             let fade = stance.fade(stance::DRAWN, over);
-            log::info!("character: {over} over it from {transition}, blending over {fade:.3}s");
-            model.act(&transition, over, fade);
+            log::info!("character: {over} over it, blending over {fade:.3}s");
+            model.act(&packs, over, fade);
         }
         *stood = Some(Stood {
             held,
             drawn: self.drawn,
+            told: Cell::new(false),
         });
     }
 

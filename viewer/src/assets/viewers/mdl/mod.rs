@@ -3264,8 +3264,8 @@ impl Rendered {
 
     /// Lays one motion over the pose the character is standing in for as long as it runs, which is
     /// what drawing or sheathing a weapon is.
-    pub fn act(&self, path: &str, motion: &str, fade: f32) {
-        self.animation.act(path, motion, fade);
+    pub fn act(&self, packs: &[String], motion: &str, fade: f32) {
+        self.animation.act(packs, motion, fade);
     }
 
     /// The motion the character is standing in, by the name its own pack gives it.

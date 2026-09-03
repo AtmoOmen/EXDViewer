@@ -51,18 +51,14 @@ const DEST: u32 = 0;
 const SOURCE: u32 = 1;
 const FRAMES: u32 = 2;
 
-/// Where a body's animation packs are filed, which every class directory hangs off.
-pub fn root(code: u16) -> String {
-    format!("chara/human/c{code:04}/animation/a{SET:04}")
-}
-
-/// The pack a class's own `file` is filed as, for the class directory `held` names.
-pub fn pack(code: u16, held: &str, file: &str) -> String {
-    format!("{}/{held}/{file}", root(code))
+/// The pack a class's own `file` is filed as, for the class directory `held` names, under the body
+/// `code` spells. Few bodies file animation of their own, so this is asked of a whole lineage.
+pub fn pack(code: &str, held: &str, file: &str) -> String {
+    format!("chara/human/{code}/animation/a{SET:04}/{held}/{file}")
 }
 
 /// The idle pack every body plays with nothing drawn.
-pub fn sheathed_pack(code: u16) -> String {
+pub fn sheathed_pack(code: &str) -> String {
     pack(code, COMMON, "resident/idle.pap")
 }
 
@@ -180,6 +176,11 @@ fn weapon_types(bytes: &[u8]) -> Option<Vec<(u32, String)>> {
 
 #[cfg(test)]
 mod tests {
+    use ironworks::Ironworks;
+    use ironworks::file::File as _;
+    use ironworks::file::pap::AnimationPack;
+    use ironworks::sqpack::{Install, SqPack};
+
     use super::*;
 
     fn table(entries: &[(u32, &str)]) -> Vec<u8> {
@@ -274,6 +275,34 @@ mod tests {
         assert_eq!(held.directory(Some(401), None), "bt_2ax_emp", "a two-hander");
         assert_eq!(held.fade(SHEATHED, DRAWN), 12.0 / FPS);
         assert_eq!(held.fade(DRAWN, DRAW), 4.0 / FPS);
+    }
+
+    /// The four motion names this module stands on, read out of the packs it names them in. Which
+    /// of `sub.pap`'s partial motions the game plays on a draw is inferred from their names, the
+    /// half-second they run and the upper-body slot `ActionTimeline` rows 1 and 2 state; that
+    /// they are the only two in the pack, in every class, is what this holds.
+    #[test]
+    fn the_packs_a_stance_names_hold_the_motions_it_asks_them_for() {
+        let install = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(
+            "/home/asriel/.xlcore/ffxiv/game/sqpack",
+        )));
+        let names = |path: String| -> Vec<String> {
+            let bytes: Vec<u8> = install.file(&path).expect("the pack");
+            AnimationPack::read(std::io::Cursor::new(bytes))
+                .expect("a readable pack")
+                .animations()
+                .iter()
+                .map(|animation| animation.name().to_owned())
+                .collect()
+        };
+        assert!(names(sheathed_pack("c0101")).contains(&SHEATHED.to_owned()));
+        for class in ["bt_swd_sld", "bt_2ax_emp", "bt_clw_clw", "bt_2gn_emp"] {
+            let idle = names(pack("c0101", class, "resident/idle.pap"));
+            assert!(idle.contains(&DRAWN.to_owned()), "{class}: {idle:?}");
+            let sub = names(pack("c0101", class, "resident/sub.pap"));
+            assert!(sub.contains(&DRAW.to_owned()), "{class}: {sub:?}");
+            assert!(sub.contains(&SHEATHE.to_owned()), "{class}: {sub:?}");
+        }
     }
 
     #[test]

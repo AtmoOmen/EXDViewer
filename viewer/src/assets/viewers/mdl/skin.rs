@@ -370,10 +370,11 @@ impl Layer {
         self.time.set(0.0);
     }
 
-    /// Plays `path` through once and then fades the layer back out over `fade`, which is what an
-    /// action laid over a base pose does rather than loop on top of it forever.
-    fn once(&self, path: &str, motion: Option<&str>, fade: f32) {
-        self.load(path, motion, None, fade);
+    /// Plays the first of `candidates` that holds the motion it names through once, then fades the
+    /// layer back out over `fade`, which is what an action laid over a base pose does rather than
+    /// loop on top of it forever.
+    fn once(&self, candidates: Vec<(String, String)>, fade: f32) {
+        self.seek(candidates, fade);
         self.settle.set(fade);
     }
 
@@ -561,7 +562,13 @@ impl Layer {
                 .map_or(f32::EPSILON, |binding| {
                     binding.motion().duration().max(f32::EPSILON)
                 });
-            held.time = (held.time + step.min(duration)) % duration;
+            // A clip being cross-faded out of is still running, so it wraps; one the layer is
+            // leaving with nothing behind it holds its last frame rather than starting over
+            // under the fade.
+            held.time = match self.wanted.borrow().is_empty() {
+                true => (held.time + step).min(duration),
+                false => (held.time + step.min(duration)) % duration,
+            };
         }
         if self.share() >= 1.0 {
             *leaving = None;
@@ -1227,11 +1234,15 @@ impl Animation {
         self.body.playing().map(|(_, name, _)| name)
     }
 
-    /// Lays `motion` from `path` over whatever the body is doing for as long as it runs, fading in
-    /// and back out over `fade` seconds. A partial motion names only the bones it moves, so the
-    /// base keeps every other one for the whole of it.
-    pub fn act(&self, path: &str, motion: &str, fade: f32) {
-        self.action.once(path, Some(motion), fade);
+    /// Lays `motion` over whatever the body is doing for as long as it runs, out of the first of
+    /// `packs` that holds it, fading in and back out over `fade` seconds. A partial motion names
+    /// only the bones it moves, so the base keeps every other one for the whole of it.
+    pub fn act(&self, packs: &[String], motion: &str, fade: f32) {
+        let candidates = packs
+            .iter()
+            .map(|path| (path.clone(), motion.to_owned()))
+            .collect();
+        self.action.once(candidates, fade);
         self.running.set(true);
     }
 
@@ -2205,7 +2216,10 @@ mod tests {
     #[test]
     fn a_layer_with_nothing_playing_fades_its_clip_up_out_of_the_ones_under_it() {
         let layer = Layer::default();
-        layer.once("a.pap", Some("cbbp_a_activ"), 0.4);
+        layer.once(
+            vec![("a.pap".to_owned(), "cbbp_a_activ".to_owned())],
+            0.4,
+        );
         assert!(layer.leaving.borrow().is_none(), "nothing was playing");
         assert_eq!(layer.share(), 0.0);
         layer.motion.set(Some(0));

@@ -1214,18 +1214,7 @@ impl Animation {
     /// by what the character is doing rather than by what a pack opens on, which is why each names
     /// its motion; a pack that is missing or that ships empty gives way to the next, which is how
     /// a stance with no pose of its own falls back to one that has.
-    ///
-    /// Asking again for a pose already stood in changes nothing, so a caller that states the
-    /// stance every frame does not refetch the pack on every one of them.
     pub fn stand(&self, poses: &[(String, &str)], fade: f32) {
-        let wanted = self.body.wanted.borrow().clone();
-        let opening = self.body.opening.borrow().clone();
-        if poses
-            .iter()
-            .any(|(path, motion)| *path == wanted && opening.as_deref() == Some(*motion))
-        {
-            return;
-        }
         let candidates = poses
             .iter()
             .map(|(path, motion)| (path.clone(), (*motion).to_owned()))

@@ -20,6 +20,7 @@ mod export;
 pub(super) mod gpu;
 mod grid;
 pub(crate) mod material;
+mod noise;
 pub(super) mod program;
 mod skin;
 
@@ -1822,6 +1823,22 @@ impl Rendered {
                     Array::Failed
                 }
             };
+        }
+        // The one texture the game states no path for. Held in the same map as the fetched set so
+        // that dropping that map drops this too, and drawn once: the field is deterministic.
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            arrays.entry(deferred::PERLIN_2D)
+            && self.shaded.get()
+        {
+            let held = deferred::Layered {
+                size: (noise::SIZE as i32, noise::SIZE as i32),
+                layers: 1,
+                pixels: noise::perlin(),
+                filter: glow::LINEAR,
+                kind: program::Kind::Plane,
+            };
+            level.gpu.lock().unwrap().queue_array(deferred::PERLIN_2D, held.clone());
+            entry.insert(Array::Ready(held));
         }
 
         let mut parameters = self.parameters.borrow_mut();

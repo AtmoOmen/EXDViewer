@@ -159,6 +159,11 @@ pub const ENGINE: [(u32, &str, u32); 15] = [
 const WIND_SAMPLE_0: u32 = 0x78d3_e3b7;
 const WIND_SAMPLE_1: u32 = 0x0fd4_d321;
 
+/// The noise field a hair strand takes its flutter out of. Kept out of [`ENGINE`] because the
+/// engine builds it rather than reading it: [`super::noise::perlin`] draws the same field, and
+/// nothing fetches a path for it.
+pub const PERLIN_2D: u32 = 0xc06f_eb5b;
+
 /// The decal a face paint is drawn through, and where the set the creator picks is filed. Kept out
 /// of [`ENGINE`] because which one binds is what a character was made with rather than a fixed path.
 pub const FACE_PAINT: u32 = 0x0237_cb94;

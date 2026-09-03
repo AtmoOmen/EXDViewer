@@ -1689,6 +1689,15 @@ const WIND_SCROLL_INTERVAL: f32 = 30.0;
 /// it is not the set and is not placed here.
 pub const WIND_REACH: f32 = 1.467_972;
 
+/// What a character's own wind is capped and scaled by before a strand is swayed along it. Both off
+/// `ffxiv_dx11.exe`: the vector is normalised, then scaled by `min(speed, 30) * 0.0005`.
+const WIND_SPEED_CAP: f32 = 30.0;
+const WIND_SCALE: f32 = 0.0005;
+
+/// Ticks a second the shared animation clock counts, and the mask its accumulator is held to.
+const LOOP_TICKS: u16 = 1024;
+const LOOP_WRAP: u64 = 0x1f_ffff;
+
 /// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
 /// hold both wind layers already summed; `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength
 /// per layer instead, which `layers` carries apart for it. A mesh weights the reach by its own stream,
@@ -3358,6 +3367,13 @@ impl Buffer {
         put(grass, "m_GrassWindSpeedScale", vec![1.0]);
         put(grass, "m_BushWindSpeedScale", vec![1.0]);
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
+        // What a hair strand flutters along. The engine hands over a unit heading scaled by the
+        // wind's own speed, capped at thirty and taken down by a factor of two thousand, and leaves
+        // the last lane at nought. Heading and speed are this viewer's own, read off the zone's
+        // `.envb`; the engine samples an ambient field at the character's position instead, and
+        // whether the two are the same quantity is the one thing here nothing states.
+        let gust = scene.wind.heading * scene.wind.reach.min(WIND_SPEED_CAP) * WIND_SCALE;
+        put(INSTANCE, "m_Wind", vec![gust.x, gust.y, gust.z, 0.0]);
         // Declared by all five character packages; only `character`'s own G pass reads the first
         // lane, scaling the fur march by it. A capture confirms the game writes the same identity
         // here.
@@ -3393,6 +3409,12 @@ impl Buffer {
             0.15, 0.15, 0.15, 0.17, 0.01584, 0.9, 0.01584, 0.8,
         ]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
+        // The clock every animated package shares. A tick is a thousand-and-twenty-fourth of a
+        // second and the engine's accumulator is masked to twenty-one bits, so this runs to exactly
+        // 2048 and back, which is what makes the periods the hair shader snaps to divide it evenly.
+        put("g_PbrParameterCommon", "m_LoopTime", vec![
+            ((clock * f32::from(LOOP_TICKS)) as u64 & LOOP_WRAP) as f32 / f32::from(LOOP_TICKS),
+        ]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);

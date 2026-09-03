@@ -352,6 +352,9 @@ pub struct CharacterBuilder {
     /// The stance the body was last put in, so one it is already standing in is not started over
     /// on every frame.
     stood_in: RefCell<Option<Stood>>,
+    /// The effects the drawn weapons were last carrying, so they are named once rather than on
+    /// every frame they play.
+    glowed: RefCell<Vec<String>>,
     /// What was last logged a weapon's placement, so a stance held for a thousand frames names its
     /// bone and offset once rather than on every one of them.
     logged: Cell<(bool, Option<usize>, Option<usize>, bool)>,
@@ -457,6 +460,7 @@ impl Default for CharacterBuilder {
             stance: None,
             reading_stance: None,
             stood_in: RefCell::new(None),
+            glowed: RefCell::new(Vec::new()),
             logged: Cell::new((false, None, None, false)),
             atch: None,
             reading_atch: None,
@@ -512,6 +516,7 @@ impl CharacterBuilder {
         self.off_matched.take();
         self.logged.set((false, None, None, false));
         self.stood_in.take();
+        self.glowed.take();
         self.atch = None;
         self.reading_atch = None;
         self.stood = false;
@@ -935,7 +940,9 @@ impl CharacterBuilder {
             model.hinged(self.raised());
             model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
-            model.carried(self.attachments());
+            let carried = self.attachments();
+            model.glowing(self.effects(&carried));
+            model.carried(carried);
             self.stand(model);
         }
     }
@@ -1027,6 +1034,35 @@ impl CharacterBuilder {
         // resolved for it: nothing in the timeline states which point a prop hangs from.
         if let Some((path, _)) = &self.prop {
             found.push((path.clone(), weapons::fallback_bone(true).to_owned(), Mat4::IDENTITY));
+        }
+        found
+    }
+
+    /// The bone each drawn weapon's own effect plays from, for the ones whose `.imc` names one.
+    /// The game only plays a weapon's effect in a battle stance, so nothing sheathed carries one.
+    fn effects(&self, carried: &[(String, String, Mat4)]) -> Vec<String> {
+        if !self.drawn {
+            self.glowed.take();
+            return Vec::new();
+        }
+        let mut named = Vec::new();
+        let found = self
+            .wielded()
+            .into_iter()
+            .filter_map(|weapon| {
+                let model = weapon.model();
+                let imc = mdl::imc_path(&model).and_then(|path| self.held.get(&path))?;
+                let path = weapons::vfx_path(&weapon, imc)?;
+                let (_, bone, _) = carried.iter().find(|(held, ..)| *held == model)?;
+                named.push(path);
+                Some(bone.clone())
+            })
+            .collect();
+        if *self.glowed.borrow() != named {
+            for path in &named {
+                log::info!("character: a drawn weapon plays {path}");
+            }
+            *self.glowed.borrow_mut() = named;
         }
         found
     }

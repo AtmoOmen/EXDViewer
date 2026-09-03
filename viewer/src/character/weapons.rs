@@ -12,6 +12,7 @@ use anyhow::Result;
 use ironworks::excel::Language;
 use ironworks::file::File;
 use ironworks::file::atch::AttachPoints;
+use ironworks::file::imc::ImageChange;
 use std::io::Cursor;
 
 use crate::backend::Backend;
@@ -227,6 +228,26 @@ pub fn attach(bytes: &[u8], tag: &str, drawn: bool) -> Option<Attach> {
     })
 }
 
+/// The lowest effect id filed apart from any one weapon, out of `Weapon::ResolveVfxPath`: below
+/// this the effect is the weapon's own, at or above it the shared one every weapon reads from.
+const SHARED_VFX: u8 = 100;
+
+/// Where the effect a weapon's own `.imc` names is filed, for the variant it is worn at. The game
+/// only plays this while the weapon is drawn, which is what makes a relic glow in a battle stance
+/// and not out of one.
+pub fn vfx_path(weapon: &Weapon, bytes: &[u8]) -> Option<String> {
+    let file = ImageChange::read(Cursor::new(bytes.to_vec())).ok()?;
+    let vfx = file.entry(0, weapon.variant)?.vfx_id();
+    match vfx {
+        0 => None,
+        SHARED_VFX.. => Some(format!("vfx/weapon/eff/vw{vfx:04}.avfx")),
+        _ => Some(format!(
+            "chara/weapon/w{:04}/obj/body/b{:04}/vfx/eff/vw{vfx:04}.avfx",
+            weapon.set, weapon.base
+        )),
+    }
+}
+
 /// The bone a weapon hangs from when nothing names an attach point for it: the plain right or left
 /// hand null bone, whichever `main` says.
 pub fn fallback_bone(main: bool) -> &'static str {
@@ -252,6 +273,31 @@ mod tests {
 
         let hora = Weapon::read(0x0000_0002_0009_012d).unwrap();
         assert_eq!((hora.set, hora.base, hora.variant), (301, 9, 2));
+    }
+
+    /// The split `Weapon::ResolveVfxPath` makes: below a hundred the effect is filed under the
+    /// weapon's own directory, at or above it under the one every weapon shares.
+    #[test]
+    fn an_effect_is_the_weapons_own_until_it_is_shared() {
+        let weapon = Weapon {
+            set: 201,
+            base: 1,
+            variant: 0,
+        };
+        let entry = |vfx: u8| {
+            let mut bytes = vec![0, 0, 1, 0];
+            bytes.extend([0, 0, 0, 0, vfx, 0]);
+            bytes
+        };
+        assert_eq!(vfx_path(&weapon, &entry(0)), None);
+        assert_eq!(
+            vfx_path(&weapon, &entry(2)).as_deref(),
+            Some("chara/weapon/w0201/obj/body/b0001/vfx/eff/vw0002.avfx")
+        );
+        assert_eq!(
+            vfx_path(&weapon, &entry(150)).as_deref(),
+            Some("vfx/weapon/eff/vw0150.avfx")
+        );
     }
 
     #[test]

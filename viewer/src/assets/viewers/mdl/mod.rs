@@ -130,6 +130,10 @@ const CHARACTER_TRANSPARENT_PACKAGES: [&str; 11] = [
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
 
+/// The marker a drawn weapon's own effect is stood in for by, apart from the emote vfx marker's
+/// own tint so the two read as different things.
+const WEAPON_VFX_COLOR: [f32; 4] = [0.35, 0.95, 0.65, 1.0];
+
 /// How far the placed light reaches, in radii of the model. A lamp is drawn as the box it covers
 /// and cut off at the sphere of its own reach, and both of those show as a hard edge where they
 /// cross what is drawn, so the box stands well outside it. The near and far planes have to hold the
@@ -500,6 +504,8 @@ pub struct Rendered {
     /// A piece hung rigidly off a bone rather than skinned to the shared rig, by the path it was
     /// worn as: a weapon, carried at the placement its attach point states this frame.
     attachments: RefCell<Vec<Attachment>>,
+    /// The bones a weapon's own effect would play from, for the weapons carrying one and drawn.
+    glowing: RefCell<Vec<String>>,
     /// The props, sound and vfx an emote's own timeline states, read against whatever the body is
     /// playing.
     emote: RefCell<emote::Cue>,
@@ -590,6 +596,7 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         stains: Default::default(),
         dyed: Default::default(),
         attachments: Default::default(),
+        glowing: Default::default(),
         emote: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
@@ -2168,9 +2175,31 @@ impl Rendered {
                 }
             }
         }
-        // A marker standing in for a vfx an emote's own timeline fires: not the game's particles,
-        // only where and when one would draw.
+        // A marker standing in for a vfx an emote's own timeline fires, and for the effect a
+        // weapon carries while it is drawn: not the game's particles, only where and when one
+        // would draw.
         let mut markers = std::mem::take(&mut pose.skeleton);
+        if let Some((names, ..)) = &rig {
+            for bone in self.glowing.borrow().iter() {
+                let Some(&world) = names
+                    .iter()
+                    .position(|name| name == bone)
+                    .and_then(|bone| pose.world.get(bone))
+                else {
+                    continue;
+                };
+                let (_, rotation, translation) = world.to_scale_rotation_translation();
+                markers.push(placed::Batch {
+                    shape: placed::Shape::Box,
+                    instances: vec![placed::Instance {
+                        center: translation.to_array(),
+                        scale: [0.06; 3],
+                        turn: rotation.to_array(),
+                        color: WEAPON_VFX_COLOR,
+                    }],
+                });
+            }
+        }
         if let (Some((_, _, time)), Some((names, ..))) = (self.animation.body_playing(), &rig) {
             for vfx in self.emote.borrow().active_vfx(time) {
                 let Some(bone) = names.iter().position(|name| *name == vfx.bone) else {
@@ -3219,6 +3248,12 @@ impl Rendered {
     /// Poses the character out of a different pack, which is what picking an emote is.
     pub fn play(&self, path: &str, then: Option<&str>) {
         self.animation.play(path, then, 0.0);
+    }
+
+    /// Where each drawn weapon's own effect would play, by the bone it hangs from. The character
+    /// scene runs no particles, so this marks the place the way an emote's own vfx is marked.
+    pub fn glowing(&self, bones: Vec<String>) {
+        *self.glowing.borrow_mut() = bones;
     }
 
     /// Stands the character in one pose out of a pack, cross-fading out of whatever it was

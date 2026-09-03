@@ -958,6 +958,19 @@ impl CharacterBuilder {
         let wielded = self.wielded();
         let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
         let held = stance.directory(set(0), set(1));
+        let mut stood = self.stood_in.borrow_mut();
+        if let Some(stood) = stood
+            .as_ref()
+            .filter(|stood| stood.held == held && stood.drawn == self.drawn)
+        {
+            // Named once the pack has landed rather than when it was asked for: a class with no
+            // drawn pose of its own settles into the sheathed one, and this is what says so.
+            if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
+                log::info!("character: {} settled into {name}", stood.held);
+            }
+            return;
+        }
+
         // Over the whole lineage rather than this body alone: most bodies file no animation of
         // their own and play the one they are built on, which is the same tree their clothes come
         // from.
@@ -979,19 +992,6 @@ impl CharacterBuilder {
                 .iter()
                 .map(|code| (stance::sheathed_pack(code), stance::SHEATHED)),
         );
-
-        let mut stood = self.stood_in.borrow_mut();
-        if let Some(stood) = stood
-            .as_ref()
-            .filter(|stood| stood.held == held && stood.drawn == self.drawn)
-        {
-            // Named once the pack has landed rather than when it was asked for: a class with no
-            // drawn pose of its own settles into the sheathed one, and this is what says so.
-            if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
-                log::info!("character: {} settled into {name}", stood.held);
-            }
-            return;
-        }
 
         let wanted = poses[0].1;
         let fade = model.standing().map_or(0.0, |from| stance.fade(&from, wanted));

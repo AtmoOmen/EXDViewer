@@ -1392,11 +1392,13 @@ impl Effect {
                     continue;
                 };
                 // The corners the game builds a slot's quad from sit either side of its stated
-                // size, where a plain sprite's sit either side of half its scale.
+                // size, where a plain sprite's sit either side of half its scale. Nothing of the
+                // particle's own scale reaches them: what the game multiplies them by is the scale
+                // of the node the effect stands under, which a placement carries already.
                 let place = live.place.under(Place {
                     origin: origin + slot.offset,
                     turn: rotation(angles + slot.angles),
-                    scale: scale * Vec3::new(2.0 * slot.size[0], 2.0 * slot.size[1], 1.0),
+                    scale: Vec3::new(2.0 * slot.size[0], 2.0 * slot.size[1], 1.0),
                 });
                 out.push(Drawn {
                     center: place.origin.to_array(),

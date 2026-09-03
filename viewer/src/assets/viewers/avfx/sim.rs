@@ -10,6 +10,8 @@
 //! rest use. Nothing random is read: the `R`-suffixed curves beside the ones below go unread, so an
 //! effect plays the same way every time and scrubbing back to a frame lands where it did before.
 
+use std::hash::{Hash, Hasher};
+
 use glam::{Quat, Vec3, Vec4};
 use ironworks::file::avfx::{Avfx, Block, DirectionalLightSource, Item, Model as Geometry};
 
@@ -164,6 +166,251 @@ impl Pair {
     fn at(&self, frame: f32) -> [f32; 2] {
         self.tied.map(|axis| self.tracks[axis].at(frame))
     }
+}
+
+/// A value in `[0, 1)` fixed by whatever asks for it. The `Smpl` layer draws all of its variety
+/// from ranges the file states, and a slot handed the middle of every one of them is a rigid ladder
+/// of one sprite; hashing what the slot is keeps that variety without a generator, so an effect
+/// still plays the same way every time and scrubbing back to a frame lands where it did before.
+fn noise(key: [u64; 3], lane: u64) -> f32 {
+    let mut hasher = std::hash::DefaultHasher::new();
+    (key, lane).hash(&mut hasher);
+    (hasher.finish() >> 40) as f32 / 16_777_216.0
+}
+
+fn float(blocks: &[Block], name: &str, idle: f32) -> f32 {
+    find(blocks, name).and_then(Block::f32).unwrap_or(idle)
+}
+
+fn triplet(blocks: &[Block], names: [&str; 3]) -> Vec3 {
+    Vec3::from(names.map(|name| float(blocks, name, 0.0)))
+}
+
+/// A direction the file states as a cone about `+Y`, between two polar angles.
+fn cone(low: f32, high: f32, along: f32, around: f32) -> Vec3 {
+    let height = low.cos() + (high.cos() - low.cos()) * along;
+    let radius = (1.0 - height * height).max(0.0).sqrt();
+    let (sin, cos) = (std::f32::consts::TAU * around).sin_cos();
+    Vec3::new(sin * radius, height, cos * radius)
+}
+
+/// One slot of the `Smpl` layer as it stands at some age.
+struct Slot {
+    offset: Vec3,
+    angles: Vec3,
+    size: [f32; 2],
+    color: Vec4,
+    /// Which cell of the atlas it takes, and whether its `u` runs backwards.
+    cell: [i32; 2],
+    mirrored: bool,
+}
+
+/// The sub-sprite layer a particle carries under `Smpl`: a small particle system of its own, whose
+/// slots each take one cell of the particle's texture atlas and run a life of their own. A particle
+/// this is on draws its slots and no quad of its own.
+struct Simple {
+    slots: usize,
+    group: i32,
+    per: i32,
+    interval: f32,
+    interval_random: i32,
+    life: f32,
+    life_random: i32,
+    remade: bool,
+    /// `SIPT`, and the box it spreads a slot over where it is nought.
+    injection: i32,
+    spread: Vec3,
+    /// `SIDT`, and the cone `IRD0`..`IRD1` the two kinds that read one take.
+    heading: i32,
+    cone: [f32; 2],
+    speed: [f32; 2],
+    /// `CGX`..`CGZ`, an acceleration the game applies over a slot's whole age at once.
+    accel: Vec3,
+    begin: [f32; 2],
+    end: [f32; 2],
+    curve: f32,
+    random_size: [[f32; 2]; 2],
+    linked_size: bool,
+    angles: Vec3,
+    angles_random: Vec3,
+    rate: Vec3,
+    rate_random: Vec3,
+    cells: [i32; 2],
+    cell_interval: i32,
+    cell_random: i32,
+    cell_loops: i32,
+    mirrors: bool,
+    colors: [[u8; 4]; 4],
+    frames: [i16; 4],
+}
+
+impl Simple {
+    /// Read where `bSCt` turns the layer on, which is the bit the game gates its whole path on.
+    fn read(blocks: &[Block]) -> Option<Self> {
+        let inner = find(blocks, "Smpl")?.blocks();
+        let slots = integer(inner, "CCnt")?.clamp(0, PARTICLES as i32) as usize;
+        if slots == 0 || find(blocks, "bSCt").and_then(Block::bool) != Some(true) {
+            return None;
+        }
+        let held = |name: &str, at: usize| find(inner, name).map_or(&[][..], Block::bytes).get(at..);
+        let colors = std::array::from_fn(|key| {
+            held("Cols", key * 4)
+                .and_then(|bytes| bytes.first_chunk::<4>().copied())
+                .unwrap_or([255; 4])
+        });
+        let frames = std::array::from_fn(|key| {
+            held("Frms", key * 2)
+                .and_then(|bytes| bytes.first_chunk::<2>().copied())
+                .map_or(0, i16::from_le_bytes)
+        });
+        let on = |name: &str| find(inner, name).and_then(Block::bool) == Some(true);
+        Some(Self {
+            slots,
+            group: integer(inner, "BlkN").unwrap_or(1).max(1),
+            per: integer(inner, "CrIC").unwrap_or(1).max(1),
+            interval: integer(inner, "CrI").unwrap_or(1) as f32,
+            interval_random: integer(inner, "CrIR").unwrap_or_default().max(0),
+            life: integer(inner, "CrIL").unwrap_or(-1) as f32,
+            life_random: integer(inner, "CrLR").unwrap_or_default().max(0),
+            remade: on("bCrN"),
+            injection: integer(inner, "SIPT").unwrap_or_default(),
+            spread: triplet(inner, ["CrAX", "CrAY", "CrAZ"]),
+            heading: integer(inner, "SIDT").unwrap_or_default(),
+            cone: [float(inner, "IRD0", 0.0), float(inner, "IRD1", 0.0)],
+            speed: [float(inner, "VMin", 0.0), float(inner, "VMax", 0.0)],
+            accel: triplet(inner, ["CGX", "CGY", "CGZ"]),
+            begin: [float(inner, "SBX", 1.0), float(inner, "SBY", 1.0)],
+            end: [float(inner, "SEX", 1.0), float(inner, "SEY", 1.0)],
+            curve: float(inner, "SC", 1.0),
+            random_size: [
+                [float(inner, "SRX0", 1.0), float(inner, "SRX1", 1.0)],
+                [float(inner, "SRY0", 1.0), float(inner, "SRY1", 1.0)],
+            ],
+            linked_size: on("bSRL"),
+            angles: triplet(inner, ["RIX", "RIY", "RIZ"]),
+            angles_random: triplet(inner, ["RBX", "RBY", "RBZ"]),
+            rate: triplet(inner, ["RAX", "RAY", "RAZ"]),
+            rate_random: triplet(inner, ["RVX", "RVY", "RVZ"]),
+            cells: [
+                integer(inner, "UvCU").unwrap_or(1).max(1),
+                integer(inner, "UvCV").unwrap_or(1).max(1),
+            ],
+            cell_interval: integer(inner, "UvIv").unwrap_or_default(),
+            cell_random: integer(inner, "UvNR").unwrap_or_default().max(0),
+            cell_loops: integer(inner, "UvLC").unwrap_or_default(),
+            mirrors: on("bRUV"),
+            colors,
+            frames,
+        })
+    }
+
+    /// The color the four `Cols` keys hold at `age`, against the frames `Frms` puts them at.
+    fn tint(&self, age: f32) -> Vec4 {
+        let key = |at: usize| Vec4::from(self.colors[at].map(|lane| f32::from(lane) / 255.0));
+        if age <= f32::from(self.frames[0]) {
+            return key(0);
+        }
+        let Some(at) = (1..4).find(|&at| f32::from(self.frames[at]) > age) else {
+            return key(3);
+        };
+        let (low, high) = (f32::from(self.frames[at - 1]), f32::from(self.frames[at]));
+        key(at - 1) + (key(at) - key(at - 1)) * ((age - low) / (high - low))
+    }
+
+    /// Slot `slot` at `age` frames into the particle carrying it, or nothing where it has not been
+    /// made yet or has run out a life of its own.
+    fn at(&self, slot: usize, age: f32, key: [u64; 3]) -> Option<Slot> {
+        let random = |lane: u64| noise(key, lane);
+        let between = |lane, [low, high]: [f32; 2]| low + (high - low) * random(lane);
+        let whole = |lane, span: i32| ((span + 1) as f32 * random(lane)).floor();
+
+        let group = (slot as i32 / self.group) / self.per;
+        let age = age - (group as f32 * self.interval + whole(0, self.interval_random));
+        if age < 0.0 {
+            return None;
+        }
+        let life = self.life + whole(1, self.life_random);
+        let age = match (life > 0.0, self.remade) {
+            (true, true) => age % life,
+            (true, false) if age >= life => return None,
+            _ => age,
+        };
+
+        let held = self.cells[0] * self.cells[1];
+        let mut cell = whole(2, self.cell_random) as i32 % held;
+        if self.cell_interval > 0 {
+            let walked = cell + (age / self.cell_interval as f32) as i32;
+            if self.cell_loops > 0 && walked >= held * self.cell_loops {
+                return None;
+            }
+            cell = match self.cell_loops < 0 && walked >= -(held * self.cell_loops) {
+                true => held - 1,
+                false => walked.rem_euclid(held),
+            };
+        }
+
+        let along = match self.life > 0.0 {
+            true => (age / self.life).powf(self.curve),
+            false => 0.0,
+        };
+        let across = between(3, self.random_size[0]);
+        let down = match self.linked_size {
+            true => across,
+            false => between(4, self.random_size[1]),
+        };
+        let heading = match self.heading {
+            0 => cone(0.0, std::f32::consts::PI, random(5), random(6)),
+            1 => cone(self.cone[0], self.cone[1], random(5), random(6)),
+            2 => Vec3::X,
+            3 => Vec3::Y,
+            4 => Vec3::Z,
+            _ => Vec3::ZERO,
+        };
+        let spread = match self.injection {
+            0 => self.spread * Vec3::from([7, 8, 9].map(|lane| 2.0 * random(lane) - 1.0)),
+            _ => Vec3::ZERO,
+        };
+        let swing = |base: Vec3, span: Vec3, lane: u64| {
+            base + span * Vec3::from([0, 1, 2].map(|axis| 2.0 * random(lane + axis) - 1.0))
+        };
+
+        Some(Slot {
+            offset: spread + heading * between(10, self.speed) * age + 0.5 * self.accel * age * age,
+            angles: swing(self.angles, self.angles_random, 11)
+                + swing(self.rate, self.rate_random, 14) * age,
+            size: [
+                (self.begin[0] + (self.end[0] - self.begin[0]) * along) * across,
+                (self.begin[1] + (self.end[1] - self.begin[1]) * along) * down,
+            ],
+            color: self.tint(age),
+            cell: [cell % self.cells[0], cell / self.cells[0]],
+            mirrored: self.mirrors && random(17) >= 0.5,
+        })
+    }
+}
+
+/// The uv rows a particle hands over, narrowed onto one cell of a `UvCU` by `UvCV` atlas. The game
+/// writes the cell straight into the vertex it builds, so this stands ahead of whatever the
+/// particle's own uv sets do to a coordinate.
+fn celled(
+    mut rows: [[f32; 4]; UV_SETS * UV_REGISTERS],
+    slot: &Slot,
+    cells: [i32; 2],
+) -> [[f32; 4]; UV_SETS * UV_REGISTERS] {
+    let span = [1.0 / cells[0] as f32, 1.0 / cells[1] as f32];
+    let middle = [
+        (slot.cell[0] as f32 + 0.5) * span[0] - 0.5,
+        (slot.cell[1] as f32 + 0.5) * span[1] - 0.5,
+    ];
+    for row in &mut rows {
+        row[3] += row[0] * middle[0] + row[1] * middle[1];
+        row[0] *= match slot.mirrored {
+            true => -span[0],
+            false => span[0],
+        };
+        row[1] *= span[1];
+    }
+    rows
 }
 
 /// One of the up to four uv sets a particle carries, `UvSt`. The sprite packages read a coordinate
@@ -423,6 +670,7 @@ struct Particle {
     shape: Shape,
     facing: Facing,
     blend: Blend,
+    simple: Option<Simple>,
     shading: std::sync::Arc<Shading>,
 }
 
@@ -608,6 +856,7 @@ impl Particle {
             texture: index(nested(blocks, "TC1"), "TLst"),
             facing: Facing::read(kind, integer(blocks, "RBDT").unwrap_or_default()),
             blend: integer(blocks, "RMT").unwrap_or_default().into(),
+            simple: Simple::read(blocks),
         }
     }
 }
@@ -1099,34 +1348,68 @@ impl Effect {
     }
 
     pub fn drawn(&self, state: &State) -> Vec<Drawn> {
-        state
-            .particles
-            .iter()
-            .map(|live| {
-                let def = &self.particles[live.def];
-                let age = (state.frame - live.born) as f32;
-                let angles = def.rotation.at(age) + read(&def.spin, age) * age;
+        let mut out = Vec::with_capacity(state.particles.len());
+        for live in &state.particles {
+            let def = &self.particles[live.def];
+            let age = (state.frame - live.born) as f32;
+            let angles = def.rotation.at(age) + read(&def.spin, age) * age;
+            let origin = live.at + def.position.at(age);
+            let scale = def.scale.at(age);
+            let held = Drawn {
+                center: [0.0; 3],
+                scale: [0.0; 3],
+                turn: [0.0; 4],
+                roll: angles.z,
+                color: (live.tint * def.color.at(age)).to_array(),
+                rim: def.fresnel.at(age),
+                uv: transform(&def.uv, age),
+                texture: def.texture,
+                shape: def.shape,
+                facing: def.facing,
+                blend: def.blend,
+                def: live.def,
+            };
+            let Some(simple) = &def.simple else {
                 let place = live.place.under(Place {
-                    origin: live.at + def.position.at(age),
+                    origin,
                     turn: rotation(angles),
-                    scale: def.scale.at(age),
+                    scale,
                 });
-                Drawn {
+                out.push(Drawn {
                     center: place.origin.to_array(),
                     scale: place.scale.to_array(),
                     turn: place.turn.to_array(),
-                    roll: angles.z,
-                    color: (live.tint * def.color.at(age)).to_array(),
-                    rim: def.fresnel.at(age),
-                    uv: transform(&def.uv, age),
-                    texture: def.texture,
-                    shape: def.shape,
-                    facing: def.facing,
-                    blend: def.blend,
-                    def: live.def,
+                    ..held
+                });
+                continue;
+            };
+            for at in 0..simple.slots {
+                if out.len() >= PARTICLES {
+                    break;
                 }
-            })
-            .collect()
+                let key = [live.def as u64, live.born as u64, at as u64];
+                let Some(slot) = simple.at(at, age, key) else {
+                    continue;
+                };
+                // The corners the game builds a slot's quad from sit either side of its stated
+                // size, where a plain sprite's sit either side of half its scale.
+                let place = live.place.under(Place {
+                    origin: origin + slot.offset,
+                    turn: rotation(angles + slot.angles),
+                    scale: scale * Vec3::new(2.0 * slot.size[0], 2.0 * slot.size[1], 1.0),
+                });
+                out.push(Drawn {
+                    center: place.origin.to_array(),
+                    scale: place.scale.to_array(),
+                    turn: place.turn.to_array(),
+                    roll: angles.z + slot.angles.z,
+                    color: (live.tint * def.color.at(age) * slot.color).to_array(),
+                    uv: celled(held.uv, &slot, simple.cells),
+                    ..held
+                });
+            }
+        }
+        out
     }
 
     /// What the shader package a particle is drawn with is asked for.
@@ -1504,5 +1787,146 @@ mod test {
         assert_eq!(rim.power, 1.0);
         assert_eq!(rim.begin, [1.0; 4]);
         assert_eq!(rim.end, [1.0; 4]);
+    }
+
+    /// A particle carrying a `Smpl` layer, whose slots the tests below read.
+    fn simple(inner: &[Vec<u8>], flag: i32) -> Vec<u8> {
+        block(
+            "Ptcl",
+            &[
+                scalar("PrVT", 1),
+                scalar("bSCt", flag),
+                block("Smpl", &inner.concat()),
+            ]
+            .concat(),
+        )
+    }
+
+    fn shown(bytes: Vec<u8>, frame: i32) -> Vec<super::Drawn> {
+        let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+        let effect = Effect::read(&file);
+        let state = State {
+            frame,
+            running: Vec::new(),
+            particles: vec![Live {
+                def: 0,
+                born: 0,
+                life: f32::INFINITY,
+                at: Vec3::ZERO,
+                velocity: Vec3::ZERO,
+                place: Place::NONE,
+                tint: Vec4::ONE,
+            }],
+        };
+        effect.drawn(&state)
+    }
+
+    fn effect(inner: &[Vec<u8>], flag: i32) -> Vec<u8> {
+        block(
+            "AVFX",
+            &[scalar("Ver", 0x0001_0000), simple(inner, flag)].concat(),
+        )
+    }
+
+    /// `w_fire208n1y`'s flame makes one slot every `CrI` frames and gives each `CrIL` frames of its
+    /// own, so its sixteen slots are one frame apart and the last dies fifteen frames after the
+    /// first. Four slots on a four-frame life run the same shape out in seven.
+    #[test]
+    fn a_simple_layer_makes_a_slot_an_interval_and_retires_it_a_life_later() {
+        let held = [
+            scalar("CCnt", 4),
+            scalar("CrI", 1),
+            scalar("CrIC", 1),
+            scalar("BlkN", 1),
+            scalar("CrIL", 4),
+        ];
+        let counts: Vec<usize> = (0..9).map(|frame| shown(effect(&held, 1), frame).len()).collect();
+        assert_eq!(counts, [1, 2, 3, 4, 3, 2, 1, 0, 0]);
+    }
+
+    /// The whole of the atlas drawn at once is what made the brazier read as a grid of little
+    /// flames. A slot takes one cell of it, walking one cell every `UvIv` frames of its own age and
+    /// starting over at the end, and the rows it hands the shader put that cell's corners where the
+    /// texture holds them.
+    #[test]
+    fn a_simple_slot_takes_one_cell_of_its_atlas_and_walks_it() {
+        let held = [
+            scalar("CCnt", 1),
+            scalar("CrIL", -1),
+            scalar("UvCU", 4),
+            scalar("UvCV", 4),
+            scalar("UvIv", 1),
+        ];
+        // The corner a quad's own uv reaches: the shader is handed a coordinate about the middle.
+        let corners = |frame: i32| {
+            let uv = shown(effect(&held, 1), frame)[0].uv;
+            let at = |u: f32, v: f32| {
+                [
+                    uv[0][0] * u + uv[0][1] * v + uv[0][3],
+                    uv[1][0] * u + uv[1][1] * v + uv[1][3],
+                ]
+            };
+            [at(-0.5, -0.5), at(0.5, 0.5)]
+        };
+        assert_eq!(corners(0), [[0.0, 0.0], [0.25, 0.25]]);
+        assert_eq!(corners(5), [[0.25, 0.25], [0.5, 0.5]]);
+        assert_eq!(corners(15), [[0.75, 0.75], [1.0, 1.0]]);
+        assert_eq!(corners(16), [[0.0, 0.0], [0.25, 0.25]]);
+    }
+
+    /// A slot is drawn between the size it begins at and the one it ends at, over its own life and
+    /// either side of its own middle, where a plain sprite is drawn either side of half its scale.
+    #[test]
+    fn a_simple_slot_runs_from_the_size_it_begins_at_to_the_one_it_ends_at() {
+        let held = [
+            scalar("CCnt", 1),
+            scalar("CrIL", 4),
+            scalar("SBX", 0.5f32.to_bits() as i32),
+            scalar("SEX", 0.25f32.to_bits() as i32),
+            scalar("SBY", 1.0f32.to_bits() as i32),
+            scalar("SEY", 1.0f32.to_bits() as i32),
+            scalar("SC", 1.0f32.to_bits() as i32),
+        ];
+        let width = |frame: i32| shown(effect(&held, 1), frame)[0].scale[0];
+        assert_eq!(width(0), 1.0);
+        assert_eq!(width(2), 0.75);
+        assert_eq!(width(3), 0.625);
+        assert_eq!(shown(effect(&held, 1), 3)[0].scale[1], 2.0);
+    }
+
+    /// `Cols` is four colors against the four frames `Frms` states, lerped over a slot's own age and
+    /// held at either end.
+    #[test]
+    fn a_simple_slot_reads_the_color_keys_beside_its_frames() {
+        let mut keys = Vec::new();
+        for color in [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255], [255, 255, 255, 0]] {
+            keys.extend(color);
+        }
+        let mut frames = Vec::new();
+        for frame in [0i16, 2, 4, 8] {
+            frames.extend(frame.to_le_bytes());
+        }
+        let held = [
+            scalar("CCnt", 1),
+            scalar("CrIL", -1),
+            block("Cols", &keys),
+            block("Frms", &frames),
+        ];
+        let color = |frame: i32| shown(effect(&held, 1), frame)[0].color;
+        assert_eq!(color(0), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(color(1), [0.5, 0.5, 0.0, 1.0]);
+        assert_eq!(color(4), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(color(9), [1.0, 1.0, 1.0, 0.0]);
+    }
+
+    /// The game runs the whole layer behind `bSCt`, so a particle that holds the block without
+    /// turning it on is drawn as the one quad it was before.
+    #[test]
+    fn a_particle_that_states_no_bsct_keeps_the_quad_of_its_own() {
+        let held = [scalar("CCnt", 16), scalar("CrIL", 16), scalar("UvCU", 4), scalar("UvCV", 4)];
+        assert_eq!(shown(effect(&held, 1), 0).len(), 1);
+        let plain = shown(effect(&held, 0), 0);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].uv, super::program::UV_IDENTITY);
     }
 }

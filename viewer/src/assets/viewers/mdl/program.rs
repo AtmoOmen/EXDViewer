@@ -3538,7 +3538,14 @@ impl Buffer {
         // engine's own number would only move away from.
         put(water, "m_Roughness", vec![1.0; 4]);
         put(water, "m_Misc", vec![1.0; 4]);
-        put(water, "m_NoiseSize", vec![1.0; 4]);
+        // Where the whitecaps wander: a world position goes through the reciprocal here, so a one
+        // tiles the noise once per world unit rather than once across it.
+        put(water, "m_NoiseSize", vec![
+            NOISE_TEXELS,
+            NOISE_TEXELS,
+            1.0 / NOISE_TEXELS,
+            1.0 / NOISE_TEXELS,
+        ]);
 
         // The pair below is read by every one of the twenty-eight shaders holding the buffer, and the
         // two past it by none of them.
@@ -3731,6 +3738,12 @@ fn write(out: &mut [u8], register: usize, values: &[f32]) {
 /// everything it reflects: at nought the whole environment term goes and only what it refracts is
 /// left. Byte-identical across two captured frames, so the engine holds these rather than any file.
 const REFLECTION_WEIGHT: [f32; 2] = [4.0, 0.2];
+
+/// Texels across `common/graphics/texture/-noise.tex`. Read off `ffxiv_dx11.exe`: the water
+/// renderer writes that texture's own width, height and their reciprocals into `m_NoiseSize` every
+/// frame, and a shader scales a world position by the reciprocal, so one tile of the noise spans
+/// this many world units.
+const NOISE_TEXELS: f32 = 128.0;
 
 /// The floor a background surface's ambient never falls below, and the gain its occlusion is read
 /// at. Byte-identical across five captures of four zones, so the engine holds these rather than any
@@ -4537,6 +4550,32 @@ mod test {
         };
         // Two seconds of it, at the one radian a second the engine states.
         assert!((phase(3.0) - phase(1.0) - 2.0).abs() < 1e-5);
+    }
+
+    /// The register water wanders its whitecaps by, which is the noise texture's own size: the
+    /// shader multiplies a world position by `.zw`, so those have to be the reciprocal of a real
+    /// texture rather than a one.
+    #[test]
+    fn the_whitecap_noise_tiles_across_the_texture_the_engine_loads() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let water = Buffer {
+            name: "g_WaterParameter".to_owned(),
+            members: vec![hlsl::layout::Member {
+                name: "m_NoiseSize".to_owned(),
+                offset: 0,
+                size: 16,
+                kind: "float4".to_owned(),
+            }],
+            registers: 1,
+            fixed: None,
+        };
+        let filled = floats(water.fill(&Scene::default(), Pass::Water, &[]));
+        assert_eq!(filled[..2], [128.0, 128.0]);
+        assert_eq!(filled[2..4], [1.0 / 128.0, 1.0 / 128.0]);
     }
 
     /// The gust the engine advects: a cycle over `wavelength` world units, carried along the

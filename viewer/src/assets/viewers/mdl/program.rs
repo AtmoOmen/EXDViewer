@@ -1746,6 +1746,11 @@ pub const WAVING_RATE: f32 = 1.0;
 /// `uvOffset` by `heading * max_strength * worldScale` times it, wrapping the pair into `0..1`.
 const WIND_SCROLL_INTERVAL: f32 = 30.0;
 
+/// What a layer's stated strength reaches `grass.shpk` at. Read off `ffxiv_dx11.exe`: the renderer
+/// keeps it in the slot straight after the wind block and nothing writes it past the constructor.
+/// The advection is not taken down by it, only the two the shader leans a blade between.
+const WIND_POWER_SCALE: f32 = 0.15;
+
 /// World units a leaf leans by at the far end of one sway. Measured off `m_WindVector` in real
 /// frames rather than derived: the reach a wind set sums to is several times this and is not what the
 /// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
@@ -2902,8 +2907,9 @@ impl Buffer {
         // Two layers, each a heading, and a strength between `windPowerMin` and `windPowerMin +
         // windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex` at `worldPos.xz *
         // worldScale - uvOffset`. `worldScale` is the plain reading of the file's own stated cycle
-        // length. The engine advects `uvOffset` along the layer's heading by its own strength, so a
-        // stronger wind runs the field past faster; it wraps the pair every cycle, which is what
+        // length. The pair the blade leans between is the stated range rather than the stated
+        // strength, both taken down by [`WIND_POWER_SCALE`]. The engine advects `uvOffset` along the
+        // layer's heading by its own strength, so a stronger wind runs the field past faster; it wraps the pair every cycle, which is what
         // keeps the coordinate exact however long the clock has run. `windViewDir` is read by no
         // vertex shader this viewer runs, so it is left at nought.
         if self.name == "g_WindInfo" {
@@ -2923,9 +2929,14 @@ impl Buffer {
                         layer.heading.x,
                         layer.heading.y,
                         layer.heading.z,
-                        layer.max_strength,
+                        (layer.max_strength - layer.min_strength) * WIND_POWER_SCALE,
                     ]);
-                    write(&mut out, base + 1, &[offset.x, offset.y, world_scale, layer.min_strength]);
+                    write(&mut out, base + 1, &[
+                        offset.x,
+                        offset.y,
+                        world_scale,
+                        layer.min_strength * WIND_POWER_SCALE,
+                    ]);
                 }
             }
             return out;
@@ -4208,9 +4219,9 @@ mod test {
         ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, Customize, DECAL,
         DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
         INSTANCING, JOINT, REFLECTION_PARAM, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS,
-        SUN_PARAM, WAVING, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field,
-        encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
-        selector, shader_types, sun,
+        SUN_PARAM, WAVING, WIND_POWER_SCALE, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer,
+        ambient, decal_field, encode, instance_fields, joints, moon_phase, moon_roll, moon_softness,
+        moon_terminator, selector, shader_types, sun,
     };
 
     /// The two buffers of the post chain no reflection describes, against what the game's own
@@ -5017,8 +5028,8 @@ mod test {
         let filled = held(30.0);
         // The world-to-uv scale is the stated cycle length and nothing else.
         assert_eq!(filled[6], 1.0 / 512.0);
-        assert_eq!(filled[3], 8.0);
-        assert_eq!(filled[7], 2.0);
+        assert_eq!(filled[3], (8.0 - 2.0) * WIND_POWER_SCALE);
+        assert_eq!(filled[7], 2.0 * WIND_POWER_SCALE);
         // Thirty seconds at strength eight carries the field eight cycles' worth of texels.
         assert!((filled[5] - (8.0 / 512.0)).abs() < 1e-6, "{}", filled[5]);
         assert_eq!(filled[4], 0.0);

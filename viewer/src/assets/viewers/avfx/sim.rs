@@ -1144,3 +1144,72 @@ impl Effect {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use ironworks::file::File;
+    use ironworks::file::avfx::Avfx;
+
+    use super::{Fresnel, Particle, nested};
+
+    /// One block as the format writes it: the tag back to front and null-padded, its length, then
+    /// a payload rounded up to the next four bytes.
+    fn block(tag: &str, payload: &[u8]) -> Vec<u8> {
+        let mut head = [0u8; 4];
+        for (at, byte) in tag.bytes().rev().enumerate() {
+            head[at] = byte;
+        }
+        let mut out = head.to_vec();
+        out.extend(u32::try_from(payload.len()).expect("a short payload").to_le_bytes());
+        out.extend(payload);
+        out.resize(out.len().next_multiple_of(4), 0);
+        out
+    }
+
+    /// A curve holding one key, whose three floats a scalar reads the last of and a colour all of.
+    fn curve(tag: &str, data: [f32; 3]) -> Vec<u8> {
+        let mut key = vec![0u8; 4];
+        for value in data {
+            key.extend(value.to_le_bytes());
+        }
+        block(tag, &block("Keys", &key))
+    }
+
+    fn scalar(tag: &str, value: i32) -> Vec<u8> {
+        block(tag, &value.to_le_bytes())
+    }
+
+    #[test]
+    fn a_model_particle_reads_the_rim_ramp_its_data_block_states() {
+        let colour = |tag: &str, rgb: [f32; 3], alpha: f32| {
+            block(tag, &[curve("RGB", rgb), curve("A", [0.0, 0.0, alpha])].concat())
+        };
+        let data = block(
+            "Data",
+            &[
+                curve("FrC", [0.0, 0.0, 3.0]),
+                colour("ColB", [1.0, 1.0, 1.0], 0.0),
+                colour("ColE", [0.5, 0.25, 0.125], 1.0),
+            ]
+            .concat(),
+        );
+        let particle = block("Ptcl", &[scalar("PrVT", 5), data].concat());
+        let bytes = block("AVFX", &[scalar("Ver", 0x0001_0000), particle].concat());
+
+        let file = Avfx::read(std::io::Cursor::new(bytes)).expect("a whole file");
+        let held = Particle::read(&file.particles()[0], 0, &[]);
+        let rim = held.fresnel.at(0.0);
+        assert_eq!(rim.power, 3.0);
+        assert_eq!(rim.begin, [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(rim.end, [0.5, 0.25, 0.125, 1.0]);
+    }
+
+    /// A file stating no ramp has to leave the lerp an identity rather than a black, invisible one.
+    #[test]
+    fn a_particle_with_no_ramp_reads_as_two_white_ends() {
+        let rim = Fresnel::read(nested(&[], "Data")).at(0.0);
+        assert_eq!(rim.power, 1.0);
+        assert_eq!(rim.begin, [1.0; 4]);
+        assert_eq!(rim.end, [1.0; 4]);
+    }
+}

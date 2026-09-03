@@ -1241,12 +1241,16 @@ mod test {
 
     /// The rows a capture's own pipeline state settles. Nought is `SRC_ALPHA -> INV_SRC_ALPHA` and
     /// two is `SRC_ALPHA -> ONE`; ten sets the same pipeline as two, which is what says the eighth
-    /// bit leaves the family alone rather than naming one of its own.
+    /// bit leaves the family alone rather than naming one of its own. The one glow the game draws
+    /// against `ZERO -> SRC_COLOR` is the second of a pair whose first is that additive two, which
+    /// leaves the multiply to the one beside it.
     #[test]
     fn the_blend_modes_are_the_ones_the_captures_set() {
         assert_eq!(Blend::from(0), Blend::Alpha);
         assert_eq!(Blend::from(2), Blend::Add);
         assert_eq!(Blend::from(10), Blend::Add);
+        assert_eq!(Blend::from(1), Blend::Multiply);
+        assert_eq!(Blend::from(9), Blend::Multiply);
         for mode in 1..=4 {
             assert_eq!(Blend::from(mode), Blend::from(mode + 8), "mode {mode}");
         }

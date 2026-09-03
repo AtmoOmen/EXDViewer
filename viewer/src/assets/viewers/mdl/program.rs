@@ -1693,6 +1693,12 @@ pub struct WindLayer {
 /// header carries it is not placed here, so this is the engine's own default.
 pub const WAVING_RATE: f32 = 1.0;
 
+/// World units a leaf leans by at the far end of one sway. Measured off `m_WindVector` in real
+/// frames rather than derived: the reach a wind set sums to is several times this and is not what the
+/// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
+/// it is not the set and is not placed here.
+pub const WIND_REACH: f32 = 1.467_972;
+
 /// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
 /// hold both wind layers already summed; `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength
 /// per layer instead, which `layers` carries apart for it. A mesh weights the reach by its own stream,
@@ -1701,7 +1707,8 @@ pub const WAVING_RATE: f32 = 1.0;
 pub struct Wind {
     /// Which way a leaf leans, in world space.
     pub heading: Vec3,
-    /// How far it leans at the far end of one sway, in world units.
+    /// What the set's two layers sum to, which the panel shows. A sway itself runs at
+    /// [`WIND_REACH`], not at this.
     pub reach: f32,
     /// The two layers `heading` and `reach` are summed from, apart.
     pub layers: [WindLayer; 2],
@@ -3541,15 +3548,14 @@ impl Buffer {
         put(water, "m_Misc", vec![1.0; 4]);
         put(water, "m_NoiseSize", vec![1.0; 4]);
 
-        // The wind carries the whole reach: a mesh weights it down to a tenth at most, which is what
-        // leaves the stated strength in world units. The pair below is read by every one of the
-        // twenty-eight shaders holding the buffer, and the two past it by none of them.
+        // The pair below is read by every one of the twenty-eight shaders holding the buffer, and the
+        // two past it by none of them.
         //
         // Both are added to a position the instancing record has already brought into view space, so
         // they are handed over in that space too. The sun draws the same sway under its own view,
         // and a leaf whose shadow leans one way while it leans another is what leaving them in the
         // world looks like.
-        let wind = view.transform_vector3(scene.wind.heading * scene.wind.reach);
+        let wind = view.transform_vector3(scene.wind.heading * WIND_REACH);
         put(WAVING, "m_WindVector", wind.to_array().to_vec());
         put(WAVING, "m_UpVector", view.transform_vector3(Vec3::Y).to_array().to_vec());
         // All four as the engine writes them once and never again, though no waving shader reads
@@ -4034,7 +4040,7 @@ mod test {
     use super::{
         ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
         INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass, Scene, Sky, Volume,
-        ambient, decal_field,
+        Wind, ambient, decal_field,
         encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
         selector, shader_types, sun,
     };
@@ -4473,7 +4479,16 @@ mod test {
             registers: 3,
             fixed: None,
         };
-        let filled = floats(waving.fill(&Scene::default(), Pass::Buffer, &[]));
+        let scene = Scene {
+            wind: Wind {
+                heading: Vec3::Z,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filled = floats(waving.fill(&scene, Pass::Buffer, &[]));
+        // The wind the engine hands over, not the reach the set sums to.
+        assert_eq!(filled[..3], [0.0, 0.0, 1.467_972]);
         assert_eq!(filled[8..12], [1.0, 1.0, 0.2, 1.0]);
 
         let phase = |clock| {

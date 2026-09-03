@@ -237,13 +237,11 @@ type Read = Vec<(String, Vec<u8>)>;
 /// The race a `.atch` fetch was asked for, alongside the bytes once it lands.
 type AtchRead = (u16, Vec<u8>);
 
-/// The stance the body was last put in: the class directory its weapons name, whether they were
-/// drawn, and the pose it settled on there.
+/// The stance the body was last put in: the class directory its weapons name, and whether they
+/// were drawn.
 struct Stood {
     held: String,
     drawn: bool,
-    pack: String,
-    motion: &'static str,
 }
 
 /// What a picked set is made of, and what to call it.
@@ -953,42 +951,50 @@ impl CharacterBuilder {
     /// `bt_emp_emp`'s idle pack holds no animation at all, which is bare hands having no drawn
     /// pose to take.
     fn stand(&self, model: &mdl::Rendered) {
-        let (Some(stance), Some(listing)) = (&self.stance, &self.listing) else {
+        let Some(stance) = &self.stance else {
             return;
         };
         let wielded = self.wielded();
         let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
         let held = stance.directory(set(0), set(1));
+        let sheathed = (stance::sheathed_pack(self.code), stance::SHEATHED);
+        let poses = match self.drawn {
+            true => vec![
+                (
+                    stance::pack(self.code, &held, "resident/idle.pap"),
+                    stance::DRAWN,
+                ),
+                sheathed,
+            ],
+            false => vec![sheathed],
+        };
         let mut stood = self.stood_in.borrow_mut();
-        if let Some(stood) = stood
+        if stood
             .as_ref()
-            .filter(|stood| stood.held == held && stood.drawn == self.drawn)
+            .is_some_and(|stood| stood.held == held && stood.drawn == self.drawn)
         {
             // Stated again rather than left alone: the pack list landing stands the body in its
             // own conventional idle, which would otherwise take the class's place under it.
-            model.stand(&stood.pack, stood.motion, 0.0);
+            model.stand(&poses, 0.0);
             return;
         }
 
-        let shipped = listing.under(&stance::pack(self.code, &held, "resident"));
-        let drawn_pack = stance::pack(self.code, &held, "resident/idle.pap");
-        let (pack, motion) = match self.drawn && shipped.contains(&drawn_pack) {
-            true => (drawn_pack, stance::DRAWN),
-            false => (stance::sheathed_pack(self.code), stance::SHEATHED),
-        };
         let fade = model
             .standing()
-            .map_or(0.0, |from| stance.fade(&from, motion));
-        log::info!("character: {held} stands in {motion} from {pack}, blending over {fade:.3}s");
-        model.stand(&pack, motion, fade);
+            .map_or(0.0, |from| stance.fade(&from, poses[0].1));
+        log::info!(
+            "character: {held} stands in {} from {}, blending over {fade:.3}s",
+            poses[0].1,
+            poses[0].0
+        );
+        model.stand(&poses, fade);
 
-        let turning = stood.as_ref().is_some_and(|stood| stood.drawn != self.drawn);
-        let transition = stance::pack(self.code, &held, "resident/sub.pap");
-        if turning && shipped.contains(&transition) {
+        if stood.as_ref().is_some_and(|stood| stood.drawn != self.drawn) {
             let over = match self.drawn {
                 true => stance::DRAW,
                 false => stance::SHEATHE,
             };
+            let transition = stance::pack(self.code, &held, "resident/sub.pap");
             let fade = stance.fade(stance::DRAWN, over);
             log::info!("character: {over} over it from {transition}, blending over {fade:.3}s");
             model.act(&transition, over, fade);
@@ -996,8 +1002,6 @@ impl CharacterBuilder {
         *stood = Some(Stood {
             held,
             drawn: self.drawn,
-            pack,
-            motion,
         });
     }
 

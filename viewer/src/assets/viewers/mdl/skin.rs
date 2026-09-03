@@ -339,10 +339,10 @@ struct Layer {
     /// skeleton rests, which is what a file being inspected shows.
     motion: Cell<Option<usize>>,
     time: Cell<f32>,
-    /// Paths still to try, in order, if the one loading now lands without `opening`'s motion. A
-    /// name and its file disagree often enough that a guess has to be verified rather than
-    /// trusted on sight.
-    retry: RefCell<Vec<String>>,
+    /// Packs still to try, in order, each with the motion it is wanted for, if the one loading now
+    /// lands without its own. A name and its file disagree often enough that a guess has to be
+    /// verified rather than trusted on sight, and a pack the install lists can still ship empty.
+    retry: RefCell<Vec<(String, String)>>,
     /// The clip the last change is fading out of, sampled under the incoming one until the fade
     /// closes. A layer with nothing wanted fades this one out to nothing instead, which is what
     /// lets the layers under it back through.
@@ -397,14 +397,14 @@ impl Layer {
         }
     }
 
-    /// Loads the first of `candidates` opening on `motion`, keeping the rest to try in turn if it
-    /// lands without that motion. An empty list leaves the layer at rest.
-    fn seek(&self, mut candidates: Vec<String>, motion: &str, fade: f32) {
+    /// Loads the first of `candidates` that opens on the motion it names, keeping the rest to try
+    /// in turn if it lands without one. An empty list leaves the layer at rest.
+    fn seek(&self, mut candidates: Vec<(String, String)>, fade: f32) {
         match candidates.is_empty() {
             true => self.load("", None, None, fade),
             false => {
-                let first = candidates.remove(0);
-                self.load(&first, Some(motion), None, fade);
+                let (path, motion) = candidates.remove(0);
+                self.load(&path, Some(&motion), None, fade);
                 *self.retry.borrow_mut() = candidates;
             }
         }
@@ -451,8 +451,9 @@ impl Layer {
                 let mut retry = self.retry.borrow_mut();
                 (!retry.is_empty()).then(|| retry.remove(0))
             };
-            if let Some(next) = next {
+            if let Some((next, motion)) = next {
                 next.clone_into(&mut self.wanted.borrow_mut());
+                *self.opening.borrow_mut() = Some(motion);
                 *self.pack.borrow_mut() = None;
                 self.motion.set(None);
                 self.time.set(0.0);
@@ -576,6 +577,16 @@ impl Layer {
         };
         self.time.set(held(companion, at, duration));
     }
+}
+
+/// Every candidate paired with the `cfxf_` motion an expression is looked for by, which is the
+/// same one in whichever of them holds it.
+fn opening(candidates: Vec<String>, name: &str) -> Vec<(String, String)> {
+    let motion = format!("cfxf_{name}");
+    candidates
+        .into_iter()
+        .map(|path| (path, motion.clone()))
+        .collect()
 }
 
 /// Where a `duration`-second clip should sit to hold `companion` against `at`, the other clip's
@@ -1186,19 +1197,28 @@ impl Animation {
         self.running.set(true);
     }
 
-    /// Stands the body in `motion` from `path`, cross-fading out of whatever it was standing in
-    /// over `fade` seconds. A base pose is picked by what the character is doing rather than by
-    /// what its pack opens on, which is why this names the motion.
+    /// Stands the body in the first of `poses` whose own pack holds the motion it names,
+    /// cross-fading out of whatever it was standing in over `fade` seconds. A base pose is picked
+    /// by what the character is doing rather than by what a pack opens on, which is why each names
+    /// its motion; a pack that is missing or that ships empty gives way to the next, which is how
+    /// a stance with no pose of its own falls back to one that has.
     ///
-    /// Asking again for the pose already asked for changes nothing, so a caller that states the
+    /// Asking again for a pose already stood in changes nothing, so a caller that states the
     /// stance every frame does not refetch the pack on every one of them.
-    pub fn stand(&self, path: &str, motion: &str, fade: f32) {
-        if *self.body.wanted.borrow() == path
-            && self.body.opening.borrow().as_deref() == Some(motion)
+    pub fn stand(&self, poses: &[(String, &str)], fade: f32) {
+        let wanted = self.body.wanted.borrow().clone();
+        let opening = self.body.opening.borrow().clone();
+        if poses
+            .iter()
+            .any(|(path, motion)| *path == wanted && opening.as_deref() == Some(*motion))
         {
             return;
         }
-        self.body.load(path, Some(motion), None, fade);
+        let candidates = poses
+            .iter()
+            .map(|(path, motion)| (path.clone(), (*motion).to_owned()))
+            .collect();
+        self.body.seek(candidates, fade);
         self.running.set(true);
     }
 
@@ -1234,7 +1254,7 @@ impl Animation {
             _ => Vec::new(),
         };
         candidates.push(format!("{root}resident/face.pap"));
-        self.face.seek(candidates, &format!("cfxf_{name}"), 0.0);
+        self.face.seek(opening(candidates, name), 0.0);
         *self.pending.borrow_mut() = Some(name.to_owned());
         self.synced.set(false);
         self.running.set(true);
@@ -1277,7 +1297,7 @@ impl Animation {
         .filter(|candidate| packs.iter().any(|pack| pack.path == *candidate))
         .collect();
         drop(held);
-        self.face.seek(candidates, &format!("cfxf_{name}"), 0.0);
+        self.face.seek(opening(candidates, name.as_str()), 0.0);
         *self.pending.borrow_mut() = Some(name.clone());
         *self.linked.borrow_mut() = Some(name.clone());
         self.synced.set(true);
@@ -1807,7 +1827,7 @@ mod tests {
     use super::super::super::skeleton::{Rig, middle};
     use super::{
         Animation, Companion, Extra, Fetch, Layer, Leaving, Motions, PoseLookup, Poses, Skeleton,
-        Skin, code, extra, facial, found, held, ordering, pack_path, pack_root, seat_path,
+        Skin, code, extra, facial, found, held, opening, ordering, pack_path, pack_root, seat_path,
         skeleton_path,
     };
 
@@ -2082,16 +2102,19 @@ mod tests {
     #[test]
     fn seek_queues_the_rest_as_retries() {
         let layer = Layer::default();
-        layer.seek(vec!["a.pap".to_owned(), "b.pap".to_owned()], "cfxf_salute", 0.0);
+        layer.seek(opening(vec!["a.pap".to_owned(), "b.pap".to_owned()], "salute"), 0.0);
         assert_eq!(*layer.wanted.borrow(), "a.pap");
-        assert_eq!(*layer.retry.borrow(), vec!["b.pap".to_owned()]);
+        assert_eq!(
+            *layer.retry.borrow(),
+            vec![("b.pap".to_owned(), "cfxf_salute".to_owned())]
+        );
         assert_eq!(layer.opening.borrow().as_deref(), Some("cfxf_salute"));
     }
 
     #[test]
     fn seek_with_nothing_to_try_rests() {
         let layer = Layer::default();
-        layer.seek(Vec::new(), "cfxf_salute", 0.0);
+        layer.seek(Vec::new(), 0.0);
         assert!(layer.wanted.borrow().is_empty());
         assert!(layer.opening.borrow().is_none());
     }
@@ -2100,7 +2123,7 @@ mod tests {
     fn spent_waits_for_a_landing_with_nothing_left_to_try() {
         let layer = Layer::default();
         assert!(layer.spent(), "nothing wanted yet");
-        layer.seek(vec!["a.pap".to_owned()], "cfxf_salute", 0.0);
+        layer.seek(opening(vec!["a.pap".to_owned()], "salute"), 0.0);
         assert!(!layer.spent(), "still fetching, no candidates behind it");
         *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
         assert!(
@@ -2112,7 +2135,7 @@ mod tests {
     #[test]
     fn spent_stays_false_while_a_retry_is_queued() {
         let layer = Layer::default();
-        layer.seek(vec!["a.pap".to_owned(), "b.pap".to_owned()], "cfxf_salute", 0.0);
+        layer.seek(opening(vec!["a.pap".to_owned(), "b.pap".to_owned()], "salute"), 0.0);
         *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
         assert!(!layer.spent(), "b.pap is still queued behind a.pap");
     }
@@ -2260,11 +2283,13 @@ mod tests {
         let root = "chara/human/c0101/animation/f0206/";
         let layer = Layer::default();
         layer.seek(
-            vec![
-                format!("{root}nonresident/emot/salute.pap"),
-                format!("{root}resident/face.pap"),
-            ],
-            "cfxf_salute",
+            opening(
+                vec![
+                    format!("{root}nonresident/emot/salute.pap"),
+                    format!("{root}resident/face.pap"),
+                ],
+                "salute",
+            ),
             0.0,
         );
         settle(&layer, &backend);
@@ -2288,11 +2313,13 @@ mod tests {
         let root = "chara/human/c0101/animation/f0206/";
         let layer = Layer::default();
         layer.seek(
-            vec![
-                format!("{root}nonresident/comeon.pap"),
-                format!("{root}resident/face.pap"),
-            ],
-            "cfxf_comeon",
+            opening(
+                vec![
+                    format!("{root}nonresident/comeon.pap"),
+                    format!("{root}resident/face.pap"),
+                ],
+                "comeon",
+            ),
             0.0,
         );
         settle(&layer, &backend);

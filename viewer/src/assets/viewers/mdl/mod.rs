@@ -3256,10 +3256,10 @@ impl Rendered {
         *self.glowing.borrow_mut() = bones;
     }
 
-    /// Stands the character in one pose out of a pack, cross-fading out of whatever it was
-    /// standing in, which is what a change of weapon or of stance is.
-    pub fn stand(&self, path: &str, motion: &str, fade: f32) {
-        self.animation.stand(path, motion, fade);
+    /// Stands the character in the first of `poses` its own pack actually holds, cross-fading out
+    /// of whatever it was standing in, which is what a change of weapon or of stance is.
+    pub fn stand(&self, poses: &[(String, &str)], fade: f32) {
+        self.animation.stand(poses, fade);
     }
 
     /// Lays one motion over the pose the character is standing in for as long as it runs, which is

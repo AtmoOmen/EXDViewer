@@ -1832,7 +1832,6 @@ impl Buffers {
         self.pass(gl, 9, &held.gather, gathered, scene, Over::Fraction)?;
         self.pass(gl, 10, &held.occlude, occluded, scene, Over::Fraction)?;
         self.occluding = true;
-        self.drawn.occlusion = true;
         Ok(())
     }
 
@@ -1840,7 +1839,6 @@ impl Buffers {
     /// occlusion on is lit against.
     pub fn unocclude(&mut self) {
         self.occluding = false;
-        self.drawn.occlusion = false;
     }
 
     /// How much of the sun reaches each pixel, worked out from the depth it left of its own view.
@@ -4137,9 +4135,11 @@ impl Buffers {
         lamps: &[program::Lamp],
     ) -> Result<(), String> {
         // The frame starts again here, so what ran over the last one is forgotten - except the
-        // sun's own pass, which runs ahead of this one and would be forgotten before it was read.
+        // sun's own pass and the occlusion, which run ahead of this one and would be forgotten
+        // before they were read.
         self.drawn = Drawn {
             shadow: self.shadowing,
+            occlusion: self.occluding,
             ..Drawn::default()
         };
         let (position, _) = self.position.ok_or("no view position")?;

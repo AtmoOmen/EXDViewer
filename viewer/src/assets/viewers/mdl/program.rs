@@ -1746,10 +1746,17 @@ pub const WAVING_RATE: f32 = 1.0;
 /// `uvOffset` by `heading * max_strength * worldScale` times it, wrapping the pair into `0..1`.
 const WIND_SCROLL_INTERVAL: f32 = 30.0;
 
+/// What a layer's stated strength reaches `grass.shpk` at. Read off `ffxiv_dx11.exe`: the renderer
+/// keeps it in the slot straight after the wind block and nothing writes it past the constructor.
+/// The advection is not taken down by it, only the two the shader leans a blade between.
+const WIND_POWER_SCALE: f32 = 0.15;
+
 /// World units a leaf leans by at the far end of one sway. Measured off `m_WindVector` in real
-/// frames rather than derived: the reach a wind set sums to is several times this and is not what the
-/// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
-/// it is not the set and is not placed here.
+/// frames rather than derived: the reach a wind set sums to is several times this and is not what
+/// the engine hands over. Every frame whose `g_WindInfo` holds the calm pair holds this same length
+/// and a storm's holds a longer one, so the set does decide it, but the engine gets there by
+/// sampling the wind texture itself and leaning each layer by what it reads, and this viewer takes
+/// no such read.
 pub const WIND_REACH: f32 = 1.467_972;
 
 /// What a character's own wind is capped and scaled by before a strand is swayed along it. Both off
@@ -2902,10 +2909,11 @@ impl Buffer {
         // Two layers, each a heading, and a strength between `windPowerMin` and `windPowerMin +
         // windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex` at `worldPos.xz *
         // worldScale - uvOffset`. `worldScale` is the plain reading of the file's own stated cycle
-        // length. The engine advects `uvOffset` along the layer's heading by its own strength, so a
-        // stronger wind runs the field past faster; it wraps the pair every cycle, which is what
-        // keeps the coordinate exact however long the clock has run. `windViewDir` is read by no
-        // vertex shader this viewer runs, so it is left at nought.
+        // length. The pair the blade leans between is the stated range rather than the stated
+        // strength, both taken down by [`WIND_POWER_SCALE`]. The engine advects `uvOffset` along the
+        // layer's heading by its own strength, so a stronger wind runs the field past faster; it
+        // wraps the pair every cycle, which keeps the coordinate exact however long the clock has
+        // run. `windViewDir` is read by no vertex shader this viewer runs, so it is left at nought.
         if self.name == "g_WindInfo" {
             for (at, layer) in scene.wind.layers.iter().enumerate() {
                 let world_scale = match layer.wavelength > 0.0 {
@@ -2923,9 +2931,14 @@ impl Buffer {
                         layer.heading.x,
                         layer.heading.y,
                         layer.heading.z,
-                        layer.max_strength,
+                        (layer.max_strength - layer.min_strength) * WIND_POWER_SCALE,
                     ]);
-                    write(&mut out, base + 1, &[offset.x, offset.y, world_scale, layer.min_strength]);
+                    write(&mut out, base + 1, &[
+                        offset.x,
+                        offset.y,
+                        world_scale,
+                        layer.min_strength * WIND_POWER_SCALE,
+                    ]);
                 }
             }
             return out;
@@ -4208,9 +4221,9 @@ mod test {
         ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, Customize, DECAL,
         DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
         INSTANCING, JOINT, REFLECTION_PARAM, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS,
-        SUN_PARAM, WAVING, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field,
-        encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
-        selector, shader_types, sun,
+        SUN_PARAM, WAVING, WIND_POWER_SCALE, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer,
+        ambient, decal_field, encode, instance_fields, joints, moon_phase, moon_roll, moon_softness,
+        moon_terminator, selector, shader_types, sun,
     };
 
     /// The two buffers of the post chain no reflection describes, against what the game's own
@@ -4984,6 +4997,55 @@ mod test {
         assert_eq!(filled[2..4], [1.0 / 128.0, 1.0 / 128.0]);
     }
 
+    /// The buffer the game itself uploads at the Tuliyollal preset, where the zone's own `.envb`
+    /// states two layers of strength 8 and 1 at azimuth 90 and 120, both reaching nought at their
+    /// weakest. Read out of `~/rdcaps/tuli.zip`.
+    #[test]
+    fn a_blade_leans_between_the_pair_the_game_hands_it() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let layer = |azimuth: f32, max_strength, wavelength| {
+            let held = f32::to_radians(azimuth);
+            WindLayer {
+                heading: Vec3::new(-held.sin(), 0.0, held.cos()),
+                max_strength,
+                min_strength: 0.0,
+                wavelength,
+            }
+        };
+        let info = Buffer {
+            name: "g_WindInfo".to_owned(),
+            members: Vec::new(),
+            registers: 12,
+            fixed: None,
+        };
+        let scene = Scene {
+            clock: 0.0,
+            wind: Wind {
+                layers: [layer(90.0, 8.0, 512.0), layer(120.0, 1.0, 128.0)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filled = floats(info.fill(&scene, Pass::Buffer, &[]));
+        let close = |held: f32, want: f32| assert!((held - want).abs() < 1e-5, "{held} not {want}");
+        close(filled[0], -1.0);
+        close(filled[1], 0.0);
+        close(filled[2], 0.0);
+        close(filled[3], 1.2);
+        close(filled[6], 1.0 / 512.0);
+        close(filled[7], 0.0);
+        close(filled[12], -0.866_025);
+        close(filled[13], 0.0);
+        close(filled[14], -0.5);
+        close(filled[15], 0.15);
+        close(filled[18], 1.0 / 128.0);
+        close(filled[19], 0.0);
+    }
+
     /// The gust the engine advects: a cycle over `wavelength` world units, carried along the
     /// layer's heading by its own strength, and wrapped every cycle.
     #[test]
@@ -5017,8 +5079,8 @@ mod test {
         let filled = held(30.0);
         // The world-to-uv scale is the stated cycle length and nothing else.
         assert_eq!(filled[6], 1.0 / 512.0);
-        assert_eq!(filled[3], 8.0);
-        assert_eq!(filled[7], 2.0);
+        assert_eq!(filled[3], (8.0 - 2.0) * WIND_POWER_SCALE);
+        assert_eq!(filled[7], 2.0 * WIND_POWER_SCALE);
         // Thirty seconds at strength eight carries the field eight cycles' worth of texels.
         assert!((filled[5] - (8.0 / 512.0)).abs() < 1e-6, "{}", filled[5]);
         assert_eq!(filled[4], 0.0);

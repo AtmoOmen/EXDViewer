@@ -4630,7 +4630,18 @@ pub fn build_pair(
 
 #[cfg(test)]
 mod test {
-    use super::{BAND, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
+    use super::{BAND, ENGINE, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
+
+    /// The id the file the shadow softening dithers by is bound under. Nothing in the table says
+    /// which sampler an entry answers except this number, and the packages derive it from the name.
+    #[test]
+    fn the_shadow_dither_is_bound_under_the_name_its_shader_reads() {
+        let (id, _, _) = ENGINE
+            .into_iter()
+            .find(|(_, path, _)| path.contains("-bn_64_"))
+            .expect("the engine table names a blue noise file");
+        assert_eq!(id, shaders::names::hash(b"tBlueNoise"));
+    }
 
     /// Both meshes and both strips, against what the buffers a capture of the running game bound
     /// hold. The engine builds these rather than reading them out of a file, so the counts and the

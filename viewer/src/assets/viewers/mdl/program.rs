@@ -792,6 +792,9 @@ const INSTANCE_FIELDS: [(&str, u32); 9] = [
     ("m_HeadUpVector", 16),
 ];
 
+/// The clock every animated package shares, which the engine drives and no file states.
+const PBR: &str = "g_PbrParameterCommon";
+
 fn decal_field() -> Vec<hlsl::layout::Member> {
     vec![hlsl::layout::Member {
         name: DECAL.to_owned(),
@@ -1688,6 +1691,15 @@ const WIND_SCROLL_INTERVAL: f32 = 30.0;
 /// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
 /// it is not the set and is not placed here.
 pub const WIND_REACH: f32 = 1.467_972;
+
+/// What a character's own wind is capped and scaled by before a strand is swayed along it. Both off
+/// `ffxiv_dx11.exe`: the vector is normalised, then scaled by `min(speed, 30) * 0.0005`.
+const WIND_SPEED_CAP: f32 = 30.0;
+const WIND_SCALE: f32 = 0.0005;
+
+/// Ticks a second the shared animation clock counts, and the mask its accumulator is held to.
+const LOOP_TICKS: u16 = 1024;
+const LOOP_WRAP: u64 = 0x1f_ffff;
 
 /// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
 /// hold both wind layers already summed; `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength
@@ -3358,6 +3370,13 @@ impl Buffer {
         put(grass, "m_GrassWindSpeedScale", vec![1.0]);
         put(grass, "m_BushWindSpeedScale", vec![1.0]);
         put(INSTANCE, "m_MulColor", vec![1.0; 4]);
+        // What a hair strand flutters along. The engine hands over a unit heading scaled by the
+        // wind's own speed, capped at thirty and taken down by a factor of two thousand, and leaves
+        // the last lane at nought. Heading and speed are this viewer's own, read off the zone's
+        // `.envb`; the engine samples an ambient field at the character's position instead, and
+        // whether the two are the same quantity is the one thing here nothing states.
+        let gust = scene.wind.heading * scene.wind.reach.min(WIND_SPEED_CAP) * WIND_SCALE;
+        put(INSTANCE, "m_Wind", vec![gust.x, gust.y, gust.z, 0.0]);
         // Declared by all five character packages; only `character`'s own G pass reads the first
         // lane, scaling the fur march by it. A capture confirms the game writes the same identity
         // here.
@@ -3393,6 +3412,12 @@ impl Buffer {
             0.15, 0.15, 0.15, 0.17, 0.01584, 0.9, 0.01584, 0.8,
         ]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
+        // The clock every animated package shares. A tick is a thousand-and-twenty-fourth of a
+        // second and the engine's accumulator is masked to twenty-one bits, so this runs to exactly
+        // 2048 and back, which is what makes the periods the hair shader snaps to divide it evenly.
+        put(PBR, "m_LoopTime", vec![
+            ((clock * f32::from(LOOP_TICKS)) as u64 & LOOP_WRAP) as f32 / f32::from(LOOP_TICKS),
+        ]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);
@@ -4550,6 +4575,60 @@ mod test {
         };
         // Two seconds of it, at the one radian a second the engine states.
         assert!((phase(3.0) - phase(1.0) - 2.0).abs() < 1e-5);
+    }
+
+    /// What a strand of hair is swayed along and the clock it flutters on, neither of which any file
+    /// states and both of which the engine drives.
+    #[test]
+    fn a_strand_takes_a_capped_wind_and_a_wrapping_clock() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let instance = Buffer {
+            name: INSTANCE.to_owned(),
+            members: instance_fields(),
+            registers: 11,
+            fixed: None,
+        };
+        let gust = |reach| {
+            let scene = Scene {
+                wind: Wind {
+                    heading: Vec3::Z,
+                    reach,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            floats(instance.fill(&scene, Pass::Buffer, &[]))[20..24].to_vec()
+        };
+        // A unit heading taken down by two thousand, and a last lane the engine zeroes outright.
+        assert!((gust(4.0)[2] - 0.002).abs() < 1e-9);
+        assert_eq!(gust(4.0)[0], 0.0);
+        assert_eq!(gust(4.0)[3], 0.0);
+        // Past thirty the speed stops counting.
+        assert!((gust(200.0)[2] - 0.015).abs() < 1e-9);
+        assert_eq!(gust(200.0), gust(30.0));
+
+        let loop_time = |clock| {
+            let held = Buffer {
+                name: "g_PbrParameterCommon".to_owned(),
+                members: vec![hlsl::layout::Member {
+                    name: "m_LoopTime".to_owned(),
+                    offset: 0,
+                    size: 4,
+                    kind: "float".to_owned(),
+                }],
+                registers: 1,
+                fixed: None,
+            };
+            floats(held.fill(&Scene { clock, ..Default::default() }, Pass::Buffer, &[]))[0]
+        };
+        // Held to a tick, and back to nought where the accumulator wraps.
+        assert_eq!(loop_time(1.0 + 0.5 / 1024.0), 1.0);
+        assert_eq!(loop_time(2048.0), 0.0);
+        assert_eq!(loop_time(2049.0), 1.0);
     }
 
     /// The register water wanders its whitecaps by, which is the noise texture's own size: the

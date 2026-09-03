@@ -818,10 +818,11 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             };
 
             // A rigid piece carries no bone table of its own to resolve against the shared rig:
-            // one placeholder entry is what gives it a joint to be carried on, which
-            // `Rendered::carried` fills in every frame.
+            // one placeholder per bone it skins to is what gives it joints to be carried on, which
+            // `Rendered::carried` fills in every frame. A weapon that skins to more than one, a
+            // grimoire's pages or a bow's limbs, loses every vertex past the first without them.
             let table: Vec<String> = match worn.rigid {
-                true => vec![String::new()],
+                true => vec![String::new(); mesh.bone_table().len().max(1)],
                 false => mesh
                     .bone_table()
                     .iter()
@@ -844,7 +845,8 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             }
 
             let name = mesh.material().unwrap_or_default();
-            let resolved = material::path(&name, worn.material, worn.skin).unwrap_or(name);
+            let resolved =
+                material::path(worn.path, &name, worn.material, worn.skin).unwrap_or(name);
             let material = names
                 .iter()
                 .position(|held| *held == resolved)
@@ -2154,7 +2156,7 @@ impl Rendered {
                 let carried = world * attachment.local;
                 for (index, mesh) in level.meshes.iter().enumerate() {
                     if self.pieces[mesh.piece].path == attachment.path {
-                        pose.joints[index] = vec![carried];
+                        pose.joints[index] = vec![carried; level.bones[index].len()];
                     }
                 }
             }

@@ -1678,6 +1678,11 @@ pub struct WindLayer {
 /// header carries it is not placed here, so this is the engine's own default.
 pub const WAVING_RATE: f32 = 1.0;
 
+/// Seconds the engine advects a gust texture one whole cycle over, at unit strength. Read off
+/// `ffxiv_dx11.exe`: the wind update scales the frame time by `1.0 / 30.0` and steps each layer's
+/// `uvOffset` by `heading * max_strength * worldScale` times it, wrapping the pair into `0..1`.
+const WIND_SCROLL_INTERVAL: f32 = 30.0;
+
 /// World units a leaf leans by at the far end of one sway. Measured off `m_WindVector` in real
 /// frames rather than derived: the reach a wind set sums to is several times this and is not what the
 /// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
@@ -1697,12 +1702,6 @@ pub struct Wind {
     pub reach: f32,
     /// The two layers `heading` and `reach` are summed from, apart.
     pub layers: [WindLayer; 2],
-    /// Multiplies every layer's `1.0 / wavelength`. No file states whether that plain reading is
-    /// what the engine intends, so this stays a slider rather than a fixed derivation.
-    pub gust_scale: f32,
-    /// World units a gust texture is advected a second, in the layer's own heading. Nothing states
-    /// this at all; it is invented.
-    pub scroll: f32,
 }
 
 /// What a lone model is shown under, since nothing outside a zone names an environment to take a
@@ -1714,8 +1713,6 @@ impl Default for Wind {
             heading,
             reach: 4.0,
             layers: [WindLayer { heading, max_strength: 2.0, min_strength: 0.0, wavelength: 512.0 }; 2],
-            gust_scale: 1.0,
-            scroll: 2.0,
         }
     }
 }
@@ -2814,18 +2811,23 @@ impl Buffer {
         }
         // Two layers, each a heading, and a strength between `windPowerMin` and `windPowerMin +
         // windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex` at `worldPos.xz *
-        // worldScale - uvOffset`. `worldScale` is `gust_scale / wavelength`, the plain reading of
-        // the file's own stated cycle length; `uvOffset` advects that sample along the layer's own
-        // heading so the field scrolls rather than standing at one frozen texel. `windViewDir` is
-        // read by no vertex shader this viewer runs, so it is left at nought.
+        // worldScale - uvOffset`. `worldScale` is the plain reading of the file's own stated cycle
+        // length. The engine advects `uvOffset` along the layer's heading by its own strength, so a
+        // stronger wind runs the field past faster; it wraps the pair every cycle, which is what
+        // keeps the coordinate exact however long the clock has run. `windViewDir` is read by no
+        // vertex shader this viewer runs, so it is left at nought.
         if self.name == "g_WindInfo" {
             for (at, layer) in scene.wind.layers.iter().enumerate() {
                 let world_scale = match layer.wavelength > 0.0 {
-                    true => scene.wind.gust_scale / layer.wavelength,
+                    true => 1.0 / layer.wavelength,
                     false => 0.0,
                 };
-                let offset = Vec2::new(layer.heading.x, layer.heading.z)
-                    * (scene.wind.scroll * scene.clock * world_scale);
+                let carried =
+                    layer.max_strength * world_scale * scene.clock / WIND_SCROLL_INTERVAL;
+                let offset = (Vec2::new(layer.heading.x, layer.heading.z) * carried)
+                    .to_array()
+                    .map(|held| held.rem_euclid(1.0));
+                let offset = Vec2::from_array(offset);
                 for base in [at * 3, at * 3 + 6] {
                     write(&mut out, base, &[
                         layer.heading.x,
@@ -4030,7 +4032,7 @@ mod test {
     use super::{
         ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, FXAA_PARAM, Fog,
         HDAO_PARAM, INSTANCE, INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass,
-        Scene, Sky, Volume, Wind, ambient, decal_field, encode, instance_fields, joints,
+        Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode, instance_fields, joints,
         moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
     };
 
@@ -4535,5 +4537,48 @@ mod test {
         };
         // Two seconds of it, at the one radian a second the engine states.
         assert!((phase(3.0) - phase(1.0) - 2.0).abs() < 1e-5);
+    }
+
+    /// The gust the engine advects: a cycle over `wavelength` world units, carried along the
+    /// layer's heading by its own strength, and wrapped every cycle.
+    #[test]
+    fn a_gust_scrolls_by_the_strength_the_layer_states() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let layer = WindLayer {
+            heading: Vec3::Z,
+            max_strength: 8.0,
+            min_strength: 2.0,
+            wavelength: 512.0,
+        };
+        let held = |clock| {
+            let info = Buffer {
+                name: "g_WindInfo".to_owned(),
+                members: Vec::new(),
+                registers: 12,
+                fixed: None,
+            };
+            let scene = Scene {
+                clock,
+                wind: Wind { layers: [layer; 2], ..Default::default() },
+                ..Default::default()
+            };
+            floats(info.fill(&scene, Pass::Buffer, &[]))
+        };
+
+        let filled = held(30.0);
+        // The world-to-uv scale is the stated cycle length and nothing else.
+        assert_eq!(filled[6], 1.0 / 512.0);
+        assert_eq!(filled[3], 8.0);
+        assert_eq!(filled[7], 2.0);
+        // Thirty seconds at strength eight carries the field eight cycles' worth of texels.
+        assert!((filled[5] - (8.0 / 512.0)).abs() < 1e-6, "{}", filled[5]);
+        assert_eq!(filled[4], 0.0);
+        // A clock long enough to have wrapped stays inside the texture rather than drifting off it.
+        let far = held(30.0 * 512.0 / 8.0 + 30.0);
+        assert!((far[5] - (8.0 / 512.0)).abs() < 1e-3, "{}", far[5]);
     }
 }

@@ -4995,6 +4995,55 @@ mod test {
         assert_eq!(filled[2..4], [1.0 / 128.0, 1.0 / 128.0]);
     }
 
+    /// The buffer the game itself uploads at the Tuliyollal preset, where the zone's own `.envb`
+    /// states two layers of strength 8 and 1 at azimuth 90 and 120, both reaching nought at their
+    /// weakest. Read out of `~/rdcaps/tuli.zip`.
+    #[test]
+    fn a_blade_leans_between_the_pair_the_game_hands_it() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let layer = |azimuth: f32, max_strength, wavelength| {
+            let held = f32::to_radians(azimuth);
+            WindLayer {
+                heading: Vec3::new(-held.sin(), 0.0, held.cos()),
+                max_strength,
+                min_strength: 0.0,
+                wavelength,
+            }
+        };
+        let info = Buffer {
+            name: "g_WindInfo".to_owned(),
+            members: Vec::new(),
+            registers: 12,
+            fixed: None,
+        };
+        let scene = Scene {
+            clock: 0.0,
+            wind: Wind {
+                layers: [layer(90.0, 8.0, 512.0), layer(120.0, 1.0, 128.0)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filled = floats(info.fill(&scene, Pass::Buffer, &[]));
+        let close = |held: f32, want: f32| assert!((held - want).abs() < 1e-5, "{held} not {want}");
+        close(filled[0], -1.0);
+        close(filled[1], 0.0);
+        close(filled[2], 0.0);
+        close(filled[3], 1.2);
+        close(filled[6], 1.0 / 512.0);
+        close(filled[7], 0.0);
+        close(filled[12], -0.866_025);
+        close(filled[13], 0.0);
+        close(filled[14], -0.5);
+        close(filled[15], 0.15);
+        close(filled[18], 1.0 / 128.0);
+        close(filled[19], 0.0);
+    }
+
     /// The gust the engine advects: a cycle over `wavelength` world units, carried along the
     /// layer's heading by its own strength, and wrapped every cycle.
     #[test]

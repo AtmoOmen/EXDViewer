@@ -889,13 +889,6 @@ impl Renderer {
                         gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
                     }
                 }
-                if let Some(location) = deferred::uniform(gl, program, "dx_Viewport") {
-                    gl.uniform_2_f32(
-                        Some(&location),
-                        watering.size.0 as f32,
-                        watering.size.1 as f32,
-                    );
-                }
             }
             for (unit, texture) in member.textures.iter().enumerate() {
                 let bound = match texture.name.as_str() {
@@ -1073,7 +1066,6 @@ impl Renderer {
         fringe: bool,
     ) -> Result<(), String> {
         let instances = self.instances.ok_or("no instance buffer")?;
-        let size = self.buffers.size();
         for (batch, (offset, windows, window)) in frame.batches.iter().zip(offsets) {
             let meshes: Vec<i32> = match self
                 .models
@@ -1125,15 +1117,8 @@ impl Renderer {
                     program::Pass::Shaft => (glow::ONE, glow::ONE),
                     _ => (glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
                 };
-                // What the fragment's own coordinate is turned back into the game's convention by.
-                // Left at nought a pass reading it addresses every buffer at a negative row, and
-                // water reads five of them: the frame behind it, the lighting and where it stands.
-                let viewport = deferred::uniform(gl, program, "dx_Viewport");
                 unsafe {
                     gl.use_program(Some(program));
-                    if let Some(location) = viewport {
-                        gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-                    }
                     gl.depth_func(glow::LESS);
                     match filling {
                         // Cut to what this buffer holds, which is one channel short of the
@@ -1425,7 +1410,6 @@ impl Renderer {
                             .iter()
                             .position(|buffer| buffer.instances() > 1)
                             .unwrap_or(0) as u32;
-                        let viewport = deferred::uniform(gl, program, "dx_Viewport");
                         let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
                             continue;
                         };
@@ -1435,9 +1419,6 @@ impl Renderer {
                             false => 0,
                         };
                         unsafe {
-                            if let Some(location) = viewport {
-                                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-                            }
                             gl.bind_vertex_array(Some(array));
                             for at in 0..taken {
                                 gl.bind_buffer_range(

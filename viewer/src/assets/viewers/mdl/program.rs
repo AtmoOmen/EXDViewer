@@ -3130,8 +3130,8 @@ impl Buffer {
         // same four fields, written positionally instead.
         if self.name == "g_CommonParameter" && self.members.is_empty() {
             let (width, height) = (size.0.max(1.0), size.1.max(1.0));
-            write(&mut out, 0, &[1.0 / width, -1.0 / height, 0.0, 1.0]);
-            write(&mut out, 1, &[2.0 / width, -2.0 / height, -1.0, 1.0]);
+            write(&mut out, 0, &[1.0 / width, 1.0 / height, 0.0, 0.0]);
+            write(&mut out, 1, &[2.0 / width, 2.0 / height, -1.0, -1.0]);
             let bloom = scene.bloom;
             let [gain, floor] = REFLECTION_WEIGHT;
             write(&mut out, 2, &[bloom.specular, bloom.emissive, gain, floor]);
@@ -3599,21 +3599,21 @@ impl Buffer {
         ]);
         put(customize, "m_OptionColor0", held.option.to_vec());
 
-        // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a
-        // texture coordinate names counts from the far side of the one a fragment coordinate does,
-        // so the height goes in negative and the offset takes it back.
+        // A pixel's own place, which a screen-wide pass has nothing else to work from.
         let (width, height) = (size.0.max(1.0), size.1.max(1.0));
         let common = "g_CommonParameter";
-        put(
-            common,
-            "m_RenderTarget",
-            vec![1.0 / width, -1.0 / height, 0.0, 1.0],
-        );
-        put(
-            common,
-            "m_Viewport",
-            vec![2.0 / width, -2.0 / height, -1.0, 1.0],
-        );
+        put(common, "m_RenderTarget", vec![
+            1.0 / width,
+            1.0 / height,
+            0.0,
+            0.0,
+        ]);
+        put(common, "m_Viewport", vec![
+            2.0 / width,
+            2.0 / height,
+            -1.0,
+            -1.0,
+        ]);
         // The two lanes the composite weighs its glare by before it divides that through by the
         // colour and leaves the share in the frame's alpha, which the weather states, and then the
         // pair a surface takes the brightness it stands in through to weigh what it reflects.
@@ -4255,6 +4255,66 @@ mod test {
             10.0,
             0.3
         ]);
+    }
+
+    /// Where a screen-wide pass reads the frame it is drawing into. `SV_Position` reaches the body
+    /// as `gl_FragCoord`, which counts rows from the corner a texture coordinate counts them from,
+    /// so this pair scales a fragment's own place into the frame and never turns it over. Both the
+    /// buffer named by its fields and the one the star shaders leave bare hold the same four lanes.
+    #[test]
+    fn a_pixel_reads_the_frame_at_its_own_row() {
+        let scene = Scene {
+            size: (1920.0, 1080.0),
+            ..Default::default()
+        };
+        let filled = |members: Vec<(&str, u32, u32)>| {
+            let held = Buffer {
+                name: "g_CommonParameter".to_owned(),
+                members: members
+                    .into_iter()
+                    .map(|(name, offset, size)| hlsl::layout::Member {
+                        name: name.to_owned(),
+                        offset,
+                        size,
+                        kind: "float4".to_owned(),
+                    })
+                    .collect(),
+                registers: 4,
+                fixed: None,
+            };
+            held.fill(&scene, Pass::Composite, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect::<Vec<f32>>()
+        };
+        for held in [
+            filled(vec![("m_RenderTarget", 0, 16), ("m_Viewport", 16, 16)]),
+            filled(Vec::new()),
+        ] {
+            let corner = |row: usize, at: Vec2| {
+                Vec2::new(
+                    at.x * held[row * 4] + held[row * 4 + 2],
+                    at.y * held[row * 4 + 1] + held[row * 4 + 3],
+                )
+            };
+            let (low, high) = (Vec2::new(0.5, 0.5), Vec2::new(1919.5, 1079.5));
+            assert!(
+                corner(0, low).abs_diff_eq(Vec2::ZERO, 1e-3),
+                "the near corner of the frame reads the near corner of it: {held:?}"
+            );
+            assert!(
+                corner(0, high).abs_diff_eq(Vec2::ONE, 1e-3),
+                "and the far one the far: {held:?}"
+            );
+            assert!(
+                corner(1, low).abs_diff_eq(Vec2::NEG_ONE, 1e-3),
+                "clip space runs the same way: {held:?}"
+            );
+            assert!(
+                corner(1, high).abs_diff_eq(Vec2::ONE, 1e-3),
+                "at both ends: {held:?}"
+            );
+        }
     }
 
     /// What the shadow softening sizes a penumbra with, read back through the arithmetic its own

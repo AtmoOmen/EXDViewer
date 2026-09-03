@@ -4048,9 +4048,6 @@ impl Buffers {
             if let Some((unit, held)) = gathering {
                 gl.bind_sampler(unit, Some(held));
             }
-            if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
-                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-            }
             // What a pass reading a square of its own source steps between the corners of it.
             if let Some(location) = gl.get_uniform_location(program, "u_texel") {
                 gl.uniform_2_f32(Some(&location), 1.0 / size.0 as f32, 1.0 / size.1 as f32);

@@ -79,7 +79,7 @@ jobs:
           path: |
             xiviewer-${{ matrix.platform.os-name }}${{ matrix.platform.binary-ext }}
 
-release:
+  release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'CN-')
     needs: build
     runs-on: windows-latest

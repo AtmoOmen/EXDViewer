@@ -765,17 +765,12 @@ impl Game {
                     };
                     unsafe {
                         gl.use_program(Some(program));
-                        // A material with no depth pass writes its own, since the depth buffer is
-                        // what says which pixels the frame covered.
-                        gl.depth_mask(depth || shaded.depth.is_none());
-                        // Where a pre-pass has settled which fragment is visible, every later pass
-                        // takes that one rather than deciding again: a mesh layered over itself
-                        // offers two fragments a nearer-or-equal test would both accept, and the
-                        // passes need not agree on which they keep.
-                        gl.depth_func(match depth || shaded.depth.is_none() {
-                            true => glow::LEQUAL,
-                            false => glow::EQUAL,
-                        });
+                        // Nearer-or-equal, every pass settling its own depth rather than taking
+                        // the depth pass's: the two do not clip the same fragments, so a buffer
+                        // pass gated on the depth the other settled loses every fragment only its
+                        // own test keeps.
+                        gl.depth_mask(true);
+                        gl.depth_func(glow::LEQUAL);
                         gl.color_mask(!depth, !depth, !depth, !depth);
                         let written: Vec<u32> = (0..held.targets.len().max(1))
                             .map(|at| glow::COLOR_ATTACHMENT0 + at as u32)

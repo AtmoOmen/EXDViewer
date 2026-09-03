@@ -56,10 +56,6 @@ const FULL: f32 = 17.0;
 /// What the disc's own alpha falls off by where a weather states no starfield set.
 const MOON_FADE: f32 = 0.4;
 
-/// How many radians of phase a sway runs a second. The wind set does not state it: the shader takes
-/// its whole phase from the engine, and nothing in the set is a rate.
-const RATE: f32 = 1.6;
-
 /// Multiplies `grass.shpk`'s own `1.0 / wavelength` world-to-UV scale. Neutral until the wind
 /// texture's own tiling is confirmed against a capture.
 const GUST_SCALE: f32 = 1.0;
@@ -216,8 +212,6 @@ pub struct Ambient {
     pub tilt: f32,
     /// How far down the view the sun's own depth maps reach, which that file states beside it.
     pub reach: f32,
-    /// How fast one sway runs, which no file states.
-    pub rate: f32,
     /// Multiplies `grass.shpk`'s own world-to-UV scale, which no file confirms either.
     pub gust_scale: f32,
     /// World units a gust texture is advected a second, which no file states.
@@ -268,7 +262,6 @@ impl Ambient {
             weather: 0,
             tilt,
             reach,
-            rate: RATE,
             gust_scale: GUST_SCALE,
             scroll: GUST_SCROLL,
             moon: MOON,
@@ -539,7 +532,6 @@ impl Ambient {
         Some(program::Wind {
             heading: Vec3::new(held.x, 0.0, held.y).normalize_or_zero(),
             reach: held.length(),
-            rate: self.rate,
             layers,
             gust_scale: self.gust_scale,
             scroll: self.scroll,
@@ -804,10 +796,6 @@ impl Ambient {
         }
 
         if self.keyframes(WIND).is_some() {
-            ui.label(RichText::new(format!("Sway rate  {:.2} rad/s", self.rate)).weak());
-            changed |= ui
-                .add(egui::Slider::new(&mut self.rate, 0.0..=6.0).show_value(false))
-                .changed();
             ui.label(RichText::new(format!("Gust scale  {:.2}x", self.gust_scale)).weak());
             changed |= ui
                 .add(egui::Slider::new(&mut self.gust_scale, 0.1..=4.0).show_value(false))

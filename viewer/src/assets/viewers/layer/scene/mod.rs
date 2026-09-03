@@ -4650,11 +4650,10 @@ impl Scene {
                             };
                             match self.ambient.wind() {
                                 Some(held) => format!(
-                                    "clock {:.1}s, reach {:.2} at {:.0} deg, {:.2} rad/s, {count} model{plural}",
+                                    "clock {:.1}s, reach {:.2} at {:.0} deg, {count} model{plural}",
                                     self.clock / TICKS,
                                     held.reach,
                                     held.heading.x.atan2(held.heading.z).to_degrees(),
-                                    held.rate,
                                 ),
                                 None => format!("no wind set stated, {count} model{plural}"),
                             }

@@ -742,6 +742,9 @@ const JOINT: usize = 12;
 /// The buffer a drawing package reads one record of per object drawn.
 const INSTANCING: &str = "g_InstancingData";
 
+/// The buffer a waving shader takes its wind and its sway weight out of.
+const WAVING: &str = "g_WavingParam";
+
 /// The buffer holding what the engine decides per object rather than per material.
 const INSTANCE: &str = "g_InstanceParameter";
 
@@ -1684,27 +1687,29 @@ pub struct WindLayer {
     pub wavelength: f32,
 }
 
+/// Radians of phase one sway runs a second. Read off `ffxiv_dx11.exe`: the bg renderer accumulates
+/// `frame time * rate` into the phase every frame and wraps it at `2pi`, and `rate` is a field of the
+/// environment manager holding a flat `1.0`. A scene can state its own, and which slot of the level
+/// header carries it is not placed here, so this is the engine's own default.
+pub const WAVING_RATE: f32 = 1.0;
+
 /// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
 /// hold both wind layers already summed; `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength
-/// per layer instead, which `layers` carries apart for it. The rate is invented for both: the shader
-/// takes its whole phase from the engine and no file states how fast one sway runs. A mesh weights
-/// the reach by its own stream, which reaches a tenth at most, so the stated strength is already in
-/// world units.
+/// per layer instead, which `layers` carries apart for it. A mesh weights the reach by its own stream,
+/// which reaches a tenth at most, so the stated strength is already in world units.
 #[derive(Clone, Copy)]
 pub struct Wind {
     /// Which way a leaf leans, in world space.
     pub heading: Vec3,
     /// How far it leans at the far end of one sway, in world units.
     pub reach: f32,
-    /// Radians of phase a second.
-    pub rate: f32,
     /// The two layers `heading` and `reach` are summed from, apart.
     pub layers: [WindLayer; 2],
     /// Multiplies every layer's `1.0 / wavelength`. No file states whether that plain reading is
     /// what the engine intends, so this stays a slider rather than a fixed derivation.
     pub gust_scale: f32,
     /// World units a gust texture is advected a second, in the layer's own heading. Nothing states
-    /// this at all; it is invented the same way `rate` is.
+    /// this at all; it is invented.
     pub scroll: f32,
 }
 
@@ -1716,7 +1721,6 @@ impl Default for Wind {
         Self {
             heading,
             reach: 4.0,
-            rate: 1.6,
             layers: [WindLayer { heading, max_strength: 2.0, min_strength: 0.0, wavelength: 512.0 }; 2],
             gust_scale: 1.0,
             scroll: 2.0,
@@ -2813,7 +2817,7 @@ impl Buffer {
         // meant for one reads the same value; the shader only reads it for a motion vector this
         // viewer does not draw.
         if self.name == "g_WindParam" || self.name == "g_PreviousWindParam" {
-            write(&mut out, 0, &[0.0, 0.0, 0.0, scene.clock * scene.wind.rate]);
+            write(&mut out, 0, &[0.0, 0.0, 0.0, scene.clock * WAVING_RATE]);
             return out;
         }
         // Two layers, each a heading, and a strength between `windPowerMin` and `windPowerMin +
@@ -3545,12 +3549,12 @@ impl Buffer {
         // they are handed over in that space too. The sun draws the same sway under its own view,
         // and a leaf whose shadow leans one way while it leans another is what leaving them in the
         // world looks like.
-        let waving = "g_WavingParam";
         let wind = view.transform_vector3(scene.wind.heading * scene.wind.reach);
-        put(waving, "m_WindVector", wind.to_array().to_vec());
-        put(waving, "m_UpVector", view.transform_vector3(Vec3::Y).to_array().to_vec());
-        // The .zw a capture states, kept though no waving shader reads past .xy.
-        put(waving, "m_WavingParam", vec![1.0, 1.0, 0.2, 1.0]);
+        put(WAVING, "m_WindVector", wind.to_array().to_vec());
+        put(WAVING, "m_UpVector", view.transform_vector3(Vec3::Y).to_array().to_vec());
+        // All four as the engine writes them once and never again, though no waving shader reads
+        // past .xy.
+        put(WAVING, "m_WavingParam", vec![1.0, 1.0, 0.2, 1.0]);
 
         // A light is read in view space: the shader dots its direction against a normal it has just
         // brought out of the G-buffer and through the view matrix.
@@ -3698,7 +3702,7 @@ impl Buffer {
                     let (x, z) = (instance.transform.w_axis.x, instance.transform.w_axis.z);
                     (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
                 });
-            put(at, "m_WavingAnimTime", &[scene.clock * scene.wind.rate + offset]);
+            put(at, "m_WavingAnimTime", &[scene.clock * WAVING_RATE + offset]);
             put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
             // The blend is what carries the colour: the shading lerps from the material's own
             // emissive toward this one by it, so a colour written with the blend at nought never
@@ -4029,7 +4033,8 @@ mod test {
 
     use super::{
         ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, Fog, INSTANCE,
-        JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, Pass, Scene, Sky, Volume, ambient, decal_field,
+        INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, WAVING_RATE, Pass, Scene,
+        Sky, Volume, ambient, decal_field,
         encode, instance_fields, joints, moon_phase, moon_roll, moon_softness, moon_terminator,
         selector, shader_types, sun,
     };
@@ -4442,6 +4447,44 @@ mod test {
         assert_eq!(f32::from_bits(record[9]), 13.0f32.to_radians());
         assert!(held[..32 * SHADER_TYPE].iter().all(|held| *held == 0));
     }
+
+    /// The two numbers the engine's own bg renderer decides for a sway rather than reading out of a
+    /// file: the weight it writes once at startup and never again, and the rate its phase runs at.
+    #[test]
+    fn a_sway_carries_the_weight_and_the_rate_the_engine_states() {
+        let member = |name: &str, offset| hlsl::layout::Member {
+            name: name.to_owned(),
+            offset,
+            size: 16,
+            kind: "float4".to_owned(),
+        };
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let waving = Buffer {
+            name: WAVING.to_owned(),
+            members: vec![
+                member("m_WindVector", 0),
+                member("m_UpVector", 16),
+                member("m_WavingParam", 32),
+            ],
+            registers: 3,
+            fixed: None,
+        };
+        let filled = floats(waving.fill(&Scene::default(), Pass::Buffer, &[]));
+        assert_eq!(filled[8..12], [1.0, 1.0, 0.2, 1.0]);
+
+        let phase = |clock| {
+            let held = Buffer {
+                name: INSTANCING.to_owned(),
+                members: vec![member("m_WavingAnimTime", 0)],
+                registers: 1,
+                fixed: None,
+            };
+            floats(held.fill(&Scene { clock, ..Default::default() }, Pass::Buffer, &[]))[0]
+        };
+        assert!((phase(3.0) - phase(1.0) - 2.0 * WAVING_RATE).abs() < 1e-5);
+    }
 }
-
-

@@ -137,12 +137,15 @@ impl Stage {
         self.mixer.as_ref().map_or(0, Mixer::playing)
     }
 
-    /// How many of the cues offered so far have a container to play out of.
-    pub fn read(&self) -> usize {
-        self.held
-            .values()
-            .filter(|held| matches!(held, Held::Ready(..)))
-            .count()
+    /// How many of the containers asked for have been read, against how many were asked for.
+    pub fn read(&self) -> (usize, usize) {
+        (
+            self.held
+                .values()
+                .filter(|held| matches!(held, Held::Ready(..)))
+                .count(),
+            self.held.len(),
+        )
     }
 
     /// Creates the mixer and resumes it, both from inside the same click.

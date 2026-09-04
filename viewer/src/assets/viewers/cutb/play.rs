@@ -1744,17 +1744,20 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
             {
                 state.stage.set_volume(volume);
             }
+            let (read, wanted) = state.stage.read();
             ui.label(
                 RichText::new(format!(
-                    "{}/{} cues read, {} sounding",
-                    state.stage.read(),
-                    state.cues.len(),
+                    "{read}/{wanted} read, {} sounding",
                     state.stage.playing()
                 ))
                 .weak(),
-            );
+            )
+            .on_hover_text(format!(
+                "Sound files read of the ones {} cues ask for",
+                state.cues.len()
+            ));
             if state.stage.missing() > 0 {
-                ui.label(RichText::new(format!("{} unvoiced", state.stage.missing())).weak())
+                ui.label(RichText::new(format!("{} missing", state.stage.missing())).weak())
                     .on_hover_text("Cues naming a file the install does not hold");
             }
         }

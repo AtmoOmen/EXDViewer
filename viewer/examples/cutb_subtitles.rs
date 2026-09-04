@@ -1,6 +1,5 @@
 //! What a cutscene's `C048` subtitles state: the row each names, whether the sheet its `CTIS`
-//! holds that row, how long the line stands in each language, and the frame rate the gaps between
-//! them bound from above.
+//! holds that row, and how long the line stands in each language.
 //!
 //! `cutb_subtitles <paths file>` reads one `.cutb` path per line.
 
@@ -38,10 +37,6 @@ struct Tally {
     kinds: BTreeMap<i32, usize>,
     enabled: [usize; 8],
     voices: usize,
-    /// The tightest frames-a-second any two subtitles of one timeline leave room for: a line
-    /// cannot outlast the gap to the next.
-    ceiling: f32,
-    ceiling_at: String,
 }
 
 fn main() {
@@ -52,10 +47,7 @@ fn main() {
     let list = std::env::args().nth(1).expect("a path list");
     let paths = std::fs::read_to_string(list).expect("the list");
 
-    let mut tally = Tally {
-        ceiling: f32::INFINITY,
-        ..Tally::default()
-    };
+    let mut tally = Tally::default();
     let mut shown = 0;
     for path in paths.lines() {
         let Ok(bytes) = ironworks.file::<Vec<u8>>(path) else {
@@ -96,7 +88,6 @@ fn main() {
             let Node::Timeline(timeline) = node else {
                 continue;
             };
-            let mut spans: Vec<(f32, f32)> = Vec::new();
             for item in timeline.items() {
                 let Item::Command(command) = item else {
                     continue;
@@ -131,11 +122,6 @@ fn main() {
                             }
                             None => println!("{path}: {} names no row", key),
                         }
-                        if let Some(caption) = subtitle.captions().get(ENGLISH)
-                            && caption.enabled() != 0
-                        {
-                            spans.push((f32::from(command.time()), caption.duration() as f32));
-                        }
                     }
                     CommandKind::C063(sound) => {
                         tally.voices += usize::from(
@@ -145,17 +131,6 @@ fn main() {
                         );
                     }
                     _ => {}
-                }
-            }
-            spans.sort_by(|left, right| left.0.total_cmp(&right.0));
-            for pair in spans.windows(2) {
-                let (frames, duration) = (pair[1].0 - pair[0].0, pair[0].1);
-                if frames > 0.0 && duration > 0.0 {
-                    let ceiling = frames * 1000.0 / duration;
-                    if ceiling < tally.ceiling {
-                        tally.ceiling = ceiling;
-                        tally.ceiling_at = format!("{path} at frame {}", pair[0].0);
-                    }
                 }
             }
         }
@@ -169,8 +144,4 @@ fn main() {
     println!("subtitle_type: {:?}", tally.kinds);
     println!("captions enabled by slot: {:?}", tally.enabled);
     println!("{} voice C063", tally.voices);
-    println!(
-        "a subtitle never outlasts the gap to the next past {:.2} frames a second ({})",
-        tally.ceiling, tally.ceiling_at,
-    );
 }

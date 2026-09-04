@@ -303,6 +303,7 @@ mod tests {
     /// One weapon the install itself gives an effect: `w0401b0080`'s third variant names vfx 2,
     /// and the file that resolves to is one the install ships.
     #[test]
+    #[ignore = "reads the real local FFXIV install"]
     fn a_weapon_variant_that_names_an_effect_resolves_a_file_the_install_holds() {
         let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
             ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),

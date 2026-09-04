@@ -2283,6 +2283,37 @@ mod tests {
     }
 
     /// `salute.pap` really carries `cfxf_bow`, per `dump`ing the real file: exactly the case the
+    /// The draw motion played through once: at the end the layer fades out from over the base
+    /// holding its last frame, rather than starting the clip over underneath the fade.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_one_shot_holds_its_last_frame_while_it_fades_out() {
+        let backend = local_backend();
+        let layer = Layer::default();
+        layer.once(
+            vec![(
+                "chara/human/c0101/animation/a0001/bt_swd_sld/resident/sub.pap".to_owned(),
+                "cbbp_a_activ".to_owned(),
+            )],
+            0.2,
+        );
+        settle(&layer, &backend);
+        let duration = layer.duration().expect("the draw motion");
+        for _ in 0..40 {
+            layer.advance(duration / 10.0);
+            if layer.wanted.borrow().is_empty() {
+                break;
+            }
+        }
+        assert!(layer.wanted.borrow().is_empty(), "it played through");
+        let at = |layer: &Layer| layer.leaving.borrow().as_ref().map(|held| held.time);
+        let held = at(&layer).expect("fading out from over the base");
+        layer.advance(duration / 10.0);
+        let after = at(&layer).expect("still fading out");
+        assert!(after >= held, "the released clip ran backwards: {held} -> {after}");
+        assert!(after <= duration, "past its own end: {after} > {duration}");
+    }
+
     /// filename-first bug got wrong. Seeking it first with `resident/face.pap` behind it, which
     /// does carry `cfxf_salute`, should miss the filename guess and land on the fallback instead.
     #[test]

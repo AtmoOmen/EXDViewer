@@ -259,6 +259,7 @@ mod tests {
     /// The install's own tables, read end to end: the classes a gladius and a shield are in, and
     /// the twelve frames the blend table gives a change of standing pose.
     #[test]
+    #[ignore = "reads the real local FFXIV install"]
     fn the_installs_own_tables_name_a_gladius_and_shield_stance() {
         let backend = block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
             api_url: "https://exd.camora.dev".to_owned(),
@@ -282,6 +283,7 @@ mod tests {
     /// half-second they run and the upper-body slot `ActionTimeline` rows 1 and 2 state; that
     /// they are the only two in the pack, in every class, is what this holds.
     #[test]
+    #[ignore = "reads the real local FFXIV install"]
     fn the_packs_a_stance_names_hold_the_motions_it_asks_them_for() {
         let install = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(
             "/home/asriel/.xlcore/ffxiv/game/sqpack",
@@ -302,6 +304,28 @@ mod tests {
             let sub = names(pack("c0101", class, "resident/sub.pap"));
             assert!(sub.contains(&DRAW.to_owned()), "{class}: {sub:?}");
             assert!(sub.contains(&SHEATHE.to_owned()), "{class}: {sub:?}");
+        }
+    }
+
+    /// Every race reaches a drawn pose. Few bodies file animation of their own, so the drawn pack
+    /// is asked for over the lineage `human.pbd` states, and this holds that the walk reaches a
+    /// body the install actually files `bt_swd_sld` under whichever race it starts from.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn every_race_reaches_a_body_that_files_the_class_it_stands_in() {
+        let install = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(
+            "/home/asriel/.xlcore/ffxiv/game/sqpack",
+        )));
+        let bytes: Vec<u8> = install
+            .file("chara/xls/boneDeformer/human.pbd")
+            .expect("the deformers");
+        let deformers = crate::assets::viewers::mdl::Deformers::read(&bytes).expect("readable");
+        for code in [101, 201, 501, 1201, 1501, 1801] {
+            let found = deformers.lineage(code).any(|held| {
+                let path = pack(&format!("c{held:04}"), "bt_swd_sld", "resident/idle.pap");
+                install.file::<Vec<u8>>(&path).is_ok()
+            });
+            assert!(found, "c{code:04} reaches no drawn sword and shield pose");
         }
     }
 

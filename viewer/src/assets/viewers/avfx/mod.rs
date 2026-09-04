@@ -1162,8 +1162,9 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
             spun(across, away.cross(across))
         }
         // Standing upright is the whole of what this one asks for, so it takes no turn: a roll would
-        // lean the quad off the axis it is billed about.
-        sim::Facing::Upright => {
+        // lean the quad off the axis it is billed about. Which of the two bills a sprite takes went
+        // unmeasured, so both meet the eye here as they always did.
+        sim::Facing::Upright(_) => {
             let across = Vec3::Y
                 .cross(eye - Vec3::from(drawn.center))
                 .normalize_or(right);
@@ -1184,6 +1185,18 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
     }
 }
 
+/// The turn a model billed about the world's up axis is drawn under. The game hands its own model
+/// package a world matrix and the package never reads the view, so this is the whole of the bill:
+/// the particle's own turn does not survive it.
+fn billed(toward: sim::Toward, center: Vec3, eye: Vec3, back: Vec3) -> glam::Quat {
+    let aim = match toward {
+        sim::Toward::Eye => eye - center,
+        sim::Toward::Screen => back,
+    };
+    let aim = Vec3::new(aim.x, 0.0, aim.z).normalize_or(Vec3::Z);
+    glam::Quat::from_mat3(&glam::Mat3::from_cols(Vec3::Y.cross(aim), Vec3::Y, aim))
+}
+
 /// One batch per particle definition, shape and blend, furthest group first since blending reads
 /// what is already there. Takes already-placed draws: a zone merges every instance of the same file
 /// into one set before calling this, so a placement costs a transform rather than a draw of its own.
@@ -1196,6 +1209,7 @@ pub(crate) fn batches(
     right: Vec3,
     up: Vec3,
 ) -> Vec<gpu::Batch> {
+    let back = right.cross(up);
     let mut groups: BTreeMap<_, Vec<(f32, sim::Drawn)>> = BTreeMap::new();
     for drawn in drawn {
         let center = Vec3::from(drawn.center);
@@ -1230,7 +1244,12 @@ pub(crate) fn batches(
                         instances.push(program::Instance {
                             transform: Mat4::from_scale_rotation_translation(
                                 Vec3::from(drawn.scale),
-                                glam::Quat::from_array(drawn.turn),
+                                match drawn.facing {
+                                    sim::Facing::Upright(toward) => {
+                                        billed(toward, Vec3::from(drawn.center), eye, back)
+                                    }
+                                    _ => glam::Quat::from_array(drawn.turn),
+                                },
                                 Vec3::from(drawn.center),
                             ),
                             color: Vec4::from(drawn.color),
@@ -1828,6 +1847,48 @@ mod tests {
         )
         .effect;
         assert_eq!(at(effect, 0)[0].facing, sim::Facing::Screen);
+    }
+
+    /// `RBDT` names the two upright bills apart, and the game turns them to meet different things.
+    #[test]
+    fn the_two_upright_bills_read_apart() {
+        let based = |base| {
+            let effect = &playing(
+                &[
+                    life(-1.0),
+                    block("PrVT", &integer(5)),
+                    block("RBDT", &integer(base)),
+                ],
+                (0, 0),
+            )
+            .effect;
+            at(effect, 0)[0].facing
+        };
+        assert_eq!(based(4), sim::Facing::Upright(sim::Toward::Screen));
+        assert_eq!(based(8), sim::Facing::Upright(sim::Toward::Eye));
+    }
+
+    /// The two bills a model takes about the world's up axis, against the world matrices the game
+    /// hands its own model package: `b0025_aet1_o` over Ishgard at `RBDT 8`, which meets the eye,
+    /// and `b2923_aet1_o` at Tuliyollal's aetheryte at `RBDT 4`, which meets the screen. The two
+    /// are 9 degrees apart at the Ishgard camera, so neither reading can pass for the other.
+    #[test]
+    fn a_billed_model_turns_the_way_the_game_turns_it() {
+        let eye = Vec3::new(-251.920_83, 8.874_07, 166.831_26);
+        let back = -Vec3::new(0.674_39, 0.404_75, -0.617_55);
+        let at = Vec3::new(-64.0, 8.53, 44.0);
+        let basis = glam::Mat3::from_quat(super::billed(sim::Toward::Eye, at, eye, back));
+        assert!(basis.y_axis.abs_diff_eq(Vec3::Y, 1e-6));
+        assert!(basis.z_axis.abs_diff_eq(Vec3::new(-0.837_051, 0.0, 0.547_124), 1e-5));
+        assert!(basis.x_axis.abs_diff_eq(Vec3::new(0.547_124, 0.0, 0.837_051), 1e-5));
+
+        let eye = Vec3::new(-6.535_23, 18.582_67, 36.727_37);
+        let back = -Vec3::new(-0.568_08, -0.186_75, -0.801_5);
+        let at = Vec3::new(-24.067_76, 10.866_75, 7.599_18);
+        let basis = glam::Mat3::from_quat(super::billed(sim::Toward::Screen, at, eye, back));
+        assert!(basis.y_axis.abs_diff_eq(Vec3::Y, 1e-6));
+        assert!(basis.z_axis.abs_diff_eq(Vec3::new(0.578_258, 0.0, 0.815_854), 1e-4));
+        assert!(basis.x_axis.abs_diff_eq(Vec3::new(0.815_854, 0.0, -0.578_258), 1e-4));
     }
 
     /// A quad billed against the camera can carry the turn about its own normal, and that is the one

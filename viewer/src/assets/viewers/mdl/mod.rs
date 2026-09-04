@@ -1393,11 +1393,9 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     model.viewport(ui);
 }
 
-/// The constants the passes past the composite are run with. Every one of these is a value a shader
-/// reads and no file states, so the numbers are the user's to move rather than the viewer's to
-/// settle. The occlusion and glare ones are a guess: those buffers report no member names, no
-/// defaults and no units at all, and the lengths among the first are taken as fractions of what the
-/// frame itself spans.
+/// Which of the passes past the composite run, and what each is run with. Every constant here comes
+/// out of a buffer no file describes, so each is stated beside its control rather than left to a
+/// slider; the two lanes of the vignette are the exception and are picks.
 fn settings(ui: &mut egui::Ui, model: &Rendered) {
     let mut look = model.look.get();
     ui.horizontal_wrapped(|ui| {

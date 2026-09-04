@@ -618,6 +618,8 @@ pub struct Drawn {
     pub vignette: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
     pub shadow: bool,
+    /// Whether the chain that weights a pixel by how much sky reaches it ran this frame.
+    pub occlusion: bool,
     /// The horizon band and the overhead sheet, in that order.
     pub clouds: [bool; 2],
 }
@@ -4133,9 +4135,11 @@ impl Buffers {
         lamps: &[program::Lamp],
     ) -> Result<(), String> {
         // The frame starts again here, so what ran over the last one is forgotten - except the
-        // sun's own pass, which runs ahead of this one and would be forgotten before it was read.
+        // sun's own pass and the occlusion, which run ahead of this one and would be forgotten
+        // before they were read.
         self.drawn = Drawn {
             shadow: self.shadowing,
+            occlusion: self.occluding,
             ..Drawn::default()
         };
         let (position, _) = self.position.ok_or("no view position")?;

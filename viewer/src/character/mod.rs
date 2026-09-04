@@ -14,6 +14,7 @@ mod mounts;
 mod npcs;
 mod palette;
 mod stains;
+pub mod stand;
 mod stance;
 mod weapons;
 
@@ -46,7 +47,7 @@ use crate::utils::{
 /// its material, which is the skin their own body is drawn with.
 const BODY_SET: u16 = 1;
 /// What each body differs from the one it is built on by.
-const DEFORMERS: &str = "chara/xls/boneDeformer/human.pbd";
+pub(super) const DEFORMERS: &str = "chara/xls/boneDeformer/human.pbd";
 
 /// How big a set's icon is drawn, and how far apart the grid sets them.
 const ICON: f32 = 40.0;
@@ -64,24 +65,24 @@ const PANEL_MIN_WIDTH: f32 = 180.0;
 
 /// Which customisation each of the creator's menus drives, as `Customize` numbers them. Every one
 /// of these is measured from `CharaMakeType` rather than named by any file.
-const FACE: u32 = 5;
-const HAIRSTYLE: u32 = 6;
+pub(super) const FACE: u32 = 5;
+pub(super) const HAIRSTYLE: u32 = 6;
 const SKIN_COLOR: u32 = 8;
 const EYE_COLOR: u32 = 9;
 const HAIR_COLOR: u32 = 10;
 const FEATURES: u32 = 12;
 const TATTOO_COLOR: u32 = 13;
 const LIP_COLOR: u32 = 20;
-const FACE_PAINT: u32 = 24;
+pub(super) const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
-const HEIGHT: u32 = 3;
+pub(super) const HEIGHT: u32 = 3;
 /// Muscle tone, on a body the creator offers no tail or ears; every other race spends the same
 /// customisation on the length of whatever its [`TAIL`] menu shapes.
 const MUSCLE_TONE: u32 = 21;
 const BUST: u32 = 23;
 /// A tail, or a Viera's ears: the game files both under the one customisation, and under one
 /// numbered set beneath the body that grows it.
-const TAIL: u32 = 22;
+pub(super) const TAIL: u32 = 22;
 
 /// What the creator ticks beside a menu rather than offering as a menu of its own, keyed past every
 /// menu number so the two can never collide. The game holds each of them all the same: a highlight
@@ -193,7 +194,7 @@ impl Slot {
 
     /// Whether a set worn here is filed as an accessory rather than as equipment, which is both
     /// the directory it sits in and the letter its models are named with.
-    fn adornment(self) -> bool {
+    pub(super) fn adornment(self) -> bool {
         Self::ADORNMENT.contains(&self)
     }
 }
@@ -246,7 +247,7 @@ struct Stood {
 }
 
 /// What a picked set is made of, and what to call it.
-struct Set {
+pub(super) struct Set {
     id: u16,
     parts: Vec<String>,
 }
@@ -1116,116 +1117,15 @@ impl CharacterBuilder {
     /// What the creator's menus have been left at, and what the shaders and the model make of it:
     /// the colours to tint with, the parts to leave undrawn and the shape keys to deform by.
     fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32, Vec3) {
-        let mut customize = mdl::Customize::default();
-        // Every feature the face declares, less the ones the creator has been left on.
-        let mut hidden: BTreeSet<String> = FEATURE_LETTERS
-            .iter()
-            .map(|letter| format!("{FEATURE}{letter}"))
-            .collect();
-        hidden.extend(self.covered());
-        let mut shapes = BTreeSet::new();
-        let mut stature = 1.0;
-        let mut bust = Vec3::ONE;
-        let mut tone = 1.0;
-        let Some(body) = self.creator.body(self.tribe, self.female) else {
-            return (customize, hidden, shapes, stature, bust);
-        };
-        // A body that is offered a tail or a pair of ears lengthens those with the customisation
-        // the rest spend on muscle, and is left at the tone a race with none to set is given.
-        let muscled = !body.menus.iter().any(|menu| menu.customize == TAIL);
-        let palettes = self
-            .made
-            .as_ref()
-            .map(|made| made.palettes(self.tribe, self.female));
-        for menu in &body.menus {
-            let at = self.choice(menu) as usize;
-            if let Some(palettes) = &palettes {
-                let color = match menu.customize {
-                    SKIN_COLOR => Some((&palettes.skin, &mut customize.skin)),
-                    HAIR_COLOR => Some((&palettes.hair, &mut customize.hair)),
-                    LIP_COLOR => Some((&palettes.lips, &mut customize.lip)),
-                    EYE_COLOR => Some((&palettes.eyes, &mut customize.right_eye)),
-                    _ => None,
-                };
-                if let Some((swatches, held)) = color {
-                    *held = swatches.shaded(at);
-                }
-                // A strand is mixed between the two hair colours by its mask, so with the
-                // highlight left off both are the one colour: leaving it white is what drew brown
-                // hair silver. Eyes go the same way, one colour unless they are made odd.
-                if menu.customize == HAIR_COLOR {
-                    customize.highlight = match self.ticked(HIGHLIGHTS) {
-                        true => palettes.highlights.shaded(self.held(HIGHLIGHT_COLOR) as usize),
-                        false => customize.hair,
-                    };
-                }
-                if menu.customize == EYE_COLOR {
-                    customize.left_eye = match self.ticked(ODD_EYES) {
-                        true => palettes.eyes.shaded(self.held(LEFT_EYE_COLOR) as usize),
-                        false => customize.right_eye,
-                    };
-                }
-                // What the shaders call the option colour is the race feature: a limbal ring, a
-                // Miqo'te's ear tuft, the tattoo the creator names it after. Face paint has a
-                // colour of its own, which the game hands to the decal rather than to this.
-                if menu.customize == TATTOO_COLOR {
-                    let [red, green, blue, _] = palettes.features.shaded(at);
-                    customize.option = [red, green, blue];
-                }
-                if menu.customize == FACE_PAINT_COLOR {
-                    customize.decal = palettes.face_paint.shaded(at);
-                }
-            }
-            // Only the lane, since the muscle tone menu comes before the skin colour that would
-            // otherwise write over what it left.
-            if menu.customize == MUSCLE_TONE && muscled {
-                tone = slid(menu, at as u32);
-            }
-            if menu.customize == HEIGHT
-                && let Some(palettes) = &palettes
-            {
-                let [short, tall] = palettes.height;
-                stature = short + (tall - short) * slid(menu, at as u32);
-            }
-            if menu.customize == BUST
-                && let Some(palettes) = &palettes
-            {
-                let [small, full] = palettes.bust;
-                bust = Vec3::from(small).lerp(Vec3::from(full), slid(menu, at as u32));
-            }
-            if menu.customize == FEATURES {
-                // The two menus that share this one number are halves of the same run of parts,
-                // and each states where in it its own toggles start.
-                let first = body
-                    .menus
-                    .iter()
-                    .take_while(|held| !std::ptr::eq(*held, menu))
-                    .filter(|held| held.customize == FEATURES)
-                    .map(|held| held.count as usize)
-                    .sum::<usize>();
-                for bit in first..first + menu.count as usize {
-                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(bit) {
-                        hidden.remove(&format!("{FEATURE}{letter}"));
-                    }
-                }
-            }
-            if let Some((_, prefix)) = SHAPED.iter().find(|(held, _)| *held == menu.customize)
-                && at > 0
-                && let Some(letter) = FEATURE_LETTERS.get(at - 1)
-            {
-                shapes.insert(format!("{prefix}_{letter}"));
-            }
-        }
-        customize.skin[3] = tone;
-        customize.paint = self.paint();
-        if customize.paint.is_none() {
-            customize.decal[3] = 0.0;
-        }
-        // Lip colour carries its own opacity, and the creator's own box is what it is worn at all.
-        if !self.ticked(LIPSTICK) {
-            customize.lip[3] = 0.0;
-        }
-        (customize, hidden, shapes, stature, bust)
+        appearance(
+            &self.creator,
+            self.made.as_ref(),
+            self.tribe,
+            self.female,
+            &self.choices,
+            self.covered(),
+            self.paint(),
+        )
     }
 
     /// How far the visor of the hat being worn has been raised, which is nothing at all where the
@@ -2606,7 +2506,146 @@ const BUILT_ON: [u16; 16] = [1, 3, 5, 5, 11, 11, 7, 7, 9, 9, 13, 13, 15, 15, 17,
 const ADULT: u16 = 1;
 const CHILD: u16 = 4;
 
-fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
+
+/// Where a menu has been left, which is where the creator opens it until it is picked from. Not
+/// bounded by the count: a lip colour past the dark half is where the light one starts.
+fn choice(choices: &BTreeMap<u32, u32>, menu: &menus::Menu) -> u32 {
+    choices.get(&menu.customize).copied().unwrap_or(menu.init)
+}
+
+/// What one of the creator's own boxes has been left at, and whether it is ticked.
+fn left_at(choices: &BTreeMap<u32, u32>, key: u32) -> u32 {
+    choices.get(&key).copied().unwrap_or(0)
+}
+
+fn ticked(choices: &BTreeMap<u32, u32>, key: u32) -> bool {
+    left_at(choices, key) != 0
+}
+
+/// The colours a body was made with, the seams it hides, the shapes it wears, how tall it stands
+/// and how full its chest is: everything the creator's own menus decide, off where each has been
+/// left. `covered` is what the outfit hides on top of that, and `paint` the face paint it wears.
+#[allow(clippy::too_many_arguments)]
+pub fn appearance(
+creator: &menus::Creator,
+made: Option<&palette::Made>,
+tribe: u32,
+female: bool,
+choices: &BTreeMap<u32, u32>,
+covered: BTreeSet<String>,
+paint: Option<u16>,
+) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32, Vec3) {
+    let mut customize = mdl::Customize::default();
+    // Every feature the face declares, less the ones the creator has been left on.
+    let mut hidden: BTreeSet<String> = FEATURE_LETTERS
+        .iter()
+        .map(|letter| format!("{FEATURE}{letter}"))
+        .collect();
+    hidden.extend(covered);
+    let mut shapes = BTreeSet::new();
+    let mut stature = 1.0;
+    let mut bust = Vec3::ONE;
+    let mut tone = 1.0;
+    let Some(body) = creator.body(tribe, female) else {
+        return (customize, hidden, shapes, stature, bust);
+    };
+    // A body that is offered a tail or a pair of ears lengthens those with the customisation
+    // the rest spend on muscle, and is left at the tone a race with none to set is given.
+    let muscled = !body.menus.iter().any(|menu| menu.customize == TAIL);
+    let palettes = made.map(|made| made.palettes(tribe, female));
+    for menu in &body.menus {
+        let at = choice(choices, menu) as usize;
+        if let Some(palettes) = &palettes {
+            let color = match menu.customize {
+                SKIN_COLOR => Some((&palettes.skin, &mut customize.skin)),
+                HAIR_COLOR => Some((&palettes.hair, &mut customize.hair)),
+                LIP_COLOR => Some((&palettes.lips, &mut customize.lip)),
+                EYE_COLOR => Some((&palettes.eyes, &mut customize.right_eye)),
+                _ => None,
+            };
+            if let Some((swatches, held)) = color {
+                *held = swatches.shaded(at);
+            }
+            // A strand is mixed between the two hair colours by its mask, so with the
+            // highlight left off both are the one colour: leaving it white is what drew brown
+            // hair silver. Eyes go the same way, one colour unless they are made odd.
+            if menu.customize == HAIR_COLOR {
+                customize.highlight = match ticked(choices, HIGHLIGHTS) {
+                    true => palettes.highlights.shaded(left_at(choices, HIGHLIGHT_COLOR) as usize),
+                    false => customize.hair,
+                };
+            }
+            if menu.customize == EYE_COLOR {
+                customize.left_eye = match ticked(choices, ODD_EYES) {
+                    true => palettes.eyes.shaded(left_at(choices, LEFT_EYE_COLOR) as usize),
+                    false => customize.right_eye,
+                };
+            }
+            // What the shaders call the option colour is the race feature: a limbal ring, a
+            // Miqo'te's ear tuft, the tattoo the creator names it after. Face paint has a
+            // colour of its own, which the game hands to the decal rather than to this.
+            if menu.customize == TATTOO_COLOR {
+                let [red, green, blue, _] = palettes.features.shaded(at);
+                customize.option = [red, green, blue];
+            }
+            if menu.customize == FACE_PAINT_COLOR {
+                customize.decal = palettes.face_paint.shaded(at);
+            }
+        }
+        // Only the lane, since the muscle tone menu comes before the skin colour that would
+        // otherwise write over what it left.
+        if menu.customize == MUSCLE_TONE && muscled {
+            tone = slid(menu, at as u32);
+        }
+        if menu.customize == HEIGHT
+            && let Some(palettes) = &palettes
+        {
+            let [short, tall] = palettes.height;
+            stature = short + (tall - short) * slid(menu, at as u32);
+        }
+        if menu.customize == BUST
+            && let Some(palettes) = &palettes
+        {
+            let [small, full] = palettes.bust;
+            bust = Vec3::from(small).lerp(Vec3::from(full), slid(menu, at as u32));
+        }
+        if menu.customize == FEATURES {
+            // The two menus that share this one number are halves of the same run of parts,
+            // and each states where in it its own toggles start.
+            let first = body
+                .menus
+                .iter()
+                .take_while(|held| !std::ptr::eq(*held, menu))
+                .filter(|held| held.customize == FEATURES)
+                .map(|held| held.count as usize)
+                .sum::<usize>();
+            for bit in first..first + menu.count as usize {
+                if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(bit) {
+                    hidden.remove(&format!("{FEATURE}{letter}"));
+                }
+            }
+        }
+        if let Some((_, prefix)) = SHAPED.iter().find(|(held, _)| *held == menu.customize)
+            && at > 0
+            && let Some(letter) = FEATURE_LETTERS.get(at - 1)
+        {
+            shapes.insert(format!("{prefix}_{letter}"));
+        }
+    }
+    customize.skin[3] = tone;
+    customize.paint = paint;
+    if customize.paint.is_none() {
+        customize.decal[3] = 0.0;
+    }
+    // Lip colour carries its own opacity, and the creator's own box is what it is worn at all.
+    if !ticked(choices, LIPSTICK) {
+        customize.lip[3] = 0.0;
+    }
+    (customize, hidden, shapes, stature, bust)
+}
+
+
+pub(super) fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
     let body = BUILT_ON
         .get(tribe.max(1) as usize - 1)
         .copied()
@@ -2615,7 +2654,7 @@ fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
 }
 
 /// The body a model was made for, which its own file name states.
-fn made_for(model: &str) -> Option<u16> {
+pub(super) fn made_for(model: &str) -> Option<u16> {
     let name = model.rsplit('/').next()?;
     name.strip_prefix('c')?.get(..4)?.parse().ok()
 }
@@ -2626,7 +2665,7 @@ fn root(code: u16) -> String {
 
 /// Every model one numbered set of a kind holds. A face is several files and a body one, and which
 /// is which is the directory's to say rather than a list of suffixes here.
-fn parts(listing: &Listing, under: &str, id: u16) -> Vec<String> {
+pub(super) fn parts(listing: &Listing, under: &str, id: u16) -> Vec<String> {
     let letter = under.rsplit('/').next().unwrap_or_default().as_bytes()[0] as char;
     let mut found = listing.under(&format!("{under}/{letter}{id:04}/model/"));
     found.retain(|path| path.ends_with(".mdl"));
@@ -2635,7 +2674,7 @@ fn parts(listing: &Listing, under: &str, id: u16) -> Vec<String> {
 }
 
 /// The numbered sets of a kind the code carries, each with the models it holds.
-fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
+pub(super) fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
     let under = format!("{}/obj/{kind}", root(*code));
     let letter = kind.as_bytes()[0] as char;
     listing
@@ -2657,7 +2696,7 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
 
 /// The sets of whichever part the body grows: a tail where it has one, a Viera's ears where it does
 /// not. Both are numbered the same way and neither body ships the other.
-fn grown(listing: &Listing, code: u16) -> Vec<Set> {
+pub(super) fn grown(listing: &Listing, code: u16) -> Vec<Set> {
     ["tail", "zear"]
         .into_iter()
         .map(|kind| sets(listing, &code, kind))
@@ -2670,7 +2709,7 @@ fn grown(listing: &Listing, code: u16) -> Vec<Set> {
 ///
 /// Few bodies have a model of their own for a given slot: the rest wear the nearest one they are
 /// built on, which is what the deformers between the two then shape onto them.
-fn equipment(
+pub(super) fn equipment(
     listing: &Listing,
     deformers: &mdl::Deformers,
     code: u16,
@@ -2697,7 +2736,7 @@ fn equipment(
 /// The body whose skin another one's model is drawn with: its own where it ships a material for
 /// the set, and the nearest body it is built on where it does not. Elezen, Miqo'te, Roegadyn women
 /// and Lalafell women ship none, and each of those is a body whose skin is its parent's.
-fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16> {
+pub(super) fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16> {
     deformers.lineage(code).find(|code| {
         let under = format!("{}/obj/body/b{BODY_SET:04}/material/", root(*code));
         !listing.under(&under).is_empty()
@@ -2707,7 +2746,7 @@ fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16>
 /// The models a body is built out of. The game holds one of them, `c0101b0001`, and stands every
 /// other body on it deformed, which is why no other code ships a model of the set while twelve of
 /// them ship the skin it is drawn with.
-fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String> {
+pub(super) fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String> {
     deformers
         .lineage(code)
         .map(|code| parts(listing, &format!("{}/obj/body", root(code)), BODY_SET))
@@ -2716,20 +2755,20 @@ fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String>
 }
 
 /// Which of a set's models covers one slot.
-fn part(parts: &[String], slot: Slot) -> Option<String> {
+pub(super) fn part(parts: &[String], slot: Slot) -> Option<String> {
     let tail = format!("_{}.mdl", slot.suffix());
     parts.iter().find(|path| path.ends_with(&tail)).cloned()
 }
 
 /// The picked set if the code still carries it, and its lowest otherwise.
-fn pick(sets: &[Set], wanted: u16) -> u16 {
+pub(super) fn pick(sets: &[Set], wanted: u16) -> u16 {
     match sets.iter().any(|set| set.id == wanted) {
         true => wanted,
         false => sets.first().map_or(wanted, |set| set.id),
     }
 }
 
-fn held(sets: &[Set], wanted: u16) -> Vec<String> {
+pub(super) fn held(sets: &[Set], wanted: u16) -> Vec<String> {
     sets.iter()
         .find(|set| set.id == wanted)
         .map(|set| set.parts.clone())

@@ -14,6 +14,7 @@ use ironworks::file::layer::{HelperKind, Instance, InstanceData, InstanceKind, T
 use ironworks::file::lvb::LevelFile;
 use ironworks::file::mdl::{Lod, MeshKind, ModelContainer};
 use ironworks::file::{lcb, svb};
+use ironworks::file::pbd::PreBoneDeformer;
 use ironworks::file::sgb::SharedGroupFile;
 use ironworks::file::tmb::{Channel, CommandKind, Curves, Item};
 use ironworks::{
@@ -23,6 +24,145 @@ use ironworks::{
 
 /// How deep a shared group is followed into another, matching the scene view's own cap.
 const DEPTH: u8 = 8;
+
+/// Where `ENpcBase` writes what the creator would have picked, and the places in it this reads.
+const CUSTOMIZE: usize = 52;
+const RACE: usize = 0;
+const GENDER: usize = 1;
+const BODY: usize = 2;
+const TRIBE: usize = 4;
+const FACE: usize = 5;
+const HAIRSTYLE: usize = 6;
+const TAIL: usize = 22;
+const CHILD_BODY: u8 = 4;
+/// The rest of `ENpcBase`: the ten model quads, the body it states apart from the creator's
+/// numbering, and the row it is dressed out of.
+const MODELS: usize = 35;
+const MODEL_CHARA: usize = 46;
+const NPC_EQUIP: usize = 47;
+/// `NpcEquip`'s own ten, and `ModelChara`'s numbered body.
+const EQUIP_MODELS: usize = 2;
+const CHARA_MODEL: usize = 3;
+const CHARA_KIND: usize = 5;
+const CHARA_BASE: usize = 6;
+/// `BNpcBase`'s links to all three.
+const BNPC_CHARA: usize = 4;
+const BNPC_CUSTOMIZE: usize = 5;
+const BNPC_EQUIP: usize = 6;
+
+/// The `ENpcBase` a participant copying a live character falls back to, out of `sub_141B26310`: a
+/// stand-in for a party member, and the one body a `StableChocobo` always draws.
+const PARTY_STAND_IN: u32 = 1_034_882;
+const STABLED_CHOCOBO: u32 = 1_006_001;
+
+/// The body a clan is grown on, as `viewer/src/character` resolves one.
+const BUILT_ON: [u16; 16] = [1, 3, 5, 5, 11, 11, 7, 7, 9, 9, 13, 13, 15, 15, 17, 17];
+const ADULT: u16 = 1;
+const CHILD: u16 = 4;
+const BODY_SET: u16 = 1;
+const SUFFIXES: [&str; 10] = [
+    "met", "top", "glv", "dwn", "sho", "ear", "nek", "wrs", "ril", "rir",
+];
+
+fn resolve(tribe: u8, female: bool, child: bool) -> u16 {
+    let body = BUILT_ON
+        .get(usize::from(tribe.max(1)) - 1)
+        .copied()
+        .unwrap_or(1);
+    (body + u16::from(female)) * 100 + if child { CHILD } else { ADULT }
+}
+
+/// Which schema field each of a sheet's columns is: EXDSchema lists them in offset order, and
+/// ironworks indexes them in the exh's own.
+fn ordered(sheet: &ironworks::excel::Sheet<&str>) -> Vec<usize> {
+    let held = sheet.columns().unwrap_or_default();
+    let mut at: Vec<usize> = (0..held.len()).collect();
+    at.sort_by_key(|c| (held[*c].offset(), format!("{:?}", held[*c].kind())));
+    at
+}
+
+/// What a character participant is built out of.
+enum Cast {
+    /// A human, by the body its clan grows on and what it wears.
+    Human {
+        code: u16,
+        face: u16,
+        hair: u16,
+        tail: u16,
+        outfit: [Option<(u16, bool)>; 10],
+    },
+    /// A body of its own, drawn from every model under one directory.
+    Beast { under: String },
+}
+
+/// Every model path this cast would draw, against a directory index of the whole install.
+fn drawn_from(cast: &Cast, under: &BTreeMap<String, Vec<String>>, built_on: &BTreeMap<u16, u16>) -> Vec<String> {
+    let lineage = |code: u16| std::iter::successors(Some(code), |code| built_on.get(code).copied());
+    match cast {
+        Cast::Beast { under: held } => under.get(held).cloned().unwrap_or_default(),
+        Cast::Human {
+            code,
+            face,
+            hair,
+            tail,
+            outfit,
+        } => {
+            let mut found = Vec::new();
+            // A set the code no longer carries draws its lowest, the way the creator picks one.
+            let numbered = |kind: &str, wanted: u16| -> Vec<String> {
+                let letter = kind.as_bytes()[0] as char;
+                let root = format!("chara/human/c{code:04}/obj/{kind}/{letter}");
+                let held = format!("{root}{wanted:04}/model/");
+                if let Some(parts) = under.get(&held) {
+                    return parts.clone();
+                }
+                under
+                    .range(root.clone()..)
+                    .take_while(|(path, _)| path.starts_with(&root))
+                    .map(|(_, parts)| parts.clone())
+                    .next()
+                    .unwrap_or_default()
+            };
+            found.extend(numbered("face", *face));
+            found.extend(numbered("hair", *hair));
+            for kind in ["tail", "zear"] {
+                found.extend(numbered(kind, *tail));
+            }
+            let body = lineage(*code)
+                .filter_map(|code| {
+                    under.get(&format!(
+                        "chara/human/c{code:04}/obj/body/b{BODY_SET:04}/model/"
+                    ))
+                })
+                .next()
+                .cloned()
+                .unwrap_or_default();
+            for (slot, suffix) in SUFFIXES.into_iter().enumerate() {
+                let worn = outfit[slot].and_then(|(set, adornment)| {
+                    let (kind, letter) = match adornment {
+                        true => ("accessory", 'a'),
+                        false => ("equipment", 'e'),
+                    };
+                    let held = under.get(&format!("chara/{kind}/{letter}{set:04}/model/"))?;
+                    lineage(*code).find_map(|code| {
+                        let path =
+                            format!("chara/{kind}/{letter}{set:04}/model/c{code:04}{letter}{set:04}_{suffix}.mdl");
+                        held.contains(&path).then_some(path)
+                    })
+                });
+                match worn {
+                    Some(path) => found.push(path),
+                    None => found.extend(
+                        body.iter()
+                            .find(|path| path.ends_with(&format!("_{suffix}.mdl")))
+                            .cloned(),
+                    ),
+                }
+            }
+            found
+        }
+    }
+}
 
 /// Whether a model holds geometry the scene view would draw, at the level it asks for first.
 fn drawable(bytes: Vec<u8>) -> Option<usize> {
@@ -355,6 +495,33 @@ fn main() {
 
     let list = std::env::args().nth(1).expect("a paths file");
     let paths = std::fs::read_to_string(list).expect("the paths file");
+    // Every model, under the directory holding it: what a character is worn out of is a directory
+    // rather than a name, and nothing in an install answers that without a path list.
+    let mut under: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in paths.lines().filter(|path| path.ends_with(".mdl")) {
+        let Some(at) = path.rfind('/') else { continue };
+        under
+            .entry(path[..=at].to_owned())
+            .or_default()
+            .push(path.to_owned());
+    }
+    for parts in under.values_mut() {
+        parts.sort();
+    }
+    let built_on: BTreeMap<u16, u16> = ironworks
+        .file::<Vec<u8>>("chara/xls/boneDeformer/human.pbd")
+        .ok()
+        .and_then(|bytes| PreBoneDeformer::read(std::io::Cursor::new(bytes)).ok())
+        .map(|file| {
+            file.deformers()
+                .filter_map(|deformer| {
+                    Some((deformer.id(), deformer.node().parent()?.deformer().id()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut casts: BTreeMap<(bool, u32), usize> = BTreeMap::new();
+    let mut cast_kinds: BTreeMap<&str, usize> = BTreeMap::new();
 
     let mut files = 0usize;
     let mut failed = 0usize;
@@ -422,6 +589,34 @@ fn main() {
                 };
                 *kinds.entry(format!("{:?}", helper.kind())).or_default() += 1;
                 *heights.entry(helper.height()).or_default() += 1;
+                // What each kind that draws a character resolves to with no live one on hand,
+                // which is the branch `sub_141B26310` takes wherever the roster it indexes is
+                // empty and the record does not force an id of its own.
+                let stands = match helper.kind() {
+                    HelperKind::EventNpc => Some((false, helper.base_id())),
+                    HelperKind::BattleNpc => Some((true, helper.base_id())),
+                    HelperKind::Player => Some((false, helper.base_id())),
+                    HelperKind::PartyMember | HelperKind::PartyMemberAlt | HelperKind::Unknown82 => {
+                        Some((false, match helper.forces_base_id() {
+                            true => helper.base_id(),
+                            false => PARTY_STAND_IN,
+                        }))
+                    }
+                    HelperKind::StableChocobo => Some((false, STABLED_CHOCOBO)),
+                    _ => None,
+                };
+                if let Some(key) = stands.filter(|(_, id)| *id != 0) {
+                    *casts.entry(key).or_default() += 1;
+                    *cast_kinds
+                        .entry(match helper.kind() {
+                            HelperKind::EventNpc => "EventNpc",
+                            HelperKind::BattleNpc => "BattleNpc",
+                            HelperKind::Player => "Player",
+                            HelperKind::StableChocobo => "StableChocobo",
+                            _ => "PartyMember",
+                        })
+                        .or_default() += 1;
+                }
                 if let Some(placement) = helper.placement() {
                     placements += 1;
                     *flags.entry(placement.flags()).or_default() += 1;
@@ -689,6 +884,170 @@ fn main() {
     }
     for asset in missing.iter().take(20) {
         println!("  no file {asset}");
+    }
+
+    println!();
+    println!("character participants by kind {cast_kinds:?}");
+    let bases = excel.sheet("ENpcBase").unwrap();
+    let battle = excel.sheet("BNpcBase").unwrap();
+    let customizes = excel.sheet("BNpcCustomize").unwrap();
+    let charas = excel.sheet("ModelChara").unwrap();
+    let equips = excel.sheet("NpcEquip").unwrap();
+    let (base_at, battle_at, customize_at, chara_at, equip_at) = (
+        ordered(&bases),
+        ordered(&battle),
+        ordered(&customizes),
+        ordered(&charas),
+        ordered(&equips),
+    );
+    let mut why: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut stood = 0usize;
+    let mut standing: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut geometry = [0usize; 2];
+    let mut pieces: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut absent: BTreeSet<String> = BTreeSet::new();
+    for ((battle_npc, id), seen) in &casts {
+        stood += seen;
+        let byte = |row: &ironworks::excel::Row, at: &[usize], field: usize| -> u8 {
+            row.field(at[field])
+                .ok()
+                .and_then(|held| held.into_u8().ok())
+                .unwrap_or(0)
+        };
+        let link = |row: &ironworks::excel::Row, at: &[usize], field: usize| -> u32 {
+            row.field(at[field])
+                .ok()
+                .and_then(|held| held.into_u16().ok())
+                .map_or(0, u32::from)
+        };
+        let quads = |row: &ironworks::excel::Row, at: &[usize], first: usize| -> [Option<(u16, bool)>; 10] {
+            let mut worn = [None; 10];
+            for slot in 0..10 {
+                let held = row
+                    .field(at[first + slot])
+                    .ok()
+                    .and_then(|held| held.into_u32().ok())
+                    .unwrap_or(0);
+                worn[slot] = (held != 0 && held != u32::MAX).then_some((held as u16, slot >= 5));
+            }
+            worn
+        };
+        let (customize, own, chara, equip) = match battle_npc {
+            false => {
+                let Ok(row) = bases.row(*id) else {
+                    *why.entry("no row under this id").or_default() += seen;
+                    continue;
+                };
+                let chara = link(&row, &base_at, MODEL_CHARA);
+                let equip = link(&row, &base_at, NPC_EQUIP);
+                let outfit = quads(&row, &base_at, MODELS);
+                (Some((row, base_at.clone(), CUSTOMIZE)), outfit, chara, equip)
+            }
+            true => {
+                let Ok(row) = battle.row(*id) else {
+                    *why.entry("no row under this id").or_default() += seen;
+                    continue;
+                };
+                let chara = link(&row, &battle_at, BNPC_CHARA);
+                let equip = link(&row, &battle_at, BNPC_EQUIP);
+                let held = link(&row, &battle_at, BNPC_CUSTOMIZE);
+                let customize = customizes
+                    .row(held)
+                    .ok()
+                    .map(|held| (held, customize_at.clone(), 0));
+                (customize, [None; 10], chara, equip)
+            }
+        };
+        let human = customize
+            .as_ref()
+            .filter(|(held, at, first)| byte(held, at, first + RACE) != 0);
+        let cast = match human {
+            Some((held, held_at, first)) => {
+                let tribe = byte(held, held_at, first + TRIBE);
+                let female = byte(held, held_at, first + GENDER) != 0;
+                let child = byte(held, held_at, first + BODY) == CHILD_BODY;
+                // Its own quads unless it states none at all, in which case the `NpcEquip` it
+                // names is what dresses it.
+                let mut outfit = own;
+                if outfit.iter().all(Option::is_none) && equip != 0
+                    && let Ok(held) = equips.row(equip)
+                {
+                    outfit = quads(&held, &equip_at, EQUIP_MODELS);
+                }
+                Cast::Human {
+                    code: resolve(tribe, female, child),
+                    face: u16::from(byte(held, held_at, first + FACE)),
+                    hair: u16::from(byte(held, held_at, first + HAIRSTYLE)),
+                    tail: u16::from(byte(held, held_at, first + TAIL)),
+                    outfit,
+                }
+            }
+            None => {
+                let held = charas.row(chara).ok().filter(|_| chara != 0);
+                let Some(held) = held else {
+                    *why.entry("no race and no ModelChara").or_default() += seen;
+                    continue;
+                };
+                let (model, kind, base) = (
+                    held.field(chara_at[CHARA_MODEL]).unwrap().into_u16().unwrap(),
+                    byte(&held, &chara_at, CHARA_KIND),
+                    byte(&held, &chara_at, CHARA_BASE),
+                );
+                match kind {
+                    3 => Cast::Beast {
+                        under: format!("chara/monster/m{model:04}/obj/body/b{base:04}/model/"),
+                    },
+                    2 => Cast::Beast {
+                        under: format!("chara/demihuman/d{model:04}/obj/equipment/e{base:04}/model/"),
+                    },
+                    _ => {
+                        *why.entry("ModelChara names a body this does not resolve")
+                            .or_default() += seen;
+                        continue;
+                    }
+                }
+            }
+        };
+        *standing
+            .entry(match cast {
+                Cast::Human { .. } => "human",
+                Cast::Beast { .. } => "monster or demihuman",
+            })
+            .or_default() += seen;
+        let held = drawn_from(&cast, &under, &built_on);
+        let drawn = held
+            .iter()
+            .filter(|path| {
+                ironworks
+                    .file::<Vec<u8>>(path)
+                    .ok()
+                    .and_then(drawable)
+                    .is_some_and(|meshes| meshes > 0)
+            })
+            .count();
+        geometry[usize::from(drawn > 0)] += seen;
+        *pieces.entry(drawn.min(20)).or_default() += seen;
+        if drawn == 0 {
+            *why.entry(match held.is_empty() {
+                true => "nothing on disk under what it names",
+                false => "every model it names is empty",
+            })
+            .or_default() += seen;
+            if let Cast::Beast { under } = &cast {
+                absent.insert(under.clone());
+            }
+        }
+    }
+    println!(
+        "{} of {stood} character participants draw geometry, over {} distinct ids",
+        geometry[1],
+        casts.len()
+    );
+    println!("  what they stand as {standing:?}");
+    println!("  models drawn per participant {pieces:?}");
+    println!("  why the rest do not {why:?}");
+    for path in absent.iter().take(10) {
+        println!("  nothing under {path}");
     }
 
     println!();

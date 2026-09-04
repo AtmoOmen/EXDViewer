@@ -45,6 +45,8 @@ struct Census {
     unaddressed_shows: usize,
     effects: usize,
     unaddressed_effects: usize,
+    /// What the effects no actor track reaches name, by the directory they sit under.
+    stray_paths: BTreeMap<String, usize>,
     /// `CTCB`: how many records, against how many timelines the file holds.
     ctcb: usize,
     ctcb_matches: usize,
@@ -190,10 +192,13 @@ impl Census {
                             None => self.unaddressed_shows += 1,
                         }
                     }
-                    CommandKind::C049(_) => {
+                    CommandKind::C049(effect) => {
                         self.effects += 1;
                         if target.is_none() {
                             self.unaddressed_effects += 1;
+                            let path = effect.path().unwrap_or_default();
+                            let under = path.rsplit_once('/').map(|(at, _)| at).unwrap_or(path);
+                            *self.stray_paths.entry(under.to_owned()).or_default() += 1;
                         }
                     }
                     _ => {}
@@ -306,6 +311,9 @@ impl Census {
             "C049: {} effects, {} reach no participant",
             self.effects, self.unaddressed_effects
         );
+        let mut stray: Vec<_> = self.stray_paths.iter().collect();
+        stray.sort_by(|a, b| b.1.cmp(a.1));
+        println!("  stray directories {:?}", stray.iter().take(8).collect::<Vec<_>>());
         println!(
             "CTCB: {} nodes, {} whose count matches the timelines",
             self.ctcb, self.ctcb_matches

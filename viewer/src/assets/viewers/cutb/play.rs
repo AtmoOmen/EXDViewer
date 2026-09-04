@@ -395,15 +395,18 @@ impl Part {
     /// Puts each list in the order it runs. A timeline lists its commands in neither the order it
     /// plays them nor any order at all, so what holds at a time cannot be read off one as it comes
     /// out of the file.
-    /// How much of it is drawn at a time: the last fade to have started, held at either end past
-    /// its own length. The client multiplies every fade running on one object together; this reads
-    /// the last alone, which is the same answer wherever two of them do not overlap.
-    fn opacity(&self, time: f32) -> f32 {
-        self.faded
+    /// The fade holding at a time, and how far into it that time is: the last one to have started,
+    /// since a fade holds its own end until another replaces it. The client multiplies every fade
+    /// running on one object together; this reads the last alone, which is the same answer wherever
+    /// two of them do not overlap.
+    fn fading(&self, time: f32) -> Option<(usize, &Fade, f32)> {
+        let (index, (at, fade)) = self
+            .faded
             .iter()
+            .enumerate()
             .rev()
-            .find(|(at, _)| *at <= time)
-            .map_or(1.0, |(at, fade)| fade.at(time - at))
+            .find(|(_, (at, _))| *at <= time)?;
+        Some((index, fade, time - at))
     }
 
     fn order(&mut self) {
@@ -1131,6 +1134,9 @@ struct State {
     /// frame it runs for, and the same for whether each participant is drawn.
     burst: std::collections::BTreeSet<u64>,
     shown: BTreeMap<u32, bool>,
+    /// Which fade each participant is running, so one is reported when it starts rather than every
+    /// frame it steps through.
+    fades: BTreeMap<u32, Option<usize>>,
 }
 
 impl Default for State {
@@ -1150,6 +1156,7 @@ impl Default for State {
             faces: BTreeMap::new(),
             burst: std::collections::BTreeSet::new(),
             shown: BTreeMap::new(),
+            fades: BTreeMap::new(),
         }
     }
 }
@@ -1387,7 +1394,22 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             );
         }
         state.cast.show(*participant, shown);
-        state.cast.fade(*participant, part.opacity(time));
+        let fading = part.fading(time);
+        state.cast.fade(
+            *participant,
+            fading.map_or(1.0, |(_, fade, along)| fade.at(along)),
+        );
+        let at = fading.map(|(at, ..)| at);
+        if state.fades.insert(*participant, at) != Some(at)
+            && let Some((_, fade, _)) = fading
+        {
+            log::info!(
+                "cutb: {participant:#x} fades {:.2} to {:.2} over {:.0}f",
+                fade.from,
+                fade.to,
+                fade.over
+            );
+        }
         let Some(model) = state.cast.model(*participant).cloned() else {
             continue;
         };
@@ -1796,6 +1818,40 @@ mod test {
         let wide = framed(Rect::from_min_size(egui::Pos2::ZERO, vec2(2400.0, 900.0)));
         assert!((wide.width() - 1600.0).abs() < 1e-3);
         assert!((wide.height() - 900.0).abs() < 1e-3);
+    }
+
+    fn fade(at: f32, from: f32, to: f32, over: f32) -> (f32, Fade) {
+        (at, Fade { from, to, over })
+    }
+
+    #[test]
+    fn a_fade_ramps_between_its_ends_and_holds_either_side_of_them() {
+        let part = Part {
+            faded: vec![fade(100.0, 1.0, 0.0, 20.0)],
+            ..Part::default()
+        };
+        let drawn = |time| part.fading(time).map(|(_, fade, along)| fade.at(along));
+        // Nothing has faded it yet, so it is whole.
+        assert!(drawn(99.0).is_none());
+        assert_eq!(drawn(100.0), Some(1.0));
+        assert_eq!(drawn(110.0), Some(0.5));
+        assert_eq!(drawn(120.0), Some(0.0));
+        // Past its own length it holds the end it reached rather than reverting.
+        assert_eq!(drawn(400.0), Some(0.0));
+    }
+
+    #[test]
+    fn the_last_fade_to_have_started_is_the_one_that_holds() {
+        let mut part = Part {
+            faded: vec![fade(200.0, 0.0, 1.0, 10.0), fade(100.0, 1.0, 0.0, 10.0)],
+            ..Part::default()
+        };
+        part.order();
+        let drawn = |time| part.fading(time).map(|(_, fade, along)| fade.at(along));
+        // A fade out followed by a fade back in leaves it whole, which a product of the two
+        // would not.
+        assert_eq!(drawn(150.0), Some(0.0));
+        assert_eq!(drawn(210.0), Some(1.0));
     }
 
     #[test]

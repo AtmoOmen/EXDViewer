@@ -98,6 +98,12 @@ const GET_NORMAL_MAP_PARALLAX: u32 = 0xd9fd_8a1c;
 const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
 const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 
+/// `ApplyDitherClip`, and the value that puts the clip a partly faded character is drawn through
+/// in. The variant it selects discards each pixel whose `-dither.tex` texel stands above
+/// `m_MulColor.w`, so at full opacity it discards nothing and the two readings draw the same frame.
+const APPLY_DITHER_CLIP: u32 = 0x8b03_6665;
+const APPLY_DITHER_CLIP_ON: u32 = 0x61b0_cf19;
+
 /// `ApplyWavingAnim`, and the value that lets the wind reach a surface. Set only where the model's
 /// own header allows it, which is what keeps a wall from swaying with the leaves.
 const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
@@ -1272,6 +1278,8 @@ pub struct Cast {
     /// Where it stands, at the height it was built.
     pub model: Mat4,
     pub customize: program::Customize,
+    /// How much of it is drawn, which its own dither clip tests each pixel against.
+    pub opacity: f32,
 }
 
 /// What the debug row offers, in the order it offers it.
@@ -1626,6 +1634,7 @@ impl Rendered {
             joints: pose.joints,
             model: at * Mat4::from_scale(Vec3::splat(self.stature.get())),
             customize: self.made_up(),
+            opacity: 1.0,
         }
     }
 
@@ -2974,7 +2983,11 @@ impl Rendered {
         // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
         // game would draw through the skinning variant. `GetNormalMap` is added per material below,
         // since only `bg.shpk` has a node for the parallax value.
-        let mut base = vec![(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON), (GET_RLR, GET_RLR_ON)];
+        let mut base = vec![
+            (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
+            (APPLY_DITHER_CLIP, APPLY_DITHER_CLIP_ON),
+            (GET_RLR, GET_RLR_ON),
+        ];
         if skinned {
             base.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
         }
@@ -3359,11 +3372,11 @@ impl Rendered {
         self.animation.act(packs, motion, fade);
     }
 
-    /// Opens the motion the character is playing `seconds` in rather than at its own start, which
-    /// is what a cutscene naming a window of one asks for. Read after [`Self::stand`], since
-    /// taking a clip up is what puts its clock back to nought.
-    pub fn opened_at(&self, seconds: f32) {
-        self.animation.opened_at(seconds);
+    /// Puts the motion the character is playing `seconds` in rather than wherever wall time has
+    /// run it to, which is what a transport seeking by a cutscene's own frame numbering asks for.
+    /// Read after [`Self::stand`], since taking a clip up is what puts its clock back to nought.
+    pub fn plays_at(&self, seconds: f32) {
+        self.animation.plays_at(seconds);
     }
 
     /// The motion the character is standing in, by the name its own pack gives it.

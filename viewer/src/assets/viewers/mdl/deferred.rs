@@ -91,7 +91,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 16] = [
+pub const ENGINE: [(u32, &str, u32); 17] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -167,10 +167,14 @@ pub const ENGINE: [(u32, &str, u32); 16] = [
         "common/graphics/texture/-bn_64_00.tex",
         glow::NEAREST,
     ),
+    // The threshold a dither clip tests an object's own opacity against, four by four and read at
+    // a quarter of the pixel's own coordinate, so one texel covers one pixel.
+    (DITHER, "common/graphics/texture/-dither.tex", glow::NEAREST),
 ];
 
 const WIND_SAMPLE_0: u32 = 0x78d3_e3b7;
 const WIND_SAMPLE_1: u32 = 0x0fd4_d321;
+const DITHER: u32 = 0x9f46_7267;
 
 /// The noise field a hair strand takes its flutter out of. Kept out of [`ENGINE`] because the
 /// engine builds it rather than reading it: [`super::noise::perlin`] draws the same field, and
@@ -3805,12 +3809,11 @@ impl Buffers {
     /// the engine's own set is reached.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
         let held = Self::upload(gl, held)?;
-        // The wind field is read at a world-scaled UV that runs well past a single tile, unlike
-        // anything else `ENGINE` names, so `upload`'s own `Kind`-based guess of clamping a plane
-        // is wrong for it specifically. No file states this sampler's own state at all - grass.shpk
-        // declares it with no material behind it - so REPEAT is read off the shader's own math
-        // rather than off any capture.
-        if matches!(id, WIND_SAMPLE_0 | WIND_SAMPLE_1) {
+        // The wind field is read at a world-scaled UV and the dither at a quarter of the pixel's
+        // own coordinate, both of which run well past a single tile, so `upload`'s own `Kind`-based
+        // guess of clamping a plane is wrong for these two. No file states either sampler's state
+        // at all, so REPEAT is read off the shaders' own math rather than off any capture.
+        if matches!(id, WIND_SAMPLE_0 | WIND_SAMPLE_1 | DITHER) {
             unsafe {
                 gl.bind_texture(held.0, Some(held.1));
                 gl.tex_parameter_i32(held.0, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);

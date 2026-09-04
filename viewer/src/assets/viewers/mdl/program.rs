@@ -1729,6 +1729,8 @@ pub struct Scene {
     pub star: Star,
     /// The colours the character was made with.
     pub customize: Customize,
+    /// How much of the object at hand is drawn, which its dither clip tests each pixel against.
+    pub opacity: f32,
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
     pub clock: f32,
     pub wind: Wind,
@@ -1917,6 +1919,7 @@ impl Default for Scene {
             shaft: Shaft::default(),
             star: Star::default(),
             customize: Customize::default(),
+            opacity: 1.0,
             clock: 0.0,
             wind: Wind::default(),
             blur: Blur::Along(Vec2::ZERO),
@@ -3607,7 +3610,7 @@ impl Buffer {
         // nought the buffer would otherwise sit at, which silently stands every blade still.
         put(grass, "m_GrassWindSpeedScale", vec![1.0]);
         put(grass, "m_BushWindSpeedScale", vec![1.0]);
-        put(INSTANCE, "m_MulColor", vec![1.0; 4]);
+        put(INSTANCE, "m_MulColor", vec![1.0, 1.0, 1.0, scene.opacity]);
         // What a hair strand flutters along. The engine hands over a unit heading scaled by the
         // wind's own speed, capped at thirty and taken down by a factor of two thousand, and leaves
         // the last lane at nought. Heading and speed are this viewer's own, read off the zone's

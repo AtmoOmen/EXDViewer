@@ -292,6 +292,25 @@ pub struct Part {
     effects: Vec<(f32, Burst)>,
     /// Whether it is drawn. Empty where nothing states it, which leaves it drawn.
     shown: Vec<(f32, bool)>,
+    /// The fades it runs. Empty where nothing states one, which leaves it whole.
+    faded: Vec<(f32, Fade)>,
+}
+
+/// One `C094`: what the participant fades from and to, and over how many of the cutscene's own
+/// frames. The client ramps it linearly and holds either end past it, and the four parts its
+/// filter can pick between are the same in every file that names one, so nothing here splits them.
+struct Fade {
+    from: f32,
+    to: f32,
+    over: f32,
+}
+
+impl Fade {
+    /// How much is drawn `along` frames into the fade.
+    fn at(&self, along: f32) -> f32 {
+        let held = (along / self.over.max(f32::EPSILON)).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * held
+    }
 }
 
 /// One effect a timeline fires on a participant: which file, the curve set stating its color, and
@@ -376,12 +395,27 @@ impl Part {
     /// Puts each list in the order it runs. A timeline lists its commands in neither the order it
     /// plays them nor any order at all, so what holds at a time cannot be read off one as it comes
     /// out of the file.
+    /// The fade holding at a time, and how far into it that time is: the last one to have started,
+    /// since a fade holds its own end until another replaces it. The client multiplies every fade
+    /// running on one object together; this reads the last alone, which is the same answer wherever
+    /// two of them do not overlap.
+    fn fading(&self, time: f32) -> Option<(usize, &Fade, f32)> {
+        let (index, (at, fade)) = self
+            .faded
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, (at, _))| *at <= time)?;
+        Some((index, fade, time - at))
+    }
+
     fn order(&mut self) {
         self.placed.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.motions.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.faces.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.effects.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.shown.sort_by(|left, right| left.0.total_cmp(&right.0));
+        self.faded.sort_by(|left, right| left.0.total_cmp(&right.0));
     }
 }
 
@@ -509,6 +543,16 @@ fn parts_of(
                 }
             }
             CommandKind::C019(state) => part.shown.push((at, state.visibility() & 0xFF != 0)),
+            CommandKind::C094(fade) => part.faded.push((
+                at,
+                Fade {
+                    from: fade.start_visibility(),
+                    to: fade.end_visibility(),
+                    // The clip takes its length off the low half of the field, as every command
+                    // whose first word is a duration does.
+                    over: f32::from(fade.fade_time() as u16),
+                },
+            )),
             _ => {}
         }
     }
@@ -750,6 +794,16 @@ impl Player {
     /// Where a participant stands at a time, where its own timeline places it.
     fn placed(&self, participant: u32, time: f32) -> Option<Transform> {
         latest(&self.parts.get(&participant)?.placed, time).map(|(_, at)| *at)
+    }
+
+    /// The participants nothing is drawing at a time, which is what a prop is taken out of the
+    /// frame by: the scene places one per participant and a cast is hidden through its own model.
+    fn unplaced(&self, time: f32) -> std::collections::BTreeSet<u32> {
+        self.parts
+            .iter()
+            .filter(|(_, part)| latest(&part.shown, time).is_some_and(|(_, on)| !on))
+            .map(|(participant, _)| *participant)
+            .collect()
     }
 
     /// Every shot, in the order it plays.
@@ -1080,6 +1134,9 @@ struct State {
     /// frame it runs for, and the same for whether each participant is drawn.
     burst: std::collections::BTreeSet<u64>,
     shown: BTreeMap<u32, bool>,
+    /// Which fade each participant is running, so one is reported when it starts rather than every
+    /// frame it steps through.
+    fades: BTreeMap<u32, Option<usize>>,
 }
 
 impl Default for State {
@@ -1099,6 +1156,7 @@ impl Default for State {
             faces: BTreeMap::new(),
             burst: std::collections::BTreeSet::new(),
             shown: BTreeMap::new(),
+            fades: BTreeMap::new(),
         }
     }
 }
@@ -1182,6 +1240,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     perform(tab.player.parts(), &mut state);
     let standing = state.cast.standing();
     let firing = tab.player.firing(cutscene, state.time);
+    let unplaced = tab.player.unplaced(state.time);
     state.burst.retain(|id| firing.iter().any(|held| held.id == *id));
     for held in &firing {
         if state.burst.insert(held.id) {
@@ -1216,6 +1275,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         }
         Fetch::Ready(scene) => {
             scene.stand(standing);
+            scene.hide(unplaced);
             scene.fire(firing);
             if let Some(pose) = pose {
                 scene.drive(pose.drive());
@@ -1334,22 +1394,42 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             );
         }
         state.cast.show(*participant, shown);
+        let fading = part.fading(time);
+        state.cast.fade(
+            *participant,
+            fading.map_or(1.0, |(_, fade, along)| fade.at(along)),
+        );
+        let at = fading.map(|(at, ..)| at);
+        if state.fades.insert(*participant, at) != Some(at)
+            && let Some((_, fade, _)) = fading
+        {
+            log::info!(
+                "cutb: {participant:#x} fades {:.2} to {:.2} over {:.0}f",
+                fade.from,
+                fade.to,
+                fade.over
+            );
+        }
         let Some(model) = state.cast.model(*participant).cloned() else {
             continue;
         };
         let lays_over = |motion: &str| state.cast.lays_over(motion);
-        if let Some((at, held)) = started(&part.motions, time, false, &lays_over)
-            && state.bodies.get(participant) != Some(&at)
-            && let Some(pack) = state.cast.holding(*participant, &held.motion)
-        {
-            state.bodies.insert(*participant, at);
-            log::info!(
-                "cutb: {participant:#x} plays {} from {:.2}s out of {pack}",
-                held.motion,
-                held.from
-            );
-            model.stand(&[(pack, &held.motion)], 0.0);
-            model.opened_at(held.from);
+        if let Some((at, held)) = started(&part.motions, time, false, &lays_over) {
+            if state.bodies.get(participant) != Some(&at)
+                && let Some(pack) = state.cast.holding(*participant, &held.motion)
+            {
+                state.bodies.insert(*participant, at);
+                log::info!(
+                    "cutb: {participant:#x} plays {} from {:.2}s out of {pack}",
+                    held.motion,
+                    held.from
+                );
+                model.stand(&[(pack, &held.motion)], 0.0);
+            }
+            // Every frame rather than only where the cue changes: the clip runs on wall time and
+            // the transport on the cutscene's own frames, so a seek would otherwise replay the
+            // clip from its start instead of landing inside it.
+            model.plays_at(held.from + (time - part.motions[at].0) / FRAMES_A_SECOND);
         }
         match started(&part.motions, time, true, &lays_over) {
             Some((at, held)) => {
@@ -1738,6 +1818,40 @@ mod test {
         let wide = framed(Rect::from_min_size(egui::Pos2::ZERO, vec2(2400.0, 900.0)));
         assert!((wide.width() - 1600.0).abs() < 1e-3);
         assert!((wide.height() - 900.0).abs() < 1e-3);
+    }
+
+    fn fade(at: f32, from: f32, to: f32, over: f32) -> (f32, Fade) {
+        (at, Fade { from, to, over })
+    }
+
+    #[test]
+    fn a_fade_ramps_between_its_ends_and_holds_either_side_of_them() {
+        let part = Part {
+            faded: vec![fade(100.0, 1.0, 0.0, 20.0)],
+            ..Part::default()
+        };
+        let drawn = |time| part.fading(time).map(|(_, fade, along)| fade.at(along));
+        // Nothing has faded it yet, so it is whole.
+        assert!(drawn(99.0).is_none());
+        assert_eq!(drawn(100.0), Some(1.0));
+        assert_eq!(drawn(110.0), Some(0.5));
+        assert_eq!(drawn(120.0), Some(0.0));
+        // Past its own length it holds the end it reached rather than reverting.
+        assert_eq!(drawn(400.0), Some(0.0));
+    }
+
+    #[test]
+    fn the_last_fade_to_have_started_is_the_one_that_holds() {
+        let mut part = Part {
+            faded: vec![fade(200.0, 0.0, 1.0, 10.0), fade(100.0, 1.0, 0.0, 10.0)],
+            ..Part::default()
+        };
+        part.order();
+        let drawn = |time| part.fading(time).map(|(_, fade, along)| fade.at(along));
+        // A fade out followed by a fade back in leaves it whole, which a product of the two
+        // would not.
+        assert_eq!(drawn(150.0), Some(0.0));
+        assert_eq!(drawn(210.0), Some(1.0));
     }
 
     #[test]

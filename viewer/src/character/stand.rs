@@ -122,6 +122,8 @@ pub struct Cast {
     /// The participants a timeline has taken out of the frame, which a cutscene does to the double
     /// standing in for someone the moment the other takes over.
     hidden: BTreeSet<u32>,
+    /// How much of each participant a fade leaves drawn. Absent is whole.
+    faded: BTreeMap<u32, f32>,
     packs: Packs,
     failure: Option<String>,
 }
@@ -237,6 +239,11 @@ impl Cast {
         };
     }
 
+    /// How much of a participant is drawn, which a fade takes down over its own length.
+    pub fn fade(&mut self, participant: u32, opacity: f32) {
+        self.faded.insert(participant, opacity);
+    }
+
     /// Moves a participant to where its own timeline puts it now.
     pub fn place(&mut self, participant: u32, at: Transform) {
         for wanted in &mut self.wanted {
@@ -262,6 +269,11 @@ impl Cast {
                 Some(scene::Standing {
                     model: held.models.get(&wanted.participant)?.clone(),
                     at: wanted.at,
+                    opacity: self
+                        .faded
+                        .get(&wanted.participant)
+                        .copied()
+                        .unwrap_or(1.0),
                 })
             })
             .collect()

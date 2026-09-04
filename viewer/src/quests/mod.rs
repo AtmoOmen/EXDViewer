@@ -1,12 +1,12 @@
 mod cutscenes;
 mod dag;
-mod derive;
+pub(crate) mod derive;
 mod detail;
 pub use detail::sestring;
 mod dialogue_box;
 pub mod glyph;
 pub mod graph;
-mod index;
+pub(crate) mod index;
 mod play;
 mod requirements;
 mod rewards;

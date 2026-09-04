@@ -70,6 +70,8 @@ pub struct Cue {
     pub entry: usize,
     /// What to call it in the log.
     pub label: String,
+    /// How long to hold the voice, in frames. `None` lets it go once its own audio has played out.
+    pub holds: Option<f32>,
 }
 
 enum Held {
@@ -87,6 +89,8 @@ pub struct Stage {
     /// Each voice with the frame it opened on and how long its own audio runs, in frames, so a
     /// one-shot is let go once it has played out.
     voices: Vec<(u64, f32, f32)>,
+    /// The voice carrying the track playing under the whole cutscene, where one is.
+    under: Option<u64>,
     next: u64,
     enabled: bool,
     volume: f32,
@@ -102,6 +106,7 @@ impl Default for Stage {
             decoded: HashMap::new(),
             mixer: None,
             voices: Vec::new(),
+            under: None,
             next: 0,
             enabled: false,
             volume: 0.7,
@@ -177,6 +182,7 @@ impl Stage {
     /// clock is scrubbable and the mixer's is not.
     pub fn silence(&mut self) {
         self.voices.clear();
+        self.under = None;
         if let Some(mixer) = &mut self.mixer {
             mixer.stop_all();
         }
@@ -226,6 +232,7 @@ impl Stage {
         self.voices
             .retain(|(_, at, runs)| time >= *at && time - at < *runs);
         let live: Vec<u64> = self.voices.iter().map(|(id, ..)| *id).collect();
+        self.under = self.under.filter(|id| live.contains(id));
         if let Some(mixer) = &mut self.mixer {
             mixer.retain(|id| live.contains(id));
         }
@@ -234,14 +241,28 @@ impl Stage {
     /// Plays a cue, if its container has been read. A cue whose file is still coming is dropped
     /// rather than played late.
     pub fn fire(&mut self, cue: &Cue, time: f32) {
-        if !self.enabled {
-            return;
+        self.start(cue, time);
+    }
+
+    /// Keeps one track playing under the whole cutscene, which is where a quest's own music sits.
+    pub fn under(&mut self, cue: &Cue, time: f32) {
+        if self.under.is_none() {
+            self.under = self.start(cue, time);
         }
-        let Some(key) = cue.paths.first() else {
-            return;
-        };
+    }
+
+    /// Whether a track is playing under the cutscene now.
+    pub fn sounding_under(&self) -> bool {
+        self.under.is_some()
+    }
+
+    fn start(&mut self, cue: &Cue, time: f32) -> Option<u64> {
+        if !self.enabled {
+            return None;
+        }
+        let key = cue.paths.first()?;
         let Some(Held::Ready(path, container)) = self.held.get(key) else {
-            return;
+            return None;
         };
         let slot = (path.clone(), cue.entry);
         if !self.decoded.contains_key(&slot) {
@@ -252,7 +273,7 @@ impl Stage {
                     cue.entry + 1
                 );
                 self.missing += 1;
-                return;
+                return None;
             };
             match audio::decode_data(entry.format(), entry.data()) {
                 Ok(decoded) => {
@@ -261,22 +282,22 @@ impl Stage {
                 Err(why) => {
                     log::warn!("cutb: {path} entry {} did not decode: {why}", cue.entry);
                     self.missing += 1;
-                    return;
+                    return None;
                 }
             }
         }
         let audio = self.decoded[&slot].clone();
-        let Some(mixer) = &mut self.mixer else {
-            return;
-        };
+        let mixer = self.mixer.as_mut()?;
         let id = self.next;
         self.next += 1;
         if let Err(why) = mixer.play(id, audio.clone(), 1.0) {
             log::warn!("cutb: {path} did not play: {why}");
-            return;
+            return None;
         }
-        self.voices.push((id, time, runs_for(&audio)));
+        self.voices
+            .push((id, time, cue.holds.unwrap_or_else(|| runs_for(&audio))));
         log::info!("cutb: {} plays {path}#{} at frame {time:.0}", cue.label, cue.entry);
+        Some(id)
     }
 }
 

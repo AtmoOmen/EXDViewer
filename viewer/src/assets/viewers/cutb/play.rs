@@ -26,7 +26,7 @@ use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData, T
 use ironworks::file::lvb::LevelFile;
 use ironworks::file::tmb::{Channel, CommandKind, Curves, Item, Timeline};
 
-use super::sound;
+use super::{music, sound};
 use crate::assets::viewers::layer;
 use crate::assets::viewers::layer::scene;
 use crate::backend::Backend;
@@ -564,6 +564,7 @@ fn sounds_of(timeline: &Timeline, offset: f32, held: &mut Vec<sound::Cue>) {
             paths: vec![path.to_owned()],
             entry,
             label: "effect".to_owned(),
+            holds: None,
         });
     }
 }
@@ -769,6 +770,7 @@ impl Player {
                 paths,
                 entry: 0,
                 label: subtitle.speaker.clone(),
+                holds: None,
             });
         }
         cues.sort_by(|left, right| left.at.total_cmp(&right.at));
@@ -1073,6 +1075,13 @@ enum Fetch {
 /// sheet states rather than the text they format to: which payloads a line spells out is a setting.
 type Said = BTreeMap<String, Vec<u8>>;
 
+enum Tracks {
+    Idle,
+    Loading(Box<TrackedPromise<anyhow::Result<music::Music>>>),
+    Ready(music::Music),
+    Failed(String),
+}
+
 enum Lines {
     Idle,
     Loading(Box<TrackedPromise<anyhow::Result<Said>>>),
@@ -1137,6 +1146,10 @@ struct State {
     cues: Vec<sound::Cue>,
     cues_for: Option<Language>,
     sounded: f32,
+    /// The music the cutscene's own quest states, and which of it to play under the frame.
+    tracks: Tracks,
+    track: usize,
+    music: bool,
 }
 
 impl Default for State {
@@ -1160,6 +1173,9 @@ impl Default for State {
             cues: Vec::new(),
             cues_for: None,
             sounded: 0.0,
+            tracks: Tracks::Idle,
+            track: 0,
+            music: false,
         }
     }
 }
@@ -1168,8 +1184,9 @@ impl Default for State {
 /// instead of the free orbit camera.
 pub struct Tab {
     level: String,
-    /// Which expansion the cutscene sits under, off its own path: the client spends the same on a
-    /// voice path.
+    /// The cutscene's own path, and which expansion it sits under: the client spends the same on
+    /// a voice path.
+    path: String,
     slug: String,
     player: Player,
     state: RefCell<State>,
@@ -1179,6 +1196,7 @@ impl Tab {
     pub fn new(level: String, path: &str, cutscene: &Cutscene) -> Self {
         Self {
             level,
+            path: path.to_owned(),
             slug: path.split('/').nth(1).unwrap_or("ffxiv").to_owned(),
             player: Player::new(cutscene),
             state: RefCell::new(State::default()),
@@ -1247,9 +1265,29 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         state.cues = tab.player.cues(&tab.slug, language);
         state.stage.silence();
     }
+    if state.music && matches!(&state.tracks, Tracks::Idle) {
+        let backend = backend.clone();
+        let path = tab.path.clone();
+        state.tracks = Tracks::Loading(Box::new(TrackedPromise::spawn_local(async move {
+            music::resolve(backend, language, path).await
+        })));
+    }
+    if matches!(&state.tracks, Tracks::Loading(promise) if promise.try_get().is_some()) {
+        let Tracks::Loading(promise) = std::mem::replace(&mut state.tracks, Tracks::Idle) else {
+            unreachable!()
+        };
+        state.tracks = match promise.block_and_take() {
+            Ok(found) => Tracks::Ready(found),
+            Err(error) => Tracks::Failed(error.to_string()),
+        };
+    }
+
     let held = &mut *state;
     if held.stage.enabled() {
         held.stage.want(backend, &held.cues);
+        if let Some(cue) = under(held, tab.player.duration()) {
+            held.stage.want(backend, std::slice::from_ref(&cue));
+        }
     }
     held.stage.poll(held.time);
 
@@ -1531,7 +1569,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
 
 /// Plays whatever the clock has just run over. A cutscene's own clock scrubs and the mixer's does
 /// not, so anything but playing forward stops the lot rather than leaving it ringing.
-fn fire(state: &mut State) {
+fn fire(state: &mut State, duration: f32) {
     let time = state.time;
     if !state.playing || time < state.sounded {
         state.stage.silence();
@@ -1543,7 +1581,92 @@ fn fire(state: &mut State) {
             state.stage.fire(cue, time);
         }
     }
+    if let Some(cue) = under(state, duration) {
+        state.stage.under(&cue, 0.0);
+    }
     state.sounded = time;
+}
+
+/// The track to keep playing under the frame: whichever of the quest's the panel has picked. It is
+/// held for the whole cutscene, since nothing states where it stops.
+fn under(state: &State, duration: f32) -> Option<sound::Cue> {
+    if !state.music {
+        return None;
+    }
+    let Tracks::Ready(found) = &state.tracks else {
+        return None;
+    };
+    let track = found.tracks.get(state.track)?;
+    Some(sound::Cue {
+        at: 0.0,
+        paths: vec![track.path.clone()],
+        entry: 0,
+        label: "music".to_owned(),
+        holds: Some(duration.max(1.0)),
+    })
+}
+
+/// The music row: a toggle, whatever the cutscene's own quest names, and which of it to play.
+fn music_ui(ui: &mut egui::Ui, state: &mut State) {
+    if ui
+        .checkbox(&mut state.music, "Music")
+        .on_hover_text(
+            "Play the music the quest naming this cutscene states. Nothing in the file itself \
+             says what a cutscene plays under, so this is quest-wide rather than per-cutscene.",
+        )
+        .clicked()
+        && !state.music
+    {
+        state.stage.silence();
+    }
+    if !state.music {
+        return;
+    }
+    match &state.tracks {
+        Tracks::Idle | Tracks::Loading(_) => {
+            ui.label(RichText::new("reading the quest\u{2026}").weak());
+        }
+        Tracks::Failed(why) => {
+            ui.label(RichText::new(format!("music: {why}")).weak());
+        }
+        Tracks::Ready(found) if found.tracks.is_empty() => {
+            ui.label(
+                RichText::new(match found.quests {
+                    0 => "no quest names this cutscene".to_owned(),
+                    quests => format!("{quests} quests name it, none with music"),
+                })
+                .weak(),
+            );
+        }
+        Tracks::Ready(found) => {
+            let mut picked = state.track.min(found.tracks.len() - 1);
+            egui::ComboBox::from_id_salt("cutb_music")
+                .selected_text(label_of(&found.tracks[picked]))
+                .show_ui(ui, |ui| {
+                    for (at, track) in found.tracks.iter().enumerate() {
+                        ui.selectable_value(&mut picked, at, label_of(track))
+                            .on_hover_text(format!("{} \u{b7} quest {}", track.path, track.quest));
+                    }
+                });
+            if picked != state.track {
+                state.track = picked;
+                state.stage.silence();
+            }
+            if state.stage.sounding_under() {
+                ui.label(RichText::new("under").weak());
+            }
+        }
+    }
+}
+
+/// What to call a track: the instruction the quest names it with, marked where the quest's own
+/// script plays it in the scene that plays this cutscene.
+fn label_of(track: &music::Track) -> String {
+    let leaf = track.path.rsplit('/').next().unwrap_or(&track.path);
+    match track.scripted {
+        true => format!("{} \u{b7} {leaf}", track.instruction),
+        false => format!("{} \u{b7} {leaf} (elsewhere in the quest)", track.instruction),
+    }
 }
 
 fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose>) {
@@ -1557,7 +1680,7 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         ui.ctx().request_repaint();
     }
 
-    fire(state);
+    fire(state, duration);
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("⏮").on_hover_text("Back to the start").clicked() {
@@ -1627,6 +1750,7 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         if let Some(why) = state.stage.error() {
             ui.colored_label(egui::Color32::LIGHT_RED, format!("sound: {why}"));
         }
+        music_ui(ui, state);
         if let Lines::Failed(why) = &state.lines {
             ui.colored_label(egui::Color32::LIGHT_RED, format!("lines: {why}"));
         }

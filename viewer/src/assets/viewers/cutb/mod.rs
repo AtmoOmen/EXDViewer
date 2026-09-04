@@ -3,6 +3,7 @@
 //! The timelines hold the same commands `.tmb` does, and most of what a cutscene puts in them is a
 //! kind that crate does not model, so a row saying only its magic and its size is the honest one.
 
+mod music;
 mod play;
 mod sound;
 

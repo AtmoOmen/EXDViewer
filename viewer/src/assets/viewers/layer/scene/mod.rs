@@ -773,6 +773,24 @@ pub struct Drive {
     pub far: f32,
 }
 
+/// The asset a [`Prop`] draws itself from.
+pub enum Asset {
+    /// A model, placed as one instance.
+    Model(String),
+    /// A shared group, expanded the way the scene expands one of its own.
+    Group(String),
+}
+
+/// Something placed in the scene by a host outside this view, alongside what the level itself
+/// holds.
+pub struct Prop {
+    pub asset: Asset,
+    /// Where it stands, read the same way a layer group's own instances are.
+    pub transform: Transform,
+    /// The instance it stands for, which is the key the level's `.svb` and `.lcb` are read by.
+    pub id: u32,
+}
+
 /// A 16:9-authored vertical field of view, carried to another aspect ratio by keeping its
 /// horizontal field rather than its vertical one.
 fn refit_16_9_fov(vertical_degrees: f32, aspect: f32) -> f32 {
@@ -1253,6 +1271,64 @@ impl Scene {
     /// driven camera shows. Forgotten the same way [`Self::drive`] is.
     pub fn mark(&mut self, markers: Vec<(Vec3, String)>) {
         self.markers = markers;
+    }
+
+    /// Adds props to the scene under a layer of their own. Unlike [`Self::drive`] and
+    /// [`Self::mark`] this appends, so a host builds a scene's props once rather than every frame.
+    pub fn place(&mut self, layer: &str, props: Vec<Prop>) {
+        if props.is_empty() {
+            return;
+        }
+        self.layers.push(Layer {
+            name: layer.to_owned(),
+            origin: None,
+            visible: true,
+            festival: 0,
+            shown: true,
+            placements: 0,
+        });
+        let at = self.layers.len() - 1;
+        for prop in props {
+            let here = matrix(prop.transform);
+            let key = reach((0, [0; 4]), 0, prop.id);
+            match prop.asset {
+                Asset::Model(path) => {
+                    let model = self.model(&path);
+                    self.models[model].instances += 1;
+                    self.layers[at].placements += 1;
+                    self.placements.push(Placement {
+                        model,
+                        transform: here,
+                        driven: None,
+                        center: here.transform_point3(Vec3::ZERO),
+                        // A prop states neither a bounding sphere nor a fade distance, and the
+                        // record the game builds for one leaves both at nought as well, so it
+                        // never fades.
+                        radius: 0.0,
+                        fade: 0.0,
+                        layer: at,
+                        key,
+                        glow: None,
+                        casts: true,
+                        wind_phase: None,
+                    });
+                }
+                Asset::Group(path) => self.waiting.push(Expand {
+                    path,
+                    transform: here,
+                    key,
+                    scale: Vec3::from_array(prop.transform.scale())
+                        .abs()
+                        .max_element()
+                        .max(0.001),
+                    layer: Some(at),
+                    depth: 1,
+                    chain: Vec::new(),
+                    since: Mat4::IDENTITY,
+                }),
+            }
+        }
+        self.dirty = true;
     }
 
     /// Reads placements out of a file's layers, queueing every shared group it names.

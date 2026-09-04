@@ -1243,11 +1243,30 @@ fn shown(parts: &[Part]) -> Vec<Range<i32>> {
     runs
 }
 
-/// What the viewer is for: taking a file apart, or standing a character up the way the game does.
+/// What the viewer is for: taking a file apart, standing a character up the way the game does, or
+/// standing one in a frame this view does not draw.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Chrome {
     Asset,
     Character,
+    Placed,
+}
+
+/// A model standing in a frame someone else draws: the card holding its geometry, what each of its
+/// meshes draws with, and where in that frame it stands.
+///
+/// Everything the model owns that belongs to a frame - the camera, the G-buffer, the lighting and
+/// every pass past it - is the host's here. What crosses is geometry, one joint palette per mesh,
+/// and the two things a character puts into the scene constants beside every other surface.
+pub struct Cast {
+    pub gpu: Arc<Mutex<gpu::Model>>,
+    pub surfaces: Vec<gpu::Surface>,
+    /// One palette per mesh, in the model's own space, since a mesh's blend indices run over its
+    /// own bone table.
+    pub joints: Vec<Vec<Mat4>>,
+    /// Where it stands, at the height it was built.
+    pub model: Mat4,
+    pub customize: program::Customize,
 }
 
 /// What the debug row offers, in the order it offers it.
@@ -1407,7 +1426,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         model.animation.ui(ui);
     }
 
-    model.poll(ui, backend);
+    model.poll(ui.ctx(), backend);
     model.viewport(ui);
 }
 
@@ -1587,14 +1606,34 @@ impl Rendered {
             .collect()
     }
 
-    fn poll(&self, ui: &egui::Ui, backend: &Backend) {
+    /// What a host outside this view draws this model with, at the transform it stands at and for
+    /// as much of a G-buffer as that host's own frame writes.
+    ///
+    /// A motion is set the way the character tab sets one, through [`Self::act`] and [`Self::play`]:
+    /// nothing about this seam names a pose, so what it stands in is whatever was last asked for.
+    pub fn cast(&self, at: Mat4, attachments: usize) -> Cast {
+        let level = self.level.borrow();
+        self.translate(level.skinned, level.waving, attachments);
+        let (pose, _) = self.posed(&level);
+        Cast {
+            gpu: level.gpu.clone(),
+            surfaces: self.surfaces(&level),
+            joints: pose.joints,
+            model: at * Mat4::from_scale(Vec3::splat(self.stature.get())),
+            customize: self.made_up(),
+        }
+    }
+
+    /// Asks for whatever this model still needs. Called by the view drawing it, which is not always
+    /// this one.
+    pub fn poll(&self, ctx: &egui::Context, backend: &Backend) {
         self.export
             .borrow_mut()
             .take_if(|promise| promise.try_get().is_some());
 
         let level = self.level.borrow();
         if level.skinned {
-            self.animation.poll(ui.ctx(), backend);
+            self.animation.poll(ctx, backend);
             self.emote
                 .borrow_mut()
                 .poll(backend, self.animation.body_playing());
@@ -1695,14 +1734,22 @@ impl Rendered {
                     Slot::Ready(material) => Some(material.package()),
                     _ => None,
                 })
+                // The passes that light a frame and grade it belong to whoever draws the frame,
+                // which for a placed model is not this one.
                 .chain(
-                    [
-                        program::VIEW_POSITION,
-                        program::DIRECTIONAL,
-                        program::POINT,
-                        program::COMPOSITE,
-                        program::TONE_ADJUST,
-                    ]
+                    match self.chrome.get() {
+                        Chrome::Placed => [].as_slice(),
+                        _ => [
+                            program::VIEW_POSITION,
+                            program::DIRECTIONAL,
+                            program::POINT,
+                            program::COMPOSITE,
+                            program::TONE_ADJUST,
+                        ]
+                        .as_slice(),
+                    }
+                    .iter()
+                    .copied()
                     .map(str::to_owned),
                 )
                 // Asked for only where the viewer is drawing with them, so a frame nobody wants
@@ -2044,7 +2091,7 @@ impl Rendered {
             };
             *texture = match result {
                 Ok(decoded) => {
-                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
+                    let held = crate::utils::tex_loader::fit(ctx, &decoded.image);
                     let size = [held.width() as usize, held.height() as usize];
                     self.resident
                         .set(self.resident.get() + size[0] * size[1] * 4);
@@ -2090,7 +2137,7 @@ impl Rendered {
                             mipmap_mode: Some(egui::TextureFilter::Linear),
                         },
                     };
-                    Texture::Ready(ui.ctx().load_texture(format!("mdl:{path}"), image, options))
+                    Texture::Ready(ctx.load_texture(format!("mdl:{path}"), image, options))
                 }
                 Err(why) => {
                     log::error!("assets/mdl: {path}: {why}");
@@ -2101,6 +2148,127 @@ impl Rendered {
     }
 
     /// The model itself: an orbit camera over a paint callback.
+    /// The pose the model stands in, in its own space, and the rig it was posed on.
+    ///
+    /// The joints move the geometry after the file stated its bounds, so where the model stands has
+    /// to be worked out before anything is framed or clipped against it.
+    fn posed(&self, level: &Level) -> (skin::Pose, Option<skin::RigInfo>) {
+        let worn: Vec<&str> = level
+            .meshes
+            .iter()
+            .map(|mesh| self.pieces[mesh.piece].path.as_str())
+            .collect();
+        let mut pose = self.animation.pose(&level.bones, &worn, self.skeleton.get());
+        let rig = self.animation.rig();
+        // A carried piece has no bone table of its own to resolve against the shared rig, so
+        // `pose` names it by an unresolvable placeholder and leaves it at `Mat4::IDENTITY`; this
+        // overwrites that with the bone it actually hangs from, carried the way a rider is.
+        if !self.attachments.borrow().is_empty()
+            && let Some((names, ..)) = &rig
+        {
+            for attachment in self.attachments.borrow().iter() {
+                let Some(bone) = names.iter().position(|name| *name == attachment.bone) else {
+                    continue;
+                };
+                let Some(&world) = pose.world.get(bone) else {
+                    continue;
+                };
+                let carried = world * attachment.local;
+                for (index, mesh) in level.meshes.iter().enumerate() {
+                    if self.pieces[mesh.piece].path == attachment.path {
+                        pose.joints[index] = vec![carried; level.bones[index].len()];
+                    }
+                }
+            }
+        }
+        (pose, rig)
+    }
+
+    /// What each mesh of the level is drawn with, once its material and that material's own shaders
+    /// have arrived.
+    fn surfaces(&self, level: &Level) -> Vec<gpu::Surface> {
+        let translated = self.translated.borrow();
+        let tables = self.tables.borrow();
+        let slots = self.slots.borrow();
+        let textures = self.textures.borrow();
+        let stacks = self.stacks.borrow();
+        let bind = |path: &str| match textures.get(path) {
+            Some(Texture::Ready(handle)) => Some(handle.id()),
+            _ => None,
+        };
+        // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
+        // its package is translated, and answering with that one would pin the sampler to it.
+        let sampled = |path: &str, aniso: f32| match stacks.get_key_value(path) {
+            Some((held, Array::Ready(_))) => Some(gpu::Bound::Stacked(held.clone())),
+            _ => bind(path).map(|handle| gpu::Bound::Plane(handle, aniso)),
+        };
+        // One that has not answered yet, as against one that answered with nothing. The flat
+        // stand-in a draw reaches for meanwhile is opaque, so a cutout authored into a normal map's
+        // alpha clips nothing and the quad it was cut out of stands as a solid card.
+        let pending = |path: &str| {
+            !matches!(
+                textures.get(path),
+                Some(Texture::Ready(_) | Texture::Absent)
+            ) && !matches!(stacks.get(path), Some(Array::Ready(_) | Array::Failed))
+        };
+        level
+            .meshes
+            .iter()
+            .map(|mesh| {
+                let runs = shown(&mesh.parts);
+                let Some(Some(Slot::Ready(material))) = slots.get(mesh.material) else {
+                    return gpu::Surface {
+                        material: mesh.material,
+                        runs,
+                        ..Default::default()
+                    };
+                };
+                if !material.drawn() {
+                    return gpu::Surface {
+                        material: mesh.material,
+                        ..Default::default()
+                    };
+                }
+                let shaded = self.shaded.get().then(|| {
+                    let passes = translated.get(&mesh.material)?.held.as_ref().ok()?;
+                    if material.bound().any(|(_, path)| pending(path)) {
+                        return None;
+                    }
+                    Some(gpu::Shaded {
+                        buffer: passes.buffer.clone(),
+                        depth: passes.depth.clone(),
+                        // The model viewer lights one object against nothing, so it casts no shadow.
+                        shadow: None,
+                        resolve: passes.resolve.clone(),
+                        sheer: passes.sheer.clone(),
+                        table: tables
+                            .get(&mesh.material)
+                            .map(|base| self.dyed_table(mesh, material, base)),
+                        textures: material
+                            .bound()
+                            .map(|(id, path)| (id, sampled(path, material.anisotropic(id))))
+                            .collect(),
+                    })
+                });
+                gpu::Surface {
+                    material: mesh.material,
+                    shaded: shaded.flatten(),
+                    runs,
+                    family: material.family(),
+                    normal: material.texture(Role::Normal).and_then(|path| bind(path)),
+                    index: material.texture(Role::Index).and_then(|path| bind(path)),
+                    mask: material.texture(Role::Mask).and_then(|path| bind(path)),
+                    diffuse: material.texture(Role::Diffuse).and_then(|path| bind(path)),
+                    alpha_threshold: material.alpha_threshold(),
+                    diffuse_color: material.diffuse(),
+                    emissive_color: material.emissive(),
+                    normal_scale: material.normal_scale(),
+                    cull: material.cull(),
+                }
+            })
+            .collect()
+    }
+
     fn viewport(&self, ui: &mut egui::Ui) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
         if rect.width() < 1.0 || rect.height() < 1.0 {
@@ -2154,36 +2322,7 @@ impl Rendered {
         }
         self.camera.set(camera);
 
-        // The joints move the geometry after the file stated its bounds, so where the model stands
-        // has to be worked out before anything is framed or clipped against it.
-        let worn: Vec<&str> = level
-            .meshes
-            .iter()
-            .map(|mesh| self.pieces[mesh.piece].path.as_str())
-            .collect();
-        let mut pose = self.animation.pose(&level.bones, &worn, self.skeleton.get());
-        let rig = self.animation.rig();
-        // A carried piece has no bone table of its own to resolve against the shared rig, so
-        // `pose` names it by an unresolvable placeholder and leaves it at `Mat4::IDENTITY`; this
-        // overwrites that with the bone it actually hangs from, carried the way a rider is.
-        if !self.attachments.borrow().is_empty()
-            && let Some((names, ..)) = &rig
-        {
-            for attachment in self.attachments.borrow().iter() {
-                let Some(bone) = names.iter().position(|name| *name == attachment.bone) else {
-                    continue;
-                };
-                let Some(&world) = pose.world.get(bone) else {
-                    continue;
-                };
-                let carried = world * attachment.local;
-                for (index, mesh) in level.meshes.iter().enumerate() {
-                    if self.pieces[mesh.piece].path == attachment.path {
-                        pose.joints[index] = vec![carried; level.bones[index].len()];
-                    }
-                }
-            }
-        }
+        let (mut pose, rig) = self.posed(&level);
         // A marker standing in for a vfx an emote's own timeline fires, and for the effect a
         // weapon carries while it is drawn: not the game's particles, only where and when one
         // would draw.
@@ -2267,86 +2406,7 @@ impl Rendered {
             }
             false => None,
         };
-        let translated = self.translated.borrow();
-        let tables = self.tables.borrow();
-        let slots = self.slots.borrow();
-        let textures = self.textures.borrow();
-        let stacks = self.stacks.borrow();
-        let bind = |path: &str| match textures.get(path) {
-            Some(Texture::Ready(handle)) => Some(handle.id()),
-            _ => None,
-        };
-        // The graph's own store first: a sliced texture reaches egui as a plane on the frame before
-        // its package is translated, and answering with that one would pin the sampler to it.
-        let sampled = |path: &str, aniso: f32| match stacks.get_key_value(path) {
-            Some((held, Array::Ready(_))) => Some(gpu::Bound::Stacked(held.clone())),
-            _ => bind(path).map(|handle| gpu::Bound::Plane(handle, aniso)),
-        };
-        // One that has not answered yet, as against one that answered with nothing. The flat
-        // stand-in a draw reaches for meanwhile is opaque, so a cutout authored into a normal map's
-        // alpha clips nothing and the quad it was cut out of stands as a solid card.
-        let pending = |path: &str| {
-            !matches!(
-                textures.get(path),
-                Some(Texture::Ready(_) | Texture::Absent)
-            ) && !matches!(stacks.get(path), Some(Array::Ready(_) | Array::Failed))
-        };
-        let surfaces = level
-            .meshes
-            .iter()
-            .map(|mesh| {
-                let runs = shown(&mesh.parts);
-                let Some(Some(Slot::Ready(material))) = slots.get(mesh.material) else {
-                    return gpu::Surface {
-                        material: mesh.material,
-                        runs,
-                        ..Default::default()
-                    };
-                };
-                if !material.drawn() {
-                    return gpu::Surface {
-                        material: mesh.material,
-                        ..Default::default()
-                    };
-                }
-                let shaded = self.shaded.get().then(|| {
-                    let passes = translated.get(&mesh.material)?.held.as_ref().ok()?;
-                    if material.bound().any(|(_, path)| pending(path)) {
-                        return None;
-                    }
-                    Some(gpu::Shaded {
-                        buffer: passes.buffer.clone(),
-                        depth: passes.depth.clone(),
-                        // The model viewer lights one object against nothing, so it casts no shadow.
-                        shadow: None,
-                        resolve: passes.resolve.clone(),
-                        sheer: passes.sheer.clone(),
-                        table: tables
-                            .get(&mesh.material)
-                            .map(|base| self.dyed_table(mesh, material, base)),
-                        textures: material
-                            .bound()
-                            .map(|(id, path)| (id, sampled(path, material.anisotropic(id))))
-                            .collect(),
-                    })
-                });
-                gpu::Surface {
-                    material: mesh.material,
-                    shaded: shaded.flatten(),
-                    runs,
-                    family: material.family(),
-                    normal: material.texture(Role::Normal).and_then(|path| bind(path)),
-                    index: material.texture(Role::Index).and_then(|path| bind(path)),
-                    mask: material.texture(Role::Mask).and_then(|path| bind(path)),
-                    diffuse: material.texture(Role::Diffuse).and_then(|path| bind(path)),
-                    alpha_threshold: material.alpha_threshold(),
-                    diffuse_color: material.diffuse(),
-                    emissive_color: material.emissive(),
-                    normal_scale: material.normal_scale(),
-                    cull: material.cull(),
-                }
-            })
-            .collect();
+        let surfaces = self.surfaces(&level);
 
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against. A projection built for GL

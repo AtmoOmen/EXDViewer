@@ -405,41 +405,44 @@ impl Model {
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
-        frame: &Frame,
+        held: (&[Surface], &[Vec<glam::Mat4>]),
         buffers: &mut deferred::Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        if !self.stage(gl, frame.surfaces.len()) {
+        if !self.stage(gl, held.0.len()) {
             return Ok(());
         }
-        let held = (
+        let supplied = (
             std::mem::take(&mut self.arrays),
             std::mem::take(&mut self.stacks),
             self.types.take(),
         );
-        supply(gl, buffers, held);
+        supply(gl, buffers, supplied);
         self.game
-            .fill(gl, painter, frame, &self.meshes, buffers, scene)
+            .fill(gl, painter, held, &self.meshes, buffers, scene)
     }
 
     /// The surfaces of this model that answer into the frame rather than into the buffer: drawn
     /// once the host has resolved its own lighting over what [`Self::fill`] left.
+    #[allow(clippy::too_many_arguments)]
     pub fn over(
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
-        frame: &Frame,
+        surfaces: &[Surface],
         buffers: &mut deferred::Buffers,
         lighting: &deferred::Lighting,
+        lamps: &[program::Lamp],
         scene: &program::Scene,
     ) -> Result<(), String> {
-        if self.failure.is_some() || self.meshes.len() != frame.surfaces.len() {
+        if self.failure.is_some() || self.meshes.len() != surfaces.len() {
             return Ok(());
         }
         self.game
-            .resolve(gl, painter, frame, &self.meshes, buffers, scene)?;
-        self.game
-            .sheer(gl, painter, frame, &self.meshes, buffers, lighting, scene)
+            .resolve(gl, painter, surfaces, &self.meshes, buffers, scene)?;
+        self.game.sheer(
+            gl, painter, surfaces, &self.meshes, buffers, lighting, lamps, scene,
+        )
     }
 
     pub fn draw(
@@ -760,17 +763,18 @@ impl Game {
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
-        frame: &Frame,
+        held: (&[Surface], &[Vec<glam::Mat4>]),
         meshes: &[Buffers],
         buffers: &mut deferred::Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        self.palettes(gl, &frame.joints, scene.view * scene.model)?;
+        let (surfaces, joints) = held;
+        self.palettes(gl, joints, scene.view * scene.model)?;
         let mut failed: Option<String> = None;
         for page in 0..buffers.pages() {
             buffers.open(gl, page);
             for depth in [true, false] {
-                for (at, (mesh, surface)) in meshes.iter().zip(&frame.surfaces).enumerate() {
+                for (at, (mesh, surface)) in meshes.iter().zip(surfaces).enumerate() {
                     let Some(shaded) = &surface.shaded else {
                         continue;
                     };
@@ -861,7 +865,16 @@ impl Game {
             size: (size.0 as f32, size.1 as f32),
             ..frame.scene.clone()
         };
-        let failed = self.fill(gl, painter, frame, meshes, buffers, &scene).err();
+        let failed = self
+            .fill(
+                gl,
+                painter,
+                (&frame.surfaces, &frame.joints),
+                meshes,
+                buffers,
+                &scene,
+            )
+            .err();
         // Only where the lit frame is what is being shown: a raw channel is a page of the G-buffer
         // and owes nothing to the passes past it.
         if let Some(lighting) = frame.lighting.as_ref().filter(|_| frame.target >= TARGETS) {
@@ -873,8 +886,17 @@ impl Game {
             }
             buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
-            self.resolve(gl, painter, frame, meshes, buffers, &scene)?;
-            self.sheer(gl, painter, frame, meshes, buffers, lighting, &scene)?;
+            self.resolve(gl, painter, &frame.surfaces, meshes, buffers, &scene)?;
+            self.sheer(
+                gl,
+                painter,
+                &frame.surfaces,
+                meshes,
+                buffers,
+                lighting,
+                &[frame.scene.lamp],
+                &scene,
+            )?;
             // Over the frame the composite left and before anything spreads or grades it, which is
             // where the game runs it.
             if let Some(reflection) = frame.reflection.as_ref() {
@@ -919,13 +941,12 @@ impl Game {
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
-        frame: &Frame,
+        surfaces: &[Surface],
         meshes: &[Buffers],
         buffers: &mut deferred::Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (opaque, mut blended): (Vec<usize>, Vec<usize>) = frame
-            .surfaces
+        let (opaque, mut blended): (Vec<usize>, Vec<usize>) = surfaces
             .iter()
             .enumerate()
             .filter(|(_, surface)| {
@@ -937,7 +958,7 @@ impl Game {
             })
             .map(|(at, _)| at)
             .partition(|at| {
-                frame.surfaces[*at]
+                surfaces[*at]
                     .shaded
                     .as_ref()
                     .is_some_and(|shaded| shaded.depth.is_some())
@@ -993,7 +1014,7 @@ impl Game {
                 if behind {
                     buffers.keep(gl)?;
                 }
-                let surface = &frame.surfaces[*at];
+                let surface = &surfaces[*at];
                 let Some(mesh) = meshes.get(*at) else {
                     continue;
                 };
@@ -1036,14 +1057,14 @@ impl Game {
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
-        frame: &Frame,
+        surfaces: &[Surface],
         meshes: &[Buffers],
         buffers: &mut deferred::Buffers,
         lighting: &deferred::Lighting,
+        lamps: &[program::Lamp],
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let held: Vec<(usize, Arc<program::Program>, Arc<program::Program>)> = frame
-            .surfaces
+        let held: Vec<(usize, Arc<program::Program>, Arc<program::Program>)> = surfaces
             .iter()
             .enumerate()
             .filter(|(_, surface)| !surface.runs.is_empty())
@@ -1057,7 +1078,7 @@ impl Game {
         }
         buffers.sheer(gl)?;
         for (at, buffer, _) in &held {
-            let surface = &frame.surfaces[*at];
+            let surface = &surfaces[*at];
             let Some(mesh) = meshes.get(*at) else {
                 continue;
             };
@@ -1087,8 +1108,7 @@ impl Game {
             self.bind(gl, painter, program, buffer, surface, *at, mesh, buffers, scene)?;
         }
 
-        buffers
-            .relight(gl, lighting, scene, &[frame.scene.lamp])?;
+        buffers.relight(gl, lighting, scene, lamps)?;
 
         // Tested against a copy of the depth rather than the depth itself: a surface here also
         // samples it, and the live one is the framebuffer's own attachment.
@@ -1118,7 +1138,7 @@ impl Game {
             );
         }
         for (at, _, resolve) in &held {
-            let surface = &frame.surfaces[*at];
+            let surface = &surfaces[*at];
             let Some(mesh) = meshes.get(*at) else {
                 continue;
             };

@@ -10,7 +10,9 @@ use ironworks::excel::{Excel, Language};
 use ironworks::file::File;
 use ironworks::file::cutb::{Cutscene, Node};
 use ironworks::file::layer::{HelperKind, Instance, InstanceData, InstanceKind, Transform};
+use ironworks::file::lvb::LevelFile;
 use ironworks::file::mdl::{Lod, MeshKind, ModelContainer};
+use ironworks::file::{lcb, svb};
 use ironworks::file::sgb::SharedGroupFile;
 use ironworks::{
     Ironworks,
@@ -155,6 +157,8 @@ fn main() {
     let mut groups: BTreeMap<String, usize> = BTreeMap::new();
     let mut carrying: BTreeMap<String, usize> = BTreeMap::new();
     let mut busiest: Vec<(usize, String)> = Vec::new();
+    let mut levels: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
+    let mut clashes: BTreeMap<&str, usize> = BTreeMap::new();
 
     let mut here;
     for path in paths.lines().filter(|path| path.ends_with(".cutb")) {
@@ -353,6 +357,62 @@ fn main() {
             }
         }
         busiest.push((here, path.to_owned()));
+
+        let Some(Node::Scene(scene)) = file
+            .nodes()
+            .iter()
+            .find(|node| matches!(node, Node::Scene(_)))
+        else {
+            continue;
+        };
+        if scene.level().is_empty() {
+            continue;
+        }
+        let level = format!("bg/{}.lvb", scene.level());
+        let keys = levels.entry(level.clone()).or_insert_with(|| {
+            let mut held = BTreeSet::new();
+            let Ok(bytes) = ironworks.file::<Vec<u8>>(&level) else {
+                return held;
+            };
+            let Ok(read) = LevelFile::read(std::io::Cursor::new(bytes)) else {
+                return held;
+            };
+            let aside = |path: &String| match path.is_empty() {
+                true => None,
+                false => ironworks.file::<Vec<u8>>(path).ok(),
+            };
+            if let Some(bytes) = aside(read.scene().light_culling_path())
+                && let Ok(boxes) = lcb::ClipBoxes::read(std::io::Cursor::new(bytes))
+            {
+                for group in boxes.groups() {
+                    held.extend(group.entries().iter().map(lcb::Entry::instance));
+                }
+            }
+            if let Some(bytes) = aside(read.scene().sky_visibility_path())
+                && let Ok(sky) = svb::SkyVisibility::read(std::io::Cursor::new(bytes))
+            {
+                for group in sky.groups() {
+                    held.extend(group.entries().iter().map(svb::Entry::instance));
+                }
+            }
+            held
+        });
+        for node in file.nodes() {
+            let Node::Participants(participants) = node else {
+                continue;
+            };
+            for participant in participants {
+                if nested_of(participant).is_none() {
+                    continue;
+                }
+                *clashes
+                    .entry(match keys.contains(&participant.id()) {
+                        true => "the level states a box or a visibility for this id",
+                        false => "no entry under this id",
+                    })
+                    .or_default() += 1;
+            }
+        }
     }
     busiest.sort_by(|a, b| b.0.cmp(&a.0));
 
@@ -459,6 +519,7 @@ fn main() {
                 .or_default() += 1;
         }
     }
+    println!("prop ids against the level's own lcb/svb keys {clashes:?}");
     println!("busiest cutscenes {:?}", &busiest[..10.min(busiest.len())]);
     println!(
         "SharedGroups: {} of {} paths place a model that draws, covering {} of {} participants",

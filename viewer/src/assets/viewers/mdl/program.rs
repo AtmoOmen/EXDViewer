@@ -605,6 +605,9 @@ const SAMPLING_OFFSET: &str = "cSamplingOffset";
 /// within each the first lane is the diffuse's share and the second the specular's.
 const CLOUD_SHADOW_PARAM: &str = "cCloudShadowParam";
 const CLOUD_SHADOW_WEIGHTS: [f32; 4] = [0.5, 0.5, 1.0, 0.5];
+
+/// Where the lighting reads that map, which the package names its buffer and its one member alike.
+const CLOUD_SHADOW_MATRIX: &str = "g_CloudShadowMatrix";
 const VIGNETTING_PARAM: &str = "cVignettingParam";
 
 /// How the shadow resolve softens an edge. The package names its first two levels a single
@@ -1535,10 +1538,12 @@ impl Cloud {
     /// sheet's vertex shader, which clamps what would fall outside the planes rather than losing it.
     pub fn shadow_camera(light: Vec3, view: Mat4) -> (Mat4, Mat4) {
         let eye = view.inverse().w_axis.truncate();
-        // Toward whichever of the two the sun stands at, so the map is drawn from above at any hour.
+        // Taken to the upper half whichever way it was handed in, so the sheet is always overhead.
         let toward = light.normalize_or(Vec3::Y) * light.y.signum();
         let turn = glam::Quat::from_rotation_arc(Vec3::Z, toward);
-        let span = |axis: Vec3| CLOUD_SHADOW_SPAN * axis.cross(toward).length().max(CLOUD_SHADOW_FLOOR);
+        let span = |axis: Vec3| {
+            CLOUD_SHADOW_SPAN * axis.cross(toward).length().max(CLOUD_SHADOW_FLOOR)
+        };
         let (wide, tall) = (span(Vec3::X), span(Vec3::Z));
         (
             Mat4::from_rotation_translation(turn, eye).inverse(),
@@ -3625,8 +3630,8 @@ impl Buffer {
         // leaves the map opaque white, and the term is one wherever this lands.
         let (cloud, onto) = Cloud::shadow_camera(scene.light, view);
         put(
-            "g_CloudShadowMatrix",
-            "g_CloudShadowMatrix",
+            CLOUD_SHADOW_MATRIX,
+            CLOUD_SHADOW_MATRIX,
             rows(onto * cloud * view.inverse(), 4),
         );
         // The weight the character resolve carries a material's own emissive into the frame's alpha
@@ -4297,8 +4302,8 @@ mod test {
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, Customize, DECAL,
-        DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
+        ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, CLOUD_SHADOW_MATRIX, Customize,
+        DECAL, DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
         INSTANCING, JOINT, REFLECTION_PARAM, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS,
         SUN_PARAM, WAVING, WIND_POWER_SCALE, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer,
         ambient, decal_field, encode, instance_fields, joints, moon_phase, moon_roll, moon_softness,
@@ -4455,6 +4460,68 @@ mod test {
             let short = (SHADOW_MAP * ATLAS_COLUMNS.min(ATLAS_ROWS) as i32) as f32;
             let across = -x * short / (SHADOW_MAP as f32 * ATLAS_ROWS as f32 * row(1).length());
             assert!((across - 0.007).abs() < 1e-6, "split {split}: {across}");
+        }
+    }
+
+    /// Where a lit pixel is read in the map a cloud's shadow was drawn into, against the matrix a
+    /// captured frame of Ishgard bound at the same camera and hour. The frame's own view goes in and
+    /// the whole of the game's own matrix has to come out: the box, its planes, and the turn that
+    /// stands the map's camera under the light are each only right if every lane of this lands.
+    #[test]
+    fn the_cloud_shadow_matrix_comes_out_as_the_game_held_it() {
+        // Rows of the frame's own world-to-view matrix, as its camera buffer holds them.
+        let held = [
+            [0.675_344_3, 9.536_745e-7, 0.737_502_75, 47.094_776],
+            [-0.298_507_6, 0.914_425_9, 0.273_347_5, -128.917_86],
+            [-0.674_391_3, -0.404_753_77, 0.617_552_34, -269.328_43],
+        ];
+        let column = |at: usize| Vec4::new(held[0][at], held[1][at], held[2][at], 0.0);
+        let scene = Scene {
+            view: Mat4::from_cols(column(0), column(1), column(2), column(3) + Vec4::W),
+            light: Vec3::new(0.806_444_64, 0.512_089_13, 0.295_654_77),
+            ..Default::default()
+        };
+        let buffer = Buffer {
+            name: CLOUD_SHADOW_MATRIX.to_owned(),
+            members: vec![hlsl::layout::Member {
+                name: CLOUD_SHADOW_MATRIX.to_owned(),
+                offset: 0,
+                size: 64,
+                kind: "float4".to_owned(),
+            }],
+            registers: 4,
+            fixed: None,
+        };
+        let filled: Vec<f32> = buffer
+            .fill(&scene, Pass::Lighting, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        let held = [
+            -2.184_979_4e-4,
+            -5.585_666e-4,
+            -5.960_442_4e-4,
+            0.0,
+            -3.103_349_6e-4,
+            3.582_748_8e-4,
+            -2.219_851_2e-4,
+            0.0,
+            -3.817_188_5e-5,
+            -1.543_313_7e-5,
+            2.845_579_4e-5,
+            -1.001_001e-3,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ];
+        // The lanes that carry the box are exact to a part in ten thousand of their own last digit;
+        // the ones that carry nothing land on the same 1e-8 of float noise the game's own frames do.
+        for (at, (filled, held)) in filled.iter().zip(held).enumerate() {
+            assert!(
+                (filled - held).abs() < 2e-8,
+                "lane {at}: {filled} against {held}"
+            );
         }
     }
 

@@ -3392,7 +3392,9 @@ impl Scene {
                     held.pass = program::Pass::CloudShadow;
                     held
                 });
-            self.cloud_shadow = sheet.zip(held).map(|(sheet, blur)| (Arc::new(sheet), Arc::new(blur)));
+            self.cloud_shadow = sheet
+                .zip(held)
+                .map(|(sheet, blur)| (Arc::new(sheet), Arc::new(blur)));
         }
         if self.starlight.is_none()
             && let (Some(Package::Ready(vertex)), Some(Package::Ready(fragment))) = (

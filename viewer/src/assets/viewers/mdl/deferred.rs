@@ -2214,11 +2214,10 @@ impl Buffers {
             return Ok(held);
         }
         let size = (program::CLOUD_SHADOW_MAP, program::CLOUD_SHADOW_MAP);
-        let mut built = Vec::new();
-        for _ in 0..2 {
-            let held = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+        let one = || -> Result<(glow::Framebuffer, glow::Texture), String> {
+            let map = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
             unsafe {
-                gl.bind_texture(glow::TEXTURE_2D, Some(held));
+                gl.bind_texture(glow::TEXTURE_2D, Some(map));
                 for (name, value) in [
                     (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
                     (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
@@ -2228,9 +2227,9 @@ impl Buffers {
                     gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
                 }
             }
-            built.push((frame_of(gl, &[held], None)?, held));
-        }
-        let held = [built[0], built[1]];
+            Ok((frame_of(gl, &[map], None)?, map))
+        };
+        let held = [one()?, one()?];
         self.clouded = Some(held);
         Ok(held)
     }

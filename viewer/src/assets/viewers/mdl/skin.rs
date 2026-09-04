@@ -327,9 +327,9 @@ fn companion(timeline: &[u8], duration: f32) -> Companion {
             _ => continue,
         };
         let (path, hold, span) = match command.kind() {
-            CommandKind::C009(animation) => (animation.path(), animation.duration(), (0.0, 1.0)),
+            CommandKind::C009(animation) => (animation.motion(), animation.duration(), (0.0, 1.0)),
             CommandKind::C010(animation) => (
-                animation.path(),
+                animation.motion(),
                 animation.duration(),
                 // `0x01` enables the start and end frames; without it the whole clip plays.
                 match animation.flags() & 0x01 != 0 {
@@ -764,6 +764,25 @@ impl<T> Fetch<T> {
             _ => None,
         }
     }
+}
+
+/// Every name a pack's own animation table states, which is how a timeline naming a motion says
+/// which pack to play it out of, and whether each lays over the pose the body is already in rather
+/// than replacing it, which is what the clip's own blend hint states.
+pub fn motion_names(bytes: &[u8]) -> Result<Vec<(String, bool)>> {
+    let file = AnimationPack::read(Cursor::new(bytes.to_vec()))?;
+    let bindings = file.parse_animations().unwrap_or_default();
+    Ok(file
+        .animations()
+        .iter()
+        .map(|animation| {
+            let at = usize::try_from(animation.havok_index()).unwrap_or(usize::MAX);
+            let over = bindings
+                .get(at)
+                .is_some_and(|binding| binding.blend_hint() == 1);
+            (animation.name().to_owned(), over)
+        })
+        .collect())
 }
 
 /// The `cfxf_` names a pap's own animation table states, regardless of whether its own timeline
@@ -1412,6 +1431,13 @@ impl Animation {
         self.stood.set(true);
         self.body.seek(candidates, Some(fade));
         self.running.set(true);
+    }
+
+    /// Opens the body's clip `seconds` in rather than at its own start, which is what a cutscene
+    /// naming a window of a motion asks for. Read after whatever asked for the clip, since taking
+    /// one up is what puts its clock back to nought.
+    pub fn opened_at(&self, seconds: f32) {
+        self.body.time.set(seconds);
     }
 
     /// What the body is standing in, by the name its own pack gives the motion.

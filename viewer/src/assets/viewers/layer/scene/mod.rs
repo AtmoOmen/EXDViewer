@@ -790,6 +790,17 @@ pub struct Standing {
     pub at: Transform,
 }
 
+/// One effect a host outside this view is running: which file, where it stands, how far into its
+/// own timeline it now is, and the color to draw it through. The id is the firing's own, so a
+/// host that hands the list over again every frame keeps each firing's particles.
+pub struct Fired {
+    pub id: u64,
+    pub path: String,
+    pub at: Mat4,
+    pub frame: i32,
+    pub tint: Vec4,
+}
+
 /// Something placed in the scene by a host outside this view, alongside what the level itself
 /// holds.
 pub struct Prop {
@@ -901,6 +912,10 @@ pub struct Scene {
     ambient: ambient::Ambient,
     lights: Vec<Light>,
     effects: Vec<Vfx>,
+    /// The effects a host outside this view is running, replaced every frame the way
+    /// [`Scene::stand`]'s cast is, and the particles each firing has run out.
+    fired: Vec<Fired>,
+    firing: HashMap<u64, avfx::sim::State>,
     effect_files: Vec<Effect>,
     effect_at: HashMap<String, usize>,
     sound: sound::SoundStage,
@@ -1190,6 +1205,8 @@ impl Scene {
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             effects: Vec::new(),
+            fired: Vec::new(),
+            firing: HashMap::new(),
             effect_files: Vec::new(),
             effect_at: HashMap::new(),
             effect_shape: None,
@@ -1292,6 +1309,13 @@ impl Scene {
     /// have finished arriving, not a scene to build again.
     pub fn stand(&mut self, cast: Vec<Standing>) {
         self.cast = cast;
+    }
+
+    /// The effects a host outside this view is running, replacing whatever it ran before. Called
+    /// every frame the way [`Self::stand`] is: what a firing has run out is kept by its id, so the
+    /// list itself is only where each one stands and how far along it is.
+    pub fn fire(&mut self, fired: Vec<Fired>) {
+        self.fired = fired;
     }
 
     /// Adds props to the scene under a layer of their own. Unlike [`Self::drive`] and
@@ -2215,22 +2239,7 @@ impl Scene {
                 let EffectState::Ready(parsed, live, _) = &effect.state else {
                     return None;
                 };
-                // Held back rather than drawn white: a texture still fetching would otherwise bind
-                // no sampler at all, and an additive quad with none reads as flat white.
-                let ready = parsed.textures.iter().all(|path| {
-                    matches!(self.textures.get(path.as_str()), Some(Texture::Ready(_)))
-                });
-                if !ready {
-                    return None;
-                }
-                let bound: Vec<Option<egui::TextureId>> = parsed
-                    .textures
-                    .iter()
-                    .map(|path| match self.textures.get(path) {
-                        Some(Texture::Ready(handle)) => Some(handle.id()),
-                        _ => None,
-                    })
-                    .collect();
+                let bound = self.bound_textures(parsed)?;
                 let base = parsed.drawn(live);
                 let mut drawn = Vec::new();
                 for vfx in self.effects.iter().filter(|vfx| vfx.path == effect.path) {
@@ -2256,6 +2265,43 @@ impl Scene {
                     batches,
                     fade_range: parsed.fade_range,
                 })
+            })
+            .chain(self.fired.iter().filter_map(|held| {
+                let Some(EffectState::Ready(parsed, ..)) = self
+                    .effect_at
+                    .get(&held.path)
+                    .map(|at| &self.effect_files[*at].state)
+                else {
+                    return None;
+                };
+                let bound = self.bound_textures(parsed)?;
+                let (scale, rotation, translation) = held.at.to_scale_rotation_translation();
+                let scale = scale.abs().max_element().max(0.001);
+                let drawn: Vec<_> = parsed
+                    .drawn(self.firing.get(&held.id)?)
+                    .into_iter()
+                    .map(|item| item.placed(rotation, translation, scale, held.tint))
+                    .collect();
+                let batches = avfx::batches(parsed, drawn, &bound, view, eye, right, up);
+                (!batches.is_empty()).then_some(gpu::EffectDraw {
+                    path: held.path.clone(),
+                    batches,
+                    fade_range: parsed.fade_range,
+                })
+            }))
+            .collect()
+    }
+
+    /// The handle bound to each texture an effect samples, or `None` where one has not arrived:
+    /// held back rather than drawn white, since an additive quad with no sampler reads as flat
+    /// white.
+    fn bound_textures(&self, parsed: &avfx::sim::Effect) -> Option<Vec<Option<egui::TextureId>>> {
+        parsed
+            .textures
+            .iter()
+            .map(|path| match self.textures.get(path.as_str()) {
+                Some(Texture::Ready(handle)) => Some(Some(handle.id())),
+                _ => None,
             })
             .collect()
     }
@@ -2446,6 +2492,7 @@ impl Scene {
             .effects
             .iter()
             .map(|vfx| vfx.path.clone())
+            .chain(self.fired.iter().map(|held| held.path.clone()))
             .collect::<Vec<_>>()
         {
             if self.effect_at.contains_key(&path) {
@@ -2514,11 +2561,32 @@ impl Scene {
             };
             parsed.seek(live, target);
         }
+
+        // A firing runs once rather than over and over: the host says when it started, so it plays
+        // to the end its own file states and settles there. Held to that end, and to the longest
+        // run the simulation reaches at all, since stepping is what moves a particle and a scrub
+        // deep into a cutscene would otherwise replay every frame of it in one paint.
+        self.firing
+            .retain(|id, _| self.fired.iter().any(|held| held.id == *id));
+        for held in &self.fired {
+            let Some(EffectState::Ready(parsed, ..)) = self
+                .effect_at
+                .get(&held.path)
+                .map(|at| &self.effect_files[*at].state)
+            else {
+                continue;
+            };
+            let end = match parsed.bounded {
+                true => parsed.length,
+                false => avfx::sim::LONGEST,
+            };
+            parsed.seek(self.firing.entry(held.id).or_default(), held.frame.clamp(0, end));
+        }
     }
 
     /// The two apricot packages an effect is drawn with, fetched once the zone places any at all.
     fn load_effect_packages(&mut self, backend: &Backend) {
-        if self.effects.is_empty() {
+        if self.effects.is_empty() && self.fired.is_empty() {
             return;
         }
         for (held, path) in [
@@ -3960,7 +4028,7 @@ impl Scene {
             (held.water, "water mirror"),
             (held.vignette, "vignette"),
             (
-                !self.effects.is_empty()
+                !(self.effects.is_empty() && self.fired.is_empty())
                     && self
                         .effect_files
                         .iter()
@@ -4307,7 +4375,7 @@ impl Scene {
             step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
-            effects: self.effects.len(),
+            effects: self.effects.len() + self.fired.len(),
             effects_drawn,
             casting: self.casts.iter().flatten().sum(),
             models: format!(

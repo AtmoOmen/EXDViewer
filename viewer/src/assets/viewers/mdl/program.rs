@@ -266,6 +266,18 @@ pub const CLOUD: &str = "shader/sm5/shpk/cloud.shpk";
 pub const CLOUD_BAND: u32 = 0xa2f7_6b97;
 pub const CLOUD_SHEET: u32 = 0xd9d5_8038;
 
+/// The subview the sheet answers with the shadow it casts rather than with its own colour, which is
+/// what fills the map the sun's lighting reads a cloud out of. Spelled the way this package's own
+/// generation spells a subview, so it is none of the ids a drawing package answers to.
+const CLOUD_SHADOW_VIEW: u32 = 0x344c_e408;
+
+/// The blur that map is left in, over the four taps the vertex shader the game pairs it with builds.
+pub const CLOUD_SHADOW: &str = "shader/sm5/posteffect/CloudShadow.shcd";
+pub const CLOUD_SHADOW_VERTEX: &str = "shader/sm5/posteffect/VSSampling4.shcd";
+
+/// How wide it is drawn.
+pub const CLOUD_SHADOW_MAP: i32 = 256;
+
 /// The textures each draws, which the environment's cloud set names by id. A sheet of nought is a
 /// weather that draws none: no such file exists.
 pub fn cloud_texture(id: u16) -> String {
@@ -587,6 +599,12 @@ const MERGE_WEIGHT: &str = "cMergeWeight";
 const SOFT_FOCUS_PARAM: &str = "cSoftFocusParam";
 const SAMPLING_PARAM: &str = "cParam";
 const SAMPLING_OFFSET: &str = "cSamplingOffset";
+
+/// How far the blur takes the light down where the sheet is at its thickest. The first pair weighs
+/// what the lighting reads under the middle of the map and the second what it reads at the edge, and
+/// within each the first lane is the diffuse's share and the second the specular's.
+const CLOUD_SHADOW_PARAM: &str = "cCloudShadowParam";
+const CLOUD_SHADOW_WEIGHTS: [f32; 4] = [0.5, 0.5, 1.0, 0.5];
 const VIGNETTING_PARAM: &str = "cVignettingParam";
 
 /// How the shadow resolve softens an edge. The package names its first two levels a single
@@ -639,6 +657,12 @@ const SHEET_RISE: f32 = 1000.0;
 
 /// The radius the band stands at around the camera.
 const BAND_RADIUS: f32 = 2000.0;
+
+/// The square of the world the sheet's shadow map is sized to cover, and how far along the light the
+/// map keeps what it draws. The span is a half-extent, so the map covers twice this either way.
+const CLOUD_SHADOW_SPAN: f32 = 2000.0;
+const CLOUD_SHADOW_NEAR: f32 = 20.0;
+const CLOUD_SHADOW_FAR: f32 = 20000.0;
 
 /// How far the view direction is carried toward straight down before a cloud is lit against it, and
 /// the alpha the sheet fades toward overhead. One number does both, and it is a single sample: only
@@ -887,6 +911,9 @@ pub enum Pass {
     Fur,
     CloudBand,
     CloudSheet,
+    /// The sheet again, drawn from the sun's own side into the map the lighting reads a cloud's
+    /// shadow out of.
+    CloudShadow,
     Composite,
     CompositeBlended,
     /// What a semitransparent surface that lights itself resolves through.
@@ -912,7 +939,9 @@ impl Pass {
             Self::Buffer => PASS_G_OPAQUE,
             Self::Blended => PASS_G_SEMITRANSPARENCY,
             Self::Lighting | Self::Lamp => PASS_LIGHTING_OPAQUE,
-            Self::Fur | Self::CloudBand | Self::CloudSheet | Self::Star => PASS_7,
+            Self::Fur | Self::CloudBand | Self::CloudSheet | Self::CloudShadow | Self::Star => {
+                PASS_7
+            }
             Self::Composite => PASS_COMPOSITE_OPAQUE,
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
             Self::BlendedLighting => PASS_LIGHTING_SEMITRANSPARENCY,
@@ -1493,6 +1522,32 @@ impl Cloud {
                 )
             }
         }
+    }
+
+    /// Where the sun stands to draw the sheet's own shadow, as a view and an orthographic
+    /// projection. It looks along the light from where the camera is, and its box is the shadow a
+    /// square of the world of [`CLOUD_SHADOW_SPAN`] a side throws across the light, so a low sun
+    /// reaches further along its own heading than a high one. Depth is left to the sheet's vertex
+    /// shader, which clamps what would fall outside the near and far planes rather than losing it.
+    pub fn shadow_camera(light: Vec3, view: Mat4) -> (Mat4, Mat4) {
+        let eye = view.inverse().w_axis.truncate();
+        let toward = light.normalize_or(Vec3::Y);
+        let turn = glam::Quat::from_rotation_arc(Vec3::Z, toward);
+        let (wide, tall) = (
+            CLOUD_SHADOW_SPAN * Vec3::X.cross(toward).length(),
+            CLOUD_SHADOW_SPAN * Vec3::Z.cross(toward).length(),
+        );
+        (
+            Mat4::from_rotation_translation(turn, eye).inverse(),
+            Mat4::orthographic_rh(
+                -wide,
+                wide,
+                -tall,
+                tall,
+                CLOUD_SHADOW_NEAR,
+                CLOUD_SHADOW_FAR,
+            ),
+        )
     }
 }
 
@@ -2226,7 +2281,10 @@ impl Program {
             Pass::CloudBand => CLOUD_BAND,
             _ => CLOUD_SHEET,
         };
-        let subview = package.technique_subview()[1];
+        let subview = match pass {
+            Pass::CloudShadow => CLOUD_SHADOW_VIEW,
+            _ => package.technique_subview()[1],
+        };
         let (vs, ps) = pair(&package, &[], &[], pass.id(), technique, subview)
             .ok_or("the cloud package holds no such technique")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
@@ -3363,6 +3421,10 @@ impl Buffer {
             ]);
             return out;
         }
+        if self.name == CLOUD_SHADOW_PARAM {
+            write(&mut out, 0, &CLOUD_SHADOW_WEIGHTS);
+            return out;
+        }
         if self.name == SAMPLING_PARAM {
             // The quad this is drawn over already carries clip space and the coordinate to read at,
             // so the position is only turned the way round the pass expects and the coordinate is
@@ -3372,6 +3434,15 @@ impl Buffer {
             return out;
         }
         if self.name == SAMPLING_OFFSET {
+            // The cloud shadow's own four, which stand on a cross rather than on a square: each is a
+            // whole texel of the map one way and half a texel the other.
+            if matches!(pass, Pass::CloudShadow) {
+                let texel = 1.0 / CLOUD_SHADOW_MAP as f32;
+                let half = texel * 0.5;
+                write(&mut out, 0, &[-texel, -half, texel, half]);
+                write(&mut out, 1, &[half, -texel, -half, texel]);
+                return out;
+            }
             // Which tap lands in which lane is settled by the weight the pass pairs with it, and the
             // middle of the kernel is the first lane here rather than the lone coordinate.
             match scene.blur {
@@ -3545,13 +3616,15 @@ impl Buffer {
             "m_EmissiveColor",
             vec![1.0; 3],
         );
-        // The projection a cloud's shadow falls through. Nothing here casts one and the sampler it
-        // pairs with stands in opaque white, so the term resolves to one; the identity is what keeps
-        // the lighting from dividing by a zero row and carrying a NaN through every lit pixel.
+        // Where a lit pixel stands in the map the sheet's own shadow was drawn into. The lighting
+        // hands this a view-space position and turns the clip coordinate into a texture one itself,
+        // so unlike the sun's own map this takes no half of its rows. A weather that draws no sheet
+        // leaves the map opaque white, and the term is one wherever this lands.
+        let (cloud, onto) = Cloud::shadow_camera(scene.light, view);
         put(
             "g_CloudShadowMatrix",
             "g_CloudShadowMatrix",
-            rows(Mat4::IDENTITY, 4),
+            rows(onto * cloud * view.inverse(), 4),
         );
         // The weight the character resolve carries a material's own emissive into the frame's alpha
         // at, which the glare pass reads that frame back through. It reaches no color of its own,

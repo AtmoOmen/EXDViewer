@@ -842,6 +842,8 @@ pub struct Scene {
     /// The two cloud draws, the band first, and the texture each reads: the weather names one per
     /// mesh by id, so moving the hour or the weather fetches the next.
     clouds: [Option<Arc<program::Program>>; 2],
+    /// The sheet drawn again from where the sun stands, and the blur the map it fills is left in.
+    cloud_shadow: Option<(Arc<program::Program>, Arc<program::Program>)>,
     cloud_files: [Aside; 2],
     cloud_wanted: [Option<u16>; 2],
     /// The night star field's tier 0, its own two `.shcd` translated into one program, and its three
@@ -1138,6 +1140,7 @@ impl Scene {
             moonlight: None,
             haze: None,
             clouds: [None, None],
+            cloud_shadow: None,
             cloud_files: [Aside::Done, Aside::Done],
             cloud_wanted: [None, None],
             starlight: None,
@@ -2820,6 +2823,8 @@ impl Scene {
         }
         if self.ambient.clouds().is_some() {
             wanted.push(program::CLOUD.to_owned());
+            wanted.push(program::CLOUD_SHADOW.to_owned());
+            wanted.push(program::CLOUD_SHADOW_VERTEX.to_owned());
         }
         if self.ambient.starfield().is_some() {
             wanted.push(program::STAR_VERTEX.to_owned());
@@ -3368,6 +3373,27 @@ impl Scene {
                     .map(Arc::new);
             }
         }
+        // One target, whatever the frame's own packing takes: the map holds a weight rather than a
+        // channel of the G-buffer.
+        if self.cloud_shadow.is_none()
+            && let Some(Package::Ready(bytes)) = self.packages.get(program::CLOUD)
+            && let (Some(Package::Ready(blur)), Some(Package::Ready(vertex))) = (
+                self.packages.get(program::CLOUD_SHADOW),
+                self.packages.get(program::CLOUD_SHADOW_VERTEX),
+            )
+        {
+            let sheet = program::Program::cloud(bytes, program::Pass::CloudShadow, 1)
+                .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::CLOUD))
+                .ok();
+            let held = program::Program::sampling(program::CLOUD_SHADOW, blur, vertex)
+                .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::CLOUD_SHADOW))
+                .ok()
+                .map(|mut held| {
+                    held.pass = program::Pass::CloudShadow;
+                    held
+                });
+            self.cloud_shadow = sheet.zip(held).map(|(sheet, blur)| (Arc::new(sheet), Arc::new(blur)));
+        }
         if self.starlight.is_none()
             && let (Some(Package::Ready(vertex)), Some(Package::Ready(fragment))) = (
                 self.packages.get(program::STAR_VERTEX),
@@ -3829,6 +3855,7 @@ impl Scene {
             (held.stars, "stars"),
             (held.clouds[0], "band"),
             (held.clouds[1], "sheet"),
+            (held.cloud_shadow, "cloud shadow"),
             (held.fog, "fog"),
             (held.reflection, "reflection"),
             (held.water, "water mirror"),
@@ -4082,6 +4109,7 @@ impl Scene {
             starlight: self.starlight.clone(),
             haze: self.haze.clone(),
             clouds: self.clouds.clone(),
+            cloud_shadow: self.cloud_shadow.clone(),
             glare: self.glare.clone(),
             smoothing: self.smoothing.clone(),
             occlusion: self.look.occlude.then(|| self.occlusion.clone()).flatten(),

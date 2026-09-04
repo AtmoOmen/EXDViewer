@@ -36,6 +36,9 @@ const OCCLUSION: u32 = 0x3266_7bd7;
 const SHADOW_MASK: u32 = 0x8187_d13f;
 /// The sun's own depth map, which the resolve compares a pixel against.
 const SHADOW_DEPTH: u32 = 0x58ad_2b38;
+/// What the lighting reads a cloud's shadow through, which the sheet fills from the sun's own side.
+/// Where no sheet is drawn it falls to the opaque white below and the term comes to one.
+const CLOUD_SHADOW: u32 = 0xb821_f0d3;
 /// What the softening gathers that same map's own depths through rather than comparing against
 /// them, spelled the way `directionalshadow` spells it.
 const GATHER_SAMPLER: &str = "g_SamplerGahter";
@@ -217,6 +220,10 @@ const REFLECT: usize = 31;
 /// than fixed.
 const STAR: usize = 70;
 
+/// The sheet drawn from the sun's own side, and the blur that map is left in.
+const CLOUD_SHADOW_DRAW: usize = 72;
+const CLOUD_SHADOW_BLUR: usize = 73;
+
 /// The four members of water's own reflection chain drawn over a quad: the blur pair, the wide
 /// blur's first half and the merge. The two drawn over the water itself are linked by the caller
 /// that holds the geometry.
@@ -317,7 +324,7 @@ const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 const NEUTRAL: [(u32, [u8; 4]); 5] = [
     (0x342f_2734, [255, 255, 255, 255]),
     (0x6e23_1669, [0, 0, 0, 0]),
-    (0xb821_f0d3, [255, 255, 255, 255]),
+    (CLOUD_SHADOW, [255, 255, 255, 255]),
     (0x0efb_24f7, [0, 0, 0, 0]),
     (REFLECTION_MAP, [0, 0, 0, 0]),
 ];
@@ -554,8 +561,9 @@ enum Over {
     Sheering(Sheered),
     /// A pass of the glare chain, over a target of its own and against what the pass before it left.
     Glaring((i32, i32), Glared),
-    /// The blur among them, drawn over the triangle that carries a coordinate of its own: the game's
-    /// own vertex shader builds its seven taps off that lane rather than off the position.
+    /// The blur among them and the cloud shadow's own, drawn over the triangle that carries a
+    /// coordinate of its own: the vertex shader the game pairs each with builds its taps off that
+    /// lane rather than off the position.
     Blurring((i32, i32), glow::Texture),
     /// A member of the reflection chain, over a target of its own and against what the members
     /// before it left. Which member is drawing is carried with them: two of the names its files use
@@ -593,12 +601,14 @@ struct Glared {
     merge: Option<glow::Texture>,
 }
 
-/// One cloud mesh as the card holds it, and what it is drawn with.
+/// One cloud mesh as the card holds it, what it is drawn with, and how wide the target it is drawn
+/// into stands: the sheet is drawn once over the frame and again into a map of its own.
 #[derive(Clone, Copy)]
 struct Clouded {
     layout: glow::VertexArray,
     indices: i32,
     texture: glow::Texture,
+    size: (i32, i32),
 }
 
 /// Which of the passes a zone runs over and above the lighting actually drew this frame. A picture
@@ -622,6 +632,8 @@ pub struct Drawn {
     pub occlusion: bool,
     /// The horizon band and the overhead sheet, in that order.
     pub clouds: [bool; 2],
+    /// Whether the sheet was drawn again into the map the sun reads a cloud's shadow out of.
+    pub cloud_shadow: bool,
 }
 
 /// What the fog pass reads, by the names its file gives them.
@@ -1097,6 +1109,12 @@ pub struct Buffers {
     strips: [Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>; 2],
     /// The texture each draws, under the file it came from so a weather that has not moved keeps it.
     sheets: [Option<(String, glow::Texture)>; 2],
+    /// The map the sheet's own shadow is drawn into, and the one the blur leaves it in. Fixed at the
+    /// size the game draws it, so neither follows the frame.
+    clouded: Option<[(glow::Framebuffer, glow::Texture); 2]>,
+    /// Whether that map holds this frame's clouds. The lighting reads the opaque white stand-in
+    /// until it does, and again from the frame a weather stops stating a sheet.
+    clouding: bool,
     /// The star field's own dome, built once since it depends on nothing a frame carries.
     dome: Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>,
     /// Its three textures: colour, band, twinkle. Fixed paths rather than weather-named, so unlike
@@ -2068,6 +2086,7 @@ impl Buffers {
                 layout,
                 indices,
                 texture,
+                size: self.size,
             }),
         );
         unsafe {
@@ -2121,6 +2140,99 @@ impl Buffers {
             }
         }
         Ok(())
+    }
+
+    /// The sheet again, drawn from where the sun stands into a map the lighting reads a cloud's
+    /// shadow out of, and blurred there. Before the lighting, which takes it as a weight on the sun.
+    ///
+    /// The map is cleared to nought in the two channels the blur reads, so wherever the sheet does
+    /// not cover it the blur leaves opaque light. A weather that draws no sheet leaves the lighting
+    /// on the white stand-in instead, which comes to the same thing without the two passes.
+    pub fn cloud_shadow(
+        &mut self,
+        gl: &glow::Context,
+        held: &std::sync::Arc<program::Program>,
+        blur: &std::sync::Arc<program::Program>,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let Some(texture) = self.sheets[1].as_ref().map(|(_, held)| *held) else {
+            self.clouding = false;
+            return Ok(());
+        };
+        let [(source, drawn), (into, _)] = self.clouded(gl)?;
+        let (layout, _, _, indices) = self.strip(gl, 1)?;
+        let size = (program::CLOUD_SHADOW_MAP, program::CLOUD_SHADOW_MAP);
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(source));
+            gl.viewport(0, 0, size.0, size.1);
+            gl.clear_color(1.0, 1.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        self.pass(
+            gl,
+            CLOUD_SHADOW_DRAW,
+            held,
+            source,
+            scene,
+            Over::Clouding(Clouded {
+                layout,
+                indices,
+                texture,
+                size,
+            }),
+        )?;
+        self.pass(
+            gl,
+            CLOUD_SHADOW_BLUR,
+            blur,
+            into,
+            scene,
+            Over::Blurring(size, drawn),
+        )?;
+        self.clouding = true;
+        self.drawn.cloud_shadow = true;
+        Ok(())
+    }
+
+    /// Leaves the lighting reading opaque light again.
+    pub fn unclouded(&mut self) {
+        self.clouding = false;
+    }
+
+    /// The pair that map is drawn and blurred into, built the first time it is. Wrapped rather than
+    /// clamped: the lighting reads it at a coordinate that runs past its own edge.
+    fn clouded(
+        &mut self,
+        gl: &glow::Context,
+    ) -> Result<[(glow::Framebuffer, glow::Texture); 2], String> {
+        if let Some(held) = self.clouded {
+            return Ok(held);
+        }
+        let size = (program::CLOUD_SHADOW_MAP, program::CLOUD_SHADOW_MAP);
+        let mut built = Vec::new();
+        for _ in 0..2 {
+            let held = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(held));
+                for (name, value) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::REPEAT),
+                    (glow::TEXTURE_WRAP_T, glow::REPEAT),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+                }
+            }
+            built.push((frame_of(gl, &[held], None)?, held));
+        }
+        let held = [built[0], built[1]];
+        self.clouded = Some(held);
+        Ok(held)
     }
 
     /// One of the cloud meshes on the card, built the first time it is drawn.
@@ -3813,6 +3925,14 @@ impl Buffers {
         {
             return Ok(held.merged.1);
         }
+        // Before it as well, and the same shape: opaque white until a sheet has been drawn from the
+        // sun's own side, and again from the frame a weather stops stating one.
+        if id == CLOUD_SHADOW
+            && self.clouding
+            && let Some([_, (_, map)]) = self.clouded
+        {
+            return Ok(map);
+        }
         if let Some(held) = self.neutrals.get(&id) {
             return Ok(*held);
         }
@@ -3890,6 +4010,7 @@ impl Buffers {
     ) -> Result<(), String> {
         let size = match over {
             Over::Fraction => self.fraction(),
+            Over::Clouding(held) => held.size,
             Over::Exposing(size, _)
             | Over::Sized(size)
             | Over::Glaring(size, _)
@@ -4140,6 +4261,7 @@ impl Buffers {
         self.drawn = Drawn {
             shadow: self.shadowing,
             occlusion: self.occluding,
+            cloud_shadow: self.clouding,
             ..Drawn::default()
         };
         let (position, _) = self.position.ok_or("no view position")?;

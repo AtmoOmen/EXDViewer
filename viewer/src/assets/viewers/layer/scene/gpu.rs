@@ -229,6 +229,8 @@ pub struct Frame {
     pub haze: Option<Arc<program::Program>>,
     /// The two draws that put clouds over that sky, the horizon band first.
     pub clouds: [Option<Arc<program::Program>>; 2],
+    /// The sheet drawn again from where the sun stands, and the blur the map it fills is left in.
+    pub cloud_shadow: Option<(Arc<program::Program>, Arc<program::Program>)>,
     /// The chain that spreads the bright end of the frame into a halo, once its four shaders have
     /// arrived.
     pub glare: Option<Arc<Glare>>,
@@ -1478,6 +1480,26 @@ impl Renderer {
             match lighting.shadow.as_ref() {
                 Some(held) => self.buffers.shade(gl, held, &scene)?,
                 None => self.buffers.unshade(),
+            }
+            // And the cloud's own shadow beside it, which that same variant reads as a second
+            // weight. The sheet is drawn from where the sun is rather than from the camera, and it
+            // stands where the sky's own draw of it will.
+            match frame.cloud_shadow.as_ref() {
+                Some((sheet, blur)) => {
+                    let (view, projection) =
+                        program::Cloud::shadow_camera(scene.light, scene.view);
+                    let overhead = program::Scene {
+                        model: program::Cloud::placement(
+                            program::Pass::CloudSheet,
+                            scene.view.inverse().w_axis.truncate(),
+                        ),
+                        view,
+                        projection,
+                        ..scene.clone()
+                    };
+                    self.buffers.cloud_shadow(gl, sheet, blur, &overhead)?;
+                }
+                None => self.buffers.unclouded(),
             }
             self.buffers.resolve(gl, lighting, &scene, &frame.lamps)?;
             // Before the exposure, which reads the whole frame: a black hole where the sky belongs

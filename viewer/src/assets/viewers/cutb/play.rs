@@ -26,6 +26,7 @@ use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData, T
 use ironworks::file::lvb::LevelFile;
 use ironworks::file::tmb::{Channel, CommandKind, Curves, Item, Timeline};
 
+use super::sound;
 use crate::assets::viewers::layer;
 use crate::assets::viewers::layer::scene;
 use crate::backend::Backend;
@@ -75,7 +76,7 @@ const ALPHA: u8 = 0x0D;
 
 /// Frames a second. A cutscene's own numbering runs at this: a `C010` naming `cbfm_arms` ends at
 /// frame 155, and that pack's own binding gives the clip 5.1666665 seconds.
-const FRAMES_A_SECOND: f32 = 30.0;
+pub(super) const FRAMES_A_SECOND: f32 = 30.0;
 
 /// A camera pose, already in world space and degrees.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -542,6 +543,31 @@ fn subtitles_of(timeline: &Timeline, offset: f32, sheet_upper: &str, held: &mut 
     }
 }
 
+/// Every `C063` a timeline plays, as a cue naming the container and the entry inside it. The
+/// command files its own path, so nothing has to be derived.
+fn sounds_of(timeline: &Timeline, offset: f32, held: &mut Vec<sound::Cue>) {
+    for item in timeline.items() {
+        let Item::Command(command) = item else {
+            continue;
+        };
+        let CommandKind::C063(played) = command.kind() else {
+            continue;
+        };
+        let Some(path) = played.path().filter(|path| !path.is_empty()) else {
+            continue;
+        };
+        let Ok(entry) = usize::try_from(played.sound_index()) else {
+            continue;
+        };
+        held.push(sound::Cue {
+            at: offset + f32::from(command.time()),
+            paths: vec![path.to_owned()],
+            entry,
+            label: "effect".to_owned(),
+        });
+    }
+}
+
 /// One shot: a `C004` command and the `CTTL` node it came from, in the cutscene's own global
 /// frame numbering (its segment's own start added on).
 pub struct Shot {
@@ -673,6 +699,8 @@ pub struct Player {
     parts: BTreeMap<u32, Part>,
     /// The lines its timelines put on screen, in the order they run.
     subtitles: Vec<Subtitle>,
+    /// The sounds its timelines play, in the order they run.
+    sounds: Vec<sound::Cue>,
     duration: f32,
 }
 
@@ -681,6 +709,7 @@ impl Player {
         let mut shots = Vec::new();
         let mut parts = BTreeMap::new();
         let mut subtitles = Vec::new();
+        let mut sounds = Vec::new();
         let sheet_upper = sheet_id(dialogue_sheet(cutscene));
         let mut offset = 0.0;
         for (node, held) in cutscene.nodes().iter().enumerate() {
@@ -688,6 +717,7 @@ impl Player {
                 continue;
             };
             subtitles_of(timeline, offset, &sheet_upper, &mut subtitles);
+            sounds_of(timeline, offset, &mut sounds);
             let local = shots_of(timeline);
             let span = timeline_span(
                 timeline,
@@ -715,12 +745,34 @@ impl Player {
             part.order();
         }
         subtitles.sort_by(|left, right| left.at.total_cmp(&right.at));
+        sounds.sort_by(|left, right| left.at.total_cmp(&right.at));
         Self {
             duration: offset,
             shots,
             parts,
             subtitles,
+            sounds,
         }
+    }
+
+    /// Every sound the cutscene plays: the effects its `C063` commands file, and the voice line
+    /// each subtitle key names in a language, both in the order they run.
+    fn cues(&self, slug: &str, language: Language) -> Vec<sound::Cue> {
+        let mut cues = self.sounds.clone();
+        for subtitle in &self.subtitles {
+            let paths = sound::voice_paths(&subtitle.key, slug, language);
+            if paths.is_empty() {
+                continue;
+            }
+            cues.push(sound::Cue {
+                at: subtitle.at,
+                paths,
+                entry: 0,
+                label: subtitle.speaker.clone(),
+            });
+        }
+        cues.sort_by(|left, right| left.at.total_cmp(&right.at));
+        cues
     }
 
     /// Every line the cutscene puts on screen, in the order it runs.
@@ -1080,6 +1132,11 @@ struct State {
     /// frame it runs for, and the same for whether each participant is drawn.
     burst: std::collections::BTreeSet<u64>,
     shown: BTreeMap<u32, bool>,
+    /// What the cutscene sounds, and how far through it the cues have been fired.
+    stage: sound::Stage,
+    cues: Vec<sound::Cue>,
+    cues_for: Option<Language>,
+    sounded: f32,
 }
 
 impl Default for State {
@@ -1099,6 +1156,10 @@ impl Default for State {
             faces: BTreeMap::new(),
             burst: std::collections::BTreeSet::new(),
             shown: BTreeMap::new(),
+            stage: sound::Stage::default(),
+            cues: Vec::new(),
+            cues_for: None,
+            sounded: 0.0,
         }
     }
 }
@@ -1107,14 +1168,18 @@ impl Default for State {
 /// instead of the free orbit camera.
 pub struct Tab {
     level: String,
+    /// Which expansion the cutscene sits under, off its own path: the client spends the same on a
+    /// voice path.
+    slug: String,
     player: Player,
     state: RefCell<State>,
 }
 
 impl Tab {
-    pub fn new(level: String, cutscene: &Cutscene) -> Self {
+    pub fn new(level: String, path: &str, cutscene: &Cutscene) -> Self {
         Self {
             level,
+            slug: path.split('/').nth(1).unwrap_or("ffxiv").to_owned(),
             player: Player::new(cutscene),
             state: RefCell::new(State::default()),
         }
@@ -1176,6 +1241,17 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
             Err(error) => Lines::Failed(error.to_string()),
         };
     }
+
+    if state.cues_for != Some(language) {
+        state.cues_for = Some(language);
+        state.cues = tab.player.cues(&tab.slug, language);
+        state.stage.silence();
+    }
+    let held = &mut *state;
+    if held.stage.enabled() {
+        held.stage.want(backend, &held.cues);
+    }
+    held.stage.poll(held.time);
 
     let pose = tab.player.pose_at(cutscene, state.time);
     state.cast.poll(ui.ctx(), backend);
@@ -1453,6 +1529,23 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
     }
 }
 
+/// Plays whatever the clock has just run over. A cutscene's own clock scrubs and the mixer's does
+/// not, so anything but playing forward stops the lot rather than leaving it ringing.
+fn fire(state: &mut State) {
+    let time = state.time;
+    if !state.playing || time < state.sounded {
+        state.stage.silence();
+        state.sounded = time;
+        return;
+    }
+    for cue in &state.cues {
+        if cue.at > state.sounded && cue.at <= time {
+            state.stage.fire(cue, time);
+        }
+    }
+    state.sounded = time;
+}
+
 fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose>) {
     let duration = tab.player.duration();
     if state.playing {
@@ -1463,6 +1556,8 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         }
         ui.ctx().request_repaint();
     }
+
+    fire(state);
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("⏮").on_hover_text("Back to the start").clicked() {
@@ -1492,6 +1587,46 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         ui.checkbox(&mut state.subtitles, "Lines").on_hover_text(
             "Put the cutscene's own subtitles over the frame, out of the sheet its CTIS node names",
         );
+        let mut sound = state.stage.enabled();
+        if ui
+            .checkbox(&mut sound, "Sound")
+            .on_hover_text(
+                "Play the sounds the cutscene's own C063 commands file, and the voice line each \
+                 subtitle key names. Cues fire while it plays; a pause or a seek stops them.",
+            )
+            .clicked()
+        {
+            match sound {
+                true => state.stage.enable(),
+                false => state.stage.disable(),
+            }
+        }
+        if state.stage.enabled() {
+            let mut volume = state.stage.volume();
+            ui.spacing_mut().slider_width = 80.0;
+            if ui
+                .add(egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false).text("🔊"))
+                .changed()
+            {
+                state.stage.set_volume(volume);
+            }
+            ui.label(
+                RichText::new(format!(
+                    "{}/{} cues read, {} sounding",
+                    state.stage.read(),
+                    state.cues.len(),
+                    state.stage.playing()
+                ))
+                .weak(),
+            );
+            if state.stage.missing() > 0 {
+                ui.label(RichText::new(format!("{} unvoiced", state.stage.missing())).weak())
+                    .on_hover_text("Cues naming a file the install does not hold");
+            }
+        }
+        if let Some(why) = state.stage.error() {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("sound: {why}"));
+        }
         if let Lines::Failed(why) = &state.lines {
             ui.colored_label(egui::Color32::LIGHT_RED, format!("lines: {why}"));
         }
@@ -1695,6 +1830,7 @@ mod test {
                 said(120.0, "TEXT_A_00000_000020_BETA", 0),
                 said(300.0, "TEXT_A_00000_000030_ALPHA", 1000),
             ],
+            sounds: Vec::new(),
             duration: 0.0,
         };
         let standing =
@@ -1745,6 +1881,7 @@ mod test {
         let player = Player {
             shots: Vec::new(),
             subtitles: Vec::new(),
+            sounds: Vec::new(),
             parts: BTreeMap::from([(
                 7,
                 Part {

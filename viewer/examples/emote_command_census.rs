@@ -92,6 +92,7 @@ fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::C110(_) => "C110",
         CommandKind::C112(_) => "C112",
         CommandKind::C113(_) => "C113",
+        CommandKind::C114(_) => "C114",
         CommandKind::C117(_) => "C117",
         CommandKind::C118(_) => "C118",
         CommandKind::C120(_) => "C120",

@@ -777,7 +777,7 @@ pub struct Drive {
 pub enum Asset {
     /// A model, placed as one instance.
     Model(String),
-    /// A shared group, expanded the way the scene expands one its own layers name.
+    /// A shared group, expanded the way the scene expands one of its own.
     Group(String),
 }
 
@@ -787,7 +787,7 @@ pub struct Prop {
     pub asset: Asset,
     /// Where it stands, read the same way a layer group's own instances are.
     pub transform: Transform,
-    /// The instance it stands for, which is how the level's `.svb` and `.lcb` reach it.
+    /// The instance it stands for, which is the key the level's `.svb` and `.lcb` are read by.
     pub id: u32,
 }
 
@@ -1301,6 +1301,9 @@ impl Scene {
                         transform: here,
                         driven: None,
                         center: here.transform_point3(Vec3::ZERO),
+                        // A prop states no bounding sphere and no fade of its own, and the record
+                        // the game builds for one leaves both at nought as well, so it draws at
+                        // the coarsest detail level and never fades.
                         radius: 0.0,
                         fade: 0.0,
                         layer: at,

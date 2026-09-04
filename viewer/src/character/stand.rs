@@ -8,6 +8,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::Result;
 use ironworks::excel::Language;
@@ -91,7 +92,7 @@ struct Build {
     held: BTreeMap<String, Vec<u8>>,
     fetching: Option<Fetching>,
     /// What each borrowed body is shaped onto this one by, kept rather than rebuilt.
-    shaped: RefCell<BTreeMap<u16, Option<std::sync::Arc<mdl::Deform>>>>,
+    shaped: RefCell<BTreeMap<u16, Option<Arc<mdl::Deform>>>>,
     model: Option<Rc<mdl::Rendered>>,
     failure: Option<String>,
 }
@@ -429,7 +430,7 @@ impl Build {
                             reference
                                 .deformers
                                 .between(made_for, self.code)
-                                .map(std::sync::Arc::new)
+                                .map(Arc::new)
                         })
                         .clone()
                 });

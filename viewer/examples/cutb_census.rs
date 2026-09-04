@@ -24,7 +24,7 @@ struct Census {
     /// How many of each unmodelled node, the bytes they spend, and one file holding one.
     unread: BTreeMap<String, (usize, usize, String)>,
     extensions: BTreeMap<String, BTreeMap<u32, usize>>,
-    participants: BTreeMap<u32, usize>,
+    participants: BTreeMap<String, usize>,
     /// Participants whose id is not `0xff000000 | (index + 1)`.
     misnumbered: usize,
     /// Participants holding a rotation outside a half turn either way, and the widest angle any
@@ -108,10 +108,14 @@ impl Census {
                 }
                 Node::Participants(participants) => {
                     for (index, participant) in participants.iter().enumerate() {
-                        *self.participants.entry(participant.kind()).or_default() += 1;
+                        *self
+                            .participants
+                            .entry(format!("{:?}", participant.kind()))
+                            .or_default() += 1;
                         let expected = 0xff00_0000 | (index as u32 + 1);
                         self.misnumbered += usize::from(participant.id() != expected);
                         let widest = participant
+                            .transform()
                             .rotation()
                             .iter()
                             .fold(0.0f32, |held, angle| held.max(angle.abs()));

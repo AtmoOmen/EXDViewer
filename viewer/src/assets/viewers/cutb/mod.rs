@@ -63,12 +63,9 @@ fn holds(node: &Node) -> String {
         Node::Sheet(sheet) => format!("sheet {sheet}"),
         Node::Scene(scene) => format!("{}, {} entries", scene.level(), scene.entries().len()),
         Node::Participants(participants) => format!(
-            "{} participants, {} bytes unread",
+            "{} participants: {}",
             participants.len(),
-            participants
-                .iter()
-                .map(|participant| participant.body().len())
-                .sum::<usize>()
+            play::roll_call(participants)
         ),
         Node::Groups(groups) => format!(
             "{} groups, {} records",

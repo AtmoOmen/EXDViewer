@@ -4,13 +4,15 @@
 //! The camera comes from `C004` plus the `TMFC` curve set its `curve_id` names. Target 1 of that
 //! set is the eye - its own translate and rotate curves are where the shot actually moves; see the
 //! ironworks `C004` doc for the camera's own focal length and roll fields, on the set's target
-//! `0xff`. Actors are not played: a `CTAL` participant only gets a marker, from [`markers`].
+//! `0xff`. Actors are not played: a `CTAL` participant only gets a marker naming what it stands
+//! for, from [`markers`].
 
 use std::cell::RefCell;
 
 use egui::{Align, Button, CentralPanel, Layout, RichText, ScrollArea, containers::panel::Panel};
 use glam::{EulerRot, Quat, Vec3};
 use ironworks::file::cutb::{Cutscene, Node};
+use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData};
 use ironworks::file::lvb::LevelFile;
 use ironworks::file::tmb::{Channel, CommandKind, Curves, Item, Timeline};
 
@@ -300,6 +302,66 @@ impl Player {
     }
 }
 
+/// The helper a participant is written as, where it is one.
+fn helper(participant: &Instance) -> Option<&HelperObject> {
+    match participant.data() {
+        InstanceData::HelperObject(helper) => Some(helper),
+        _ => None,
+    }
+}
+
+/// What a participant stands for, in as few words as its record states.
+pub fn stands_for(participant: &Instance) -> String {
+    let Some(helper) = helper(participant) else {
+        return format!("{:?}", participant.kind());
+    };
+    match helper.kind() {
+        HelperKind::EventNpc | HelperKind::BattleNpc => {
+            format!("{:?} {}", helper.kind(), helper.base_id())
+        }
+        HelperKind::Weapon => format!("Weapon {}", helper.weapon().pattern_id()),
+        kind => helper
+            .nested()
+            .and_then(|nested| layer::asset(nested.data()))
+            .and_then(|asset| asset.rsplit('/').next())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("{kind:?}")),
+    }
+}
+
+/// Where a participant stands: the transform its record states apart from the instance's own wins
+/// where it says it does, the way the game's own setup takes it.
+fn stands_at(participant: &Instance) -> Vec3 {
+    helper(participant)
+        .and_then(|helper| helper.placement())
+        .filter(|placement| placement.flags() & 1 != 0)
+        .map(|placement| Vec3::from_array(placement.transform().translation()))
+        .unwrap_or_else(|| Vec3::from_array(participant.transform().translation()))
+}
+
+/// What a `CTAL` holds, as a count of each kind its participants stand for.
+pub fn roll_call(participants: &[Instance]) -> String {
+    let mut held: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for participant in participants {
+        let named = match helper(participant) {
+            Some(helper) => format!("{:?}", helper.kind()),
+            None => format!("{:?}", participant.kind()),
+        };
+        *held.entry(named).or_default() += 1;
+    }
+    let mut lines: Vec<(usize, String)> = held
+        .into_iter()
+        .map(|(named, count)| (count, named))
+        .collect();
+    lines.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    lines
+        .iter()
+        .take(4)
+        .map(|(count, named)| format!("{count} {named}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The `CTAL` participants a cutscene names, as points to mark rather than characters to draw.
 pub fn markers(cutscene: &Cutscene) -> Vec<(Vec3, String)> {
     cutscene
@@ -314,8 +376,8 @@ pub fn markers(cutscene: &Cutscene) -> Vec<(Vec3, String)> {
                 .iter()
                 .map(|participant| {
                     (
-                        Vec3::from_array(participant.position()),
-                        format!("{:#010x}", participant.id()),
+                        stands_at(participant),
+                        format!("{} · {:#x}", stands_for(participant), participant.id()),
                     )
                 })
                 .collect()

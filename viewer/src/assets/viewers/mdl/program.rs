@@ -658,11 +658,15 @@ const SHEET_RISE: f32 = 1000.0;
 /// The radius the band stands at around the camera.
 const BAND_RADIUS: f32 = 2000.0;
 
-/// The square of the world the sheet's shadow map is sized to cover, and how far along the light the
-/// map keeps what it draws. The span is a half-extent, so the map covers twice this either way.
-const CLOUD_SHADOW_SPAN: f32 = 2000.0;
-const CLOUD_SHADOW_NEAR: f32 = 20.0;
-const CLOUD_SHADOW_FAR: f32 = 20000.0;
+/// What the sheet's shadow map is sized to cover: one period of its own texture, so a texel of the
+/// map is a fixed share of a cloud however far across the world the sheet is drawn. The near plane
+/// is a thousandth of the far one, which is the sheet's own span.
+const CLOUD_SHADOW_SPAN: f32 = SHEET_SPAN / SHEET_TILING;
+const CLOUD_SHADOW_NEAR: f32 = SHEET_SPAN * 0.001;
+const CLOUD_SHADOW_FAR: f32 = SHEET_SPAN;
+
+/// How thin the box may be taken where the light lies along one of the world's own axes.
+const CLOUD_SHADOW_FLOOR: f32 = 0.001;
 
 /// How far the view direction is carried toward straight down before a cloud is lit against it, and
 /// the alpha the sheet fades toward overhead. One number does both, and it is a single sample: only
@@ -1525,18 +1529,17 @@ impl Cloud {
     }
 
     /// Where the sun stands to draw the sheet's own shadow, as a view and an orthographic
-    /// projection. It looks along the light from where the camera is, and its box is the shadow a
-    /// square of the world of [`CLOUD_SHADOW_SPAN`] a side throws across the light, so a low sun
-    /// reaches further along its own heading than a high one. Depth is left to the sheet's vertex
-    /// shader, which clamps what would fall outside the near and far planes rather than losing it.
+    /// projection. It looks along the light from where the camera is, turned the shortest way from
+    /// the world's own third axis, and its box is what the two horizontal axes throw across the
+    /// light: a low sun reaches further along its own heading than a high one. Depth is left to the
+    /// sheet's vertex shader, which clamps what would fall outside the planes rather than losing it.
     pub fn shadow_camera(light: Vec3, view: Mat4) -> (Mat4, Mat4) {
         let eye = view.inverse().w_axis.truncate();
-        let toward = light.normalize_or(Vec3::Y);
+        // Toward whichever of the two the sun stands at, so the map is drawn from above at any hour.
+        let toward = light.normalize_or(Vec3::Y) * light.y.signum();
         let turn = glam::Quat::from_rotation_arc(Vec3::Z, toward);
-        let (wide, tall) = (
-            CLOUD_SHADOW_SPAN * Vec3::X.cross(toward).length(),
-            CLOUD_SHADOW_SPAN * Vec3::Z.cross(toward).length(),
-        );
+        let span = |axis: Vec3| CLOUD_SHADOW_SPAN * axis.cross(toward).length().max(CLOUD_SHADOW_FLOOR);
+        let (wide, tall) = (span(Vec3::X), span(Vec3::Z));
         (
             Mat4::from_rotation_translation(turn, eye).inverse(),
             Mat4::orthographic_rh(

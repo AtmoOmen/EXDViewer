@@ -348,7 +348,7 @@ pub struct CharacterBuilder {
     drawn: bool,
     /// Which motion class each weapon puts the body in, and how long the game blends one motion
     /// into another.
-    stance: Option<stance::Stance>,
+    stance: Option<Rc<stance::Stance>>,
     reading_stance: Option<TrackedPromise<Result<stance::Stance>>>,
     /// The stance the body was last put in, so one it is already standing in is not started over
     /// on every frame.
@@ -647,7 +647,7 @@ impl CharacterBuilder {
         }
         if let Some(promise) = self.reading_stance.take() {
             match promise.try_take() {
-                Ok(Ok(read)) => self.stance = Some(read),
+                Ok(Ok(read)) => self.stance = Some(Rc::new(read)),
                 Ok(Err(why)) => log::warn!("character: nothing states a weapon's stance: {why}"),
                 Err(promise) => self.reading_stance = Some(promise),
             }
@@ -947,6 +947,9 @@ impl CharacterBuilder {
             let carried = self.attachments();
             model.glowing(self.effects(&carried));
             model.carried(carried);
+            if let Some(stance) = self.stance.clone() {
+                model.blending(move |from, to| stance.fade(from, to));
+            }
             self.stand(model);
         }
     }
@@ -960,9 +963,7 @@ impl CharacterBuilder {
         let Some(stance) = &self.stance else {
             return;
         };
-        let wielded = self.wielded();
-        let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
-        let held = stance.directory(set(0), set(1));
+        let held = self.directory();
         let mut stood = self.stood_in.borrow_mut();
         if let Some(stood) = stood
             .as_ref()
@@ -1002,6 +1003,17 @@ impl CharacterBuilder {
             drawn: self.drawn,
             told: Cell::new(false),
         });
+    }
+
+    /// The class directory the weapons in hand file this body's packs under, which is what turns
+    /// an emote key into a path. Nothing read yet leaves only the directory every body shares.
+    fn directory(&self) -> String {
+        let wielded = self.wielded();
+        let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
+        match &self.stance {
+            Some(stance) => stance.directory(set(0), set(1)),
+            None => stance::COMMON.to_owned(),
+        }
     }
 
     /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
@@ -2513,11 +2525,10 @@ impl CharacterBuilder {
                 if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
                     match emote.expression() {
                         Some(name) => model.express(name),
-                        None => match emote.packs(self.code).as_slice() {
-                            [start, standing] => model.play(start, Some(standing)),
-                            [only] => model.play(only, None),
-                            _ => {}
-                        },
+                        None => {
+                            let (packs, settles) = emote.packs(self.code, &self.directory());
+                            model.play(&packs, settles.as_deref());
+                        }
                     }
                 }
             }

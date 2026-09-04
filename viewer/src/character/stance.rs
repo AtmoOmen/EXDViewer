@@ -41,7 +41,7 @@ const PACK_TABLE: &str = "chara/xls/animation/papLoadTable.plt";
 const EMPTY: &str = "emp";
 
 /// The directory every body's own unarmed packs are filed in, whatever it holds.
-const COMMON: &str = "bt_common";
+pub const COMMON: &str = "bt_common";
 
 /// The motion a body stands in sheathed and drawn, and the partial motions it draws and sheathes
 /// with, which are the same names in every class's own packs.

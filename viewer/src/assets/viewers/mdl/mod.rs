@@ -3254,9 +3254,15 @@ impl Rendered {
         self.emote.borrow().active_prop(time)
     }
 
-    /// Poses the character out of a different pack, which is what picking an emote is.
-    pub fn play(&self, path: &str, then: Option<&str>) {
-        self.animation.play(path, then, 0.0);
+    /// Poses the character out of the first of `packs` the install holds, which is what picking
+    /// an emote is.
+    pub fn play(&self, packs: &[String], then: Option<&str>) {
+        self.animation.play(packs, then);
+    }
+
+    /// What to price a change of clip against, out of the game's own blend tables.
+    pub fn blending(&self, blend: impl Fn(&str, &str) -> f32 + 'static) {
+        self.animation.blending(blend);
     }
 
     /// Where each drawn weapon's own effect would play, by the bone it hangs from. The character

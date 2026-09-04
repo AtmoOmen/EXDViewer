@@ -201,16 +201,43 @@ const IDLE: &str = "_id0";
 /// them out as reliably as this one being named for what it is.
 const RIDE_IDLE: &str = "cbnm_mt_id0";
 
-/// The `cfxf_` clip a motion's own timeline plays over it, and where in the motion's own clock
+/// One `cfxf_` clip a motion's own timeline plays over it, and where in the motion's own clock
 /// (in seconds) it is held across: a `C010` states this as a frame count and a start/end fraction
 /// of the clip itself, which only means anything once scaled by the timeline it is read from.
 #[derive(Clone)]
-struct Companion {
+struct Expression {
     name: String,
     /// Seconds into the motion's own clock the hold starts and ends.
     window: (f32, f32),
     /// The clip's own position, normalized start to end, that the window plays across.
     span: (f32, f32),
+}
+
+/// What a motion's own timeline lays over it on the face: the poses it runs through, and the
+/// library they come out of. A longer emote states several poses in turn, so the face is a
+/// schedule against the body's own clock rather than one clip held for the whole of it.
+#[derive(Clone, Default)]
+struct Companion {
+    /// The `TMPP` the timeline names, which is the facial pack past `nonresident/`. Absent leaves
+    /// the pose to be found by its own name, or in the library every face keeps resident.
+    library: Option<String>,
+    expressions: Vec<Expression>,
+}
+
+impl Companion {
+    /// Which pose is in force `at` seconds into the motion: the last one the clock has reached,
+    /// or, before the first, the one a previous turn round the loop left the face holding. Read
+    /// without assuming the timeline states its commands in time order, which it does not.
+    fn at(&self, at: f32) -> Option<&Expression> {
+        let latest = |left: &&Expression, right: &&Expression| {
+            left.window.0.total_cmp(&right.window.0)
+        };
+        self.expressions
+            .iter()
+            .filter(|held| held.window.0 <= at)
+            .max_by(latest)
+            .or_else(|| self.expressions.iter().max_by(latest))
+    }
 }
 
 /// The motions a pack holds, and the name each of its animations gives one.
@@ -219,7 +246,7 @@ struct Motions {
     named: Vec<(String, usize)>,
     /// The companion each of `named`'s own timeline plays over it, parallel to it. An emote often
     /// states its facial expression this way rather than by a name the creator picks.
-    companions: Vec<Option<Companion>>,
+    companions: Vec<Companion>,
     bindings: Vec<Binding>,
 }
 
@@ -252,9 +279,11 @@ impl Motions {
         self.bindings.get(*at)
     }
 
-    /// The companion the motion at `motion` names, if its own timeline names one.
+    /// The companion the motion at `motion` names, if its own timeline lays any pose over it.
     fn companion(&self, motion: usize) -> Option<&Companion> {
-        self.companions.get(motion)?.as_ref()
+        self.companions
+            .get(motion)
+            .filter(|held| !held.expressions.is_empty())
     }
 
     /// Which motion the pack opens on: the idle where it names one, since a monster's pack leads
@@ -271,24 +300,31 @@ impl Motions {
     }
 }
 
-/// The companion a motion's own timeline plays over it, out of the first `C009`/`C010` that plays
-/// one: `duration` is the motion's own, in seconds, which is what the timeline's frame units are
-/// scaled against. A timeline naming more than one, the way a longer emote's does to run through
-/// several expressions in turn, is read as only the first; nothing here schedules a change of
-/// companion mid-motion.
-fn companion(timeline: &[u8], duration: f32) -> Option<Companion> {
-    let timeline = Timeline::read(Cursor::new(timeline.to_vec())).ok()?;
+/// Every `cfxf_` pose a motion's own timeline plays over it, and the library they come out of:
+/// `duration` is the motion's own, in seconds, which is what the timeline's frame units are scaled
+/// against. An emote runs through several poses in turn, each one taking the face from the time
+/// its own command states.
+fn companion(timeline: &[u8], duration: f32) -> Companion {
+    let Ok(timeline) = Timeline::read(Cursor::new(timeline.to_vec())) else {
+        return Companion::default();
+    };
     let frames = timeline.items().iter().find_map(|item| match item {
         Item::Header(header) => Some(header.duration()),
         _ => None,
-    })?;
-    if frames <= 0 {
-        return None;
-    }
+    });
+    let Some(frames) = frames.filter(|frames| *frames > 0) else {
+        return Companion::default();
+    };
     let scale = duration / f32::from(frames);
-    timeline.items().iter().find_map(|item| {
-        let Item::Command(command) = item else {
-            return None;
+    let mut companion = Companion::default();
+    for item in timeline.items() {
+        let command = match item {
+            Item::FaceLibrary(library) => {
+                companion.library = library.path().map(ToOwned::to_owned);
+                continue;
+            }
+            Item::Command(command) => command,
+            _ => continue,
         };
         let (path, hold, span) = match command.kind() {
             CommandKind::C009(animation) => (animation.path(), animation.duration(), (0.0, 1.0)),
@@ -301,16 +337,19 @@ fn companion(timeline: &[u8], duration: f32) -> Option<Companion> {
                     false => (0.0, 1.0),
                 },
             ),
-            _ => return None,
+            _ => continue,
         };
-        let name = path?.strip_prefix("cfxf_")?.to_owned();
+        let Some(name) = path.and_then(|path| path.strip_prefix("cfxf_")) else {
+            continue;
+        };
         let start = f32::from(command.time()) * scale;
-        Some(Companion {
-            name,
+        companion.expressions.push(Expression {
+            name: name.to_owned(),
             window: (start, start + hold as f32 * scale),
             span,
-        })
-    })
+        });
+    }
+    companion
 }
 
 /// A clip on its way out from under whatever replaced it, kept whole so it can go on being
@@ -504,11 +543,20 @@ impl Layer {
         Some(binding.motion().duration().max(f32::EPSILON))
     }
 
-    /// The companion the motion now playing names, if its own timeline names one.
-    fn companion(&self) -> Option<Companion> {
+    /// The expression the motion now playing lays over the face `at` seconds in, if its own
+    /// timeline lays any.
+    fn expression(&self, at: f32) -> Option<Expression> {
         let pack = self.pack.borrow();
         let motions = pack.as_ref().and_then(Fetch::ready)?;
-        motions.companion(self.motion.get()?).cloned()
+        motions.companion(self.motion.get()?)?.at(at).cloned()
+    }
+
+    /// The facial library the motion now playing names, for the packs that name their own rather
+    /// than leave it to the timeline they are filed under.
+    fn library(&self) -> Option<String> {
+        let pack = self.pack.borrow();
+        let motions = pack.as_ref().and_then(Fetch::ready)?;
+        motions.companion(self.motion.get()?)?.library.clone()
     }
 
     /// The pack playing, the name its own file gives the motion, and how far into it, in
@@ -575,14 +623,14 @@ impl Layer {
         }
     }
 
-    /// Sets this layer's clock from `at`, the other layer's own, against the window `companion`
+    /// Sets this layer's clock from `at`, the other layer's own, against the window `expression`
     /// states, rather than running one of its own: a facial clip a fraction of a second long
     /// otherwise loops many times over while the body it belongs to plays once.
-    fn hold(&self, companion: &Companion, at: f32) {
+    fn hold(&self, expression: &Expression, at: f32) {
         let Some(duration) = self.duration() else {
             return;
         };
-        self.time.set(held(companion, at, duration));
+        self.time.set(held(expression, at, duration));
     }
 }
 
@@ -596,13 +644,13 @@ fn opening(candidates: Vec<String>, name: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Where a `duration`-second clip should sit to hold `companion` against `at`, the other clip's
+/// Where a `duration`-second clip should sit to hold `expression` against `at`, the other clip's
 /// own time in seconds: clamped, so it settles at the window's own edge rather than snap back to
 /// it before the window opens or past it once it has closed.
-fn held(companion: &Companion, at: f32, duration: f32) -> f32 {
-    let (start, end) = companion.window;
+fn held(expression: &Expression, at: f32, duration: f32) -> f32 {
+    let (start, end) = expression.window;
     let fraction = ((at - start) / (end - start).max(f32::EPSILON)).clamp(0.0, 1.0);
-    let (from, to) = companion.span;
+    let (from, to) = expression.span;
     (from + (to - from) * fraction) * duration
 }
 
@@ -803,8 +851,17 @@ pub struct Animation {
     /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
     /// is what asks for another rather than every frame re-loading the same pack.
     linked: RefCell<Option<String>>,
+    /// The timeline the body's own pack is filed under, and the facial library its `TMPP` names.
+    /// A pack that states one of its own needs none of this; the rest leave it to the timeline of
+    /// the same key under `chara/action/`.
+    keyed: RefCell<String>,
+    library: RefCell<Option<Fetch<Option<String>>>>,
     /// Whether a caller has said what the body stands in, so the pack list stops picking for it.
     stood: Cell<bool>,
+    /// Whether the face holds a pose the creator asked for by name. The game plays such a pose
+    /// from an `ActionTimeline` row of its own, where the face a stance lays over its idle is a
+    /// bare command inside the pack with no row at all, so the one does not displace the other.
+    picked: Cell<bool>,
     /// Whether `face` is still the pack `linked` put it on, so its clock tracks the body's own
     /// rather than running free. `express` and a manual face pick from the picker both drop this,
     /// since a pose the creator asked for by name is not the body's to hold or let go of.
@@ -864,7 +921,10 @@ impl Animation {
             action: Default::default(),
             face: Default::default(),
             linked: RefCell::new(None),
+            keyed: RefCell::new(String::new()),
+            library: RefCell::new(None),
             stood: Cell::new(false),
+            picked: Cell::new(false),
             synced: Cell::new(false),
             pending: RefCell::new(None),
             poses: Default::default(),
@@ -949,6 +1009,7 @@ impl Animation {
             layer.poll(backend);
         }
         self.poll_ordering(backend);
+        self.poll_library(backend);
         self.poll_companion();
         self.poll_pose(backend);
         if self.running.get() {
@@ -958,9 +1019,9 @@ impl Animation {
             // A body command names a window of its own clock to hold the face against rather than
             // let it loop on one of its own; nothing named, or a face the creator has since picked
             // by hand, leaves it free to run on its own clock instead.
-            match self.body.companion() {
-                Some(companion) if self.synced.get() => {
-                    self.face.hold(&companion, self.body.time.get());
+            match self.body.expression(self.body.time.get()) {
+                Some(expression) if self.synced.get() => {
+                    self.face.hold(&expression, self.body.time.get());
                 }
                 _ => self.face.advance(step),
             }
@@ -1196,7 +1257,8 @@ impl Animation {
     /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
     /// so which of the two it lands on is the pack's to say.
     pub fn play(&self, path: &str, then: Option<&str>, fade: f32) {
-        if facial(path) {
+        let face = facial(path);
+        if face {
             self.synced.set(false);
             self.face.load(path, None, then, fade);
         } else {
@@ -1206,6 +1268,10 @@ impl Animation {
         // last time and assume nothing changed, which is what left a re-picked emote's face
         // stuck on whatever frame it was already at.
         *self.linked.borrow_mut() = None;
+        // A body motion the creator asked for carries its own face, so it takes the one an
+        // expression was holding rather than being refused by it; a facial pack picked by hand
+        // is itself the expression.
+        self.picked.set(face);
         self.running.set(true);
     }
 
@@ -1243,69 +1309,122 @@ impl Animation {
 
     /// Puts an expression on the face the character wears. A file's own name is only a guess at
     /// what it holds, so every candidate is opened on the `cfxf_` name itself and skipped if it
-    /// does not carry it: the filename match first, since most poses are a pack of their own,
-    /// then the one a face keeps resident, then the rest of the face's own tree if neither knew
-    /// it. A name filed nowhere leaves the face as it rests, which is the game's own neutral pose.
+    /// does not carry it: the path the game loads a pose on demand from first, then anything else
+    /// of that name the listing knows, then the library a face keeps resident, then the rest of
+    /// the face's own tree if none of them knew it. A name filed nowhere leaves the face as it
+    /// rests, which is the game's own neutral pose.
     pub fn express(&self, name: &str) {
         let Some(root) = self.face_root() else {
             return;
         };
         let file = format!("{name}.pap");
-        let mut candidates: Vec<String> = match self.packs.borrow().as_ref() {
+        let asked = format!("{root}nonresident/{file}");
+        let listed: Vec<String> = match self.packs.borrow().as_ref() {
             Some(Ok(packs)) => packs
                 .iter()
                 .filter(|pack| pack.path.starts_with(&root) && file_name(&pack.path) == file)
                 .map(|pack| pack.path.clone())
+                .filter(|path| *path != asked)
                 .collect(),
             _ => Vec::new(),
         };
+        let mut candidates = vec![asked];
+        candidates.extend(listed);
         candidates.push(format!("{root}resident/face.pap"));
         self.face.seek(opening(candidates, name), 0.0);
         *self.pending.borrow_mut() = Some(name.to_owned());
+        self.picked.set(true);
         self.synced.set(false);
         self.running.set(true);
     }
 
-    /// Drives the face from the `cfxf_` companion the body's own motion names, the way an emote
-    /// like Joy carries its own expression rather than leaving the creator to pick one. A change of
-    /// companion is what asks for another; a body pack with none resets the face to rest rather
-    /// than leaving it holding whatever it played last.
+    /// Asks for the timeline the body's own pack is filed under, which is what names the facial
+    /// library its poses come out of. A pack that names one of its own, or one whose path holds no
+    /// key to look up, needs none of this.
+    fn poll_library(&self, backend: &Backend) {
+        let wanted = action_key(&self.body.wanted.borrow())
+            .map(|key| format!("chara/action/{key}.tmb"))
+            .unwrap_or_default();
+        let mut keyed = self.keyed.borrow_mut();
+        if *keyed != wanted {
+            wanted.clone_into(&mut keyed);
+            *self.library.borrow_mut() = None;
+        }
+        drop(keyed);
+        if wanted.is_empty() {
+            return;
+        }
+        Fetch::poll(&mut self.library.borrow_mut(), backend, &wanted, |bytes| {
+            let timeline = Timeline::read(Cursor::new(bytes.to_vec()))?;
+            Ok(timeline.items().iter().find_map(|item| match item {
+                Item::FaceLibrary(library) => library.path().map(ToOwned::to_owned),
+                _ => None,
+            }))
+        });
+    }
+
+    /// The facial library the body's own motion plays out of, or nothing where it names none.
+    /// `None` while the timeline that would name it is still being read, so the face waits for the
+    /// answer rather than settling for a guess it would never take back.
+    fn face_library(&self) -> Option<Option<String>> {
+        if let Some(library) = self.body.library() {
+            return Some(Some(library));
+        }
+        if self.keyed.borrow().is_empty() {
+            return Some(None);
+        }
+        match self.library.borrow().as_ref() {
+            Some(Fetch::Ready(library)) => Some(library.clone()),
+            Some(Fetch::Failed(_)) => Some(None),
+            _ => None,
+        }
+    }
+
+    /// Drives the face from the `cfxf_` poses the body's own motion lays over it, the way an emote
+    /// like Joy carries its own expression rather than leaving the creator to pick one. An emote
+    /// runs through several in turn, so this is read against the body's own clock and a change of
+    /// pose is what asks for another; a body motion that lays none resets the face to rest rather
+    /// than leaving it holding whatever it played last. A pose the creator asked for by name holds
+    /// through all of it, since what a stance lays over its own idle is no pose anyone picked.
     fn poll_companion(&self) {
-        let wanted = self.body.companion();
-        let name = wanted.as_ref().map(|companion| companion.name.clone());
+        if self.picked.get() {
+            return;
+        }
+        let wanted = self.body.expression(self.body.time.get());
+        let name = wanted.as_ref().map(|held| held.name.clone());
         if name == *self.linked.borrow() {
             return;
         }
-        let Some(companion) = &wanted else {
-            *self.linked.borrow_mut() = name;
+        let Some(name) = name else {
+            *self.linked.borrow_mut() = None;
             self.synced.set(false);
             self.face.load("", None, None, 0.0);
             return;
         };
-        let name = &companion.name;
         let Some(root) = self.face_root() else {
+            return;
+        };
+        let Some(library) = self.face_library() else {
             return;
         };
         let held = self.packs.borrow();
         let Some(Ok(packs)) = held.as_ref() else {
             return;
         };
-        let tail = file_name(&self.body.wanted.borrow())
-            .strip_suffix(".pap")
-            .unwrap_or_default()
-            .to_owned();
-        let candidates: Vec<String> = [
-            format!("{root}nonresident/{name}.pap"),
-            format!("{root}nonresident/emot/{tail}.pap"),
-            format!("{root}resident/face.pap"),
-        ]
-        .into_iter()
-        .filter(|candidate| packs.iter().any(|pack| pack.path == *candidate))
-        .collect();
+        let candidates: Vec<String> = library
+            .iter()
+            .map(|library| format!("{root}nonresident/{library}.pap"))
+            .chain([
+                format!("{root}nonresident/{name}.pap"),
+                format!("{root}resident/face.pap"),
+            ])
+            .filter(|candidate| packs.iter().any(|pack| pack.path == *candidate))
+            .collect();
         drop(held);
-        self.face.seek(opening(candidates, name.as_str()), 0.0);
+        log::info!("mdl: the body lays cfxf_{name} over the face");
+        self.face.seek(opening(candidates, &name), 0.0);
         *self.pending.borrow_mut() = Some(name.clone());
-        *self.linked.borrow_mut() = Some(name.clone());
+        *self.linked.borrow_mut() = Some(name);
         self.synced.set(true);
     }
 
@@ -1735,6 +1854,17 @@ fn facial(pack: &str) -> bool {
     face_set(pack).is_some()
 }
 
+/// The key a body's pack is filed under, which is what the timeline naming its facial library is
+/// filed under too: the path past the animation set and the weapon class, both of which say which
+/// body plays the motion rather than which motion it is.
+fn action_key(pack: &str) -> Option<&str> {
+    let (set, rest) = pack.split_once("/animation/")?.1.split_once('/')?;
+    let named =
+        set.len() == 5 && set.starts_with('a') && set[1..].bytes().all(|byte| byte.is_ascii_digit());
+    named.then_some(())?;
+    rest.split_once('/')?.1.strip_suffix(".pap")
+}
+
 /// Where the skeleton a pack's tracks are ordered by is filed, or nothing where that is the
 /// model's own base skeleton.
 fn ordering(code: &str, pack: &str) -> Option<String> {
@@ -1825,16 +1955,19 @@ fn found(root: &str, paths: Vec<String>) -> Vec<Pack> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::rc::Rc;
 
     use glam::{Mat4, Vec3};
+    use ironworks::file::File as _;
     use ironworks::file::sklb::Transform;
+    use ironworks::file::tmb::{Item, Timeline};
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
-        Animation, Companion, Extra, Fetch, Layer, Leaving, Motions, PoseLookup, Poses, Skeleton,
-        Skin, code, extra, facial, found, held, opening, ordering, pack_path, pack_root, seat_path,
-        skeleton_path,
+        Animation, Companion, Expression, Extra, Fetch, Layer, Leaving, Motions, PoseLookup,
+        Poses, Skeleton, Skin, action_key, code, extra, facial, found, held, opening, ordering,
+        pack_path, pack_root, seat_path, skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -2154,15 +2287,65 @@ mod tests {
     #[test]
     fn held_tracks_the_bodys_clock_across_the_window_and_clamps_past_it() {
         let scale = 4.0 / 122.0;
-        let companion = Companion {
-            name: "satisfied".to_owned(),
-            window: (0.0, 103.0 * scale),
+        let satisfied = expression("satisfied", 0.0, 103.0 * scale);
+        assert_eq!(held(&satisfied, -1.0, 2.0), 0.0);
+        assert!((held(&satisfied, 103.0 * scale * 0.5, 2.0) - 1.0).abs() < 1e-4);
+        assert!((held(&satisfied, 103.0 * scale, 2.0) - 2.0).abs() < 1e-4);
+        assert_eq!(held(&satisfied, 4.0, 2.0), 2.0);
+    }
+
+    fn expression(name: &str, from: f32, to: f32) -> Expression {
+        Expression {
+            name: name.to_owned(),
+            window: (from, to),
             span: (0.0, 1.0),
+        }
+    }
+
+    /// Airquotes, as the install states it: four commands laid over one four-second motion, and
+    /// the timeline writes them at 10, 40, 30, 20 rather than in the order the clock reaches
+    /// them. The face runs through all four, and before the first it holds the one a turn round
+    /// the loop left it on.
+    #[test]
+    fn the_face_runs_through_every_pose_the_body_lays_over_it() {
+        let scale = 4.0 / 120.0;
+        let at = |frame: f32| frame * scale;
+        let companion = Companion {
+            library: Some("emot/airquotes".to_owned()),
+            expressions: vec![
+                expression("laugh", at(10.0), at(32.0)),
+                expression("smile", at(40.0), at(110.0)),
+                expression("laugh", at(30.0), at(52.0)),
+                expression("smile", at(20.0), at(42.0)),
+            ],
         };
-        assert_eq!(held(&companion, -1.0, 2.0), 0.0);
-        assert!((held(&companion, 103.0 * scale * 0.5, 2.0) - 1.0).abs() < 1e-4);
-        assert!((held(&companion, 103.0 * scale, 2.0) - 2.0).abs() < 1e-4);
-        assert_eq!(held(&companion, 4.0, 2.0), 2.0);
+        let name = |time: f32| companion.at(time).map(|held| held.name.as_str());
+        assert_eq!(name(0.0), Some("smile"), "what the last turn left behind");
+        assert_eq!(name(at(10.0)), Some("laugh"));
+        assert_eq!(name(at(25.0)), Some("smile"));
+        assert_eq!(name(at(35.0)), Some("laugh"));
+        assert_eq!(name(at(120.0)), Some("smile"));
+        assert_eq!(Companion::default().at(0.0).map(|held| held.name.as_str()), None);
+    }
+
+    /// The key a timeline is filed under is the pack path past the animation set and the weapon
+    /// class, which is what `chara/action/<key>.tmb` names the facial library under.
+    #[test]
+    fn a_packs_key_is_what_names_its_facial_library() {
+        assert_eq!(
+            action_key("chara/human/c0101/animation/a0001/bt_common/emote/airquotes.pap"),
+            Some("emote/airquotes")
+        );
+        assert_eq!(
+            action_key("chara/human/c0101/animation/a0001/bt_swd_sld/resident/idle.pap"),
+            Some("resident/idle")
+        );
+        assert_eq!(
+            action_key("chara/human/c0101/animation/f0002/nonresident/emot/airquotes.pap"),
+            None,
+            "a facial pack is filed under the face, not under an animation set"
+        );
+        assert_eq!(action_key("chara/human/c0101/animation/a0001/bt_common.pap"), None);
     }
 
     /// A pack holding nothing, for the fade arithmetic, which never reads what is playing.
@@ -2415,6 +2598,67 @@ mod tests {
         }
     }
 
+    /// Airquotes off the real install: the emote's own timeline names its facial library through
+    /// `chara/action/emote/airquotes.tmb`, and the pack that names holds every pose the emote runs
+    /// through. The stance idle a drawn weapon puts a body in names no library of its own and no
+    /// timeline under `chara/action/` either, so its own pose has to be found by name instead.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_airquotes_names_the_library_its_poses_come_out_of() {
+        let backend = local_backend();
+        let read = |path: &str| block_on(backend.files().read(path)).expect(path);
+
+        let key = action_key("chara/human/c0101/animation/a0001/bt_common/emote/airquotes.pap");
+        assert_eq!(key, Some("emote/airquotes"));
+        let timeline = read("chara/action/emote/airquotes.tmb");
+        let library = Timeline::read(Cursor::new(timeline))
+            .expect("a real timeline should parse")
+            .items()
+            .iter()
+            .find_map(|item| match item {
+                Item::FaceLibrary(library) => library.path().map(ToOwned::to_owned),
+                _ => None,
+            });
+        assert_eq!(library.as_deref(), Some("emot/airquotes"));
+
+        let motions = Motions::read(&read("chara/human/c0101/animation/a0001/bt_common/emote/airquotes.pap"))
+            .expect("a real animation pack should parse");
+        let at = motions
+            .named
+            .iter()
+            .position(|(name, _)| name == "cbem_airquotes")
+            .expect("cbem_airquotes should be named");
+        let companion = motions.companion(at).expect("airquotes lays poses on the face");
+        let mut wanted: Vec<&str> = companion
+            .expressions
+            .iter()
+            .map(|held| held.name.as_str())
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        assert_eq!(wanted, ["laugh", "smile"]);
+
+        let face = Motions::read(&read("chara/human/c0101/animation/f0002/nonresident/emot/airquotes.pap"))
+            .expect("the library the timeline names should parse");
+        for name in wanted {
+            assert!(
+                face.named.iter().any(|(held, _)| held == &format!("cfxf_{name}")),
+                "the library should hold cfxf_{name}"
+            );
+        }
+
+        let drawn = Motions::read(&read("chara/human/c0101/animation/a0001/bt_swd_sld/resident/idle.pap"))
+            .expect("a real animation pack should parse");
+        let at = drawn
+            .named
+            .iter()
+            .position(|(name, _)| name == "cbbm_id0")
+            .expect("cbbm_id0 should be named");
+        let companion = drawn.companion(at).expect("the drawn idle lays a pose on the face");
+        assert_eq!(companion.library, None);
+        assert!(block_on(backend.files().read("chara/action/resident/idle.tmb")).is_err());
+    }
+
     /// Drives the base skeleton fetch and the extra-skeleton merge until the rig lands.
     fn settle_rig(animation: &Animation, backend: &crate::backend::Backend) {
         let ctx = egui::Context::default();
@@ -2491,9 +2735,12 @@ mod tests {
         let companion = motions
             .companion(at)
             .expect("cbem_joy names a facial companion");
-        assert_eq!(companion.name, "satisfied");
-        assert_eq!(companion.window.0, 0.0);
-        assert_eq!(companion.span, (0.0, 1.0));
+        let [held] = companion.expressions.as_slice() else {
+            panic!("cbem_joy lays one pose over the face, found {:?}", companion.expressions.len());
+        };
+        assert_eq!(held.name, "satisfied");
+        assert_eq!(held.window.0, 0.0);
+        assert_eq!(held.span, (0.0, 1.0));
         let body_duration = motions
             .binding(at)
             .expect("cbem_joy has a binding")
@@ -2501,9 +2748,9 @@ mod tests {
             .duration();
         let expected_end = 103.0 / 122.0 * body_duration;
         assert!(
-            (companion.window.1 - expected_end).abs() < 1e-4,
+            (held.window.1 - expected_end).abs() < 1e-4,
             "window end {} should scale duration 103 against Header duration 122, expected {expected_end}",
-            companion.window.1
+            held.window.1
         );
     }
 }

@@ -650,6 +650,17 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
             })
             .weak(),
         );
+        let (built, wanted) = state.cast.built();
+        if wanted > 0 {
+            ui.label(RichText::new(format!("{built}/{wanted} standing")).weak())
+                .on_hover_text(
+                    "Characters built out of the rows their participants name, against how many \
+                     rows the cast holds",
+                );
+        }
+        if let Some(why) = state.cast.failure() {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("cast: {why}"));
+        }
     });
 }
 

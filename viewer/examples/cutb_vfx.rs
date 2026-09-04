@@ -54,6 +54,10 @@ struct Census {
     pairs: usize,
     /// What a `C019` runs against, by the kind the participant stands for.
     kinds: BTreeMap<String, usize>,
+    /// How many `C094` fade a node right out, right in, or to something between, and what each
+    /// states it applies to.
+    fades: [usize; 3],
+    filters: BTreeMap<i32, usize>,
 
     /// The bodies of the two large unmodelled kinds, and whether a dword of one reaches a string.
     unmodelled: BTreeMap<String, (usize, BTreeMap<usize, usize>)>,
@@ -235,6 +239,17 @@ impl Census {
                             *self.kinds.entry(named).or_default() += 1;
                         }
                     }
+                    CommandKind::C094(fade) => {
+                        self.fades[match fade.end_visibility() {
+                            end if end <= 0.0 => 0,
+                            end if end >= 1.0 => 1,
+                            _ => 2,
+                        }] += 1;
+                        *self
+                            .filters
+                            .entry(fade.filter().map(|held| held.filter()).unwrap_or(-1))
+                            .or_default() += 1;
+                    }
                     CommandKind::Unknown { magic, body } => {
                         let magic = String::from_utf8_lossy(magic).into_owned();
                         if magic != "C128" && magic != "C156" {
@@ -349,6 +364,12 @@ impl Census {
         for (named, count) in &self.kinds {
             println!("  {named:>16}  {count}");
         }
+
+        println!(
+            "\nC094: {} fade a node right out, {} right in, {} to something between",
+            self.fades[0], self.fades[1], self.fades[2]
+        );
+        println!("  by what each states it applies to: {:?}", self.filters);
 
         println!("\nthe two large unmodelled kinds, and which dwords of the body are ever set");
         for (magic, (count, words)) in &self.unmodelled {

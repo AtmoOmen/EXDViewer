@@ -229,12 +229,14 @@ impl Companion {
     /// or, before the first, the one a previous turn round the loop left the face holding. Read
     /// without assuming the timeline states its commands in time order, which it does not.
     fn at(&self, at: f32) -> Option<&Expression> {
-        let latest = |held: &Expression, other: &Expression| held.window.0.total_cmp(&other.window.0);
+        let latest = |left: &&Expression, right: &&Expression| {
+            left.window.0.total_cmp(&right.window.0)
+        };
         self.expressions
             .iter()
             .filter(|held| held.window.0 <= at)
-            .max_by(|left, right| latest(left, right))
-            .or_else(|| self.expressions.iter().max_by(|left, right| latest(left, right)))
+            .max_by(latest)
+            .or_else(|| self.expressions.iter().max_by(latest))
     }
 }
 
@@ -1255,7 +1257,8 @@ impl Animation {
     /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
     /// so which of the two it lands on is the pack's to say.
     pub fn play(&self, path: &str, then: Option<&str>, fade: f32) {
-        if facial(path) {
+        let face = facial(path);
+        if face {
             self.synced.set(false);
             self.face.load(path, None, then, fade);
         } else {
@@ -1265,9 +1268,10 @@ impl Animation {
         // last time and assume nothing changed, which is what left a re-picked emote's face
         // stuck on whatever frame it was already at.
         *self.linked.borrow_mut() = None;
-        // A motion the creator asked for by name carries its own face, so it takes the one an
-        // expression was holding rather than being refused by it.
-        self.picked.set(false);
+        // A body motion the creator asked for carries its own face, so it takes the one an
+        // expression was holding rather than being refused by it; a facial pack picked by hand
+        // is itself the expression.
+        self.picked.set(face);
         self.running.set(true);
     }
 
@@ -1341,10 +1345,12 @@ impl Animation {
         let wanted = action_key(&self.body.wanted.borrow())
             .map(|key| format!("chara/action/{key}.tmb"))
             .unwrap_or_default();
-        if *self.keyed.borrow() != wanted {
-            wanted.clone_into(&mut self.keyed.borrow_mut());
+        let mut keyed = self.keyed.borrow_mut();
+        if *keyed != wanted {
+            wanted.clone_into(&mut keyed);
             *self.library.borrow_mut() = None;
         }
+        drop(keyed);
         if wanted.is_empty() {
             return;
         }
@@ -1949,10 +1955,13 @@ fn found(root: &str, paths: Vec<String>) -> Vec<Pack> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::rc::Rc;
 
     use glam::{Mat4, Vec3};
+    use ironworks::file::File as _;
     use ironworks::file::sklb::Transform;
+    use ironworks::file::tmb::{Item, Timeline};
 
     use super::super::super::skeleton::{Rig, middle};
     use super::{
@@ -2587,6 +2596,67 @@ mod tests {
                 PoseLookup::Pending => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
         }
+    }
+
+    /// Airquotes off the real install: the emote's own timeline names its facial library through
+    /// `chara/action/emote/airquotes.tmb`, and the pack that names holds every pose the emote runs
+    /// through. The stance idle a drawn weapon puts a body in names no library of its own and no
+    /// timeline under `chara/action/` either, so its own pose has to be found by name instead.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_airquotes_names_the_library_its_poses_come_out_of() {
+        let backend = local_backend();
+        let read = |path: &str| block_on(backend.files().read(path)).expect(path);
+
+        let key = action_key("chara/human/c0101/animation/a0001/bt_common/emote/airquotes.pap");
+        assert_eq!(key, Some("emote/airquotes"));
+        let timeline = read("chara/action/emote/airquotes.tmb");
+        let library = Timeline::read(Cursor::new(timeline))
+            .expect("a real timeline should parse")
+            .items()
+            .iter()
+            .find_map(|item| match item {
+                Item::FaceLibrary(library) => library.path().map(ToOwned::to_owned),
+                _ => None,
+            });
+        assert_eq!(library.as_deref(), Some("emot/airquotes"));
+
+        let motions = Motions::read(&read("chara/human/c0101/animation/a0001/bt_common/emote/airquotes.pap"))
+            .expect("a real animation pack should parse");
+        let at = motions
+            .named
+            .iter()
+            .position(|(name, _)| name == "cbem_airquotes")
+            .expect("cbem_airquotes should be named");
+        let companion = motions.companion(at).expect("airquotes lays poses on the face");
+        let mut wanted: Vec<&str> = companion
+            .expressions
+            .iter()
+            .map(|held| held.name.as_str())
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        assert_eq!(wanted, ["laugh", "smile"]);
+
+        let face = Motions::read(&read("chara/human/c0101/animation/f0002/nonresident/emot/airquotes.pap"))
+            .expect("the library the timeline names should parse");
+        for name in wanted {
+            assert!(
+                face.named.iter().any(|(held, _)| held == &format!("cfxf_{name}")),
+                "the library should hold cfxf_{name}"
+            );
+        }
+
+        let drawn = Motions::read(&read("chara/human/c0101/animation/a0001/bt_swd_sld/resident/idle.pap"))
+            .expect("a real animation pack should parse");
+        let at = drawn
+            .named
+            .iter()
+            .position(|(name, _)| name == "cbbm_id0")
+            .expect("cbbm_id0 should be named");
+        let companion = drawn.companion(at).expect("the drawn idle lays a pose on the face");
+        assert_eq!(companion.library, None);
+        assert!(block_on(backend.files().read("chara/action/resident/idle.tmb")).is_err());
     }
 
     /// Drives the base skeleton fetch and the extra-skeleton merge until the rig lands.

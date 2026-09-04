@@ -781,6 +781,15 @@ pub enum Asset {
     Group(String),
 }
 
+/// A character a host outside this view stands in the scene. It is assembled rather than placed:
+/// what the scene draws of it is the model's own geometry, filling the same G-buffer as everything
+/// else in the frame.
+pub struct Standing {
+    pub model: Rc<mdl::Rendered>,
+    /// Where it stands, in world space.
+    pub at: Mat4,
+}
+
 /// Something placed in the scene by a host outside this view, alongside what the level itself
 /// holds.
 pub struct Prop {
@@ -809,6 +818,10 @@ pub struct Scene {
     /// Markers a host outside this view wants drawn over the frame, in scene space with a label.
     /// Cleared the same way [`Self::drive`] is.
     markers: Vec<(Vec3, String)>,
+    /// The characters a host outside this view wants standing in the scene. Held rather than
+    /// cleared each frame: a model keeps asking for what it still needs, and the host hands its
+    /// cast over once.
+    cast: Vec<Standing>,
     /// Whether the last frame drawn was driven, for the side panel to grey its own camera controls
     /// against: [`Self::drive`] itself is forgotten the instant a frame reads it.
     driving: bool,
@@ -1210,6 +1223,7 @@ impl Scene {
             standing: 0,
             fitted: 0,
             renderer: gpu::Renderer::new(),
+            cast: Vec::new(),
             placed: Vec::new(),
             casts: Vec::new(),
             motions: Vec::new(),
@@ -1271,6 +1285,13 @@ impl Scene {
     /// driven camera shows. Forgotten the same way [`Self::drive`] is.
     pub fn mark(&mut self, markers: Vec<(Vec3, String)>) {
         self.markers = markers;
+    }
+
+    /// The characters standing in the scene, replacing whoever stood there before. Unlike
+    /// [`Self::place`] a host may call this every frame: a cast that changes is one whose models
+    /// have finished arriving, not a scene to build again.
+    pub fn stand(&mut self, cast: Vec<Standing>) {
+        self.cast = cast;
     }
 
     /// Adds props to the scene under a layer of their own. Unlike [`Self::drive`] and
@@ -4113,12 +4134,20 @@ impl Scene {
             }
         }
 
+        let attachments = self.renderer.lock().unwrap().attachments();
+        let cast: Vec<mdl::Cast> = self
+            .cast
+            .iter()
+            .map(|held| held.model.cast(held.at, attachments))
+            .collect();
+
         let (light, color) = self.ambient.light();
         let blades = self.sown();
         self.standing = blades.iter().map(|held| self.turf[held.turf].blades).sum();
         let effects = self.effect_draws(view, eye);
         let effects_drawn = effects.iter().map(|held| held.batches.len()).sum();
         let frame = gpu::Frame {
+            casts: cast,
             scene: program::Scene {
                 view,
                 projection,

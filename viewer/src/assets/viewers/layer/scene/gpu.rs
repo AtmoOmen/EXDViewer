@@ -22,7 +22,7 @@ use super::super::super::mdl::deferred::{
 use super::super::super::mdl::gpu::{
     Bound, Exposure, Glare, Lighting, Occlusion, Shaded, Smoothing, attribute,
 };
-use super::super::super::mdl::{Vertex, program};
+use super::super::super::mdl::{self, Vertex, program};
 
 /// The color table, which the game's own shaders address as a texture of their own.
 const TABLE: u32 = 0x2005_679f;
@@ -247,6 +247,10 @@ pub struct Frame {
     /// Every light the zone places that reaches the frame.
     pub lamps: Vec<program::Lamp>,
     pub batches: Vec<Batch>,
+    /// The characters standing in the scene, each drawn from a model of its own: a character is
+    /// assembled rather than placed, so it fills the same G-buffer through its own geometry instead
+    /// of through an instance of the scene's.
+    pub casts: Vec<mdl::Cast>,
     /// The zone's own grass, once its package has arrived, and the grids it stands over.
     pub grass: Option<Arc<Grass>>,
     pub blades: Vec<Blades>,
@@ -1310,6 +1314,48 @@ impl Renderer {
         Ok(())
     }
 
+    /// Every character standing in the scene: with no lighting, what each fills the G-buffer with,
+    /// and with one, what each answers into the frame the lighting left.
+    ///
+    /// Each carries its own place in the world and the colours it was made with, which are the two
+    /// things the scene constants hold per character rather than per frame.
+    fn cast(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        scene: &program::Scene,
+        lighting: Option<&Lighting>,
+    ) -> Result<(), String> {
+        for cast in &frame.casts {
+            let held = program::Scene {
+                model: cast.model,
+                customize: cast.customize,
+                ..scene.clone()
+            };
+            let mut model = cast.gpu.lock().unwrap();
+            match lighting {
+                None => model.fill(
+                    gl,
+                    painter,
+                    (&cast.surfaces, &cast.joints),
+                    &mut self.buffers,
+                    &held,
+                )?,
+                Some(lighting) => model.over(
+                    gl,
+                    painter,
+                    &cast.surfaces,
+                    &mut self.buffers,
+                    lighting,
+                    &frame.lamps,
+                    &held,
+                )?,
+            }
+        }
+        Ok(())
+    }
+
     fn render(
         &mut self,
         gl: &glow::Context,
@@ -1467,6 +1513,7 @@ impl Renderer {
             }
             self.grass(gl, painter, frame, &scene, page)?;
         }
+        self.cast(gl, painter, frame, &scene, None)?;
 
         if let Some(lighting) = frame.lighting.as_ref() {
             // Before anything reads it: every lighting pass and the composite take the occlusion as
@@ -1564,6 +1611,7 @@ impl Renderer {
             // Over the sky, the water and the fog: a fringe pixel is one the opaque pass left
             // uncovered, and drawing it any earlier leaves the sky free to paint over it.
             self.sheer(gl, painter, frame, &scene, &offsets, lighting)?;
+            self.cast(gl, painter, frame, &scene, Some(lighting))?;
             // Before the exposure, since a halo belongs to the frame the lighting left rather than
             // to what a curve made of it.
             if let Some(glare) = frame.glare.as_ref() {

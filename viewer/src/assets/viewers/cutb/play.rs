@@ -280,18 +280,15 @@ pub struct Subtitle {
     pub at: f32,
     /// The key of the row it names, in the sheet the cutscene's `CTIS` node holds.
     pub key: String,
+    /// Who says it. The client's own parsers stop at the line number, so this is the viewer's
+    /// reading of the rest of the key rather than a field.
+    pub speaker: String,
     /// How long the line stands in each language, in milliseconds, nought where that language
     /// states nothing.
     lengths: Vec<i32>,
 }
 
 impl Subtitle {
-    /// The speaker's name, which the key carries past its line number. The client's own parsers
-    /// stop at the number, so this is the viewer's reading of the rest rather than a field.
-    pub fn speaker(&self) -> &str {
-        self.key.rsplit('_').next().unwrap_or_default()
-    }
-
     /// How long the line stands in a language, in seconds.
     pub fn runs(&self, language: Language) -> f32 {
         caption_slot(language)
@@ -299,6 +296,28 @@ impl Subtitle {
             .map(|length| *length as f32 / 1000.0)
             .unwrap_or(0.0)
     }
+}
+
+/// Who a key says the line: what it names past the sheet's own id, skipping the line number, which
+/// a key writes on either side of the name.
+fn speaker_of(key: &str, sheet_upper: &str) -> String {
+    let rest = key.strip_prefix("TEXT_").unwrap_or(key);
+    let rest = rest
+        .strip_prefix(sheet_upper)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .unwrap_or(rest);
+    rest.split('_')
+        .find(|part| !part.bytes().all(|byte| byte.is_ascii_digit()))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The id a cutscene's line keys open with, which is the last part of the sheet its `CTIS` names.
+fn sheet_id(sheet: Option<&str>) -> String {
+    sheet
+        .and_then(|name| name.rsplit('/').next())
+        .unwrap_or_default()
+        .to_uppercase()
 }
 
 /// Which of a `C048`'s captions a language reads: the client indexes them by the language itself,
@@ -436,7 +455,7 @@ fn parts_of(timeline: &Timeline, offset: f32, parts: &mut BTreeMap<u32, Part>) {
 }
 
 /// The subtitles one `CTTL` states, offset into the cutscene's own global frame numbering.
-fn subtitles_of(timeline: &Timeline, offset: f32, held: &mut Vec<Subtitle>) {
+fn subtitles_of(timeline: &Timeline, offset: f32, sheet_upper: &str, held: &mut Vec<Subtitle>) {
     for item in timeline.items() {
         let Item::Command(command) = item else {
             continue;
@@ -449,6 +468,7 @@ fn subtitles_of(timeline: &Timeline, offset: f32, held: &mut Vec<Subtitle>) {
         };
         held.push(Subtitle {
             at: offset + f32::from(command.time()),
+            speaker: speaker_of(key, sheet_upper),
             key: key.to_owned(),
             lengths: subtitle
                 .captions()
@@ -601,13 +621,14 @@ impl Player {
         let mut shots = Vec::new();
         let mut parts = BTreeMap::new();
         let mut subtitles = Vec::new();
+        let sheet_upper = sheet_id(dialogue_sheet(cutscene));
         let mut offset = 0.0;
         for (node, held) in cutscene.nodes().iter().enumerate() {
             let Node::Timeline(timeline) = held else {
                 continue;
             };
             parts_of(timeline, offset, &mut parts);
-            subtitles_of(timeline, offset, &mut subtitles);
+            subtitles_of(timeline, offset, &sheet_upper, &mut subtitles);
             let local = shots_of(timeline);
             let span = timeline_span(
                 timeline,
@@ -1282,7 +1303,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
                             .filter(|text| !text.is_empty())
                             .unwrap_or_else(|| subtitle.key.clone());
                         let label =
-                            format!("{:.0}f · {} · {said}", subtitle.at, subtitle.speaker());
+                            format!("{:.0}f · {} · {said}", subtitle.at, subtitle.speaker);
                         if ui
                             .add(Button::selectable(speaking == Some(at), label))
                             .on_hover_text(&subtitle.key)
@@ -1526,6 +1547,7 @@ mod test {
     fn said(at: f32, key: &str, english_ms: i32) -> Subtitle {
         Subtitle {
             at,
+            speaker: speaker_of(key, "A_00000"),
             key: key.to_owned(),
             lengths: vec![0, english_ms, 0, 0, 0, 0, 0, 0],
         }
@@ -1564,11 +1586,15 @@ mod test {
     }
 
     #[test]
-    fn a_key_names_its_speaker_past_its_line_number() {
-        assert_eq!(
-            said(0.0, "TEXT_VOICEMAN_07003_003100_GALUF", 0).speaker(),
-            "GALUF"
-        );
+    fn a_key_names_its_speaker_on_either_side_of_its_line_number() {
+        let named = |key| speaker_of(key, &sheet_id(Some("cut_scene/070/VoiceMan_07003")));
+        assert_eq!(named("TEXT_VOICEMAN_07003_003100_GALUF"), "GALUF");
+        let quest = |key| speaker_of(key, &sheet_id(Some("quest/000/ManFst000_00083")));
+        // Half the corpus writes the name ahead of the number rather than after it.
+        assert_eq!(quest("TEXT_MANFST000_00083_BREMONDT_000_37"), "BREMONDT");
+        assert_eq!(quest("TEXT_MANFST000_00083_000010_MOTHERCRYSTAL"), "MOTHERCRYSTAL");
+        // A key naming nothing but its number leaves the speaker unsaid.
+        assert_eq!(quest("TEXT_MANFST000_00083_000010"), "");
     }
 
     #[test]

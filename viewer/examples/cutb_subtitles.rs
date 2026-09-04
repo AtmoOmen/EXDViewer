@@ -37,6 +37,11 @@ struct Tally {
     kinds: BTreeMap<i32, usize>,
     enabled: [usize; 8],
     voices: usize,
+    /// Keys whose own id is the sheet's last segment, against those that read some other way, and
+    /// how many name a speaker past the line number.
+    id_matches: usize,
+    id_differs: usize,
+    trailing_digits: usize,
 }
 
 fn main() {
@@ -83,6 +88,11 @@ fn main() {
             })
             .unwrap_or_default();
         tally.named += usize::from(sheet.is_some());
+        let id_upper = sheet
+            .as_deref()
+            .and_then(|name| name.rsplit('/').next())
+            .unwrap_or_default()
+            .to_uppercase();
 
         for node in file.nodes() {
             let Node::Timeline(timeline) = node else {
@@ -104,6 +114,18 @@ fn main() {
                             tally.keyless += 1;
                             continue;
                         };
+                        match key
+                            .strip_prefix("TEXT_")
+                            .is_some_and(|rest| rest.starts_with(&id_upper))
+                        {
+                            true => tally.id_matches += 1,
+                            false => tally.id_differs += 1,
+                        }
+                        tally.trailing_digits += usize::from(
+                            key.rsplit('_')
+                                .next()
+                                .is_some_and(|last| last.bytes().all(|byte| byte.is_ascii_digit())),
+                        );
                         match rows.get(key) {
                             Some(text) => {
                                 tally.resolved += 1;
@@ -144,4 +166,9 @@ fn main() {
     println!("subtitle_type: {:?}", tally.kinds);
     println!("captions enabled by slot: {:?}", tally.enabled);
     println!("{} voice C063", tally.voices);
+    println!(
+        "{} keys open with the sheet's own id, {} read some other way, {} end in a number rather \
+         than a speaker",
+        tally.id_matches, tally.id_differs, tally.trailing_digits,
+    );
 }

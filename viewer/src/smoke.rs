@@ -64,6 +64,12 @@ const GAME_SHADERS_X: f32 = 267.0;
 const SCENE_TAB_X: f32 = 287.0;
 const PLAY_TAB_X: f32 = 406.0;
 
+/// Where the cutscene transport's own play button sits, measured up from the foot of the window,
+/// and how long to let the level and the cast arrive before pressing it.
+const PLAY_X: f32 = 470.0;
+const PLAY_UP: f32 = 57.0;
+const PLAY_AT: Duration = Duration::from_secs(40);
+
 pub struct Config {
     pub sqpack_path: String,
     pub schema_path: Option<String>,
@@ -160,7 +166,7 @@ enum Phase {
     Settling { at: Instant },
     /// The reference shot has been requested; `before` lands via `Event::Screenshot`.
     Referencing { at: Instant },
-    Clicked { at: Instant },
+    Clicked { at: Instant, played: bool },
     Shooting { at: Instant, requested: bool },
 }
 
@@ -373,7 +379,10 @@ impl eframe::App for SmokeApp {
                 Phase::Referencing { .. } => {
                     self.reference = Some(image);
                     self.click = Some(self.config.steps[self.step].click_at());
-                    self.phase = Phase::Clicked { at: Instant::now() };
+                    self.phase = Phase::Clicked {
+                        at: Instant::now(),
+                        played: false,
+                    };
                 }
                 Phase::Shooting { .. } => self.land_shot(&ctx, image),
                 _ => {}
@@ -409,7 +418,7 @@ impl eframe::App for SmokeApp {
                     self.fail(format!("{} never produced a reference shot", step.path()));
                 }
             }
-            Phase::Clicked { at } => {
+            Phase::Clicked { at, played } => {
                 // A scene's instances stream in over several seconds; a model's shaded frame
                 // settles inside one. Matches `smoke.ts`'s `SETTLE` for the same reason.
                 let settle = match step {
@@ -419,7 +428,15 @@ impl eframe::App for SmokeApp {
                     // of it, each of which is a dozen models of its own.
                     Step::Cut(_) => Duration::from_secs(75),
                 };
-                if at.elapsed() > settle {
+                // Nothing an actor does shows in a frame held at the first: the cutscene has to
+                // run for its own timeline to reach the shot.
+                if matches!(step, Step::Cut(_)) && !played && at.elapsed() > PLAY_AT {
+                    self.click = Some(pos2(PLAY_X, self.config.height as f32 - PLAY_UP));
+                    self.phase = Phase::Clicked {
+                        at: *at,
+                        played: true,
+                    };
+                } else if at.elapsed() > settle {
                     self.phase = Phase::Shooting {
                         at: Instant::now(),
                         requested: false,

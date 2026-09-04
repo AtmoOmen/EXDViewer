@@ -881,6 +881,11 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             && let Some(pack) = state.cast.holding(*participant, &held.motion)
         {
             state.bodies.insert(*participant, at);
+            log::info!(
+                "cutb: {participant:#x} plays {} from {:.2}s out of {pack}",
+                held.motion,
+                held.from
+            );
             model.stand(&[(pack, &held.motion)], 0.0);
             model.opened_at(held.from);
         }

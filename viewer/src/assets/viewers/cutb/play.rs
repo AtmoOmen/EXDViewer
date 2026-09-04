@@ -5,8 +5,12 @@
 //! role apiece and hang off one another: the eye stands where the last [`EYE`] target does, aimed
 //! at the last [`LOOK_AT`] one with the last [`UP`] one over it, and each of those rides whichever
 //! `CTAL` participant the shot's own bindings name. See the ironworks `C004` doc for the rest,
-//! including the focal length and roll fields on the set's target `0xff`. Actors are not played: a
-//! participant only gets a marker naming what it stands for, from [`markers`].
+//! including the focal length and roll fields on the set's target `0xff`.
+//!
+//! Each actor is driven off the same timelines: a `TMAC` names the `CTAL` participant its tracks
+//! run against, and the commands they reach place it (`C018`), play a motion on its body (`C010`,
+//! `C040`) and put an expression on its face (`C090`). A motion is named rather than filed, so
+//! which pack holds it is looked up against the `.pap` files the cutscene's own `CTRL` loads.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -32,9 +36,14 @@ const LOOK_AT: u8 = 3;
 const UP: u8 = 4;
 
 /// Which `C004` binding names each role's participant, and where the flag holding role 1 to a
-/// participant's position alone sits.
+/// participant's position alone sits. Each role spends five fields: two participants with a
+/// sub-index apiece, then that flag.
 const ROLES: [(u8, usize); 3] = [(1, 0), (EYE, 6), (LOOK_AT, 11)];
 const RIG_UPRIGHT: usize = 4;
+
+/// Where the flag holding a shot to the bind it opened with sits, past role 1's own five fields.
+/// Nought in nine shots in ten, which is a camera that re-binds every frame.
+const HELD_BIND: usize = 5;
 
 /// How far a target's parents are followed, past which a file naming a loop of them stops rather
 /// than hangs. Deeper than any set the game ships.
@@ -49,9 +58,9 @@ const ROLL_TAG: u8 = 0x35;
 /// a frame it fixes at sixteen by nine.
 const HALF_SENSOR: f32 = 7.001_51;
 
-/// No file states a frame rate for a cutscene's own timing; this is a starting guess the transport
-/// bar can move.
-const DEFAULT_FPS: f32 = 30.0;
+/// Frames a second. A cutscene's own numbering runs at this: a `C010` naming `cbfm_arms` ends at
+/// frame 155, and that pack's own binding gives the clip 5.1666665 seconds.
+const FRAMES_A_SECOND: f32 = 30.0;
 
 /// A camera pose, already in world space and degrees.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,7 +120,12 @@ struct Target {
 
 /// The targets a shot's curve set drives, with each role's binding resolved onto the first target
 /// carrying it - the only one the shot binds.
-fn rig(set: &Curves, bindings: &[u32; 17], participants: &[Instance]) -> BTreeMap<u8, Target> {
+fn rig(
+    set: &Curves,
+    bindings: &[u32; 17],
+    participants: &[Instance],
+    placed: &dyn Fn(u32) -> Option<Transform>,
+) -> BTreeMap<u8, Target> {
     let mut targets = BTreeMap::new();
     for curve in set.curves().iter().filter(|curve| curve.target() != CAMERA_FIELDS) {
         targets.entry(curve.target()).or_insert(Target {
@@ -133,7 +147,8 @@ fn rig(set: &Curves, bindings: &[u32; 17], participants: &[Instance]) -> BTreeMa
             continue;
         };
         let turns = role == ROLES[0].0 && bindings[RIG_UPRIGHT] != 1;
-        target.bound = Some((scene::matrix(stands_at(participant)), turns));
+        let at = placed(participant.id()).unwrap_or_else(|| stands_at(participant));
+        target.bound = Some((scene::matrix(at), turns));
     }
     targets
 }
@@ -226,6 +241,111 @@ fn eye_pose(
         near,
         far,
     })
+}
+
+/// What a cutscene's timelines ask of one participant, in the cutscene's own global frame
+/// numbering. Each list is what holds from its own time on, so the one to run at a time is the
+/// last to have started.
+#[derive(Default)]
+pub struct Part {
+    /// Where it stands. Empty where nothing places it, which leaves its `CTAL` record's own
+    /// transform standing.
+    placed: Vec<(f32, Transform)>,
+    /// The motion its body plays.
+    motions: Vec<(f32, Cue)>,
+    /// The `cfxf_` expression its face wears.
+    faces: Vec<(f32, String)>,
+}
+
+/// One motion a timeline names for a body: which, and how far into the clip to open, in seconds.
+struct Cue {
+    motion: String,
+    from: f32,
+}
+
+/// Which of a list's entries holds at a time: the last to have started.
+fn latest<T>(held: &[(f32, T)], time: f32) -> Option<(usize, &T)> {
+    held.iter()
+        .enumerate()
+        .filter(|(_, (at, _))| *at <= time)
+        .last()
+        .map(|(index, (_, held))| (index, held))
+}
+
+/// The participant each of a timeline's commands runs against, out of the actors it drives.
+fn addressed(timeline: &Timeline) -> BTreeMap<i16, u32> {
+    let tracks: BTreeMap<i16, &[i16]> = timeline
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Track(track) => Some((track.id(), track.commands())),
+            _ => None,
+        })
+        .collect();
+    let mut held = BTreeMap::new();
+    for item in timeline.items() {
+        let Item::Actor(actor) = item else { continue };
+        for track in actor.tracks() {
+            for command in tracks.get(track).into_iter().flat_map(|held| held.iter()) {
+                held.insert(*command, actor.participant());
+            }
+        }
+    }
+    held
+}
+
+/// Files a named motion where it belongs: a face wears the poses its own packs name and a body
+/// plays the rest. A `cfx` name that is not a pose is the face's own blink or lip clip, which the
+/// body would only corrupt, so nothing plays it.
+fn cue(part: &mut Part, at: f32, motion: Option<&str>, from: f32) {
+    let Some(motion) = motion else {
+        return;
+    };
+    match motion.strip_prefix("cfxf_") {
+        Some(pose) => part.faces.push((at, pose.to_owned())),
+        None if motion.starts_with("cfx") => {}
+        None => part.motions.push((
+            at,
+            Cue {
+                motion: motion.to_owned(),
+                from,
+            },
+        )),
+    }
+}
+
+/// Reads one timeline's commands into the parts its participants play, offset into the cutscene's
+/// own global frame numbering.
+fn parts_of(timeline: &Timeline, offset: f32, parts: &mut BTreeMap<u32, Part>) {
+    let addressed = addressed(timeline);
+    for item in timeline.items() {
+        let Item::Command(command) = item else {
+            continue;
+        };
+        let Some(participant) = addressed.get(&command.id()) else {
+            continue;
+        };
+        let at = offset + f32::from(command.time());
+        let part = parts.entry(*participant).or_default();
+        match command.kind() {
+            CommandKind::C018(placed) => part.placed.push((
+                at,
+                Transform::new(placed.translation(), placed.rotation(), placed.scale()),
+            )),
+            // `0x01` enables the start and end frames; without it the clip plays from its own
+            // start.
+            CommandKind::C010(play) => {
+                let from = match play.flags() & 0x01 != 0 {
+                    true => play.animation_start() / FRAMES_A_SECOND,
+                    false => 0.0,
+                };
+                cue(part, at, play.motion(), from);
+            }
+            CommandKind::C040(play) => cue(part, at, play.motion(), 0.0),
+            CommandKind::C090(wear) => cue(part, at, wear.motion(), 0.0),
+            _ => {}
+        }
+    }
 }
 
 /// One shot: a `C004` command and the `CTTL` node it came from, in the cutscene's own global
@@ -343,17 +463,21 @@ fn active_shot(shots: &[Shot], time: f32) -> Option<&Shot> {
 /// reads the curves back out of the `Cutscene` it was built from.
 pub struct Player {
     shots: Vec<Shot>,
+    /// What each participant its timelines address does over the whole of it.
+    parts: BTreeMap<u32, Part>,
     duration: f32,
 }
 
 impl Player {
     pub fn new(cutscene: &Cutscene) -> Self {
         let mut shots = Vec::new();
+        let mut parts = BTreeMap::new();
         let mut offset = 0.0;
         for (node, held) in cutscene.nodes().iter().enumerate() {
             let Node::Timeline(timeline) = held else {
                 continue;
             };
+            parts_of(timeline, offset, &mut parts);
             let local = shots_of(timeline);
             let span = timeline_span(
                 timeline,
@@ -379,7 +503,18 @@ impl Player {
         Self {
             duration: offset,
             shots,
+            parts,
         }
+    }
+
+    /// What each participant its timelines address does.
+    pub fn parts(&self) -> &BTreeMap<u32, Part> {
+        &self.parts
+    }
+
+    /// Where a participant stands at a time, where its own timeline places it.
+    fn placed(&self, participant: u32, time: f32) -> Option<Transform> {
+        latest(&self.parts.get(&participant)?.placed, time).map(|(_, at)| *at)
     }
 
     /// Every shot, in the order it plays.
@@ -402,7 +537,15 @@ impl Player {
             Item::Curves(held) if held.id() == shot.curves => Some(held),
             _ => None,
         })?;
-        let targets = rig(set, &shot.bindings, participants(cutscene));
+        // A shot binds a role to where the actor stands now unless it says to hold the bind it
+        // opened with, so a camera riding someone who walks follows rather than lags.
+        let bound = match shot.bindings[HELD_BIND] == 1 {
+            true => shot.start,
+            false => time,
+        };
+        let targets = rig(set, &shot.bindings, participants(cutscene), &|participant| {
+            self.placed(participant, bound)
+        });
         eye_pose(set, &targets, time - shot.start, shot.near, shot.far)
     }
 }
@@ -512,6 +655,7 @@ fn stands_as(participant: &Instance) -> Option<stand::Wanted> {
         id,
         height: helper.height(),
         at: stands_at(participant),
+        participant: participant.id(),
     })
 }
 
@@ -541,6 +685,21 @@ pub fn roll_call(participants: &[Instance]) -> String {
         .map(|(count, named)| format!("{count} {named}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// The `.pap` packs a cutscene loads, which is where the motions its timelines name live.
+fn packs(cutscene: &Cutscene) -> Vec<String> {
+    cutscene
+        .nodes()
+        .iter()
+        .filter_map(|node| match node {
+            Node::Resources(list) => Some(list),
+            _ => None,
+        })
+        .flatten()
+        .map(|resource| resource.path().to_owned())
+        .filter(|path| path.ends_with(".pap"))
+        .collect()
 }
 
 /// The `CTAL` a cutscene holds, empty where it names none.
@@ -587,9 +746,13 @@ struct State {
     cast: stand::Cast,
     time: f32,
     playing: bool,
-    /// Frames a second. No file states one for a cutscene; this is a starting guess the transport
-    /// bar can move.
+    /// Frames a second, which the transport bar can move off the rate the file's own numbering
+    /// runs at.
     fps: f32,
+    /// Which cue each participant's body and face are holding, so a cue is issued when it changes
+    /// rather than every frame: taking a clip up is what puts its own clock back to nought.
+    bodies: BTreeMap<u32, usize>,
+    faces: BTreeMap<u32, usize>,
 }
 
 impl Default for State {
@@ -599,7 +762,9 @@ impl Default for State {
             cast: stand::Cast::default(),
             time: 0.0,
             playing: false,
-            fps: DEFAULT_FPS,
+            fps: FRAMES_A_SECOND,
+            bodies: BTreeMap::new(),
+            faces: BTreeMap::new(),
         }
     }
 }
@@ -647,6 +812,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
                 let mut scene = layer::level_scene(&tab.level, file);
                 scene.place("Cutscene", props(cutscene));
                 state.cast = stand::Cast::new(cast(cutscene));
+                state.cast.loads(packs(cutscene));
                 Fetch::Ready(Box::new(scene))
             }
             Err(error) => Fetch::Failed(error.to_string()),
@@ -655,6 +821,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
 
     let pose = tab.player.pose_at(cutscene, state.time);
     state.cast.poll(ui.ctx(), backend);
+    perform(tab.player.parts(), &mut state);
     let standing = state.cast.standing();
 
     Panel::left("cutb_shots")
@@ -687,6 +854,36 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         }
     });
     None
+}
+
+/// Puts every participant where its own timeline has it now, and plays what that timeline names.
+///
+/// A cue is issued only where it has changed: taking a clip up is what puts its own clock back to
+/// nought, so a cue reissued every frame would hold every actor on its first pose.
+fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
+    let time = state.time;
+    for (participant, part) in parts {
+        if let Some((_, at)) = latest(&part.placed, time) {
+            state.cast.place(*participant, *at);
+        }
+        let Some(model) = state.cast.model(*participant).cloned() else {
+            continue;
+        };
+        if let Some((at, held)) = latest(&part.motions, time)
+            && state.bodies.get(participant) != Some(&at)
+            && let Some(pack) = state.cast.holding(*participant, &held.motion)
+        {
+            state.bodies.insert(*participant, at);
+            model.stand(&[(pack, &held.motion)], 0.0);
+            model.opened_at(held.from);
+        }
+        if let Some((at, name)) = latest(&part.faces, time)
+            && state.faces.get(participant) != Some(&at)
+        {
+            state.faces.insert(*participant, at);
+            model.express(name);
+        }
+    }
 }
 
 fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
@@ -741,8 +938,8 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         ui.spacing_mut().slider_width = 200.0;
         ui.add(egui::Slider::new(&mut state.time, 0.0..=duration.max(1.0)).text("frame"));
         ui.add(egui::Slider::new(&mut state.fps, 5.0..=60.0).text("fps")).on_hover_text(
-            "How fast to play the cutscene's own frames. No file states a rate for one; this is a \
-             starting guess.",
+            "How fast to play the cutscene's own frames. Thirty is the rate its own numbering \
+             runs at.",
         );
         ui.label(
             RichText::new(match pose {

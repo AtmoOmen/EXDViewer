@@ -25,6 +25,7 @@ pub(super) mod program;
 mod skin;
 
 pub use deform::{Deform, Deformers};
+pub use skin::motion_names;
 pub use dye::Templates as DyeTemplates;
 pub use program::Customize;
 
@@ -3335,6 +3336,13 @@ impl Rendered {
     /// what drawing or sheathing a weapon is.
     pub fn act(&self, packs: &[String], motion: &str, fade: f32) {
         self.animation.act(packs, motion, fade);
+    }
+
+    /// Opens the motion the character is playing `seconds` in rather than at its own start, which
+    /// is what a cutscene naming a window of one asks for. Read after [`Self::stand`], since
+    /// taking a clip up is what puts its clock back to nought.
+    pub fn opened_at(&self, seconds: f32) {
+        self.animation.opened_at(seconds);
     }
 
     /// The motion the character is standing in, by the name its own pack gives it.

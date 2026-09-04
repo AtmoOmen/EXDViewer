@@ -39,6 +39,8 @@ pub struct Wanted {
     /// one. Nought leaves the row be.
     pub height: u8,
     pub at: Transform,
+    /// The `CTAL` participant standing it, which is what a cutscene's own timeline addresses.
+    pub participant: u32,
 }
 
 /// A build: the row and the height, since those are the whole of what makes two characters differ.
@@ -47,6 +49,9 @@ type Key = (Roll, u32, u8);
 /// One batch of files a character is still waiting on, and the rows every character was read from.
 type Fetching = TrackedPromise<Result<Vec<(String, Vec<u8>)>>>;
 type Rows = TrackedPromise<Result<BTreeMap<(Roll, u32), Stands>>>;
+
+/// The motions each pack a scene loads holds, by the path it was read from.
+type Naming = TrackedPromise<Result<Vec<(String, Vec<String>)>>>;
 
 /// Everything every character in a scene reads, which is read once for the whole cast.
 struct Reference {
@@ -93,7 +98,12 @@ struct Build {
     fetching: Option<Fetching>,
     /// What each borrowed body is shaped onto this one by, kept rather than rebuilt.
     shaped: RefCell<BTreeMap<u16, Option<Arc<mdl::Deform>>>>,
-    model: Option<Rc<mdl::Rendered>>,
+    /// One model per participant standing this row: a cutscene drives each participant's own
+    /// animation, and that state lives in the model, so two of them cannot share one.
+    models: BTreeMap<u32, Rc<mdl::Rendered>>,
+    /// The bodies its motions are read from, nearest first, kept for picking the pack a named
+    /// motion comes out of.
+    lineage: Vec<String>,
     failure: Option<String>,
 }
 
@@ -108,7 +118,46 @@ pub struct Cast {
     reading_rows: Option<Rows>,
     asked: bool,
     builds: BTreeMap<Key, Build>,
+    packs: Packs,
     failure: Option<String>,
+}
+
+/// Every motion the packs a scene loads hold, by name, so a timeline naming one plays out of the
+/// pack that has it rather than by opening every candidate in turn.
+#[derive(Default)]
+struct Packs {
+    queue: Vec<String>,
+    reading: Option<Naming>,
+    named: BTreeMap<String, Vec<String>>,
+    /// What has been queued, so a pack two characters share is read once.
+    asked: BTreeSet<String>,
+}
+
+impl Packs {
+    fn ask(&mut self, paths: impl IntoIterator<Item = String>) {
+        for path in paths {
+            if self.asked.insert(path.clone()) {
+                self.queue.push(path);
+            }
+        }
+    }
+}
+
+/// The packs a body has resident whatever it is doing, which is where the motions a cutscene names
+/// but its own `CTRL` does not list are filed: the idle it stands in, the additive gestures a
+/// conversation lays over it, and the rest of the unarmed set.
+fn resident(listing: &Listing, code: &str) -> Vec<String> {
+    let kind = match code.as_bytes().first() {
+        Some(b'c') => "human",
+        Some(b'm') => "monster",
+        Some(b'd') => "demihuman",
+        _ => "weapon",
+    };
+    let mut found = listing.under(&format!(
+        "chara/{kind}/{code}/animation/a0001/bt_common/resident/"
+    ));
+    found.retain(|path| path.ends_with(".pap"));
+    found
 }
 
 impl Cast {
@@ -119,14 +168,58 @@ impl Cast {
         }
     }
 
-    /// The models built so far, against how many builds the cast holds.
+    /// The packs a scene loads its motions out of, which a cutscene states for itself.
+    pub fn loads(&mut self, paths: Vec<String>) {
+        self.packs.ask(paths);
+    }
+
+    /// The models built so far, against how many participants the cast stands.
     pub fn built(&self) -> (usize, usize) {
-        let built = self
-            .builds
-            .values()
-            .filter(|held| held.model.is_some())
-            .count();
-        (built, self.builds.len())
+        let built = self.builds.values().map(|held| held.models.len()).sum();
+        (built, self.wanted.len())
+    }
+
+    /// The model standing for a participant, once it has been built.
+    pub fn model(&self, participant: u32) -> Option<&Rc<mdl::Rendered>> {
+        self.wanted
+            .iter()
+            .find(|wanted| wanted.participant == participant)
+            .and_then(|wanted| self.builds.get(&(wanted.roll, wanted.id, wanted.height)))
+            .and_then(|held| held.models.get(&participant))
+    }
+
+    /// Which of the packs the scene loads a participant plays `motion` out of: the one filed
+    /// under the nearest body it is built on, since a race that authors none of its own is posed
+    /// from the one it borrows its clothes from.
+    pub fn holding(&self, participant: u32, motion: &str) -> Option<String> {
+        let held = self.packs.named.get(motion)?;
+        let lineage = self
+            .wanted
+            .iter()
+            .find(|wanted| wanted.participant == participant)
+            .and_then(|wanted| self.builds.get(&(wanted.roll, wanted.id, wanted.height)))
+            .map(|build| build.lineage.as_slice())
+            .unwrap_or_default();
+        lineage
+            .iter()
+            .find_map(|code| held.iter().find(|path| path.contains(code.as_str())))
+            .or_else(|| held.first())
+            .cloned()
+    }
+
+    /// Whether every pack asked for has been read, past which a motion the index does not name is
+    /// filed nowhere the scene loads rather than not read yet.
+    pub fn loaded(&self) -> bool {
+        self.packs.queue.is_empty() && self.packs.reading.is_none()
+    }
+
+    /// Moves a participant to where its own timeline puts it now.
+    pub fn place(&mut self, participant: u32, at: Transform) {
+        for wanted in &mut self.wanted {
+            if wanted.participant == participant {
+                wanted.at = at;
+            }
+        }
     }
 
     /// Why the cast could not be read, where it could not be.
@@ -142,7 +235,7 @@ impl Cast {
             .filter_map(|wanted| {
                 let held = self.builds.get(&(wanted.roll, wanted.id, wanted.height))?;
                 Some(scene::Standing {
-                    model: held.model.clone()?,
+                    model: held.models.get(&wanted.participant)?.clone(),
                     at: wanted.at,
                 })
             })
@@ -182,6 +275,35 @@ impl Cast {
                 npcs::stand_in(&held, language, &ids).await
             }));
         }
+        if let Some(promise) = self.packs.reading.take() {
+            match promise.try_take() {
+                Ok(read) => {
+                    for (path, names) in read.unwrap_or_default() {
+                        for name in names {
+                            self.packs.named.entry(name).or_default().push(path.clone());
+                        }
+                    }
+                }
+                Err(promise) => self.packs.reading = Some(promise),
+            }
+        }
+        if self.packs.reading.is_none() && !self.packs.queue.is_empty() {
+            let files = backend.files().clone();
+            let paths = std::mem::take(&mut self.packs.queue);
+            self.packs.reading = Some(TrackedPromise::spawn_local(async move {
+                let mut read = Vec::with_capacity(paths.len());
+                for path in paths {
+                    // A pack the scene lists but the install does not ship is skipped: what the
+                    // rest hold is still worth having.
+                    if let Ok(bytes) = files.read(&path).await
+                        && let Ok(names) = mdl::motion_names(&bytes)
+                    {
+                        read.push((path, names));
+                    }
+                }
+                Ok(read)
+            }));
+        }
         if let Some(promise) = self.reading_reference.take() {
             match promise.try_take() {
                 Ok(Ok((creator, made, deformers, dye_templates, worn_over))) => {
@@ -207,9 +329,22 @@ impl Cast {
         let (Some(listing), Some(reference)) = (self.listing.clone(), self.reference.clone()) else {
             return;
         };
-        for build in self.builds.values_mut() {
-            build.poll(ctx, &listing, &reference, backend);
+        for (key, build) in &mut self.builds {
+            let standing: Vec<u32> = self
+                .wanted
+                .iter()
+                .filter(|wanted| (wanted.roll, wanted.id, wanted.height) == *key)
+                .map(|wanted| wanted.participant)
+                .collect();
+            build.poll(ctx, &listing, &reference, backend, &standing);
         }
+        let wanted: Vec<String> = self
+            .builds
+            .values()
+            .flat_map(|build| build.lineage.iter())
+            .flat_map(|code| resident(&listing, code))
+            .collect();
+        self.packs.ask(wanted);
     }
 
     /// Opens a build per row and height a participant asked for.
@@ -255,7 +390,8 @@ impl Build {
             held: BTreeMap::new(),
             fetching: None,
             shaped: RefCell::new(BTreeMap::new()),
-            model: None,
+            models: BTreeMap::new(),
+            lineage: Vec::new(),
             failure: None,
         }
     }
@@ -266,6 +402,7 @@ impl Build {
         listing: &Listing,
         reference: &Reference,
         backend: &Backend,
+        standing: &[u32],
     ) {
         if self.failure.is_some() {
             return;
@@ -304,7 +441,7 @@ impl Build {
             .filter(|path| !self.held.contains_key(path))
             .collect();
         if !missing.is_empty() || !optional.is_empty() {
-            if self.model.is_none() && self.fetching.is_none() {
+            if self.models.is_empty() && self.fetching.is_none() {
                 let files = backend.files().clone();
                 self.fetching = Some(TrackedPromise::spawn_local(async move {
                     let mut read = Vec::with_capacity(missing.len());
@@ -321,10 +458,15 @@ impl Build {
             }
             return;
         }
-        if self.model.is_none() {
-            self.compose(reference);
+        // One a frame: composing several at once is a whole model's upload apiece, and a cutscene
+        // stands as many of a row as its own participants name.
+        if let Some(participant) = standing
+            .iter()
+            .find(|participant| !self.models.contains_key(participant))
+        {
+            self.compose(reference, *participant);
         }
-        if let Some(model) = &self.model {
+        for model in self.models.values() {
             model.poll(ctx, backend);
         }
     }
@@ -333,6 +475,7 @@ impl Build {
     fn dress(&mut self, listing: &Listing, deformers: &mdl::Deformers, gating: &gating::Worn) {
         let npc = match &self.stands {
             Stands::Beast { under, variant } => {
+                self.lineage = monster_code(under).into_iter().collect();
                 let mut found = listing.under(under);
                 found.retain(|path| path.ends_with(".mdl"));
                 found.sort();
@@ -350,6 +493,10 @@ impl Build {
             false => resolve(npc.tribe, npc.female, false),
         };
         self.skin = super::skin(listing, deformers, self.code);
+        self.lineage = deformers
+            .lineage(self.code)
+            .map(|code| format!("c{code:04}"))
+            .collect();
         let body = body(listing, deformers, self.code);
         if body.is_empty() {
             return;
@@ -416,8 +563,8 @@ impl Build {
         self.worn = worn;
     }
 
-    /// The model, once every file it is drawn from has landed.
-    fn compose(&mut self, reference: &Reference) {
+    /// A model for one participant, once every file it is drawn from has landed.
+    fn compose(&mut self, reference: &Reference, participant: u32) {
         let parts: Vec<mdl::Source> = self
             .worn
             .iter()
@@ -462,13 +609,7 @@ impl Build {
             }
         };
         model.placed();
-        model.built_on(
-            reference
-                .deformers
-                .lineage(self.code)
-                .map(|code| format!("c{code:04}"))
-                .collect(),
-        );
+        model.built_on(self.lineage.clone());
         if let Stands::Human(npc) = &self.stands {
             let choices: BTreeMap<u32, u32> = npc.choices.iter().copied().collect();
             let paint = choices.get(&super::FACE_PAINT).copied().unwrap_or(0) as u16;
@@ -487,6 +628,18 @@ impl Build {
                 self.worn.iter().map(|(_, _, stains)| *stains).collect(),
             );
         }
-        self.model = Some(Rc::new(model));
+        self.models.insert(participant, Rc::new(model));
     }
+}
+
+/// The body a monster's own files sit under, which is what names the packs it is posed from.
+fn monster_code(under: &str) -> Option<String> {
+    under
+        .split('/')
+        .find(|held| {
+            held.len() == 5
+                && held.starts_with(['m', 'd', 'w', 'e'])
+                && held[1..].bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .map(str::to_owned)
 }

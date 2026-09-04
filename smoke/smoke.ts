@@ -521,6 +521,7 @@ async function drag(cdp: Cdp, by: number) {
 // from bun instead of letting chromium carry it out avoids that contention entirely.
 let proxied = 0;
 let proxyFailed = 0;
+const proxyFailures: string[] = [];
 
 async function proxyFetches(cdp: Cdp) {
     await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://xiviewer.app/*" }] });
@@ -550,8 +551,11 @@ async function proxyFetches(cdp: Cdp) {
                 body: body.toString("base64"),
             });
             proxied++;
-        } catch {
+        } catch (error) {
             proxyFailed++;
+            // A bare count says nothing about whether a run's failures are one flaky asset or a
+            // whole family, so name them; a 404 is fulfilled above and never lands here.
+            proxyFailures.push(`${p.request.url} ${error}`);
             await cdp
                 .send("Fetch.failRequest", { requestId: p.requestId, errorReason: "Failed" })
                 .catch(() => {});
@@ -953,8 +957,10 @@ async function main() {
     } finally {
         if (crashed) failures.push({ where: phase, source: "browser", level: "error", text: "the renderer process crashed" });
         console.log(`\nfetch proxy: ${proxied} served, ${proxyFailed} failed`);
+        for (const one of proxyFailures.slice(0, 10)) console.log(`  proxy failed: ${one}`);
         report.proxied = proxied;
         report.proxyFailed = proxyFailed;
+        report.proxyFailures = proxyFailures;
         writeFileSync(
             join(root, "smoke/last-run.json"),
             JSON.stringify({ report, failures, noted, muted }, null, 2),

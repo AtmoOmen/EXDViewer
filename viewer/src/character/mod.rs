@@ -971,27 +971,11 @@ impl CharacterBuilder {
             return;
         }
 
-        // Over the whole lineage rather than this body alone: most bodies file no animation of
-        // their own and play the one they are built on, which is the same tree their clothes come
-        // from.
-        let lineage = match self.lineage() {
-            found if found.is_empty() => vec![format!("c{:04}", self.code)],
-            found => found,
-        };
         let mut poses = Vec::new();
         if self.drawn {
-            poses.extend(lineage.iter().map(|code| {
-                (
-                    stance::pack(code, &held, "resident/idle.pap"),
-                    stance::DRAWN,
-                )
-            }));
+            poses.push((stance.pack(self.code, &held, "resident/idle"), stance::DRAWN));
         }
-        poses.extend(
-            lineage
-                .iter()
-                .map(|code| (stance::sheathed_pack(code), stance::SHEATHED)),
-        );
+        poses.push((stance.sheathed_pack(self.code), stance::SHEATHED));
 
         let wanted = poses[0].1;
         let fade = model.standing().map_or(0.0, |from| stance.fade(&from, wanted));
@@ -1003,10 +987,7 @@ impl CharacterBuilder {
                 true => stance::DRAW,
                 false => stance::SHEATHE,
             };
-            let packs: Vec<String> = lineage
-                .iter()
-                .map(|code| stance::pack(code, &held, "resident/sub.pap"))
-                .collect();
+            let packs = vec![stance.pack(self.code, &held, "resident/sub")];
             let fade = stance.fade(stance::DRAWN, over);
             log::info!("character: {over} over it, blending over {fade:.3}s");
             model.act(&packs, over, fade);

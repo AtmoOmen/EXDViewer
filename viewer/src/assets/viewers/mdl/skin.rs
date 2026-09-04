@@ -687,6 +687,16 @@ impl Layer {
         }
     }
 
+    /// Puts this layer's clock `at` seconds into its clip, wrapped into the clip's own length the
+    /// way [`Self::advance`] wraps one that plays through. A layer whose pack has not landed keeps
+    /// the clock it had, since nothing yet says how long the clip runs.
+    fn run_to(&self, at: f32) {
+        let Some(duration) = self.duration() else {
+            return;
+        };
+        self.time.set(at.rem_euclid(duration));
+    }
+
     /// Sets this layer's clock from `at`, the other layer's own, against the window `expression`
     /// states, rather than running one of its own: a facial clip a fraction of a second long
     /// otherwise loops many times over while the body it belongs to plays once.
@@ -1433,11 +1443,11 @@ impl Animation {
         self.running.set(true);
     }
 
-    /// Opens the body's clip `seconds` in rather than at its own start, which is what a cutscene
-    /// naming a window of a motion asks for. Read after whatever asked for the clip, since taking
-    /// one up is what puts its clock back to nought.
-    pub fn opened_at(&self, seconds: f32) {
-        self.body.time.set(seconds);
+    /// Puts the body's clip `seconds` in rather than wherever wall time has run it to, which is
+    /// what a transport seeking by a cutscene's own frame numbering asks for. Read after whatever
+    /// asked for the clip, since taking one up is what puts its clock back to nought.
+    pub fn plays_at(&self, seconds: f32) {
+        self.body.run_to(seconds);
     }
 
     /// What the body is standing in, by the name its own pack gives the motion.

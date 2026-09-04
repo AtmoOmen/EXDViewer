@@ -292,6 +292,25 @@ pub struct Part {
     effects: Vec<(f32, Burst)>,
     /// Whether it is drawn. Empty where nothing states it, which leaves it drawn.
     shown: Vec<(f32, bool)>,
+    /// The fades it runs. Empty where nothing states one, which leaves it whole.
+    faded: Vec<(f32, Fade)>,
+}
+
+/// One `C094`: what the participant fades from and to, and over how many of the cutscene's own
+/// frames. The client ramps it linearly and holds either end past it, and the four parts its
+/// filter can pick between are the same in every file that names one, so nothing here splits them.
+struct Fade {
+    from: f32,
+    to: f32,
+    over: f32,
+}
+
+impl Fade {
+    /// How much is drawn `along` frames into the fade.
+    fn at(&self, along: f32) -> f32 {
+        let held = (along / self.over.max(f32::EPSILON)).clamp(0.0, 1.0);
+        self.from + (self.to - self.from) * held
+    }
 }
 
 /// One effect a timeline fires on a participant: which file, the curve set stating its color, and
@@ -376,12 +395,24 @@ impl Part {
     /// Puts each list in the order it runs. A timeline lists its commands in neither the order it
     /// plays them nor any order at all, so what holds at a time cannot be read off one as it comes
     /// out of the file.
+    /// How much of it is drawn at a time: the last fade to have started, held at either end past
+    /// its own length. The client multiplies every fade running on one object together; this reads
+    /// the last alone, which is the same answer wherever two of them do not overlap.
+    fn opacity(&self, time: f32) -> f32 {
+        self.faded
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= time)
+            .map_or(1.0, |(at, fade)| fade.at(time - at))
+    }
+
     fn order(&mut self) {
         self.placed.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.motions.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.faces.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.effects.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.shown.sort_by(|left, right| left.0.total_cmp(&right.0));
+        self.faded.sort_by(|left, right| left.0.total_cmp(&right.0));
     }
 }
 
@@ -509,6 +540,16 @@ fn parts_of(
                 }
             }
             CommandKind::C019(state) => part.shown.push((at, state.visibility() & 0xFF != 0)),
+            CommandKind::C094(fade) => part.faded.push((
+                at,
+                Fade {
+                    from: fade.start_visibility(),
+                    to: fade.end_visibility(),
+                    // The clip takes its length off the low half of the field, as every command
+                    // whose first word is a duration does.
+                    over: f32::from(fade.fade_time() as u16),
+                },
+            )),
             _ => {}
         }
     }
@@ -750,6 +791,16 @@ impl Player {
     /// Where a participant stands at a time, where its own timeline places it.
     fn placed(&self, participant: u32, time: f32) -> Option<Transform> {
         latest(&self.parts.get(&participant)?.placed, time).map(|(_, at)| *at)
+    }
+
+    /// The participants nothing is drawing at a time, which is what a prop is taken out of the
+    /// frame by: the scene places one per participant and a cast is hidden through its own model.
+    fn unplaced(&self, time: f32) -> std::collections::BTreeSet<u32> {
+        self.parts
+            .iter()
+            .filter(|(_, part)| latest(&part.shown, time).is_some_and(|(_, on)| !on))
+            .map(|(participant, _)| *participant)
+            .collect()
     }
 
     /// Every shot, in the order it plays.
@@ -1182,6 +1233,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     perform(tab.player.parts(), &mut state);
     let standing = state.cast.standing();
     let firing = tab.player.firing(cutscene, state.time);
+    let unplaced = tab.player.unplaced(state.time);
     state.burst.retain(|id| firing.iter().any(|held| held.id == *id));
     for held in &firing {
         if state.burst.insert(held.id) {
@@ -1216,6 +1268,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         }
         Fetch::Ready(scene) => {
             scene.stand(standing);
+            scene.hide(unplaced);
             scene.fire(firing);
             if let Some(pose) = pose {
                 scene.drive(pose.drive());
@@ -1334,22 +1387,27 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             );
         }
         state.cast.show(*participant, shown);
+        state.cast.fade(*participant, part.opacity(time));
         let Some(model) = state.cast.model(*participant).cloned() else {
             continue;
         };
         let lays_over = |motion: &str| state.cast.lays_over(motion);
-        if let Some((at, held)) = started(&part.motions, time, false, &lays_over)
-            && state.bodies.get(participant) != Some(&at)
-            && let Some(pack) = state.cast.holding(*participant, &held.motion)
-        {
-            state.bodies.insert(*participant, at);
-            log::info!(
-                "cutb: {participant:#x} plays {} from {:.2}s out of {pack}",
-                held.motion,
-                held.from
-            );
-            model.stand(&[(pack, &held.motion)], 0.0);
-            model.opened_at(held.from);
+        if let Some((at, held)) = started(&part.motions, time, false, &lays_over) {
+            if state.bodies.get(participant) != Some(&at)
+                && let Some(pack) = state.cast.holding(*participant, &held.motion)
+            {
+                state.bodies.insert(*participant, at);
+                log::info!(
+                    "cutb: {participant:#x} plays {} from {:.2}s out of {pack}",
+                    held.motion,
+                    held.from
+                );
+                model.stand(&[(pack, &held.motion)], 0.0);
+            }
+            // Every frame rather than only where the cue changes: the clip runs on wall time and
+            // the transport on the cutscene's own frames, so a seek would otherwise replay the
+            // clip from its start instead of landing inside it.
+            model.plays_at(held.from + (time - part.motions[at].0) / FRAMES_A_SECOND);
         }
         match started(&part.motions, time, true, &lays_over) {
             Some((at, held)) => {

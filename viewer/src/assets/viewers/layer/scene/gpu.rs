@@ -1335,6 +1335,7 @@ impl Renderer {
             let held = program::Scene {
                 model: cast.model,
                 customize: cast.customize,
+                opacity: cast.opacity,
                 ..scene.clone()
             };
             let mut model = cast.gpu.lock().unwrap();

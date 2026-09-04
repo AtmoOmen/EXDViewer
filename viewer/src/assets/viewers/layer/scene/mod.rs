@@ -788,6 +788,8 @@ pub struct Standing {
     pub model: Rc<mdl::Rendered>,
     /// Where it stands, read the same way a layer group's own instances are.
     pub at: Transform,
+    /// How much of it is drawn, which its own dither clip tests each pixel against.
+    pub opacity: f32,
 }
 
 /// One effect a host outside this view is running: which file, where it stands, how far into its
@@ -833,6 +835,10 @@ pub struct Scene {
     /// cleared each frame: a model keeps asking for what it still needs, and the host hands its
     /// cast over once.
     cast: Vec<Standing>,
+    /// The props a host outside this view has taken out of the frame, by the ids it placed them
+    /// under. A shared group's own placements carry the id it was placed under as well, so hiding
+    /// one takes the whole subtree with it.
+    unplaced: BTreeSet<u32>,
     /// Whether the last frame drawn was driven, for the side panel to grey its own camera controls
     /// against: [`Self::drive`] itself is forgotten the instant a frame reads it.
     driving: bool,
@@ -1241,6 +1247,7 @@ impl Scene {
             fitted: 0,
             renderer: gpu::Renderer::new(),
             cast: Vec::new(),
+            unplaced: BTreeSet::new(),
             placed: Vec::new(),
             casts: Vec::new(),
             motions: Vec::new(),
@@ -1309,6 +1316,15 @@ impl Scene {
     /// have finished arriving, not a scene to build again.
     pub fn stand(&mut self, cast: Vec<Standing>) {
         self.cast = cast;
+    }
+
+    /// Which of the props a host placed are out of the frame, replacing whatever was out before.
+    /// Called every frame the way [`Self::stand`] is.
+    pub fn hide(&mut self, unplaced: BTreeSet<u32>) {
+        if self.unplaced != unplaced {
+            self.unplaced = unplaced;
+            self.dirty = true;
+        }
     }
 
     /// The effects a host outside this view is running, replacing whatever it ran before. Called
@@ -2100,7 +2116,7 @@ impl Scene {
             from,
             along,
             self.placements.iter().enumerate().filter_map(|(at, placement)| {
-                if !self.layers[placement.layer].shown {
+                if !self.layers[placement.layer].shown || self.unplaced.contains(&placement.key.0) {
                     return None;
                 }
                 let span = (placement.center - eye).length() - placement.radius;
@@ -2127,7 +2143,7 @@ impl Scene {
 
         for at in 0..self.placements.len() {
             let placement = self.placements[at].clone();
-            if !self.layers[placement.layer].shown {
+            if !self.layers[placement.layer].shown || self.unplaced.contains(&placement.key.0) {
                 continue;
             }
             let span = (placement.center - eye).length() - placement.radius;
@@ -4206,7 +4222,10 @@ impl Scene {
         let cast: Vec<mdl::Cast> = self
             .cast
             .iter()
-            .map(|held| held.model.cast(matrix(held.at), attachments))
+            .map(|held| mdl::Cast {
+                opacity: held.opacity,
+                ..held.model.cast(matrix(held.at), attachments)
+            })
             .collect();
 
         let (light, color) = self.ambient.light();

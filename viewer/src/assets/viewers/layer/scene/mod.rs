@@ -341,10 +341,10 @@ impl Motion {
                 Mat4::from_scale_rotation_translation(
                     size,
                     Quat::from_euler(
-                        glam::EulerRot::XYZ,
-                        turn.x.to_radians(),
-                        turn.y.to_radians(),
+                        glam::EulerRot::ZYX,
                         turn.z.to_radians(),
+                        turn.y.to_radians(),
+                        turn.x.to_radians(),
                     ),
                     shift,
                 )
@@ -393,7 +393,7 @@ impl Motion {
                 Mat4::from_scale_rotation_translation(
                     Vec3::from_array(placement.scale()) * size,
                     Quat::from_mat3(&rotation(placement.rotation()))
-                        * Quat::from_euler(glam::EulerRot::XYZ, turn.x, turn.y, turn.z),
+                        * Quat::from_euler(glam::EulerRot::ZYX, turn.z, turn.y, turn.x),
                     Vec3::from_array(placement.translation()) + shift,
                 )
             }
@@ -4362,7 +4362,7 @@ impl Scene {
                 basis.y_axis / scale.y,
                 basis.z_axis / scale.z,
             );
-            let (y, x, z) = Quat::from_mat3(&upright).to_euler(glam::EulerRot::YXZ);
+            let (z, y, x) = Quat::from_mat3(&upright).to_euler(glam::EulerRot::ZYX);
             Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees())
         });
         let place = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
@@ -5079,6 +5079,11 @@ mod tests {
         let quarter = std::f32::consts::FRAC_PI_2;
         assert!((rotation([0.0, quarter, 0.0]) * Vec3::Z - Vec3::X).length() < 1e-5);
         assert!((rotation([quarter, 0.0, quarter]) * Vec3::Z - Vec3::X).length() < 1e-5);
+        // The timeline deltas take the same order through glam's own sequence instead.
+        assert!(
+            Quat::from_euler(glam::EulerRot::ZYX, 1.1, 0.7, 0.3)
+                .abs_diff_eq(Quat::from_mat3(&rotation([0.3, 0.7, 1.1])), 1e-5)
+        );
     }
 
     #[test]

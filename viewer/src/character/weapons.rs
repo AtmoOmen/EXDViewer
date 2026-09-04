@@ -9,6 +9,7 @@
 //! tag `chara/xls/weapontype/attach.wtd` gives every weapon model set.
 
 use anyhow::{Context, Result};
+use glam::{EulerRot, Mat4, Quat, Vec3};
 use ironworks::excel::Language;
 use ironworks::file::File;
 use ironworks::file::atch::AttachPoints;
@@ -180,6 +181,24 @@ pub struct Attach {
     pub rotation: [f32; 3],
 }
 
+impl Attach {
+    /// Where this puts a weapon relative to the bone it hangs from. The three angles compose as
+    /// `Rz * Ry * Rx`, which is how the client builds the point's own quaternion; the offset is
+    /// the bone's own and is added after the turn.
+    pub fn placement(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(self.scale),
+            Quat::from_euler(
+                EulerRot::ZYX,
+                self.rotation[2],
+                self.rotation[1],
+                self.rotation[0],
+            ),
+            Vec3::from_array(self.offset),
+        )
+    }
+}
+
 /// The placement `tag` takes in the drawn or the sheathed state, out of a race's own `.atch` file.
 /// State 0 is drawn and state 1 is sheathed: measured over every point c0101.atch carries, state 0
 /// is the bare, unoffset bone in 106 of 143 and state 1 is a placement of its own in 96 of 143, and
@@ -228,6 +247,22 @@ pub fn fallback_bone(main: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The order a point's own three angles compose in, which the client builds by hand out of
+    /// their halved sines and cosines: a sheathed sword states `[pi, 0, pi/2]`, and only this
+    /// order turns the model's own length onto the hip the way round the game hangs it.
+    #[test]
+    fn an_attach_point_turns_a_weapon_the_way_the_client_composes_its_angles() {
+        use std::f32::consts::{FRAC_PI_2, PI};
+        let sheathed = Attach {
+            bone: String::new(),
+            scale: 1.0,
+            offset: [0.0; 3],
+            rotation: [PI, 0.0, FRAC_PI_2],
+        };
+        let along = sheathed.placement().transform_vector3(Vec3::Y);
+        assert!((along - Vec3::X).length() < 1e-5, "{along:?}");
+    }
 
     #[test]
     fn a_weapon_quad_packs_set_base_and_variant_in_sixteen_bits_each() {

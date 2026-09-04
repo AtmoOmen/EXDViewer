@@ -27,7 +27,7 @@ use egui::{
     Align, CentralPanel, Color32, Layout, Popup, RectAlign, RichText, ScrollArea, TextEdit,
     containers::panel::Panel,
 };
-use glam::{EulerRot, Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -1104,16 +1104,7 @@ impl CharacterBuilder {
             }
             return (path, bone.to_owned(), Mat4::IDENTITY);
         };
-        let local = Mat4::from_scale_rotation_translation(
-            Vec3::splat(placement.scale),
-            Quat::from_euler(
-                EulerRot::XYZ,
-                placement.rotation[0],
-                placement.rotation[1],
-                placement.rotation[2],
-            ),
-            Vec3::from_array(placement.offset),
-        );
+        let local = placement.placement();
         if log {
             log::info!(
                 "character: {path} hangs from {} at offset {:?} scale {}, {stance}",

@@ -118,12 +118,14 @@ impl Cast {
         }
     }
 
-    /// The models built so far, against how many builds the cast asked for.
+    /// The models built so far, against how many builds the cast holds.
     pub fn built(&self) -> (usize, usize) {
-        (
-            self.builds.values().filter(|held| held.model.is_some()).count(),
-            self.builds.len().max(usize::from(!self.wanted.is_empty())),
-        )
+        let built = self
+            .builds
+            .values()
+            .filter(|held| held.model.is_some())
+            .count();
+        (built, self.builds.len())
     }
 
     /// Why the cast could not be read, where it could not be.
@@ -233,10 +235,10 @@ impl Build {
         let mut stands = stands;
         // The height a participant states stands in for whatever the row says, at the place in the
         // customise array the creator's own slider drives.
-        if let (Stands::Human(npc), Some(held)) = (
-            &mut stands,
-            HEIGHTS.get(usize::from(height).wrapping_sub(1)),
-        ) {
+        let stood = usize::from(height)
+            .checked_sub(1)
+            .and_then(|at| HEIGHTS.get(at));
+        if let (Stands::Human(npc), Some(held)) = (&mut stands, stood) {
             for (menu, at) in &mut npc.choices {
                 if *menu == HEIGHT {
                     *at = *held;

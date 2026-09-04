@@ -909,8 +909,9 @@ struct State {
     overs: BTreeMap<u32, usize>,
     faces: BTreeMap<u32, usize>,
     /// The firings already logged, so one effect is reported when it starts rather than every
-    /// frame it runs for.
+    /// frame it runs for, and the same for whether each participant is drawn.
     burst: std::collections::BTreeSet<u64>,
+    shown: BTreeMap<u32, bool>,
 }
 
 impl Default for State {
@@ -925,6 +926,7 @@ impl Default for State {
             overs: BTreeMap::new(),
             faces: BTreeMap::new(),
             burst: std::collections::BTreeSet::new(),
+            shown: BTreeMap::new(),
         }
     }
 }
@@ -1039,9 +1041,19 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
         if let Some((_, at)) = latest(&part.placed, time) {
             state.cast.place(*participant, *at);
         }
-        state
-            .cast
-            .show(*participant, latest(&part.shown, time).is_none_or(|(_, on)| *on));
+        let shown = latest(&part.shown, time).is_none_or(|(_, on)| *on);
+        // Everyone is drawn until a timeline says otherwise, so a participant nothing has stated
+        // yet is not a change to report.
+        if state.shown.insert(*participant, shown).unwrap_or(true) != shown {
+            log::info!(
+                "cutb: {participant:#x} is {}",
+                match shown {
+                    true => "drawn",
+                    false => "out of frame",
+                }
+            );
+        }
+        state.cast.show(*participant, shown);
         let Some(model) = state.cast.model(*participant).cloned() else {
             continue;
         };

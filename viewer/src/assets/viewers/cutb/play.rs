@@ -120,9 +120,11 @@ fn rig(set: &Curves, bindings: &[u32; 17], participants: &[Instance]) -> BTreeMa
         });
     }
     for (role, slot) in ROLES {
-        let Some(participant) = participants
-            .iter()
-            .find(|participant| participant.id() == bindings[slot])
+        // The second participant of a pair stands in where the first names nothing: the game skips
+        // a role's binding only when neither of the two resolves.
+        let Some(participant) = [bindings[slot], bindings[slot + 2]]
+            .into_iter()
+            .find_map(|id| participants.iter().find(|held| held.id() == id))
         else {
             continue;
         };
@@ -151,8 +153,7 @@ fn world(
     let channels = |channels: [Channel; 3]| {
         Vec3::from_array(channels.map(|channel| curve_value(set, index, channel, time)))
     };
-    let local = Mat4::from_scale_rotation_translation(
-        Vec3::ONE,
+    let local = Mat4::from_rotation_translation(
         Quat::from_mat3(&scene::rotation(
             channels([Channel::RotationX, Channel::RotationY, Channel::RotationZ])
                 .to_array()

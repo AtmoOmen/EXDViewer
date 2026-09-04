@@ -171,7 +171,10 @@ fn rig(
         });
     }
     for (role, slot) in ROLES {
-        let Some(held) = placements.get(&bindings[slot]) else {
+        let Some(held) = placements
+            .get(&bindings[slot])
+            .or_else(|| placements.get(&bindings[slot + 2]))
+        else {
             continue;
         };
         let Some(target) = targets.values_mut().find(|target| target.role == role) else {

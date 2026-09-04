@@ -263,6 +263,17 @@ struct Cue {
     from: f32,
 }
 
+impl Part {
+    /// Puts each list in the order it runs. A timeline lists its commands in neither the order it
+    /// plays them nor any order at all, so what holds at a time cannot be read off one as it comes
+    /// out of the file.
+    fn order(&mut self) {
+        self.placed.sort_by(|left, right| left.0.total_cmp(&right.0));
+        self.motions.sort_by(|left, right| left.0.total_cmp(&right.0));
+        self.faces.sort_by(|left, right| left.0.total_cmp(&right.0));
+    }
+}
+
 /// Which of a list's entries holds at a time: the last to have started.
 fn latest<T>(held: &[(f32, T)], time: f32) -> Option<(usize, &T)> {
     held.iter()
@@ -511,6 +522,9 @@ impl Player {
                 });
             }
             offset += span.max(1.0);
+        }
+        for part in parts.values_mut() {
+            part.order();
         }
         Self {
             duration: offset,
@@ -1096,6 +1110,23 @@ mod test {
         assert_eq!(part.motions.len(), 1);
         assert_eq!(part.motions[0].1.motion, "cbfm_arms");
         assert_eq!(part.motions[0].1.from, 3.0);
+    }
+
+    #[test]
+    fn a_part_runs_in_time_order_whatever_order_the_file_lists_it_in() {
+        let mut part = Part {
+            placed: vec![(100.0, placed(2.0)), (0.0, placed(1.0))],
+            ..Part::default()
+        };
+        cue(&mut part, 50.0, Some("cbfm_arms"), 0.0);
+        cue(&mut part, 10.0, Some("cbnm_id0"), 0.0);
+        cue(&mut part, 80.0, Some("cfxf_salute"), 0.0);
+        cue(&mut part, 20.0, Some("cfxf_angry"), 0.0);
+        part.order();
+        assert_eq!(latest(&part.placed, 50.0).unwrap().1.translation()[0], 1.0);
+        assert_eq!(latest(&part.motions, 60.0).unwrap().1.motion, "cbfm_arms");
+        assert_eq!(latest(&part.faces, 90.0).unwrap().1, "salute");
+        assert_eq!(latest(&part.faces, 50.0).unwrap().1, "angry");
     }
 
     #[test]

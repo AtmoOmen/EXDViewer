@@ -1096,7 +1096,7 @@ impl CharacterBuilder {
         let stance = if self.drawn { "drawn" } else { "sheathed" };
         let placed = tag
             .zip(atch)
-            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, self.drawn));
+            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, self.drawn, !main));
         let Some(placement) = placed else {
             let bone = weapons::fallback_bone(main);
             if log {

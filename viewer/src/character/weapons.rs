@@ -182,6 +182,27 @@ pub struct Attach {
 }
 
 impl Attach {
+    /// The same placement on the other side of the body: the bone's own `_l` or `_r` flipped, and
+    /// the placement reflected across the plane between them.
+    fn mirrored(self) -> Self {
+        let flipped = match self.bone.as_bytes() {
+            [.., b'_', b'l'] => Some('r'),
+            [.., b'_', b'r'] => Some('l'),
+            _ => None,
+        };
+        let mut bone = self.bone;
+        if let Some(side) = flipped {
+            bone.pop();
+            bone.push(side);
+        }
+        Self {
+            bone,
+            offset: [self.offset[0], self.offset[1], -self.offset[2]],
+            rotation: [-self.rotation[0], -self.rotation[1], self.rotation[2]],
+            ..self
+        }
+    }
+
     /// Where this puts a weapon relative to the bone it hangs from. The three angles compose as
     /// `Rz * Ry * Rx`, which is how the client builds the point's own quaternion; the offset is
     /// the bone's own and is added after the turn.
@@ -199,19 +220,28 @@ impl Attach {
     }
 }
 
-/// The placement `tag` takes in the drawn or the sheathed state, out of a race's own `.atch` file.
-/// State 0 is drawn and state 1 is sheathed: measured over every point c0101.atch carries, state 0
-/// is the bare, unoffset bone in 106 of 143 and state 1 is a placement of its own in 96 of 143, and
-/// no point ever states only the first.
-pub fn attach(bytes: &[u8], tag: &str, drawn: bool) -> Option<Attach> {
+/// The placement `tag` takes in the drawn or the sheathed state, out of a race's own `.atch` file,
+/// for the slot it is worn in. State 0 is drawn and state 1 is sheathed: measured over every point
+/// c0101.atch carries, state 0 is the bare, unoffset bone in 106 of 143 and state 1 is a placement
+/// of its own in 96 of 143, and no point ever states only the first.
+///
+/// Nothing states a left-hand placement of its own. The client mirrors one instead, whenever the
+/// slot being worn is the second and the point is no accessory, or the point is an accessory and
+/// the slot is not the second: the bone's own trailing `_l` or `_r` is flipped, and the placement
+/// is reflected with it.
+pub fn attach(bytes: &[u8], tag: &str, drawn: bool, off_hand: bool) -> Option<Attach> {
     let file = AttachPoints::read(Cursor::new(bytes.to_vec())).ok()?;
     let point = file.point(tag)?;
     let state = file.states(point)?.get(usize::from(!drawn))?;
-    Some(Attach {
+    let placement = Attach {
         bone: state.bone().to_owned(),
         scale: state.scale(),
         offset: state.offset(),
         rotation: state.rotation(),
+    };
+    Some(match off_hand != file.accessory(point) {
+        true => placement.mirrored(),
+        false => placement,
     })
 }
 
@@ -251,6 +281,32 @@ mod tests {
     /// The order a point's own three angles compose in, which the client builds by hand out of
     /// their halved sines and cosines: a sheathed sword states `[pi, 0, pi/2]`, and only this
     /// order turns the model's own length onto the hip the way round the game hangs it.
+    /// The off hand is worn at the same point read the other way round: the bone's own side
+    /// swapped, and the placement reflected with it.
+    #[test]
+    fn the_off_hand_wears_the_main_hands_point_mirrored() {
+        let point = Attach {
+            bone: "n_buki_r".to_owned(),
+            scale: 0.9,
+            offset: [0.1, 0.2, 0.3],
+            rotation: [0.4, 0.5, 0.6],
+        }
+        .mirrored();
+        assert_eq!(point.bone, "n_buki_l");
+        assert_eq!(point.offset, [0.1, 0.2, -0.3]);
+        assert_eq!(point.rotation, [-0.4, -0.5, 0.6]);
+        assert_eq!(point.scale, 0.9);
+
+        let bare = Attach {
+            bone: "n_throw".to_owned(),
+            scale: 1.0,
+            offset: [0.0; 3],
+            rotation: [0.0; 3],
+        }
+        .mirrored();
+        assert_eq!(bare.bone, "n_throw", "a bone that names no side keeps it");
+    }
+
     #[test]
     fn an_attach_point_turns_a_weapon_the_way_the_client_composes_its_angles() {
         use std::f32::consts::{FRAC_PI_2, PI};

@@ -32,6 +32,7 @@ use crate::backend::Backend;
 use crate::character::stand;
 use crate::data::FileProviderExt;
 use crate::excel::provider::{ExcelProvider, ExcelSheet};
+use crate::quests::sestring;
 use crate::settings::LANGUAGE;
 use crate::sheet::SheetColumnDefinition;
 use crate::utils::{PromiseKind, TrackedPromise};
@@ -895,11 +896,14 @@ enum Fetch {
     Failed(String),
 }
 
-/// The lines a cutscene's own sheet holds, by the key a `C048` names them with.
+/// The lines a cutscene's own sheet holds, by the key a `C048` names them with, as the strings the
+/// sheet states rather than the text they format to: which payloads a line spells out is a setting.
+type Said = BTreeMap<String, Vec<u8>>;
+
 enum Lines {
     Idle,
-    Loading(Box<TrackedPromise<anyhow::Result<BTreeMap<String, String>>>>),
-    Ready(BTreeMap<String, String>),
+    Loading(Box<TrackedPromise<anyhow::Result<Said>>>),
+    Ready(Said),
     Failed(String),
 }
 
@@ -908,7 +912,7 @@ async fn read_lines(
     backend: Backend,
     sheet: String,
     language: Language,
-) -> anyhow::Result<BTreeMap<String, String>> {
+) -> anyhow::Result<Said> {
     let opened = backend.excel().get_sheet(&sheet, language).await?;
     let columns = SheetColumnDefinition::from_sheet(&opened);
     let [key, text, ..] = columns.as_slice() else {
@@ -927,7 +931,7 @@ async fn read_lines(
         };
         held.insert(
             String::from_utf8_lossy(key.as_bytes()).into_owned(),
-            String::from_utf8_lossy(text.as_bytes()).into_owned(),
+            text.as_bytes().to_vec(),
         );
     }
     Ok(held)
@@ -1137,14 +1141,18 @@ fn overlay(ui: &mut egui::Ui, tab: &Tab, state: &State, frame: Rect, language: L
     let Lines::Ready(lines) = &state.lines else {
         return;
     };
-    let Some(text) = lines.get(&subtitle.key).filter(|text| !text.is_empty()) else {
+    let text = lines
+        .get(&subtitle.key)
+        .map(|text| sestring(ui, text))
+        .filter(|text| !text.is_empty());
+    let Some(text) = text else {
         return;
     };
     let scale = inner.height() / DESIGN.y;
     let font = FontId::proportional(TEXT_SIZE * scale);
     let laid = ui.ctx().fonts_mut(|fonts| {
         fonts.layout(
-            text.replace('\n', " "),
+            text,
             font,
             ui.visuals().strong_text_color(),
             DESIGN.x * scale,
@@ -1221,6 +1229,9 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
     }
 }
 
+/// The shots a cutscene cuts between and the lines it says, each a list to seek by. They share the
+/// panel rather than run on from one another: a cutscene holds scores of each, so a single column
+/// would leave the second one off the foot of the panel.
 fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language) {
     let active = active_shot(tab.player.shots(), state.time).map(|shot| shot.start);
     let speaking = tab
@@ -1232,12 +1243,19 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
         _ => None,
     };
     let mut seek = None;
+    let split = !tab.player.subtitles().is_empty();
+    let height = match split {
+        true => ui.available_height() * 0.5,
+        false => ui.available_height(),
+    };
+
+    ui.label(RichText::new("Shots").strong());
     ScrollArea::vertical()
         .id_salt("cutb_shot_list")
+        .max_height(height)
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
-                ui.label(RichText::new("Shots").strong());
                 for shot in tab.player.shots() {
                     let current = active == Some(shot.start);
                     let label = format!(
@@ -1253,28 +1271,35 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
                 if tab.player.shots().is_empty() {
                     ui.label(RichText::new("This cutscene's timelines hold no camera").weak());
                 }
-                if tab.player.subtitles().is_empty() {
-                    return;
-                }
-                ui.add_space(8.0);
-                ui.label(RichText::new("Lines").strong());
-                for (at, subtitle) in tab.player.subtitles().iter().enumerate() {
-                    let said = lines
-                        .and_then(|lines| lines.get(&subtitle.key))
-                        .filter(|text| !text.is_empty())
-                        .map(|text| text.replace('\n', " "))
-                        .unwrap_or_else(|| subtitle.key.clone());
-                    let label = format!("{:.0}f · {} · {said}", subtitle.at, subtitle.speaker());
-                    if ui
-                        .add(Button::selectable(speaking == Some(at), label))
-                        .on_hover_text(&subtitle.key)
-                        .clicked()
-                    {
-                        seek = Some(subtitle.at);
-                    }
-                }
             });
         });
+    if split {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Lines").strong());
+        ScrollArea::vertical()
+            .id_salt("cutb_line_list")
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                    for (at, subtitle) in tab.player.subtitles().iter().enumerate() {
+                        let said = lines
+                            .and_then(|lines| lines.get(&subtitle.key))
+                            .map(|text| sestring(ui, text).replace('\n', " "))
+                            .filter(|text| !text.is_empty())
+                            .unwrap_or_else(|| subtitle.key.clone());
+                        let label =
+                            format!("{:.0}f · {} · {said}", subtitle.at, subtitle.speaker());
+                        if ui
+                            .add(Button::selectable(speaking == Some(at), label))
+                            .on_hover_text(&subtitle.key)
+                            .clicked()
+                        {
+                            seek = Some(subtitle.at);
+                        }
+                    }
+                });
+            });
+    }
     if let Some(at) = seek {
         state.time = at;
         state.playing = false;
@@ -1309,6 +1334,10 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
             "How fast to play the cutscene's own frames. Thirty is the rate its own numbering \
              runs at.",
         );
+    });
+    // A second row of its own, so neither the toggles nor the readouts a cutscene grows can push
+    // the transport's own buttons off the row they sit on.
+    ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut state.framed, "16:9").on_hover_text(
             "Frame the shot as sixteen by nine, which is the aspect its focal length is turned \
              into a field of view against",

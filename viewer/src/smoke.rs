@@ -65,7 +65,8 @@ const SCENE_TAB_X: f32 = 287.0;
 const PLAY_TAB_X: f32 = 406.0;
 
 /// Where the cutscene transport's own play button sits, measured up from the foot of the window,
-/// and how long to let the level and the cast arrive before pressing it.
+/// and how long to let the level and the cast arrive before pressing it. The transport spends two
+/// rows, its buttons on the upper one.
 const PLAY_X: f32 = 470.0;
 const PLAY_UP: f32 = 57.0;
 const PLAY_AT: Duration = Duration::from_secs(40);

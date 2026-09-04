@@ -1149,6 +1149,9 @@ struct State {
     /// The music the cutscene's own quest states, and which of it to play under the frame.
     tracks: Tracks,
     track: usize,
+    /// Whether to fire the cues, and whether to keep a track under them. Either one opens the
+    /// mixer; a browser only grants that from inside the click that ticked the box.
+    effects: bool,
     music: bool,
 }
 
@@ -1175,6 +1178,7 @@ impl Default for State {
             sounded: 0.0,
             tracks: Tracks::Idle,
             track: 0,
+            effects: false,
             music: false,
         }
     }
@@ -1283,11 +1287,11 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     }
 
     let held = &mut *state;
-    if held.stage.enabled() {
+    if held.effects {
         held.stage.want(backend, &held.cues);
-        if let Some(cue) = under(held, tab.player.duration()) {
-            held.stage.want(backend, std::slice::from_ref(&cue));
-        }
+    }
+    if let Some(cue) = under(held, tab.player.duration()) {
+        held.stage.want(backend, std::slice::from_ref(&cue));
     }
     held.stage.poll(held.time);
 
@@ -1576,9 +1580,11 @@ fn fire(state: &mut State, duration: f32) {
         state.sounded = time;
         return;
     }
-    for cue in &state.cues {
-        if cue.at > state.sounded && cue.at <= time {
-            state.stage.fire(cue, time);
+    if state.effects {
+        for cue in &state.cues {
+            if cue.at > state.sounded && cue.at <= time {
+                state.stage.fire(cue, time);
+            }
         }
     }
     if let Some(cue) = under(state, duration) {
@@ -1606,6 +1612,16 @@ fn under(state: &State, duration: f32) -> Option<sound::Cue> {
     })
 }
 
+/// Opens or closes the mixer to match the two toggles. Creating it and resuming it both have to
+/// happen inside the click that asked for sound, which is the only user gesture a browser counts.
+fn listen(state: &mut State) {
+    match state.effects || state.music {
+        true => state.stage.enable(),
+        false => state.stage.disable(),
+    }
+    state.stage.silence();
+}
+
 /// The music row: a toggle, whatever the cutscene's own quest names, and which of it to play.
 fn music_ui(ui: &mut egui::Ui, state: &mut State) {
     if ui
@@ -1615,9 +1631,8 @@ fn music_ui(ui: &mut egui::Ui, state: &mut State) {
              says what a cutscene plays under, so this is quest-wide rather than per-cutscene.",
         )
         .clicked()
-        && !state.music
     {
-        state.stage.silence();
+        listen(state);
     }
     if !state.music {
         return;
@@ -1710,21 +1725,17 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         ui.checkbox(&mut state.subtitles, "Lines").on_hover_text(
             "Put the cutscene's own subtitles over the frame, out of the sheet its CTIS node names",
         );
-        let mut sound = state.stage.enabled();
         if ui
-            .checkbox(&mut sound, "Sound")
+            .checkbox(&mut state.effects, "Sound")
             .on_hover_text(
                 "Play the sounds the cutscene's own C063 commands file, and the voice line each \
                  subtitle key names. Cues fire while it plays; a pause or a seek stops them.",
             )
             .clicked()
         {
-            match sound {
-                true => state.stage.enable(),
-                false => state.stage.disable(),
-            }
+            listen(state);
         }
-        if state.stage.enabled() {
+        if state.effects {
             let mut volume = state.stage.volume();
             ui.spacing_mut().slider_width = 80.0;
             if ui

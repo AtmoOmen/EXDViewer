@@ -6,6 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use glam::{Mat4, Quat, Vec3};
 use ironworks::excel::{Excel, Language};
 use ironworks::file::File;
 use ironworks::file::cutb::{Cutscene, Node};
@@ -14,6 +15,7 @@ use ironworks::file::lvb::LevelFile;
 use ironworks::file::mdl::{Lod, MeshKind, ModelContainer};
 use ironworks::file::{lcb, svb};
 use ironworks::file::sgb::SharedGroupFile;
+use ironworks::file::tmb::{Channel, CommandKind, Curves, Item};
 use ironworks::{
     Ironworks,
     sqpack::{Install, SqPack},
@@ -111,6 +113,228 @@ fn nested_of(participant: &Instance) -> Option<&Instance> {
 }
 
 
+/// Where a participant stands: the transform its record states apart from the instance's own wins
+/// where the flag says so, the way the play tab takes it.
+fn stands_at(participant: &Instance) -> Transform {
+    let InstanceData::HelperObject(helper) = participant.data() else {
+        return participant.transform();
+    };
+    helper
+        .placement()
+        .filter(|placement| placement.flags() & 1 != 0)
+        .map(|placement| placement.transform())
+        .unwrap_or_else(|| participant.transform())
+}
+
+/// The roles a `C004` camera's curve set gives its targets, and which of the command's bindings
+/// names the participant each of the first three rides. Index 4 holds role 1 to a participant's
+/// position alone.
+const ROLES: [(u8, usize); 3] = [(1, 0), (EYE, 6), (LOOK_AT, 11)];
+const RIG_UPRIGHT: usize = 4;
+const EYE: u8 = 2;
+const LOOK_AT: u8 = 3;
+const UP: u8 = 4;
+
+/// One target of a camera's curve set, with the placement its role binds and whether it turns with
+/// that participant as well as standing on it.
+struct Target {
+    role: u8,
+    parent: Option<u8>,
+    bound: Option<(Mat4, bool)>,
+}
+
+fn placement(transform: Transform) -> Mat4 {
+    Mat4::from_scale_rotation_translation(
+        Vec3::from_array(transform.scale()),
+        Quat::from_mat3(
+            &(glam::Mat3::from_rotation_z(transform.rotation()[2])
+                * glam::Mat3::from_rotation_y(transform.rotation()[1])
+                * glam::Mat3::from_rotation_x(transform.rotation()[0])),
+        ),
+        Vec3::from_array(transform.translation()),
+    )
+}
+
+/// The targets a shot drives, each role's binding resolved onto the first target carrying it.
+/// `placements` empty stands for the reading that ignores the bindings entirely.
+fn rig(
+    set: &Curves,
+    bindings: &[u32; 17],
+    placements: &BTreeMap<u32, Mat4>,
+) -> BTreeMap<u8, Target> {
+    let mut targets: BTreeMap<u8, Target> = BTreeMap::new();
+    for curve in set.curves().iter().filter(|curve| curve.target() != 0xFF) {
+        targets.entry(curve.target()).or_insert(Target {
+            role: curve.role(),
+            parent: curve.parent(),
+            bound: None,
+        });
+    }
+    for (role, slot) in ROLES {
+        let Some(held) = placements.get(&bindings[slot]) else {
+            continue;
+        };
+        let Some(target) = targets.values_mut().find(|target| target.role == role) else {
+            continue;
+        };
+        target.bound = Some((*held, role == ROLES[0].0 && bindings[RIG_UPRIGHT] != 1));
+    }
+    targets
+}
+
+fn world(set: &Curves, targets: &BTreeMap<u8, Target>, index: u8, time: f32, depth: u8) -> Mat4 {
+    let Some(target) = targets.get(&index) else {
+        return Mat4::IDENTITY;
+    };
+    let value = |channel| {
+        set.channel(index, channel)
+            .and_then(|curve| curve.at(time))
+            .unwrap_or(0.0)
+    };
+    let turn = |channel| f32::to_radians(value(channel));
+    let local = Mat4::from_rotation_translation(
+        Quat::from_mat3(
+            &(glam::Mat3::from_rotation_z(turn(Channel::RotationZ))
+                * glam::Mat3::from_rotation_y(turn(Channel::RotationY))
+                * glam::Mat3::from_rotation_x(turn(Channel::RotationX))),
+        ),
+        Vec3::new(
+            value(Channel::TranslationX),
+            value(Channel::TranslationY),
+            value(Channel::TranslationZ),
+        ),
+    );
+    let parent = match target.parent.filter(|_| depth < DEPTH) {
+        Some(parent) => world(set, targets, parent, time, depth + 1),
+        None => Mat4::IDENTITY,
+    };
+    let frame = match target.bound {
+        Some((held, true)) => held,
+        Some((held, false)) => {
+            Mat4::from_cols(parent.x_axis, parent.y_axis, parent.z_axis, held.w_axis)
+        }
+        None => parent,
+    };
+    frame * local
+}
+
+/// Where the last target of a role stands, which is the one the game reads.
+fn stands(set: &Curves, targets: &BTreeMap<u8, Target>, role: u8, time: f32) -> Option<Vec3> {
+    let index = *targets
+        .iter()
+        .rev()
+        .find(|(_, target)| target.role == role)?
+        .0;
+    Some(world(set, targets, index, time, 0).w_axis.truncate())
+}
+
+/// What the shots of every cutscene put the camera against: how the eye reads with the shot's own
+/// bindings applied, and how it reads with them ignored.
+#[derive(Default)]
+struct Cameras {
+    shots: usize,
+    bound: Vec<f32>,
+    loose: Vec<f32>,
+    aim: Vec<f32>,
+    aim_loose: Vec<f32>,
+    span: Vec<f32>,
+    square: Vec<f32>,
+}
+
+impl Cameras {
+    fn read(&mut self, file: &Cutscene, placements: &BTreeMap<u32, Mat4>, people: &[Vec3]) {
+        for node in file.nodes() {
+            let Node::Timeline(timeline) = node else {
+                continue;
+            };
+            for item in timeline.items() {
+                let Item::Command(command) = item else {
+                    continue;
+                };
+                let CommandKind::C004(camera) = command.kind() else {
+                    continue;
+                };
+                let Some(set) = timeline.items().iter().find_map(|item| match item {
+                    Item::Curves(held) if i32::from(held.id()) == camera.curve_id() => Some(held),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                self.shots += 1;
+                if people.is_empty() {
+                    continue;
+                }
+                for time in [0.0, camera.duration().max(0) as f32 * 0.5] {
+                    for held in [true, false] {
+                        let empty = BTreeMap::new();
+                        let targets = rig(
+                            set,
+                            camera.bindings(),
+                            match held {
+                                true => placements,
+                                false => &empty,
+                            },
+                        );
+                        let (Some(eye), Some(look)) = (
+                            stands(set, &targets, EYE, time),
+                            stands(set, &targets, LOOK_AT, time),
+                        ) else {
+                            continue;
+                        };
+                        let subject = *people
+                            .iter()
+                            .min_by(|a, b| (eye - **a).length().total_cmp(&(eye - **b).length()))
+                            .expect("a character");
+                        let forward = (look - eye).normalize_or_zero();
+                        let towards = (subject - eye).normalize_or_zero();
+                        let (near, angle) = match held {
+                            true => (&mut self.bound, &mut self.aim),
+                            false => (&mut self.loose, &mut self.aim_loose),
+                        };
+                        near.push((eye - subject).length());
+                        if forward.length() > 0.5 && towards.length() > 0.5 {
+                            angle.push(forward.dot(towards).clamp(-1.0, 1.0).acos().to_degrees());
+                        }
+                        if !held {
+                            continue;
+                        }
+                        let Some(over) = stands(set, &targets, UP, time) else {
+                            continue;
+                        };
+                        self.span.push((over - eye).length());
+                        let up = (over - eye).normalize_or_zero();
+                        if up.length() > 0.5 && forward.length() > 0.5 {
+                            self.square
+                                .push(up.dot(forward).clamp(-1.0, 1.0).acos().to_degrees());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The value at a fraction along a sorted run.
+fn along(held: &[f32], fraction: f32) -> f32 {
+    match held.is_empty() {
+        true => f32::NAN,
+        false => held[((held.len() - 1) as f32 * fraction) as usize],
+    }
+}
+
+fn quantiles(named: &str, held: &mut Vec<f32>) {
+    held.sort_by(f32::total_cmp);
+    println!(
+        "  {named}: n={} p10 {:.2} p25 {:.2} p50 {:.2} p75 {:.2} p90 {:.2}",
+        held.len(),
+        along(held, 0.1),
+        along(held, 0.25),
+        along(held, 0.5),
+        along(held, 0.75),
+        along(held, 0.9),
+    );
+}
+
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
 
 fn main() {
@@ -159,6 +383,7 @@ fn main() {
     let mut busiest: Vec<(usize, String)> = Vec::new();
     let mut levels: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
     let mut clashes: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut cameras = Cameras::default();
 
     let mut here;
     for path in paths.lines().filter(|path| path.ends_with(".cutb")) {
@@ -397,6 +622,31 @@ fn main() {
             }
             held
         });
+        {
+            let mut placements = BTreeMap::new();
+            let mut people = Vec::new();
+            for node in file.nodes() {
+                let Node::Participants(participants) = node else {
+                    continue;
+                };
+                for participant in participants {
+                    let held = placement(stands_at(participant));
+                    placements.insert(participant.id(), held);
+                    let human = matches!(participant.data(), InstanceData::HelperObject(helper)
+                        if matches!(
+                            helper.kind(),
+                            HelperKind::EventNpc | HelperKind::BattleNpc | HelperKind::Player
+                        ));
+                    // A metre off the participant's own feet, so the aim is measured against a
+                    // character rather than the ground it stands on.
+                    if human && held.w_axis.truncate().length() > 1.0 {
+                        people.push(held.w_axis.truncate() + Vec3::Y);
+                    }
+                }
+            }
+            cameras.read(&file, &placements, &people);
+        }
+
         for node in file.nodes() {
             let Node::Participants(participants) = node else {
                 continue;
@@ -519,6 +769,18 @@ fn main() {
                 .or_default() += 1;
         }
     }
+    println!();
+    println!(
+        "{} camera shots, read at their first frame and their middle:",
+        cameras.shots
+    );
+    quantiles("eye -> the nearest character, bound  ", &mut cameras.bound);
+    quantiles("eye -> the nearest character, unbound", &mut cameras.loose);
+    quantiles("aim angle at that character, bound   ", &mut cameras.aim);
+    quantiles("aim angle at that character, unbound ", &mut cameras.aim_loose);
+    quantiles("up target -> eye                     ", &mut cameras.span);
+    quantiles("angle between up and forward         ", &mut cameras.square);
+
     println!("prop ids against the level's own lcb/svb keys {clashes:?}");
     println!("busiest cutscenes {:?}", &busiest[..10.min(busiest.len())]);
     println!(

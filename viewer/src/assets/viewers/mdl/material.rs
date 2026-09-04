@@ -344,7 +344,7 @@ pub fn path(model: &str, name: &str, variant: u16, skin: Option<u16>) -> Option<
         ('d', 'e') => {
             format!("chara/demihuman/d{body:04}/obj/equipment/e{part:04}/material/v{worn:04}")
         }
-        ('m', 'b') => format!("chara/monster/m{body:04}/obj/body/b{part:04}/material/v0001"),
+        ('m', 'b') => format!("chara/monster/m{body:04}/obj/body/b{part:04}/material/v{worn:04}"),
         _ => return None,
     };
     Some(format!("{directory}/{name}"))

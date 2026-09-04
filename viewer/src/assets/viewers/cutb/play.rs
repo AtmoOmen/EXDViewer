@@ -15,8 +15,12 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use egui::{Align, Button, CentralPanel, Layout, RichText, ScrollArea, containers::panel::Panel};
+use egui::{
+    Align, Button, CentralPanel, Color32, FontId, Layout, Rect, RichText, ScrollArea,
+    containers::panel::Panel, pos2, vec2,
+};
 use glam::{Mat4, Quat, Vec3};
+use ironworks::excel::Language;
 use ironworks::file::cutb::{Cutscene, Node};
 use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData, Transform};
 use ironworks::file::lvb::LevelFile;
@@ -27,6 +31,9 @@ use crate::assets::viewers::layer::scene;
 use crate::backend::Backend;
 use crate::character::stand;
 use crate::data::FileProviderExt;
+use crate::excel::provider::{ExcelProvider, ExcelSheet};
+use crate::settings::LANGUAGE;
+use crate::sheet::SheetColumnDefinition;
 use crate::utils::{PromiseKind, TrackedPromise};
 
 /// The roles a camera's curve set gives its targets. The frame the rest hang off is role 1, which
@@ -266,6 +273,47 @@ struct Cue {
     runs: f32,
 }
 
+/// One `C048` subtitle: when it stands, the row it names, and how long it stands for.
+pub struct Subtitle {
+    /// When it stands, in the cutscene's own global frame numbering.
+    pub at: f32,
+    /// The key of the row it names, in the sheet the cutscene's `CTIS` node holds.
+    pub key: String,
+    /// How long the line stands in each language, in milliseconds, nought where that language
+    /// states nothing. Half the lines the game ships state nothing in any language.
+    lengths: Vec<i32>,
+}
+
+impl Subtitle {
+    /// The speaker's name, which the key carries past its line number. The client's own parsers
+    /// stop at the number, so this is the viewer's reading of the rest rather than a field.
+    pub fn speaker(&self) -> &str {
+        self.key.rsplit('_').next().unwrap_or_default()
+    }
+
+    /// How long the line stands in a language, in seconds.
+    pub fn runs(&self, language: Language) -> f32 {
+        caption_slot(language)
+            .and_then(|slot| self.lengths.get(slot))
+            .map(|length| *length as f32 / 1000.0)
+            .unwrap_or(0.0)
+    }
+}
+
+/// Which of a `C048`'s captions a language reads. The client walks `ja`, `en`, `de`, `fr`, `chs`,
+/// a slot it rejects, `ko`, `tc`; nothing the game ships fills the last two.
+fn caption_slot(language: Language) -> Option<usize> {
+    Some(match language {
+        Language::Japanese => 0,
+        Language::English => 1,
+        Language::German => 2,
+        Language::French => 3,
+        Language::ChineseSimplified => 4,
+        Language::Korean => 6,
+        _ => return None,
+    })
+}
+
 impl Part {
     /// Puts each list in the order it runs. A timeline lists its commands in neither the order it
     /// plays them nor any order at all, so what holds at a time cannot be read off one as it comes
@@ -383,6 +431,33 @@ fn parts_of(timeline: &Timeline, offset: f32, parts: &mut BTreeMap<u32, Part>) {
             CommandKind::C090(wear) => cue(part, at, wear.motion(), 0.0, f32::INFINITY),
             _ => {}
         }
+    }
+}
+
+/// The subtitles one `CTTL` states, offset into the cutscene's own global frame numbering.
+fn subtitles_of(timeline: &Timeline, offset: f32, held: &mut Vec<Subtitle>) {
+    for item in timeline.items() {
+        let Item::Command(command) = item else {
+            continue;
+        };
+        let CommandKind::C048(subtitle) = command.kind() else {
+            continue;
+        };
+        let Some(key) = subtitle.key().filter(|key| !key.is_empty()) else {
+            continue;
+        };
+        held.push(Subtitle {
+            at: offset + f32::from(command.time()),
+            key: key.to_owned(),
+            lengths: subtitle
+                .captions()
+                .iter()
+                .map(|caption| match caption.enabled() != 0 {
+                    true => caption.duration(),
+                    false => 0,
+                })
+                .collect(),
+        });
     }
 }
 
@@ -515,6 +590,8 @@ pub struct Player {
     shots: Vec<Shot>,
     /// What each participant its timelines address does over the whole of it.
     parts: BTreeMap<u32, Part>,
+    /// The lines its timelines put on screen, in the order they run.
+    subtitles: Vec<Subtitle>,
     duration: f32,
 }
 
@@ -522,12 +599,14 @@ impl Player {
     pub fn new(cutscene: &Cutscene) -> Self {
         let mut shots = Vec::new();
         let mut parts = BTreeMap::new();
+        let mut subtitles = Vec::new();
         let mut offset = 0.0;
         for (node, held) in cutscene.nodes().iter().enumerate() {
             let Node::Timeline(timeline) = held else {
                 continue;
             };
             parts_of(timeline, offset, &mut parts);
+            subtitles_of(timeline, offset, &mut subtitles);
             let local = shots_of(timeline);
             let span = timeline_span(
                 timeline,
@@ -553,11 +632,32 @@ impl Player {
         for part in parts.values_mut() {
             part.order();
         }
+        subtitles.sort_by(|left, right| left.at.total_cmp(&right.at));
         Self {
             duration: offset,
             shots,
             parts,
+            subtitles,
         }
+    }
+
+    /// Every line the cutscene puts on screen, in the order it runs.
+    pub fn subtitles(&self) -> &[Subtitle] {
+        &self.subtitles
+    }
+
+    /// The line standing at a time: the last to have started, while its own length holds. A line
+    /// stating no length stands until the next one replaces it, which is what the client's own
+    /// countdown leaves a zero doing.
+    fn subtitle_at(&self, time: f32, language: Language) -> Option<(usize, &Subtitle)> {
+        let (at, held) = self
+            .subtitles
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, held)| held.at <= time)?;
+        let runs = held.runs(language);
+        (runs <= 0.0 || time < held.at + runs * FRAMES_A_SECOND).then_some((at, held))
     }
 
     /// What each participant its timelines address does.
@@ -750,6 +850,14 @@ fn packs(cutscene: &Cutscene) -> Vec<String> {
         .collect()
 }
 
+/// The sheet a cutscene's `CTIS` reads its lines out of.
+fn dialogue_sheet(cutscene: &Cutscene) -> Option<&str> {
+    cutscene.nodes().iter().find_map(|node| match node {
+        Node::Sheet(name) if !name.is_empty() => Some(name.as_str()),
+        _ => None,
+    })
+}
+
 /// The `CTAL` a cutscene holds, empty where it names none.
 fn participants(cutscene: &Cutscene) -> &[Instance] {
     cutscene
@@ -787,8 +895,53 @@ enum Fetch {
     Failed(String),
 }
 
+/// The lines a cutscene's own sheet holds, by the key a `C048` names them with.
+enum Lines {
+    Idle,
+    Loading(Box<TrackedPromise<anyhow::Result<BTreeMap<String, String>>>>),
+    Ready(BTreeMap<String, String>),
+    Failed(String),
+}
+
+/// Reads a cutscene's dialogue sheet: two string columns of key and text, keyed by the first.
+async fn read_lines(
+    backend: Backend,
+    sheet: String,
+    language: Language,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let opened = backend.excel().get_sheet(&sheet, language).await?;
+    let columns = SheetColumnDefinition::from_sheet(&opened);
+    let [key, text, ..] = columns.as_slice() else {
+        anyhow::bail!("{sheet} is not a two column text sheet");
+    };
+    let mut held = BTreeMap::new();
+    for row_id in opened.get_row_ids() {
+        let Ok(row) = opened.get_row(row_id) else {
+            continue;
+        };
+        let (Ok(key), Ok(text)) = (
+            row.read_string(u32::from(key.offset())),
+            row.read_string(u32::from(text.offset())),
+        ) else {
+            continue;
+        };
+        held.insert(
+            String::from_utf8_lossy(key.as_bytes()).into_owned(),
+            String::from_utf8_lossy(text.as_bytes()).into_owned(),
+        );
+    }
+    Ok(held)
+}
+
 struct State {
     fetch: Fetch,
+    lines: Lines,
+    /// Which language the lines were read in, so a change of it reads them again.
+    lines_for: Option<Language>,
+    /// Whether to put the cutscene's own lines over the frame, and whether to frame it as the
+    /// sixteen by nine the camera's field of view is worked out against.
+    subtitles: bool,
+    framed: bool,
     /// Everyone standing in the scene, from the rows their participants name through to the models
     /// the scene draws.
     cast: stand::Cast,
@@ -808,6 +961,10 @@ impl Default for State {
     fn default() -> Self {
         Self {
             fetch: Fetch::Idle,
+            lines: Lines::Idle,
+            lines_for: None,
+            subtitles: true,
+            framed: true,
             cast: stand::Cast::default(),
             time: 0.0,
             playing: false,
@@ -869,6 +1026,30 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         };
     }
 
+    let language = LANGUAGE.get(ui.ctx());
+    if state.lines_for != Some(language) {
+        state.lines_for = Some(language);
+        state.lines = Lines::Idle;
+    }
+    if matches!(&state.lines, Lines::Idle)
+        && let Some(sheet) = dialogue_sheet(cutscene)
+    {
+        let backend = backend.clone();
+        let sheet = sheet.to_owned();
+        state.lines = Lines::Loading(Box::new(TrackedPromise::spawn_local(async move {
+            read_lines(backend, sheet, language).await
+        })));
+    }
+    if matches!(&state.lines, Lines::Loading(promise) if promise.try_get().is_some()) {
+        let Lines::Loading(promise) = std::mem::replace(&mut state.lines, Lines::Idle) else {
+            unreachable!()
+        };
+        state.lines = match promise.block_and_take() {
+            Ok(held) => Lines::Ready(held),
+            Err(error) => Lines::Failed(error.to_string()),
+        };
+    }
+
     let pose = tab.player.pose_at(cutscene, state.time);
     state.cast.poll(ui.ctx(), backend);
     perform(tab.player.parts(), &mut state);
@@ -877,7 +1058,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     Panel::left("cutb_shots")
         .default_size(200.0)
         .show(ui, |ui| {
-            shots_ui(ui, tab, &mut state);
+            shots_ui(ui, tab, &mut state, language);
         });
     Panel::bottom("cutb_transport").show(ui, |ui| {
         ui.add_space(4.0);
@@ -900,10 +1081,92 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
                 scene.drive(pose.drive());
             }
             scene.mark(markers(cutscene));
+            let frame = ui.max_rect();
             scene::ui(ui, scene, backend);
+            overlay(ui, tab, &state, frame, language);
         }
     });
     None
+}
+
+/// The frame a cutscene composes against, sixteen by nine: the aspect the client turns a shot's
+/// focal length into a field of view against, and the one it clamps the subtitle addon's own width
+/// to (`Client::UI::Agent::AgentTalkSubtitle.OpenSubtitleAddon`). The scene carries that field to
+/// whatever aspect it is drawn at by keeping the horizontal one, so anything past the frame's own
+/// height is over-draw.
+const FRAME_ASPECT: f32 = 16.0 / 9.0;
+
+/// The frame `ui/uld/TalkSubtitle.uld` is laid out in, which the client scales to the screen.
+const DESIGN: egui::Vec2 = egui::Vec2::new(1280.0, 720.0);
+
+/// Where the subtitle addon attaches, as a fraction of the frame: centred across it, and 95 parts
+/// in a hundred down it.
+const SUBTITLE_AT: egui::Vec2 = egui::Vec2::new(0.50, 0.95);
+
+/// What `TalkSubtitle.uld`'s three text nodes state: one run at size 18, with a copy a pixel above
+/// and a pixel below it. Both its fill and its edge read from the UI theme rather than the file.
+const TEXT_SIZE: f32 = 18.0;
+const EDGE: f32 = 1.0;
+
+/// Puts the cutscene's own frame and its lines over the scene.
+fn overlay(ui: &mut egui::Ui, tab: &Tab, state: &State, frame: Rect, language: Language) {
+    let painter = ui.painter_at(frame);
+    let inner = match state.framed {
+        true => framed(frame),
+        false => frame,
+    };
+    if state.framed {
+        let bar = Color32::BLACK;
+        painter.rect_filled(
+            Rect::from_min_max(frame.min, pos2(frame.max.x, inner.min.y)),
+            0.0,
+            bar,
+        );
+        painter.rect_filled(
+            Rect::from_min_max(pos2(frame.min.x, inner.max.y), frame.max),
+            0.0,
+            bar,
+        );
+    }
+    if !state.subtitles {
+        return;
+    }
+    let Some((_, subtitle)) = tab.player.subtitle_at(state.time, language) else {
+        return;
+    };
+    let Lines::Ready(lines) = &state.lines else {
+        return;
+    };
+    let Some(text) = lines.get(&subtitle.key).filter(|text| !text.is_empty()) else {
+        return;
+    };
+    let scale = inner.height() / DESIGN.y;
+    let font = FontId::proportional(TEXT_SIZE * scale);
+    let laid = ui.ctx().fonts_mut(|fonts| {
+        fonts.layout(
+            text.replace('\n', " "),
+            font,
+            ui.visuals().strong_text_color(),
+            DESIGN.x * scale,
+        )
+    });
+    let at = inner.min + inner.size() * SUBTITLE_AT - vec2(laid.size().x * 0.5, laid.size().y * 0.5);
+    for (offset, color) in [
+        (-EDGE * scale, Color32::BLACK),
+        (EDGE * scale, Color32::BLACK),
+        (0.0, ui.visuals().strong_text_color()),
+    ] {
+        painter.galley(at + vec2(0.0, offset), laid.clone(), color);
+    }
+}
+
+/// The largest sixteen by nine rect the frame holds, centred in it.
+fn framed(frame: Rect) -> Rect {
+    let size = match frame.width() / frame.height() < FRAME_ASPECT {
+        true => vec2(frame.width(), frame.width() / FRAME_ASPECT),
+        false => vec2(frame.height() * FRAME_ASPECT, frame.height()),
+    };
+    Rect::from_center_size(frame.center(), size)
 }
 
 /// Puts every participant where its own timeline has it now, and plays what that timeline names.
@@ -958,13 +1221,23 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
     }
 }
 
-fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
+fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language) {
     let active = active_shot(tab.player.shots(), state.time).map(|shot| shot.start);
+    let speaking = tab
+        .player
+        .subtitle_at(state.time, language)
+        .map(|(at, _)| at);
+    let lines = match &state.lines {
+        Lines::Ready(held) => Some(held),
+        _ => None,
+    };
+    let mut seek = None;
     ScrollArea::vertical()
         .id_salt("cutb_shot_list")
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
+                ui.label(RichText::new("Shots").strong());
                 for shot in tab.player.shots() {
                     let current = active == Some(shot.start);
                     let label = format!(
@@ -974,15 +1247,38 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
                         shot.duration,
                     );
                     if ui.add(Button::selectable(current, label)).clicked() {
-                        state.time = shot.start;
-                        state.playing = false;
+                        seek = Some(shot.start);
                     }
                 }
                 if tab.player.shots().is_empty() {
                     ui.label(RichText::new("This cutscene's timelines hold no camera").weak());
                 }
+                if tab.player.subtitles().is_empty() {
+                    return;
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new("Lines").strong());
+                for (at, subtitle) in tab.player.subtitles().iter().enumerate() {
+                    let said = lines
+                        .and_then(|lines| lines.get(&subtitle.key))
+                        .filter(|text| !text.is_empty())
+                        .map(|text| text.replace('\n', " "))
+                        .unwrap_or_else(|| subtitle.key.clone());
+                    let label = format!("{:.0}f · {} · {said}", subtitle.at, subtitle.speaker());
+                    if ui
+                        .add(Button::selectable(speaking == Some(at), label))
+                        .on_hover_text(&subtitle.key)
+                        .clicked()
+                    {
+                        seek = Some(subtitle.at);
+                    }
+                }
             });
         });
+    if let Some(at) = seek {
+        state.time = at;
+        state.playing = false;
+    }
 }
 
 fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose>) {
@@ -1013,6 +1309,16 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
             "How fast to play the cutscene's own frames. Thirty is the rate its own numbering \
              runs at.",
         );
+        ui.checkbox(&mut state.framed, "16:9").on_hover_text(
+            "Frame the shot as sixteen by nine, which is the aspect its focal length is turned \
+             into a field of view against",
+        );
+        ui.checkbox(&mut state.subtitles, "Lines").on_hover_text(
+            "Put the cutscene's own subtitles over the frame, out of the sheet its CTIS node names",
+        );
+        if let Lines::Failed(why) = &state.lines {
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("lines: {why}"));
+        }
         ui.label(
             RichText::new(match pose {
                 Some(pose) => format!(
@@ -1194,10 +1500,70 @@ mod test {
         assert!(laid(70.0).is_none());
     }
 
+    fn said(at: f32, key: &str, english_ms: i32) -> Subtitle {
+        Subtitle {
+            at,
+            key: key.to_owned(),
+            lengths: vec![0, english_ms, 0, 0, 0, 0, 0, 0],
+        }
+    }
+
+    #[test]
+    fn a_line_stands_for_its_own_language_s_length_and_a_lengthless_one_until_the_next() {
+        let player = Player {
+            shots: Vec::new(),
+            parts: BTreeMap::new(),
+            subtitles: vec![
+                said(0.0, "TEXT_A_00000_000010_ALPHA", 2000),
+                said(120.0, "TEXT_A_00000_000020_BETA", 0),
+                said(300.0, "TEXT_A_00000_000030_ALPHA", 1000),
+            ],
+            duration: 0.0,
+        };
+        let standing =
+            |time| player.subtitle_at(time, Language::English).map(|(at, _)| at);
+        // Two seconds of the cutscene's own frames, then nothing until the next line.
+        assert_eq!(standing(30.0), Some(0));
+        assert_eq!(standing(59.0), Some(0));
+        assert_eq!(standing(61.0), None);
+        // A line stating no length holds until something replaces it.
+        assert_eq!(standing(299.0), Some(1));
+        assert_eq!(standing(301.0), Some(2));
+        assert_eq!(standing(400.0), None);
+        assert!(standing(-1.0).is_none());
+        // A language the file states no length for leaves every line lengthless.
+        assert_eq!(
+            player
+                .subtitle_at(400.0, Language::Japanese)
+                .map(|(at, _)| at),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn a_key_names_its_speaker_past_its_line_number() {
+        assert_eq!(
+            said(0.0, "TEXT_VOICEMAN_07003_003100_GALUF", 0).speaker(),
+            "GALUF"
+        );
+    }
+
+    #[test]
+    fn the_frame_is_the_widest_sixteen_by_nine_the_view_holds() {
+        let tall = framed(Rect::from_min_size(egui::Pos2::ZERO, vec2(1600.0, 1200.0)));
+        assert!((tall.width() - 1600.0).abs() < 1e-3);
+        assert!((tall.height() - 900.0).abs() < 1e-3);
+        assert!((tall.center().y - 600.0).abs() < 1e-3);
+        let wide = framed(Rect::from_min_size(egui::Pos2::ZERO, vec2(2400.0, 900.0)));
+        assert!((wide.width() - 1600.0).abs() < 1e-3);
+        assert!((wide.height() - 900.0).abs() < 1e-3);
+    }
+
     #[test]
     fn a_participant_stands_where_its_own_timeline_last_put_it() {
         let player = Player {
             shots: Vec::new(),
+            subtitles: Vec::new(),
             parts: BTreeMap::from([(
                 7,
                 Part {

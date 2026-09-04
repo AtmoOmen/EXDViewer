@@ -2391,7 +2391,10 @@ impl Program {
                 }
             }
             for (name, registers) in hlsl::glsl::extents(program, names) {
-                if buffers.iter().any(|held| held.name == name) {
+                // Filled to whichever stage declares the most of it, which is the extent both are
+                // spelled at. Taking the first stage's leaves the other reading nought past it.
+                if let Some(held) = buffers.iter_mut().find(|held| held.name == name) {
+                    held.registers = held.registers.max(registers);
                     continue;
                 }
                 buffers.push(Buffer {
@@ -2759,7 +2762,10 @@ impl Program {
                 }
             }
             for (name, registers) in hlsl::glsl::extents(program, names) {
-                if buffers.iter().any(|held| held.name == name) {
+                // Filled to whichever stage declares the most of it, which is the extent both are
+                // spelled at. Taking the first stage's leaves the other reading nought past it.
+                if let Some(held) = buffers.iter_mut().find(|held| held.name == name) {
+                    held.registers = held.registers.max(registers);
                     continue;
                 }
                 let fixed = (name == "g_MaterialParameter")

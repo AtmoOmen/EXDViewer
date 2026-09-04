@@ -3215,7 +3215,7 @@ impl Buffer {
             write(&mut out, 3, &[encode, 0.0, 0.0, 0.0]);
             return out;
         }
-        if matches!(pass, Pass::CloudBand | Pass::CloudSheet)
+        if matches!(pass, Pass::CloudBand | Pass::CloudSheet | Pass::CloudShadow)
             && let Some(register) = [VS_PARAM, PS_PARAM].iter().position(|held| self.name == *held)
         {
             let held = scene.cloud;

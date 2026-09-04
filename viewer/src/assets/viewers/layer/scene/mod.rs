@@ -940,7 +940,7 @@ pub struct Scene {
     absent: usize,
 }
 
-fn rotation(angles: [f32; 3]) -> Mat3 {
+pub fn rotation(angles: [f32; 3]) -> Mat3 {
     Mat3::from_rotation_z(angles[2])
         * Mat3::from_rotation_y(angles[1])
         * Mat3::from_rotation_x(angles[0])
@@ -1024,7 +1024,7 @@ fn aside(path: Option<&String>) -> Aside {
     }
 }
 
-fn matrix(transform: Transform) -> Mat4 {
+pub fn matrix(transform: Transform) -> Mat4 {
     Mat4::from_scale_rotation_translation(
         Vec3::from_array(transform.scale()),
         Quat::from_mat3(&rotation(transform.rotation())),

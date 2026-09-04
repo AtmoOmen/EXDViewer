@@ -1,16 +1,18 @@
 //! Plays a cutscene's own camera over the level its `CTDS` names: the shots each `CTTL` states,
 //! sequenced in the order the file lists them since nothing else states another order.
 //!
-//! The camera comes from `C004` plus the `TMFC` curve set its `curve_id` names. Target 1 of that
-//! set is the eye - its own translate and rotate curves are where the shot actually moves; see the
-//! ironworks `C004` doc for the camera's own focal length and roll fields, on the set's target
-//! `0xff`. Actors are not played: a `CTAL` participant only gets a marker naming what it stands
-//! for, from [`markers`].
+//! The camera comes from `C004` plus the `TMFC` curve set its `curve_id` names. Its targets carry a
+//! role apiece and hang off one another: the eye stands where the last [`EYE`] target does, aimed
+//! at the last [`LOOK_AT`] one with the last [`UP`] one over it, and each of those rides whichever
+//! `CTAL` participant the shot's own bindings name. See the ironworks `C004` doc for the rest,
+//! including the focal length and roll fields on the set's target `0xff`. Actors are not played: a
+//! participant only gets a marker naming what it stands for, from [`markers`].
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 
 use egui::{Align, Button, CentralPanel, Layout, RichText, ScrollArea, containers::panel::Panel};
-use glam::{EulerRot, Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use ironworks::file::cutb::{Cutscene, Node};
 use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData, Transform};
 use ironworks::file::lvb::LevelFile;
@@ -22,12 +24,20 @@ use crate::backend::Backend;
 use crate::data::FileProviderExt;
 use crate::utils::{PromiseKind, TrackedPromise};
 
-/// The curve target carrying the eye's own position and rotation, measured against the corpus.
-/// Contradicts the ironworks crate's own doc comment on `C004`, which names target 2: that target
-/// sits at the identity, at every sampled time, in 71% of the corpus's shots (a placeholder which
-/// carries a real, unexplained transform of its own the rest of the time), where target 1 is where
-/// the shot's actual eye lives in all of them.
-const EYE: u8 = 1;
+/// The roles a camera's curve set gives its targets. The frame the rest hang off is role 1, which
+/// the shot binds but the camera never reads a position off.
+const EYE: u8 = 2;
+const LOOK_AT: u8 = 3;
+const UP: u8 = 4;
+
+/// Which `C004` binding names each role's participant, and where the flag holding role 1 to a
+/// participant's position alone sits.
+const ROLES: [(u8, usize); 3] = [(1, 0), (EYE, 6), (LOOK_AT, 11)];
+const RIG_UPRIGHT: usize = 4;
+
+/// How far a target's parents are followed, past which a file naming a loop of them stops rather
+/// than hangs. Deeper than any set the game ships.
+const DEPTH: u8 = 16;
 
 /// Where a set's own fields sit, past its targets' transform channels.
 const CAMERA_FIELDS: u8 = 0xFF;
@@ -71,18 +81,10 @@ fn field_of_view_degrees(focal_mm: f32) -> f32 {
     (2.0 * (HALF_SENSOR / focal_mm).atan()).to_degrees()
 }
 
-/// The eye's forward and up at a rotation (degrees, turning about X first, then Y, then Z - the
-/// same order every other curve-driven transform in this crate reads) plus a roll about its own
-/// forward axis, applied the other way round from how the file states it.
-fn banked_basis(rotation_deg: Vec3, roll_deg: f32) -> (Vec3, Vec3) {
-    let facing = Quat::from_euler(
-        EulerRot::XYZ,
-        rotation_deg.x.to_radians(),
-        rotation_deg.y.to_radians(),
-        rotation_deg.z.to_radians(),
-    );
-    let banked = facing * Quat::from_rotation_z((-roll_deg).to_radians());
-    (banked * Vec3::NEG_Z, banked * Vec3::Y)
+/// The up vector a roll leaves, turned about the eye's own forward axis. A positive roll takes it
+/// towards the eye's right, which is the other way round from how the file states it.
+fn banked(forward: Vec3, up: Vec3, roll_deg: f32) -> Vec3 {
+    Quat::from_axis_angle(forward, roll_deg.to_radians()) * up
 }
 
 fn curve_value(set: &Curves, target: u8, channel: Channel, time: f32) -> f32 {
@@ -98,33 +100,131 @@ fn camera_field(set: &Curves, tag: u8, time: f32) -> Option<f32> {
         .and_then(|curve| curve.at(time))
 }
 
-/// The eye's pose at a time within the shot's own span, held past either end the way
+/// One target of a camera's curve set: what it stands for, what it hangs off, and where the
+/// participant its role binds stands, with whether it turns with that participant as well.
+struct Target {
+    role: u8,
+    parent: Option<u8>,
+    bound: Option<(Mat4, bool)>,
+}
+
+/// The targets a shot's curve set drives, with each role's binding resolved onto the first target
+/// carrying it - the only one the shot binds.
+fn rig(set: &Curves, bindings: &[u32; 17], participants: &[Instance]) -> BTreeMap<u8, Target> {
+    let mut targets = BTreeMap::new();
+    for curve in set.curves().iter().filter(|curve| curve.target() != CAMERA_FIELDS) {
+        targets.entry(curve.target()).or_insert(Target {
+            role: curve.role(),
+            parent: curve.parent(),
+            bound: None,
+        });
+    }
+    for (role, slot) in ROLES {
+        // The second participant of a pair stands in where the first names nothing: the game skips
+        // a role's binding only when neither of the two resolves.
+        let Some(participant) = [bindings[slot], bindings[slot + 2]]
+            .into_iter()
+            .find_map(|id| participants.iter().find(|held| held.id() == id))
+        else {
+            continue;
+        };
+        let Some(target) = targets.values_mut().find(|target| target.role == role) else {
+            continue;
+        };
+        let turns = role == ROLES[0].0 && bindings[RIG_UPRIGHT] != 1;
+        target.bound = Some((scene::matrix(stands_at(participant)), turns));
+    }
+    targets
+}
+
+/// Where a target stands at a time, in the frame its parents and its own binding put it in. A
+/// bound target that does not turn keeps its parent's facing and takes only the participant's
+/// position.
+fn world(
+    set: &Curves,
+    targets: &BTreeMap<u8, Target>,
+    index: u8,
+    time: f32,
+    depth: u8,
+) -> Mat4 {
+    let Some(target) = targets.get(&index) else {
+        return Mat4::IDENTITY;
+    };
+    let channels = |channels: [Channel; 3]| {
+        Vec3::from_array(channels.map(|channel| curve_value(set, index, channel, time)))
+    };
+    let local = Mat4::from_rotation_translation(
+        Quat::from_mat3(&scene::rotation(
+            channels([Channel::RotationX, Channel::RotationY, Channel::RotationZ])
+                .to_array()
+                .map(f32::to_radians),
+        )),
+        channels([
+            Channel::TranslationX,
+            Channel::TranslationY,
+            Channel::TranslationZ,
+        ]),
+    );
+    let parent = match target.parent.filter(|_| depth < DEPTH) {
+        Some(parent) => world(set, targets, parent, time, depth + 1),
+        None => Mat4::IDENTITY,
+    };
+    frame(parent, target.bound) * local
+}
+
+/// The frame a target's own channels sit in: the placement its role binds, whole where the role
+/// turns with the participant and as its position over the parent's own facing where it does not.
+fn frame(parent: Mat4, bound: Option<(Mat4, bool)>) -> Mat4 {
+    match bound {
+        Some((placement, true)) => placement,
+        Some((placement, false)) => Mat4::from_cols(
+            parent.x_axis,
+            parent.y_axis,
+            parent.z_axis,
+            placement.w_axis,
+        ),
+        None => parent,
+    }
+}
+
+/// Where the last target of a role stands, which is the one the camera reads: the game walks its
+/// targets from the end.
+fn stands(set: &Curves, targets: &BTreeMap<u8, Target>, role: u8, time: f32) -> Option<Vec3> {
+    let index = *targets
+        .iter()
+        .rev()
+        .find(|(_, target)| target.role == role)?
+        .0;
+    Some(world(set, targets, index, time, 0).w_axis.truncate())
+}
+
+/// The camera's pose at a time within the shot's own span, held past either end the way
 /// [`ironworks::file::tmb::Curve::at`] holds a curve.
-fn eye_pose(set: &Curves, time: f32, near: f32, far: f32) -> Pose {
-    let position = Vec3::new(
-        curve_value(set, EYE, Channel::TranslationX, time),
-        curve_value(set, EYE, Channel::TranslationY, time),
-        curve_value(set, EYE, Channel::TranslationZ, time),
-    );
-    let rotation = Vec3::new(
-        curve_value(set, EYE, Channel::RotationX, time),
-        curve_value(set, EYE, Channel::RotationY, time),
-        curve_value(set, EYE, Channel::RotationZ, time),
-    );
+fn eye_pose(
+    set: &Curves,
+    targets: &BTreeMap<u8, Target>,
+    time: f32,
+    near: f32,
+    far: f32,
+) -> Option<Pose> {
+    let position = stands(set, targets, EYE, time)?;
+    let forward = (stands(set, targets, LOOK_AT, time)? - position).normalize_or_zero();
+    let up = stands(set, targets, UP, time)
+        .map(|over| over - position)
+        .unwrap_or(Vec3::Y);
     let roll = camera_field(set, ROLL_TAG, time).unwrap_or(0.0);
-    let (forward, up) = banked_basis(rotation, roll);
     let fov_degrees = camera_field(set, FOCAL_LENGTH_TAG, time)
         .filter(|focal| *focal > 0.0)
         .map(field_of_view_degrees)
         .unwrap_or(55.0);
-    Pose {
+    Some(Pose {
         position,
         forward,
-        up,
+        up: banked(forward, up, roll),
         fov_degrees,
         near,
         far,
-    }
+    })
 }
 
 /// One shot: a `C004` command and the `CTTL` node it came from, in the cutscene's own global
@@ -135,6 +235,7 @@ pub struct Shot {
     pub start: f32,
     pub duration: f32,
     curves: i16,
+    bindings: [u32; 17],
     near: f32,
     far: f32,
 }
@@ -187,8 +288,8 @@ fn timeline_span(timeline: &Timeline, shots: &[(i16, f32, f32)]) -> f32 {
 }
 
 /// One `C004` read out of a timeline: its own id (for the reachability filter), when it starts and
-/// runs, its name, which `TMFC` drives it, and its stated clip planes.
-type RawShot = (i16, f32, f32, Option<String>, i16, f32, f32);
+/// runs, its name, which `TMFC` drives it, what it binds, and its stated clip planes.
+type RawShot = (i16, f32, f32, Option<String>, i16, [u32; 17], f32, f32);
 
 /// The `C004` shots one `CTTL` holds, filtered to the ones its own actor tracks reach where any
 /// are, in the order they run.
@@ -210,6 +311,7 @@ fn shots_of(timeline: &Timeline) -> Vec<RawShot> {
                 camera.duration().max(0) as f32,
                 camera.name().map(str::to_owned),
                 camera.curve_id().try_into().unwrap_or(0),
+                *camera.bindings(),
                 camera.near_plane(),
                 camera.far_plane(),
             ))
@@ -259,13 +361,14 @@ impl Player {
                     .map(|(id, start, duration, ..)| (*id, *start, *duration))
                     .collect::<Vec<_>>(),
             );
-            for (_, start, duration, name, curves, near, far) in local {
+            for (_, start, duration, name, curves, bindings, near, far) in local {
                 shots.push(Shot {
                     node,
                     name,
                     start: offset + start,
                     duration,
                     curves,
+                    bindings,
                     near,
                     far,
                 });
@@ -298,7 +401,8 @@ impl Player {
             Item::Curves(held) if held.id() == shot.curves => Some(held),
             _ => None,
         })?;
-        Some(eye_pose(set, time - shot.start, shot.near, shot.far))
+        let targets = rig(set, &shot.bindings, participants(cutscene));
+        eye_pose(set, &targets, time - shot.start, shot.near, shot.far)
     }
 }
 
@@ -632,24 +736,28 @@ mod test {
     }
 
     #[test]
-    fn identity_rotation_faces_local_negative_z() {
-        let (forward, up) = banked_basis(Vec3::ZERO, 0.0);
-        assert!(close(forward, Vec3::NEG_Z));
-        assert!(close(up, Vec3::Y));
-    }
-
-    #[test]
-    fn a_yaw_of_a_quarter_turn_faces_local_negative_x() {
-        let (forward, _) = banked_basis(Vec3::new(0.0, 90.0, 0.0), 0.0);
-        assert!(close(forward, Vec3::NEG_X));
-    }
-
-    #[test]
-    fn roll_turns_up_but_not_forward() {
-        let (forward, up) = banked_basis(Vec3::ZERO, 90.0);
-        assert!(close(forward, Vec3::NEG_Z));
+    fn roll_turns_up_about_the_eye_s_own_forward() {
+        assert!(close(banked(Vec3::NEG_Z, Vec3::Y, 0.0), Vec3::Y));
         // "The other way round": a positive roll field turns up towards +X, not -X.
-        assert!(close(up, Vec3::X));
+        assert!(close(banked(Vec3::NEG_Z, Vec3::Y, 90.0), Vec3::X));
+    }
+
+    #[test]
+    fn a_binding_that_does_not_turn_keeps_the_parent_s_facing() {
+        let parent = Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
+        let placement = Mat4::from_rotation_translation(
+            Quat::from_rotation_y(std::f32::consts::PI),
+            Vec3::new(3.0, 4.0, 5.0),
+        );
+        let held = frame(parent, Some((placement, false)));
+        assert!(close(held.w_axis.truncate(), Vec3::new(3.0, 4.0, 5.0)));
+        assert!(close(
+            held.transform_vector3(Vec3::Z),
+            parent.transform_vector3(Vec3::Z)
+        ));
+        let turning = frame(parent, Some((placement, true)));
+        assert!(close(turning.transform_vector3(Vec3::Z), Vec3::NEG_Z));
+        assert!(close(turning.w_axis.truncate(), Vec3::new(3.0, 4.0, 5.0)));
     }
 
     fn shot(start: f32, duration: f32) -> Shot {
@@ -659,6 +767,7 @@ mod test {
             start,
             duration,
             curves: 0,
+            bindings: [0xffff_ffff; 17],
             near: 0.1,
             far: 1000.0,
         }

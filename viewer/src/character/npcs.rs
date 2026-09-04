@@ -104,9 +104,9 @@ const KIND: u32 = 16;
 const BASE: u32 = 17;
 const VARIANT: u32 = 18;
 
-/// The kinds of body `ModelChara` states that are drawn from a directory of their own. The others
-/// are a human, which the row that named it already says everything about, and two the corpus
-/// reaches that name nothing this resolves.
+/// The kinds of body `ModelChara` states that are drawn from a directory of their own. Kind one is
+/// a human, which the row that named it already says everything about; kind four is filed
+/// elsewhere again and nothing here resolves it.
 const DEMIHUMAN: u8 = 2;
 const MONSTER: u8 = 3;
 

@@ -791,7 +791,7 @@ pub struct Standing {
 }
 
 /// One effect a host outside this view is running: which file, where it stands, how far into its
-/// own timeline it now is, and the colour to draw it through. The id is the firing's own, so a
+/// own timeline it now is, and the color to draw it through. The id is the firing's own, so a
 /// host that hands the list over again every frame keeps each firing's particles.
 pub struct Fired {
     pub id: u64,
@@ -2568,10 +2568,11 @@ impl Scene {
         // deep into a cutscene would otherwise replay every frame of it in one paint.
         self.firing
             .retain(|id, _| self.fired.iter().any(|held| held.id == *id));
-        let (files, firing) = (&self.effect_files, &mut self.firing);
         for held in &self.fired {
-            let Some(EffectState::Ready(parsed, ..)) =
-                self.effect_at.get(&held.path).map(|at| &files[*at].state)
+            let Some(EffectState::Ready(parsed, ..)) = self
+                .effect_at
+                .get(&held.path)
+                .map(|at| &self.effect_files[*at].state)
             else {
                 continue;
             };
@@ -2579,7 +2580,7 @@ impl Scene {
                 true => parsed.length,
                 false => avfx::sim::LONGEST,
             };
-            parsed.seek(firing.entry(held.id).or_default(), held.frame.clamp(0, end));
+            parsed.seek(self.firing.entry(held.id).or_default(), held.frame.clamp(0, end));
         }
     }
 

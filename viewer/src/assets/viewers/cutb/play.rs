@@ -58,7 +58,7 @@ const ROLL_TAG: u8 = 0x35;
 /// a frame it fixes at sixteen by nine.
 const HALF_SENSOR: f32 = 7.001_51;
 
-/// Which channel of a `C049`'s curve set carries each part of the effect's colour. The client
+/// Which channel of a `C049`'s curve set carries each part of the effect's color. The client
 /// hands them to the same setter a placed effect's own `Rgba` reaches, in this order.
 const RED: u8 = 0x0C;
 const GREEN: u8 = 0x0B;
@@ -117,7 +117,7 @@ fn camera_field(set: &Curves, tag: u8, time: f32) -> Option<f32> {
         .and_then(|curve| curve.at(time))
 }
 
-/// The colour a `C049`'s curve set states at a time. Its five channels sit on the set's one
+/// The color a `C049`'s curve set states at a time. Its five channels sit on the set's one
 /// target; the fifth reaches nothing the client draws with.
 fn lit(set: &Curves, time: f32) -> Vec4 {
     let channel = |tag: u8| {
@@ -286,7 +286,7 @@ pub struct Part {
     shown: Vec<(f32, bool)>,
 }
 
-/// One effect a timeline fires on a participant: which file, the curve set stating its colour, and
+/// One effect a timeline fires on a participant: which file, the curve set stating its color, and
 /// where the timeline holding it ends, past which the effect is done.
 struct Burst {
     path: String,

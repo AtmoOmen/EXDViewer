@@ -61,6 +61,7 @@ fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::C031(_) => "C031",
         CommandKind::C033(_) => "C033",
         CommandKind::C034(_) => "C034",
+        CommandKind::C040(_) => "C040",
         CommandKind::C042(_) => "C042",
         CommandKind::C043(_) => "C043",
         CommandKind::C053(_) => "C053",
@@ -78,6 +79,7 @@ fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::C084(_) => "C084",
         CommandKind::C088(_) => "C088",
         CommandKind::C089(_) => "C089",
+        CommandKind::C090(_) => "C090",
         CommandKind::C093(_) => "C093",
         CommandKind::C094(_) => "C094",
         CommandKind::C095(_) => "C095",
@@ -149,8 +151,8 @@ fn walk(census: &mut Census, path: &str, timeline: &[u8]) {
         *census.kinds.entry(name).or_default() += 1;
         match command.kind() {
             CommandKind::C002(c) => note_path(census, name, c.path(), path),
-            CommandKind::C009(c) => note_path(census, name, c.path(), path),
-            CommandKind::C010(c) => note_path(census, name, c.path(), path),
+            CommandKind::C009(c) => note_path(census, name, c.motion(), path),
+            CommandKind::C010(c) => note_path(census, name, c.motion(), path),
             CommandKind::C012(c) => {
                 note_path(census, name, c.path(), path);
                 *census

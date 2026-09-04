@@ -298,7 +298,7 @@ fn addressed(timeline: &Timeline) -> BTreeMap<i16, u32> {
 /// plays the rest. A `cfx` name that is not a pose is the face's own blink or lip clip, which the
 /// body would only corrupt, so nothing plays it.
 fn cue(part: &mut Part, at: f32, motion: Option<&str>, from: f32) {
-    let Some(motion) = motion else {
+    let Some(motion) = motion.filter(|motion| !motion.is_empty()) else {
         return;
     };
     match motion.strip_prefix("cfxf_") {

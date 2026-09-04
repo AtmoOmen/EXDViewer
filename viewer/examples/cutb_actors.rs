@@ -13,6 +13,7 @@ use ironworks::file::cutb::{Cutscene, Node};
 use ironworks::file::layer::{HelperKind, Instance, InstanceData, InstanceKind, Transform};
 use ironworks::file::lvb::LevelFile;
 use ironworks::file::mdl::{Lod, MeshKind, ModelContainer};
+use ironworks::file::pap::AnimationPack;
 use ironworks::file::{lcb, svb};
 use ironworks::file::pbd::PreBoneDeformer;
 use ironworks::file::sgb::SharedGroupFile;
@@ -457,6 +458,175 @@ impl Cameras {
     }
 }
 
+/// What the timelines of every cutscene ask of their actors: which participants they address,
+/// what they ask of each, whether the motion each names is filed in a pack the cutscene loads, and
+/// how much of what they hold this crate still reads as a magic and a size.
+#[derive(Default)]
+struct Acting {
+    commands: usize,
+    unmodelled: usize,
+    unmodelled_kinds: BTreeMap<String, usize>,
+    addressed: BTreeSet<(String, u32)>,
+    placed: BTreeSet<(String, u32)>,
+    moving: BTreeSet<(String, u32)>,
+    facing: BTreeSet<(String, u32)>,
+    /// The same again, over the participants that stand a character.
+    cast: BTreeSet<(String, u32)>,
+    cast_moving: BTreeSet<(String, u32)>,
+    /// Named motions, split by whether a pack the cutscene loads holds them.
+    motions: [usize; 2],
+    missing: BTreeMap<String, usize>,
+}
+
+/// The participant each of a timeline's commands runs against, out of the actors it drives.
+fn addressed(timeline: &ironworks::file::tmb::Timeline) -> BTreeMap<i16, u32> {
+    let tracks: BTreeMap<i16, &[i16]> = timeline
+        .items()
+        .iter()
+        .filter_map(|item| match item {
+            Item::Track(track) => Some((track.id(), track.commands())),
+            _ => None,
+        })
+        .collect();
+    let mut held = BTreeMap::new();
+    for item in timeline.items() {
+        let Item::Actor(actor) = item else { continue };
+        for track in actor.tracks() {
+            for command in tracks.get(track).into_iter().flat_map(|held| held.iter()) {
+                held.insert(*command, actor.participant());
+            }
+        }
+    }
+    held
+}
+
+impl Acting {
+    fn read(&mut self, path: &str, file: &Cutscene, holds: &BTreeSet<&str>, cast: &BTreeSet<u32>) {
+        for node in file.nodes() {
+            let Node::Timeline(timeline) = node else {
+                continue;
+            };
+            let addressed = addressed(timeline);
+            for item in timeline.items() {
+                let Item::Command(command) = item else {
+                    continue;
+                };
+                self.commands += 1;
+                if let CommandKind::Unknown { magic, .. } = command.kind() {
+                    self.unmodelled += 1;
+                    *self
+                        .unmodelled_kinds
+                        .entry(String::from_utf8_lossy(magic).into_owned())
+                        .or_default() += 1;
+                }
+                let Some(participant) = addressed.get(&command.id()) else {
+                    continue;
+                };
+                let held = (path.to_owned(), *participant);
+                self.addressed.insert(held.clone());
+                if cast.contains(participant) {
+                    self.cast.insert(held.clone());
+                }
+                let motion = match command.kind() {
+                    CommandKind::C018(_) => {
+                        self.placed.insert(held);
+                        continue;
+                    }
+                    CommandKind::C010(play) => play.motion(),
+                    CommandKind::C040(play) => play.motion(),
+                    CommandKind::C090(wear) => wear.motion(),
+                    _ => continue,
+                };
+                let Some(motion) = motion.filter(|motion| !motion.is_empty()) else {
+                    continue;
+                };
+                match motion.starts_with("cfx") {
+                    true => self.facing.insert(held.clone()),
+                    false => self.moving.insert(held.clone()),
+                };
+                if cast.contains(participant) && !motion.starts_with("cfx") {
+                    self.cast_moving.insert(held);
+                }
+                // A face wears its poses out of packs it keeps resident whatever a cutscene
+                // loads, so only a body motion is measured against what the cutscene names.
+                if motion.starts_with("cfx") {
+                    continue;
+                }
+                self.motions[usize::from(holds.contains(motion))] += 1;
+                if !holds.contains(motion) {
+                    *self.missing.entry(motion.to_owned()).or_default() += 1;
+                }
+            }
+        }
+    }
+}
+
+/// Every motion a cutscene has on hand: what its own `CTRL` loads, plus the resident set each
+/// body it names keeps loaded whatever the cutscene asks for, which is where the idle and the
+/// additive gestures a conversation lays over it are filed.
+fn loaded<'a>(
+    file: &Cutscene,
+    shipped: &BTreeSet<&str>,
+    ironworks: &Ironworks,
+    holding: &'a mut BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<&'a str> {
+    let listed: Vec<&str> = file
+        .nodes()
+        .iter()
+        .filter_map(|node| match node {
+            Node::Resources(list) => Some(list),
+            _ => None,
+        })
+        .flatten()
+        .map(|resource| resource.path())
+        .collect();
+    let mut packs: BTreeSet<String> = listed
+        .iter()
+        .filter(|path| path.ends_with(".pap"))
+        .map(|path| (*path).to_owned())
+        .collect();
+    for path in &listed {
+        for held in path.split('/') {
+            let kind = match held.as_bytes().first() {
+                _ if held.len() != 5 || !held[1..].bytes().all(|byte| byte.is_ascii_digit()) => {
+                    continue;
+                }
+                Some(b'c') => "human",
+                Some(b'm') => "monster",
+                Some(b'd') => "demihuman",
+                _ => continue,
+            };
+            let root = format!("chara/{kind}/{held}/animation/a0001/bt_common/resident/");
+            packs.extend(
+                shipped
+                    .range(root.as_str()..)
+                    .take_while(|path| path.starts_with(&root))
+                    .map(|path| (*path).to_owned()),
+            );
+        }
+    }
+    for pack in &packs {
+        holding.entry(pack.clone()).or_insert_with(|| {
+            ironworks
+                .file::<Vec<u8>>(pack)
+                .ok()
+                .and_then(|bytes| AnimationPack::read(std::io::Cursor::new(bytes)).ok())
+                .map(|held| {
+                    held.animations()
+                        .iter()
+                        .map(|animation| animation.name().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+    }
+    holding
+        .iter()
+        .filter(|(path, _)| packs.contains(*path))
+        .flat_map(|(_, names)| names.iter().map(String::as_str))
+        .collect()
+}
+
 /// The value at a fraction along a sorted run.
 fn along(held: &[f32], fraction: f32) -> f32 {
     match held.is_empty() {
@@ -554,6 +724,11 @@ fn main() {
     let mut levels: BTreeMap<String, BTreeSet<u32>> = BTreeMap::new();
     let mut clashes: BTreeMap<&str, usize> = BTreeMap::new();
     let mut cameras = Cameras::default();
+    let mut acting = Acting::default();
+    // Every motion each pack holds, read once and kept: a cutscene names its packs rather than
+    // filing its motions, and the packs it names are largely shared between cutscenes.
+    let mut holding: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let shipped: BTreeSet<&str> = paths.lines().filter(|path| path.ends_with(".pap")).collect();
 
     let mut here;
     for path in paths.lines().filter(|path| path.ends_with(".cutb")) {
@@ -570,6 +745,36 @@ fn main() {
             }
         };
         files += 1;
+
+        let cast_ids: BTreeSet<u32> = file
+            .nodes()
+            .iter()
+            .filter_map(|node| match node {
+                Node::Participants(list) => Some(list),
+                _ => None,
+            })
+            .flatten()
+            .filter(|participant| match participant.data() {
+                InstanceData::HelperObject(helper) => matches!(
+                    helper.kind(),
+                    HelperKind::EventNpc
+                        | HelperKind::BattleNpc
+                        | HelperKind::Player
+                        | HelperKind::PartyMember
+                        | HelperKind::PartyMemberAlt
+                        | HelperKind::Unknown82
+                        | HelperKind::StableChocobo
+                ),
+                _ => false,
+            })
+            .map(Instance::id)
+            .collect();
+        acting.read(
+            path,
+            &file,
+            &loaded(&file, &shipped, &ironworks, &mut holding),
+            &cast_ids,
+        );
 
         for node in file.nodes() {
             let Node::Participants(participants) = node else {
@@ -1142,6 +1347,41 @@ fn main() {
     quantiles("aim angle at that character, unbound ", &mut cameras.aim_loose);
     quantiles("up target -> eye                     ", &mut cameras.span);
     quantiles("angle between up and forward         ", &mut cameras.square);
+
+    println!();
+    println!(
+        "{} timeline commands, {} of a magic this crate does not model",
+        acting.commands, acting.unmodelled
+    );
+    let mut kinds: Vec<_> = acting.unmodelled_kinds.iter().collect();
+    kinds.sort_by(|left, right| right.1.cmp(left.1));
+    println!(
+        "  commonest {:?}",
+        kinds.iter().take(12).map(|(magic, count)| (magic.as_str(), **count)).collect::<Vec<_>>()
+    );
+    println!(
+        "{} participants a timeline addresses: {} it places, {} it plays a motion on, {} it puts \
+         an expression on",
+        acting.addressed.len(),
+        acting.placed.len(),
+        acting.moving.len(),
+        acting.facing.len()
+    );
+    println!(
+        "  of those {} stand a character, {} of which a motion plays on",
+        acting.cast.len(),
+        acting.cast_moving.len()
+    );
+    println!(
+        "body motions named: {} a pack the cutscene has on hand holds, {} none does",
+        acting.motions[1], acting.motions[0]
+    );
+    let mut missing: Vec<_> = acting.missing.iter().collect();
+    missing.sort_by(|left, right| right.1.cmp(left.1));
+    for (name, count) in missing.iter().take(8) {
+        println!("  {count:>6}  {name}");
+    }
+    println!();
 
     println!("prop ids against the level's own lcb/svb keys {clashes:?}");
     println!("busiest cutscenes {:?}", &busiest[..10.min(busiest.len())]);

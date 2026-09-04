@@ -119,6 +119,9 @@ pub struct Cast {
     reading_rows: Option<Rows>,
     asked: bool,
     builds: BTreeMap<Key, Build>,
+    /// The participants a timeline has taken out of the frame, which a cutscene does to the double
+    /// standing in for someone the moment the other takes over.
+    hidden: BTreeSet<u32>,
     packs: Packs,
     failure: Option<String>,
 }
@@ -225,6 +228,15 @@ impl Cast {
         self.packs.queue.is_empty() && self.packs.reading.is_none()
     }
 
+    /// Whether a participant is drawn. Everyone is until a timeline says otherwise, which is the
+    /// state the game's own clip reverts to.
+    pub fn show(&mut self, participant: u32, shown: bool) {
+        match shown {
+            true => self.hidden.remove(&participant),
+            false => self.hidden.insert(participant),
+        };
+    }
+
     /// Moves a participant to where its own timeline puts it now.
     pub fn place(&mut self, participant: u32, at: Transform) {
         for wanted in &mut self.wanted {
@@ -244,6 +256,7 @@ impl Cast {
     pub fn standing(&self) -> Vec<scene::Standing> {
         self.wanted
             .iter()
+            .filter(|wanted| !self.hidden.contains(&wanted.participant))
             .filter_map(|wanted| {
                 let held = self.builds.get(&(wanted.roll, wanted.id, wanted.height))?;
                 Some(scene::Standing {

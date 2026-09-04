@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 
 use egui::{Align, Button, CentralPanel, Layout, RichText, ScrollArea, containers::panel::Panel};
-use glam::{Mat4, Quat, Vec3};
+use glam::{Mat4, Quat, Vec3, Vec4};
 use ironworks::file::cutb::{Cutscene, Node};
 use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData, Transform};
 use ironworks::file::lvb::LevelFile;
@@ -57,6 +57,13 @@ const ROLL_TAG: u8 = 0x35;
 /// Half the sensor height the game turns a focal length into a vertical field of view against, at
 /// a frame it fixes at sixteen by nine.
 const HALF_SENSOR: f32 = 7.001_51;
+
+/// Which channel of a `C049`'s curve set carries each part of the effect's colour. The client
+/// hands them to the same setter a placed effect's own `Rgba` reaches, in this order.
+const RED: u8 = 0x0C;
+const GREEN: u8 = 0x0B;
+const BLUE: u8 = 0x0A;
+const ALPHA: u8 = 0x0D;
 
 /// Frames a second. A cutscene's own numbering runs at this: a `C010` naming `cbfm_arms` ends at
 /// frame 155, and that pack's own binding gives the clip 5.1666665 seconds.
@@ -108,6 +115,24 @@ fn camera_field(set: &Curves, tag: u8, time: f32) -> Option<f32> {
         .iter()
         .find(|curve| curve.target() == CAMERA_FIELDS && curve.tag() & 0x3F == tag)
         .and_then(|curve| curve.at(time))
+}
+
+/// The colour a `C049`'s curve set states at a time. Its five channels sit on the set's one
+/// target; the fifth reaches nothing the client draws with.
+fn lit(set: &Curves, time: f32) -> Vec4 {
+    let channel = |tag: u8| {
+        set.curves()
+            .iter()
+            .find(|curve| curve.target() == 0 && curve.tag() & 0x3F == tag)
+            .and_then(|curve| curve.at(time))
+            .unwrap_or(1.0)
+    };
+    Vec4::new(
+        channel(RED),
+        channel(GREEN),
+        channel(BLUE),
+        channel(ALPHA).clamp(0.0, 1.0),
+    )
 }
 
 /// One target of a camera's curve set: what it stands for, what it hangs off, and where the
@@ -255,6 +280,19 @@ pub struct Part {
     motions: Vec<(f32, Cue)>,
     /// The `cfxf_` expression its face wears.
     faces: Vec<(f32, String)>,
+    /// The effects it fires.
+    effects: Vec<(f32, Burst)>,
+    /// Whether it is drawn. Empty where nothing states it, which leaves it drawn.
+    shown: Vec<(f32, bool)>,
+}
+
+/// One effect a timeline fires on a participant: which file, the curve set stating its colour, and
+/// where the timeline holding it ends, past which the effect is done.
+struct Burst {
+    path: String,
+    node: usize,
+    curves: i16,
+    until: f32,
 }
 
 /// One motion a timeline names for a body: which, how far into the clip to open, in seconds, and
@@ -274,6 +312,8 @@ impl Part {
         self.placed.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.motions.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.faces.sort_by(|left, right| left.0.total_cmp(&right.0));
+        self.effects.sort_by(|left, right| left.0.total_cmp(&right.0));
+        self.shown.sort_by(|left, right| left.0.total_cmp(&right.0));
     }
 }
 
@@ -352,7 +392,13 @@ fn cue(part: &mut Part, at: f32, motion: Option<&str>, from: f32, runs: f32) {
 
 /// Reads one timeline's commands into the parts its participants play, offset into the cutscene's
 /// own global frame numbering.
-fn parts_of(timeline: &Timeline, offset: f32, parts: &mut BTreeMap<u32, Part>) {
+fn parts_of(
+    timeline: &Timeline,
+    node: usize,
+    offset: f32,
+    span: f32,
+    parts: &mut BTreeMap<u32, Part>,
+) {
     let addressed = addressed(timeline);
     for item in timeline.items() {
         let Item::Command(command) = item else {
@@ -381,6 +427,20 @@ fn parts_of(timeline: &Timeline, offset: f32, parts: &mut BTreeMap<u32, Part>) {
             // its own length, and only a motion laid over the pose has an end of its own.
             CommandKind::C040(play) => cue(part, at, play.motion(), 0.0, f32::INFINITY),
             CommandKind::C090(wear) => cue(part, at, wear.motion(), 0.0, f32::INFINITY),
+            CommandKind::C049(effect) => {
+                if let Some(path) = effect.path().filter(|path| !path.is_empty()) {
+                    part.effects.push((
+                        at,
+                        Burst {
+                            path: path.to_owned(),
+                            node,
+                            curves: effect.curve_id().try_into().unwrap_or(0),
+                            until: offset + span,
+                        },
+                    ));
+                }
+            }
+            CommandKind::C019(state) => part.shown.push((at, state.visibility() & 0xFF != 0)),
             _ => {}
         }
     }
@@ -527,7 +587,6 @@ impl Player {
             let Node::Timeline(timeline) = held else {
                 continue;
             };
-            parts_of(timeline, offset, &mut parts);
             let local = shots_of(timeline);
             let span = timeline_span(
                 timeline,
@@ -536,6 +595,7 @@ impl Player {
                     .map(|(id, start, duration, ..)| (*id, *start, *duration))
                     .collect::<Vec<_>>(),
             );
+            parts_of(timeline, node, offset, span.max(1.0), &mut parts);
             for (_, start, duration, name, curves, bindings, near, far) in local {
                 shots.push(Shot {
                     node,
@@ -578,6 +638,52 @@ impl Player {
     /// How long the whole cutscene plays for, in frames.
     pub fn duration(&self) -> f32 {
         self.duration
+    }
+
+    /// The curve set of one id, out of the timeline that holds it.
+    fn set_of(cutscene: &Cutscene, node: usize, id: i16) -> Option<&Curves> {
+        let Some(Node::Timeline(timeline)) = cutscene.nodes().get(node) else {
+            return None;
+        };
+        timeline.items().iter().find_map(|item| match item {
+            Item::Curves(held) if held.id() == id => Some(held),
+            _ => None,
+        })
+    }
+
+    /// Every effect running at a time: the ones a participant has fired that its own timeline has
+    /// not run past, each standing where that participant now does. A firing keeps its id across
+    /// frames, so the particles it has run out are its own.
+    pub fn firing(&self, cutscene: &Cutscene, time: f32) -> Vec<scene::Fired> {
+        let participants = participants(cutscene);
+        let mut fired = Vec::new();
+        for (participant, part) in &self.parts {
+            let at = self.placed(*participant, time).or_else(|| {
+                participants
+                    .iter()
+                    .find(|held| held.id() == *participant)
+                    .map(stands_at)
+            });
+            let Some(at) = at.map(scene::matrix) else {
+                continue;
+            };
+            for (index, (start, burst)) in part.effects.iter().enumerate() {
+                if time < *start || time >= burst.until {
+                    continue;
+                }
+                let along = time - start;
+                fired.push(scene::Fired {
+                    id: u64::from(*participant) << 32 | index as u64,
+                    path: burst.path.clone(),
+                    at,
+                    frame: along as i32,
+                    tint: Self::set_of(cutscene, burst.node, burst.curves)
+                        .map(|set| lit(set, along))
+                        .unwrap_or(Vec4::ONE),
+                });
+            }
+        }
+        fired
     }
 
     /// The camera at a time, or `None` before any shot has started.
@@ -802,6 +908,9 @@ struct State {
     bodies: BTreeMap<u32, usize>,
     overs: BTreeMap<u32, usize>,
     faces: BTreeMap<u32, usize>,
+    /// The firings already logged, so one effect is reported when it starts rather than every
+    /// frame it runs for.
+    burst: std::collections::BTreeSet<u64>,
 }
 
 impl Default for State {
@@ -815,6 +924,7 @@ impl Default for State {
             bodies: BTreeMap::new(),
             overs: BTreeMap::new(),
             faces: BTreeMap::new(),
+            burst: std::collections::BTreeSet::new(),
         }
     }
 }
@@ -873,6 +983,18 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     state.cast.poll(ui.ctx(), backend);
     perform(tab.player.parts(), &mut state);
     let standing = state.cast.standing();
+    let firing = tab.player.firing(cutscene, state.time);
+    state.burst.retain(|id| firing.iter().any(|held| held.id == *id));
+    for held in &firing {
+        if state.burst.insert(held.id) {
+            log::info!(
+                "cutb: {:#x} fires {} at frame {:.0}",
+                held.id >> 32,
+                held.path,
+                state.time
+            );
+        }
+    }
 
     Panel::left("cutb_shots")
         .default_size(200.0)
@@ -896,6 +1018,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         }
         Fetch::Ready(scene) => {
             scene.stand(standing);
+            scene.fire(firing);
             if let Some(pose) = pose {
                 scene.drive(pose.drive());
             }
@@ -916,6 +1039,9 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
         if let Some((_, at)) = latest(&part.placed, time) {
             state.cast.place(*participant, *at);
         }
+        state
+            .cast
+            .show(*participant, latest(&part.shown, time).is_none_or(|(_, on)| *on));
         let Some(model) = state.cast.model(*participant).cloned() else {
             continue;
         };

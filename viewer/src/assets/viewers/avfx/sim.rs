@@ -29,7 +29,7 @@ const DEPTH: u8 = 4;
 
 /// Frames a loop runs for where nothing in the file bounds it, and the longest one it may reach.
 const LOOP: i32 = 300;
-const LONGEST: i32 = 3600;
+pub const LONGEST: i32 = 3600;
 
 /// Frames a fit is taken over.
 const FITTED: i32 = 300;

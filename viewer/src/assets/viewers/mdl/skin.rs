@@ -703,13 +703,21 @@ impl<T> Fetch<T> {
 }
 
 /// Every name a pack's own animation table states, which is how a timeline naming a motion says
-/// which pack to play it out of.
-pub fn motion_names(bytes: &[u8]) -> Result<Vec<String>> {
+/// which pack to play it out of, and whether each lays over the pose the body is already in rather
+/// than replacing it, which is what the clip's own blend hint states.
+pub fn motion_names(bytes: &[u8]) -> Result<Vec<(String, bool)>> {
     let file = AnimationPack::read(Cursor::new(bytes.to_vec()))?;
+    let bindings = file.parse_animations().unwrap_or_default();
     Ok(file
         .animations()
         .iter()
-        .map(|animation| animation.name().to_owned())
+        .map(|animation| {
+            let at = usize::try_from(animation.havok_index()).unwrap_or(usize::MAX);
+            let over = bindings
+                .get(at)
+                .is_some_and(|binding| binding.blend_hint() == 1);
+            (animation.name().to_owned(), over)
+        })
         .collect())
 }
 

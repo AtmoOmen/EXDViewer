@@ -50,8 +50,9 @@ type Key = (Roll, u32, u8);
 type Fetching = TrackedPromise<Result<Vec<(String, Vec<u8>)>>>;
 type Rows = TrackedPromise<Result<BTreeMap<(Roll, u32), Stands>>>;
 
-/// The motions each pack a scene loads holds, by the path it was read from.
-type Naming = TrackedPromise<Result<Vec<(String, Vec<String>)>>>;
+/// The motions each pack a scene loads holds, by the path it was read from, each with whether it
+/// lays over the pose the body is in rather than replacing it.
+type Naming = TrackedPromise<Result<Vec<(String, Vec<(String, bool)>)>>>;
 
 /// Everything every character in a scene reads, which is read once for the whole cast.
 struct Reference {
@@ -129,6 +130,8 @@ struct Packs {
     queue: Vec<String>,
     reading: Option<Naming>,
     named: BTreeMap<String, Vec<String>>,
+    /// The motions that lay over the pose the body is in rather than replacing it.
+    over: BTreeSet<String>,
     /// What has been queued, so a pack two characters share is read once.
     asked: BTreeSet<String>,
     /// Which bodies have had their resident set queued, so the listing is walked once a body
@@ -210,6 +213,12 @@ impl Cast {
             .cloned()
     }
 
+    /// Whether a motion lays over the pose the body is in rather than replacing it, which is what
+    /// its own clip states.
+    pub fn lays_over(&self, motion: &str) -> bool {
+        self.packs.over.contains(motion)
+    }
+
     /// Whether every pack asked for has been read, past which a motion the index does not name is
     /// filed nowhere the scene loads rather than not read yet.
     pub fn loaded(&self) -> bool {
@@ -282,7 +291,10 @@ impl Cast {
             match promise.try_take() {
                 Ok(read) => {
                     for (path, names) in read.unwrap_or_default() {
-                        for name in names {
+                        for (name, over) in names {
+                            if over {
+                                self.packs.over.insert(name.clone());
+                            }
                             self.packs.named.entry(name).or_default().push(path.clone());
                         }
                     }

@@ -257,10 +257,13 @@ pub struct Part {
     faces: Vec<(f32, String)>,
 }
 
-/// One motion a timeline names for a body: which, and how far into the clip to open, in seconds.
+/// One motion a timeline names for a body: which, how far into the clip to open, in seconds, and
+/// how long the command runs for, in the cutscene's own frames. Only a motion laid over the pose
+/// reads the last: what replaces the pose holds until something else replaces it.
 struct Cue {
     motion: String,
     from: f32,
+    runs: f32,
 }
 
 impl Part {
@@ -272,6 +275,27 @@ impl Part {
         self.motions.sort_by(|left, right| left.0.total_cmp(&right.0));
         self.faces.sort_by(|left, right| left.0.total_cmp(&right.0));
     }
+}
+
+/// Which motion holds at a time on one of the two layers a body plays on: the last to have
+/// started, of the ones that lay over the pose or of the ones that replace it.
+///
+/// A motion that replaces the pose holds until another replaces it; one that lays over it runs
+/// only for as long as its own command states, past which nothing lays over anything.
+fn started<'a>(
+    motions: &'a [(f32, Cue)],
+    time: f32,
+    over: bool,
+    lays_over: &dyn Fn(&str) -> bool,
+) -> Option<(usize, &'a Cue)> {
+    motions
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, (at, held))| {
+            *at <= time && lays_over(&held.motion) == over && (!over || time < at + held.runs)
+        })
+        .map(|(index, (_, held))| (index, held))
 }
 
 /// Which of a list's entries holds at a time: the last to have started.
@@ -308,7 +332,7 @@ fn addressed(timeline: &Timeline) -> BTreeMap<i16, u32> {
 /// Files a named motion where it belongs: a face wears the poses its own packs name and a body
 /// plays the rest. A `cfx` name that is not a pose is the face's own blink or lip clip, which the
 /// body would only corrupt, so nothing plays it.
-fn cue(part: &mut Part, at: f32, motion: Option<&str>, from: f32) {
+fn cue(part: &mut Part, at: f32, motion: Option<&str>, from: f32, runs: f32) {
     let Some(motion) = motion.filter(|motion| !motion.is_empty()) else {
         return;
     };
@@ -320,6 +344,7 @@ fn cue(part: &mut Part, at: f32, motion: Option<&str>, from: f32) {
             Cue {
                 motion: motion.to_owned(),
                 from,
+                runs,
             },
         )),
     }
@@ -350,10 +375,12 @@ fn parts_of(timeline: &Timeline, offset: f32, parts: &mut BTreeMap<u32, Part>) {
                     true => play.animation_start() / FRAMES_A_SECOND,
                     false => 0.0,
                 };
-                cue(part, at, play.motion(), from);
+                cue(part, at, play.motion(), from, play.duration().max(0) as f32);
             }
-            CommandKind::C040(play) => cue(part, at, play.motion(), 0.0),
-            CommandKind::C090(wear) => cue(part, at, wear.motion(), 0.0),
+            // Neither states how long it runs: a `C040` opens with a one where a `C010` opens with
+            // its own length, and only a motion laid over the pose has an end of its own.
+            CommandKind::C040(play) => cue(part, at, play.motion(), 0.0, f32::INFINITY),
+            CommandKind::C090(wear) => cue(part, at, wear.motion(), 0.0, f32::INFINITY),
             _ => {}
         }
     }
@@ -773,6 +800,7 @@ struct State {
     /// Which cue each participant's body and face are holding, so a cue is issued when it changes
     /// rather than every frame: taking a clip up is what puts its own clock back to nought.
     bodies: BTreeMap<u32, usize>,
+    overs: BTreeMap<u32, usize>,
     faces: BTreeMap<u32, usize>,
 }
 
@@ -785,6 +813,7 @@ impl Default for State {
             playing: false,
             fps: FRAMES_A_SECOND,
             bodies: BTreeMap::new(),
+            overs: BTreeMap::new(),
             faces: BTreeMap::new(),
         }
     }
@@ -890,7 +919,8 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
         let Some(model) = state.cast.model(*participant).cloned() else {
             continue;
         };
-        if let Some((at, held)) = latest(&part.motions, time)
+        let lays_over = |motion: &str| state.cast.lays_over(motion);
+        if let Some((at, held)) = started(&part.motions, time, false, &lays_over)
             && state.bodies.get(participant) != Some(&at)
             && let Some(pack) = state.cast.holding(*participant, &held.motion)
         {
@@ -902,6 +932,22 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             );
             model.stand(&[(pack, &held.motion)], 0.0);
             model.opened_at(held.from);
+        }
+        match started(&part.motions, time, true, &lays_over) {
+            Some((at, held)) => {
+                if state.overs.get(participant) != Some(&at)
+                    && let Some(pack) = state.cast.holding(*participant, &held.motion)
+                {
+                    state.overs.insert(*participant, at);
+                    log::info!("cutb: {participant:#x} lays {} over it", held.motion);
+                    model.act(&[pack], &held.motion, 0.0);
+                }
+            }
+            None => {
+                if state.overs.remove(participant).is_some() {
+                    model.act(&[], "", 0.0);
+                }
+            }
         }
         if let Some((at, name)) = latest(&part.faces, time)
             && state.faces.get(participant) != Some(&at)
@@ -1099,17 +1145,18 @@ mod test {
     #[test]
     fn a_pose_goes_to_the_face_and_a_motion_to_the_body() {
         let mut part = Part::default();
-        cue(&mut part, 10.0, Some("cfxf_salute"), 0.0);
-        cue(&mut part, 20.0, Some("cbfm_arms"), 3.0);
+        cue(&mut part, 10.0, Some("cfxf_salute"), 0.0, 30.0);
+        cue(&mut part, 20.0, Some("cbfm_arms"), 3.0, 30.0);
         // The face's own blink and lip clips move bones the body does not carry.
-        cue(&mut part, 30.0, Some("cfxb_blink1"), 0.0);
-        cue(&mut part, 40.0, Some("cfxl_lip_nor1"), 0.0);
-        cue(&mut part, 50.0, None, 0.0);
+        cue(&mut part, 30.0, Some("cfxb_blink1"), 0.0, 30.0);
+        cue(&mut part, 40.0, Some("cfxl_lip_nor1"), 0.0, 30.0);
+        cue(&mut part, 50.0, None, 0.0, 30.0);
         assert_eq!(part.faces.len(), 1);
         assert_eq!(part.faces[0], (10.0, "salute".to_owned()));
         assert_eq!(part.motions.len(), 1);
         assert_eq!(part.motions[0].1.motion, "cbfm_arms");
         assert_eq!(part.motions[0].1.from, 3.0);
+        assert_eq!(part.motions[0].1.runs, 30.0);
     }
 
     #[test]
@@ -1118,15 +1165,33 @@ mod test {
             placed: vec![(100.0, placed(2.0)), (0.0, placed(1.0))],
             ..Part::default()
         };
-        cue(&mut part, 50.0, Some("cbfm_arms"), 0.0);
-        cue(&mut part, 10.0, Some("cbnm_id0"), 0.0);
-        cue(&mut part, 80.0, Some("cfxf_salute"), 0.0);
-        cue(&mut part, 20.0, Some("cfxf_angry"), 0.0);
+        cue(&mut part, 50.0, Some("cbfm_arms"), 0.0, 30.0);
+        cue(&mut part, 10.0, Some("cbnm_id0"), 0.0, 30.0);
+        cue(&mut part, 80.0, Some("cfxf_salute"), 0.0, 30.0);
+        cue(&mut part, 20.0, Some("cfxf_angry"), 0.0, 30.0);
         part.order();
         assert_eq!(latest(&part.placed, 50.0).unwrap().1.translation()[0], 1.0);
         assert_eq!(latest(&part.motions, 60.0).unwrap().1.motion, "cbfm_arms");
         assert_eq!(latest(&part.faces, 90.0).unwrap().1, "salute");
         assert_eq!(latest(&part.faces, 50.0).unwrap().1, "angry");
+    }
+
+    #[test]
+    fn a_motion_laid_over_the_pose_neither_replaces_it_nor_outlives_its_own_command() {
+        let mut part = Part::default();
+        cue(&mut part, 0.0, Some("cbnm_id0"), 0.0, f32::INFINITY);
+        cue(&mut part, 10.0, Some("cbfa_add_yes"), 0.0, 20.0);
+        cue(&mut part, 50.0, Some("cbfm_arms"), 0.0, 60.0);
+        part.order();
+        let over = |motion: &str| motion.starts_with("cbfa_");
+        let base = |time| started(&part.motions, time, false, &over).map(|(_, held)| &held.motion);
+        let laid = |time| started(&part.motions, time, true, &over).map(|(_, held)| &held.motion);
+        // The nod lays over the idle rather than becoming it, and is gone once it has run.
+        assert_eq!(base(20.0).unwrap(), "cbnm_id0");
+        assert_eq!(laid(20.0).unwrap(), "cbfa_add_yes");
+        assert!(laid(30.0).is_none());
+        assert_eq!(base(70.0).unwrap(), "cbfm_arms");
+        assert!(laid(70.0).is_none());
     }
 
     #[test]

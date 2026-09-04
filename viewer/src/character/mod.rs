@@ -2440,9 +2440,13 @@ impl CharacterBuilder {
             Some(Pick::Emote(emote)) => {
                 self.emote = Some(emote);
                 if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
-                    match emote.expression() {
-                        Some(name) => model.express(name),
-                        None => {
+                    let seated = self.mount.is_some().then(|| emote.mounted()).flatten();
+                    match (emote.expression(), seated) {
+                        (Some(name), _) => model.express(name),
+                        // A rider keeps the pose the mount holds it in, so the emote it plays is
+                        // the partial the sheet names for that rather than the whole-body one.
+                        (None, Some(key)) => model.play_over(&self.emote_packs(key)),
+                        (None, None) => {
                             let (start, settles) = emote.keys();
                             let packs = start.map(|key| self.emote_packs(key)).unwrap_or_default();
                             let settles = settles.and_then(|key| {

@@ -650,4 +650,49 @@ mod tests {
             assert!(mean < 0.02, "{} stands {mean} from {hand}", table[at]);
         }
     }
+
+    /// Cheer On: Orange, off the real install: the emote summons the same penlight twice, and the
+    /// second names attach state 4, which every point in `c0101.atch` sends to `n_throw`. Measured
+    /// as where that bone stands against each hand over the motion.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn where_the_throw_bone_stands_over_cheer_on() {
+        let install = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(SQPACK)));
+        let read = |path: &str| install.file::<Vec<u8>>(path).expect(path);
+
+        let skeleton = SkeletonBinary::read(Cursor::new(read(
+            "chara/human/c0101/skeleton/base/b0001/skl_c0101b0001.sklb",
+        )))
+        .expect("the body skeleton")
+        .parse_skeleton()
+        .expect("a readable tagfile");
+        let rig = Rig::new(
+            skeleton.bones(),
+            skeleton.parent_indices(),
+            skeleton.reference_pose(),
+        );
+        let body = "chara/human/c0101/animation/a0001/bt_common/emote_sp/sp78_loop.pap";
+        let pack = AnimationPack::read(Cursor::new(read(body))).expect("the body pack");
+        let bindings = pack.parse_animations().expect("the body motion");
+        let duration = bindings[0].motion().duration();
+
+        for step in 0..=10 {
+            let time = duration * step as f32 / 10.0;
+            let mut locals = rig.reference().to_vec();
+            rig.lay(&mut locals, &bindings[0], rig.names(), None, time, 1.0);
+            let posed = rig.world(&locals);
+            let at = |name: &str| {
+                posed[rig.bone(name).expect(name)]
+                    .matrix()
+                    .to_scale_rotation_translation()
+                    .2
+            };
+            let throw = at("n_throw");
+            println!(
+                "t={time:5.2} n_throw {throw:?} l {:.4} r {:.4}",
+                throw.distance(at("n_buki_l")),
+                throw.distance(at("n_buki_r"))
+            );
+        }
+    }
 }

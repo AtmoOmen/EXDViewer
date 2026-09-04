@@ -1007,7 +1007,9 @@ impl Animation {
                 wanted: RefCell::new(
                     code.as_deref()
                         .and_then(|code| match &mount {
-                            Some(mount) => seat_path(code, mount, 0).or_else(|| pack_path(code)),
+                            Some(mount) => {
+                                seat_paths(code, mount, 0).pop().or_else(|| pack_path(code))
+                            }
                             None => pack_path(code),
                         })
                         .unwrap_or_default(),
@@ -1379,7 +1381,11 @@ impl Animation {
         self.built_on
             .borrow()
             .iter()
-            .find_map(|code| exists(seat_path(code, mount, seat)))
+            .find_map(|code| {
+                seat_paths(code, mount, seat)
+                    .into_iter()
+                    .find_map(|path| exists(Some(path)))
+            })
             .map(|path| (path, Some(RIDE_IDLE)))
             .or_else(|| {
                 self.built_on
@@ -1465,6 +1471,18 @@ impl Animation {
             .collect();
         self.action.once(candidates, fade);
         self.running.set(true);
+    }
+
+    /// Plays the first of `packs` the install holds over whatever the body is doing rather than in
+    /// place of it. An emote played seated or mounted is a partial naming only the bones above the
+    /// waist, so the pose the mount holds the rider in shows through everything it leaves alone.
+    pub fn play_over(&self, packs: &[String]) {
+        if packs.is_empty() {
+            return;
+        }
+        self.action.plays(packs, None, self.priced());
+        self.running.set(true);
+        *self.linked.borrow_mut() = None;
     }
 
     /// Puts an expression on the face the character wears. A file's own name is only a guess at
@@ -2073,18 +2091,19 @@ fn pack_path(code: &str) -> Option<String> {
     ))
 }
 
-/// The pack a mount names for one of its own seats, 1-based: a two-seater's driver leans and sits
-/// differently from its passenger, and a bench seating several turns some of them toward the one
-/// driving rather than facing forward, so each seat's pose is filed apart from the others rather
-/// than shared. Most mounts ship none of these and fall back to the plain standing idle
-/// [`pack_path`] already names: `bt_common/mount/mount_start.pap` is not a pose to fall back to at
-/// all, whatever seat is asked for, since its one motion is the whistle a mount is called with.
-fn seat_path(code: &str, mount: &str, seat: usize) -> Option<String> {
-    Some(format!(
-        "chara/{}/{code}/animation/a0001/mt_{mount}/resident/mount{:02}.pap",
-        tree(code)?,
-        seat + 1
-    ))
+/// The packs a mount names for one of its own seats, in the order to try them. A two-seater's
+/// driver leans and sits differently from its passenger, and a bench seating several turns some of
+/// them toward the one driving rather than facing forward, so a mount that seats more than one
+/// files a numbered pack per seat, 1-based; every other mount files its rider's pose under one
+/// unnumbered pack, which a numbered seat also falls back to. `bt_common/mount/mount_start.pap` is
+/// not a pose to fall back to at all, whatever seat is asked for, since its one motion is the
+/// whistle a mount is called with.
+fn seat_paths(code: &str, mount: &str, seat: usize) -> Vec<String> {
+    let Some(tree) = tree(code) else {
+        return Vec::new();
+    };
+    let root = format!("chara/{tree}/{code}/animation/a0001/mt_{mount}/resident/mount");
+    vec![format!("{root}{:02}.pap", seat + 1), format!("{root}.pap")]
 }
 
 /// The packs under a model's animation directory, named by what tells them apart. Every pack of a
@@ -2129,7 +2148,7 @@ mod tests {
     use super::{
         Animation, Companion, Expression, Extra, Fetch, Layer, Leaving, Motions, PoseLookup,
         Poses, Skeleton, Skin, action_key, code, extra, facial, found, held, opening, ordering,
-        pack_path, pack_root, seat_path, skeleton_path,
+        pack_path, pack_root, seat_paths, skeleton_path,
     };
 
     fn transform(translation: [f32; 3]) -> Transform {
@@ -2354,8 +2373,11 @@ mod tests {
             Some("chara/monster/m0430/animation/")
         );
         assert_eq!(
-            seat_path("c0101", "m0547", 3).as_deref(),
-            Some("chara/human/c0101/animation/a0001/mt_m0547/resident/mount04.pap")
+            seat_paths("c0101", "m0547", 3),
+            [
+                "chara/human/c0101/animation/a0001/mt_m0547/resident/mount04.pap",
+                "chara/human/c0101/animation/a0001/mt_m0547/resident/mount.pap"
+            ]
         );
     }
 

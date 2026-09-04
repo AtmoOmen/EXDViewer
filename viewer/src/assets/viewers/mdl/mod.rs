@@ -3349,6 +3349,12 @@ impl Rendered {
         self.animation.play(packs, then);
     }
 
+    /// Poses the character out of the first of `packs` the install holds over whatever it is
+    /// already doing, which is what picking an emote while mounted is.
+    pub fn play_over(&self, packs: &[String]) {
+        self.animation.play_over(packs);
+    }
+
     /// What to price a change of clip against, out of the game's own blend tables.
     pub fn blending(&self, blend: impl Fn(&str, &str) -> f32 + 'static) {
         self.animation.blending(blend);

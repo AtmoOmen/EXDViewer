@@ -6,9 +6,9 @@
 //! sixteen bits are unused in every weapon Item sampled. `ModelSub` is the other hand's model for
 //! most of them, but a fist weapon's is a hands equipment id: see [`FISTS`]. Where a weapon
 //! attaches to the skeleton comes from the character's own `.atch` file, keyed by a three-letter
-//! tag this module derives from the item's `ItemUICategory` (the job the weapon belongs to).
+//! tag `chara/xls/weapontype/attach.wtd` gives every weapon model set.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ironworks::excel::Language;
 use ironworks::file::File;
 use ironworks::file::atch::AttachPoints;
@@ -19,12 +19,11 @@ use crate::backend::Backend;
 use crate::character::Gear;
 use crate::excel::provider::{ExcelProvider, ExcelSheet as _};
 
-/// `Item`'s model quads, name, icon, `ItemUICategory` and `EquipSlotCategory`, as byte offsets.
+/// `Item`'s model quads, name, icon and `EquipSlotCategory`, as byte offsets.
 const MODEL_MAIN: u32 = 24;
 const MODEL_SUB: u32 = 32;
 const NAME: u32 = 12;
 const ICON: u32 = 136;
-const UI_CATEGORY: u32 = 152;
 const SLOT_CATEGORY: u32 = 154;
 /// Where `EquipSlotCategory` states whether a row fills the main hand or the off hand.
 const MAIN_HAND: u32 = 0;
@@ -34,6 +33,9 @@ const OFF_HAND: u32 = 1;
 /// of a main hand in this range as the main's own plus fifty rather than off the item, and
 /// `LoadEquipment` then draws the hands from what the item's `ModelSub` names.
 const FISTS: std::ops::RangeInclusive<u16> = 1601..=1650;
+
+/// The table naming which `.atch` point each weapon model set hangs from.
+const ATTACH_TYPES: &str = "chara/xls/weapontype/attach.wtd";
 
 /// A weapon model: the set its directory is filed under, the body within it, and the material
 /// colourway. Packed the same shape as [`super::Gear`] but sixteen bits a field rather than eight.
@@ -76,55 +78,24 @@ pub struct Piece {
     /// Whether this item's own `EquipSlotCategory` covers the off hand, leaving nothing there to
     /// pick by hand.
     pub covers_off_hand: bool,
-    /// The `.atch` point this weapon hangs from, out of its `ItemUICategory`.
-    pub tag: Option<&'static str>,
 }
 
-/// The `ItemUICategory` row a combat job's weapon is filed under, and the `.atch` tag it hangs
-/// from. Lifted from Penumbra's `AtchType`, which already names these tags by job; a few beyond
-/// its own list (`clw`, `pic`) are read off the tag's own spelling rather than a named source.
-const TAGS: &[(u16, &str)] = &[
-    (1, "fsw"),   // Pugilist's Arm
-    (2, "swd"),   // Gladiator's Arm
-    (3, "2ax"),   // Marauder's Arm
-    (4, "2bw"),   // Archer's Arm
-    (5, "2sp"),   // Lancer's Arm
-    (6, "rod"),   // One-handed Thaumaturge's Arm
-    (7, "2st"),   // Two-handed Thaumaturge's Arm
-    (8, "stf"),   // One-handed Conjurer's Arm
-    (9, "2st"),   // Two-handed Conjurer's Arm
-    (10, "2bk"),  // Arcanist's Grimoire
-    (11, "sld"),  // Shield
-    (84, "dgr"),  // Rogue's Arm
-    (87, "2sw"),  // Dark Knight's Arm
-    (88, "2gn"),  // Machinist's Arm
-    (89, "2gl"),  // Astrologian's Arm
-    (96, "2kt"),  // Samurai's Arm
-    (97, "2rp"),  // Red Mage's Arm
-    (98, "2bk"),  // Scholar's Arm
-    (105, "stf"), // Blue Mage's Arm, unconfirmed
-    (106, "2gb"), // Gunbreaker's Arm
-    (107, "chk"), // Dancer's Arm
-    (108, "2km"), // Reaper's Arm
-    (109, "2ff"), // Sage's Arm
-    (110, "clw"), // Viper's Arm
-    (111, "pic"), // Pictomancer's Arm
-];
+/// Weapon model set to `.atch` point, in the table's own ascending order.
+pub type Tags = Vec<(u32, String)>;
 
-fn tag(category: u16) -> Option<&'static str> {
-    TAGS.iter()
-        .find(|(id, _)| *id == category)
-        .map(|(_, tag)| *tag)
-}
+/// The point a weapon model set hangs from, which the table states one of per run of sets.
+pub(super) use super::stance::code as tag;
 
 /// Every weapon and shield the game names, split by which hand it is picked for, in one list per
-/// hand.
-pub type Pieces = (Vec<Piece>, Vec<Piece>);
+/// hand, and the table saying where each model set hangs.
+pub type Pieces = (Vec<Piece>, Vec<Piece>, Tags);
 
 /// Every weapon and shield the game names, split by which hand it is picked for. A category that
 /// covers the off hand rather than filling it (a fist weapon's second knuckle) never lists
 /// anything for that hand: the item's own `off_hand` supplies it instead.
 pub async fn read(backend: &Backend, language: Language) -> Result<Pieces> {
+    let tags = super::stance::weapon_types(&backend.files().read(ATTACH_TYPES).await?)
+        .context("weapon attach types")?;
     let excel = backend.excel();
     let items = excel.get_sheet("Item", language).await?;
     let categories = excel.get_sheet("EquipSlotCategory", language).await?;
@@ -177,10 +148,6 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Pieces> {
             },
             gauntlets: fists.then(|| Gear::read(sub)).flatten(),
             covers_off_hand: covers_off,
-            tag: row
-                .read::<u8>(UI_CATEGORY)
-                .ok()
-                .and_then(|category| tag(u16::from(category))),
         };
         if fills_main {
             main_hand.push(piece.clone());
@@ -192,11 +159,12 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Pieces> {
     main_hand.sort_by(|left, right| left.name.cmp(&right.name));
     off_hand.sort_by(|left, right| left.name.cmp(&right.name));
     log::info!(
-        "character: {} main hand, {} off hand weapons",
+        "character: {} main hand, {} off hand weapons, {} attach points",
         main_hand.len(),
-        off_hand.len()
+        off_hand.len(),
+        tags.len()
     );
-    Ok((main_hand, off_hand))
+    Ok((main_hand, off_hand, tags))
 }
 
 /// Where a race's `.atch` file is filed, which names its weapon and tool attach points.
@@ -340,10 +308,32 @@ mod tests {
         assert!(!FISTS.contains(&301));
     }
 
+    /// The points `attach.wtd` itself names for the first weapon sets it carries, and the clamp a
+    /// set it states nothing of reads under.
     #[test]
-    fn known_jobs_resolve_a_tag() {
-        assert_eq!(tag(2), Some("swd"));
-        assert_eq!(tag(96), Some("2kt"));
-        assert_eq!(tag(63), None);
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_weapon_set_reads_the_point_the_table_hangs_it_from() {
+        let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
+            ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),
+        ));
+        let bytes: Vec<u8> = install.file(ATTACH_TYPES).expect("the table");
+        let tags = super::super::stance::weapon_types(&bytes).expect("a readable table");
+        assert_eq!(tag(&tags, 101), Some("sld"), "a shield");
+        assert_eq!(tag(&tags, 201), Some("swd"), "a gladius");
+        assert_eq!(tag(&tags, 1601), Some("clg"), "a fist weapon");
+        assert_eq!(
+            tag(&tags, 1651),
+            Some("clg"),
+            "the second knuckle clamps into the first"
+        );
+
+        // Every point a combat weapon set is sent to is one the body's own `.atch` carries. A few
+        // of the tool points are in no player race's file, and those hang off the bare hand bone.
+        let bytes: Vec<u8> = install.file(&atch_path(101)).expect("the attach points");
+        let points = AttachPoints::read(Cursor::new(bytes)).expect("a readable file");
+        for set in (101..=2801).step_by(100) {
+            let held = tag(&tags, set).expect("every set reads a point");
+            assert!(points.point(held).is_some(), "c0101.atch has no {held}");
+        }
     }
 }

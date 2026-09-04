@@ -335,6 +335,8 @@ pub struct CharacterBuilder {
     /// list is worn.
     weapons_main: Vec<weapons::Piece>,
     weapons_off: Vec<weapons::Piece>,
+    /// Which `.atch` point each weapon model set hangs from.
+    weapon_tags: weapons::Tags,
     reading_weapons: Option<TrackedPromise<Result<weapons::Pieces>>>,
     main_hand: Option<usize>,
     off_hand: Option<usize>,
@@ -448,6 +450,7 @@ impl Default for CharacterBuilder {
             mounts_matched: Default::default(),
             weapons_main: Vec::new(),
             weapons_off: Vec::new(),
+            weapon_tags: Vec::new(),
             reading_weapons: None,
             main_hand: None,
             off_hand: None,
@@ -508,6 +511,7 @@ impl CharacterBuilder {
         self.mounts_matched.take();
         self.weapons_main.clear();
         self.weapons_off.clear();
+        self.weapon_tags.clear();
         self.reading_weapons = None;
         self.main_hand = None;
         self.off_hand = None;
@@ -741,9 +745,10 @@ impl CharacterBuilder {
         }
         if let Some(promise) = self.reading_weapons.take() {
             match promise.try_take() {
-                Ok(Ok((main_hand, off_hand))) => {
+                Ok(Ok((main_hand, off_hand, tags))) => {
                     self.weapons_main = main_hand;
                     self.weapons_off = off_hand;
+                    self.weapon_tags = tags;
                     self.main_matched.take();
                     self.off_matched.take();
                 }
@@ -1016,16 +1021,17 @@ impl CharacterBuilder {
             let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
             let log = self.logged.get() != key;
             self.logged.set(key);
-            found.push(self.attach(main.weapon.model(), main.tag, true, atch, log));
+            let tag = |weapon: &weapons::Weapon| weapons::tag(&self.weapon_tags, weapon.set);
+            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, atch, log));
             let off = match main.covers_off_hand {
-                true => main.off_hand.map(|weapon| (weapon, main.tag)),
+                true => main.off_hand,
                 false => self
                     .off_hand
                     .and_then(|at| self.weapons_off.get(at))
-                    .map(|piece| (piece.weapon, piece.tag)),
+                    .map(|piece| piece.weapon),
             };
-            if let Some((weapon, tag)) = off {
-                found.push(self.attach(weapon.model(), tag, false, atch, log));
+            if let Some(weapon) = off {
+                found.push(self.attach(weapon.model(), tag(&weapon), false, atch, log));
             }
         }
         // An emote's own prop, held at the same fallback bone a weapon takes with no `.atch` tag

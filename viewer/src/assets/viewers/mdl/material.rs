@@ -384,23 +384,31 @@ pub(crate) fn shared_set(set: u32) -> u32 {
     }
 }
 
+/// Whether the imc's own colourway is what files this material, which is what makes an entry
+/// naming material nought leave it with no file to read at all. Everything a piece states as its
+/// own is filed there; the skin it borrows from the body it is worn over is not, and that is the
+/// one name `Human::ResolveMtrlPath` answers without asking the imc first.
+pub fn colourwayed(model: &str, name: &str) -> bool {
+    match model.starts_with("chara/equipment/") || model.starts_with("chara/accessory/") {
+        true => name.trim_start_matches('/').as_bytes().get(8) != Some(&b'b'),
+        false => true,
+    }
+}
+
 /// The material variant a worn piece's `.imc` says `variant` actually draws with. Several variants
 /// commonly share one material to avoid duplicate files, so the folder a piece's material sits in
-/// is not always its own variant number. Falls back to `variant` wherever there is no imc to ask, it
-/// will not read, or it is silent about this one: that is the folder `variant` alone already named.
-pub fn resolve_variant(path: &str, variant: u16, imc_bytes: Option<&[u8]>) -> u16 {
+/// is not always its own variant number. Nought is the entry stating that the slot draws no
+/// material at all.
+///
+/// `None` wherever nothing states one: a piece looked at rather than worn, no imc to ask, one that
+/// will not read, or one silent about this variant. That leaves the folder `variant` alone named.
+pub fn resolve_variant(path: &str, variant: u16, imc_bytes: Option<&[u8]>) -> Option<u16> {
     if variant == 0 {
-        return variant;
+        return None;
     }
-    let Some(bytes) = imc_bytes else {
-        return variant;
-    };
-    let Ok(image_change) = imc::ImageChange::read(Cursor::new(bytes.to_vec())) else {
-        return variant;
-    };
-    image_change
-        .entry(super::imc_part(path), variant)
-        .map_or(variant, |entry| u16::from(entry.material_id()))
+    let image_change = imc::ImageChange::read(Cursor::new(imc_bytes?.to_vec())).ok()?;
+    let entry = image_change.entry(super::imc_part(path), variant)?;
+    Some(u16::from(entry.material_id()))
 }
 
 #[cfg(test)]
@@ -408,9 +416,24 @@ mod tests {
     use ironworks::Ironworks;
     use ironworks::sqpack::{Install, SqPack};
 
-    use super::resolve_variant;
+    use super::{colourwayed, resolve_variant};
 
     const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    /// The one material a slot naming no material still draws: a piece borrows the skin showing
+    /// through it from the body it is worn over, which is filed under that body rather than under
+    /// the piece's own colourway. A weapon's own material spells a `b` in the same place and is
+    /// not one of those.
+    #[test]
+    fn a_borrowed_skin_is_not_filed_under_the_wearers_colourway() {
+        let worn = "chara/equipment/e0028/model/c0101e0028_top.mdl";
+        assert!(colourwayed(worn, "mt_c0101e0028_top_a.mtrl"));
+        assert!(!colourwayed(worn, "mt_c0101b0001_a.mtrl"));
+        assert!(colourwayed(
+            "chara/weapon/w5341/obj/body/b0001/model/w5341b0001.mdl",
+            "mt_w5341b0001_a.mtrl"
+        ));
+    }
 
     /// Tataru's `ModelHead` names `e0005` variant 224, which has no `v0224` material on disk. Its
     /// own `e0005.imc` states variant 224's material_id as 26, and `v0026` does exist: the failing
@@ -424,8 +447,8 @@ mod tests {
             .file::<Vec<u8>>("chara/equipment/e0005/e0005.imc")
             .unwrap();
         let path = "chara/equipment/e0005/model/c0101e0005_met.mdl";
-        assert_eq!(resolve_variant(path, 224, Some(&imc)), 26);
-        assert_eq!(resolve_variant(path, 1, Some(&imc)), 1);
-        assert_eq!(resolve_variant(path, 224, None), 224);
+        assert_eq!(resolve_variant(path, 224, Some(&imc)), Some(26));
+        assert_eq!(resolve_variant(path, 1, Some(&imc)), Some(1));
+        assert_eq!(resolve_variant(path, 224, None), None);
     }
 }

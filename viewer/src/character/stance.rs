@@ -131,20 +131,9 @@ impl Stance {
         })
     }
 
-    /// The motion class a weapon model set is in: the last entry at or below it, since the table
-    /// states one set per run of them and the client clamps a lookup between two into the lower.
-    /// Nothing held is an empty hand.
+    /// The motion class a weapon model set is in. Nothing held is an empty hand.
     pub fn class(&self, set: Option<u16>) -> &str {
-        let Some(set) = set else {
-            return EMPTY;
-        };
-        let at = self
-            .classes
-            .partition_point(|(held, _)| *held <= u32::from(set));
-        match self.classes.get(at.saturating_sub(1)) {
-            Some((_, class)) => class,
-            None => EMPTY,
-        }
+        set.and_then(|set| code(&self.classes, set)).unwrap_or(EMPTY)
     }
 
     /// The directory a pair of weapons files its drawn packs under.
@@ -368,9 +357,10 @@ fn name(block: &[u8], at: usize) -> Option<String> {
     Some(std::str::from_utf8(&rest[..end]).ok()?.to_owned())
 }
 
-/// The weapon type table: a four-byte header whose second half counts the entries, then one
-/// four-byte model set and one three-letter code packed into four bytes for each.
-fn weapon_types(bytes: &[u8]) -> Option<Vec<(u32, String)>> {
+/// A weapon type table, which `motion.wtd` and `attach.wtd` are each one of: a four-byte header
+/// whose second half counts the entries, then one four-byte model set and one three-letter code
+/// packed into four bytes for each.
+pub(super) fn weapon_types(bytes: &[u8]) -> Option<Vec<(u32, String)>> {
     let count = usize::from(u16::from_le_bytes(bytes.get(2..4)?.try_into().ok()?));
     (0..count)
         .map(|at| {
@@ -380,6 +370,15 @@ fn weapon_types(bytes: &[u8]) -> Option<Vec<(u32, String)>> {
             Some((set, code))
         })
         .collect()
+}
+
+/// The code a weapon model set reads out of one: the last entry at or below it, since the table
+/// states one set per run of them and the client clamps a lookup between two into the lower.
+pub(super) fn code(types: &[(u32, String)], set: u16) -> Option<&str> {
+    let at = types.partition_point(|(held, _)| *held <= u32::from(set));
+    types
+        .get(at.saturating_sub(1))
+        .map(|(_, code)| code.as_str())
 }
 
 #[cfg(test)]

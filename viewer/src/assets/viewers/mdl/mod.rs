@@ -361,9 +361,9 @@ struct Piece {
     /// Which one it was asked for, which is not always where it settles: a file whose variants are
     /// alternatives rather than toggles is drawn at the first of them.
     asked: u16,
-    /// The material variant to draw with, where a caller has already resolved the imc's own
-    /// `material_id` for `variant`. Equal to `variant` wherever it has not.
-    material: u16,
+    /// The imc's own `material_id` for `variant`, where a caller has already resolved one. `None`
+    /// wherever nothing states one, and the folder `variant` names is what the piece draws with.
+    material: Option<u16>,
     deform: Option<Arc<Deform>>,
     skin: Option<u16>,
     rigid: bool,
@@ -375,10 +375,10 @@ pub struct Source {
     pub path: String,
     pub bytes: Vec<u8>,
     pub variant: u16,
-    /// The material variant to draw with, where it differs from `variant`: several imc variants
-    /// commonly share one material, and a caller that already has the imc in hand states the
-    /// `material_id` it names here rather than the raw variant. Equal to `variant` otherwise.
-    pub material: u16,
+    /// The imc's own `material_id` for `variant`, where a caller that has the imc in hand has
+    /// resolved one: several imc variants commonly share one material, and nought is the entry
+    /// stating that the slot draws no material at all. `None` wherever nothing states one.
+    pub material: Option<u16>,
     /// What to move the file's vertices by, where it was modelled for a body other than the one
     /// wearing it.
     pub deform: Option<Arc<Deform>>,
@@ -410,6 +410,7 @@ impl Piece {
     fn wears(&self, source: &Source) -> bool {
         self.path == source.path
             && self.asked == source.variant
+            && self.material == source.material
             && self.skin == source.skin
             && self.rigid == source.rigid
             && match (&self.deform, &source.deform) {
@@ -548,7 +549,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         path: path.to_owned(),
         bytes: bytes.to_vec(),
         variant: 0,
-        material: 0,
+        material: None,
         deform: None,
         skin: None,
         rigid: false,
@@ -775,7 +776,7 @@ fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> 
 struct Worn<'a> {
     path: &'a str,
     variant: u16,
-    material: u16,
+    material: Option<u16>,
     deform: Option<&'a Deform>,
     skin: Option<u16>,
     rigid: bool,
@@ -792,6 +793,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
     let mut shapes: Vec<Shape> = Vec::new();
     let mut declares: Vec<usize> = Vec::new();
     let mut skipped: Vec<MeshKind> = Vec::new();
+    let mut unbound = 0usize;
     let mut skinned = false;
     let mut waving = false;
 
@@ -812,6 +814,14 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
                         skipped.push(*kind);
                     }
                 }
+                continue;
+            }
+            let name = mesh.material().unwrap_or_default();
+            // An imc entry naming material nought states that the slot draws no material at all:
+            // every material its colourway files resolves to no path, and the game leaves a mesh
+            // whose material never bound out of the frame.
+            if worn.material == Some(0) && material::colourwayed(worn.path, &name) {
+                unbound += 1;
                 continue;
             }
             let built = match (mesh.attributes(), mesh.indices()) {
@@ -858,9 +868,13 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
                 high = high.max(position);
             }
 
-            let name = mesh.material().unwrap_or_default();
-            let resolved =
-                material::path(worn.path, &name, worn.material, worn.skin).unwrap_or(name);
+            let resolved = material::path(
+                worn.path,
+                &name,
+                worn.material.unwrap_or(worn.variant),
+                worn.skin,
+            )
+            .unwrap_or(name);
             let material = names
                 .iter()
                 .position(|held| *held == resolved)
@@ -962,15 +976,12 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             Bytes(vertices * size_of::<Vertex>() + triangles * 6).to_string(),
         ),
     ];
-    if !skipped.is_empty() {
-        identity.push((
-            "Not drawn",
-            skipped
-                .iter()
-                .map(|kind| kind_name(*kind))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+    let mut left_out: Vec<&str> = skipped.iter().map(|kind| kind_name(*kind)).collect();
+    if unbound != 0 {
+        left_out.push("no material");
+    }
+    if !left_out.is_empty() {
+        identity.push(("Not drawn", left_out.join(", ")));
     }
 
     log::info!(
@@ -3577,5 +3588,42 @@ impl Rendered {
         if let Some(lod) = picked {
             self.switch(lod);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Source, compose};
+
+    /// `w5341b0001`'s `.imc` names material nought for the one variant it carries, which is the
+    /// game stating that the weapon draws no material at all: worn at that variant it contributes
+    /// no mesh, and at the base colourway its own meshes are there.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_piece_whose_imc_names_no_material_contributes_no_mesh() {
+        let path = "chara/weapon/w5341/obj/body/b0001/model/w5341b0001.mdl";
+        let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
+            ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),
+        ));
+        let bytes: Vec<u8> = install.file(path).expect("the model");
+        let worn = |material| -> usize {
+            compose(&[Source {
+                path: path.to_owned(),
+                bytes: bytes.clone(),
+                variant: 1,
+                material,
+                deform: None,
+                skin: None,
+                rigid: true,
+            }])
+            .expect("a readable model")
+            .level
+            .borrow()
+            .meshes
+            .len()
+        };
+        assert_eq!(worn(Some(0)), 0, "the imc names no material");
+        assert!(worn(Some(1)) > 0, "the base colourway draws");
+        assert!(worn(None) > 0, "nothing states a colourway at all");
     }
 }

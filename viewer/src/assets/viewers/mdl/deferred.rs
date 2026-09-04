@@ -3324,7 +3324,9 @@ impl Buffers {
     }
 
     /// Clears one page of the G-buffer and points the draw buffers at every attachment it has.
-    pub fn open(&self, gl: &glow::Context, page: usize) {
+    /// Binds a page and stands its state up, leaving whatever it already holds: a model standing in
+    /// someone else's frame fills a buffer that frame has already written into.
+    pub fn reopen(&self, gl: &glow::Context, page: usize) {
         let Some(held) = self.frames.get(page) else {
             return;
         };
@@ -3339,10 +3341,6 @@ impl Buffers {
                 .collect();
             gl.draw_buffers(&attachments);
             gl.viewport(0, 0, self.size.0, self.size.1);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            // Said rather than assumed: the pass that puts the frame on screen reads this value
-            // back as the sign that nothing drew.
-            gl.clear_depth_f32(1.0);
             // egui leaves the scissor set to the widget's rect in the window's own coordinates, and
             // the frame is a buffer of its own that starts at nought: leaving it on clips the clear
             // and every draw after it to whatever part of the frame the rect happens to overlap.
@@ -3352,6 +3350,20 @@ impl Buffers {
             gl.depth_func(glow::LEQUAL);
             gl.depth_mask(true);
             gl.color_mask(true, true, true, true);
+        }
+    }
+
+    /// The same, emptied first.
+    pub fn open(&self, gl: &glow::Context, page: usize) {
+        self.reopen(gl, page);
+        if self.frames.get(page).is_none() {
+            return;
+        }
+        unsafe {
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            // Said rather than assumed: the pass that puts the frame on screen reads this value
+            // back as the sign that nothing drew.
+            gl.clear_depth_f32(1.0);
             // Every page draws the same geometry against one depth buffer, so only the first of
             // them clears it: what a later page does not draw still covered the pixel.
             gl.clear(match page {

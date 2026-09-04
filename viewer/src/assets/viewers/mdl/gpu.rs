@@ -772,7 +772,7 @@ impl Game {
         self.palettes(gl, joints, scene.view * scene.model)?;
         let mut failed: Option<String> = None;
         for page in 0..buffers.pages() {
-            buffers.open(gl, page);
+            buffers.reopen(gl, page);
             for depth in [true, false] {
                 for (at, (mesh, surface)) in meshes.iter().zip(surfaces).enumerate() {
                     let Some(shaded) = &surface.shaded else {
@@ -865,6 +865,11 @@ impl Game {
             size: (size.0 as f32, size.1 as f32),
             ..frame.scene.clone()
         };
+        // Emptied here rather than a page at a time inside the fill, which is what lets a model
+        // stand in a frame someone else has already written.
+        for page in 0..buffers.pages() {
+            buffers.open(gl, page);
+        }
         let failed = self
             .fill(
                 gl,

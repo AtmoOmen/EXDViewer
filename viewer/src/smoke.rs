@@ -34,12 +34,14 @@ pub enum Step {
     Model(String),
     /// `/assets/<lgb-or-lvb>`, clicking the "Scene" tab once it has decoded.
     Scene(String),
+    /// `/assets/<cutb>`, clicking the "Play" tab once it has decoded.
+    Cut(String),
 }
 
 impl Step {
     fn path(&self) -> &str {
         match self {
-            Step::Model(p) | Step::Scene(p) => p,
+            Step::Model(p) | Step::Scene(p) | Step::Cut(p) => p,
         }
     }
 
@@ -51,6 +53,7 @@ impl Step {
         match self {
             Step::Model(_) => pos2(GAME_SHADERS_X, ROW_Y),
             Step::Scene(_) => pos2(SCENE_TAB_X, ROW_Y),
+            Step::Cut(_) => pos2(PLAY_TAB_X, ROW_Y),
         }
     }
 }
@@ -59,6 +62,7 @@ impl Step {
 const ROW_Y: f32 = 116.0;
 const GAME_SHADERS_X: f32 = 267.0;
 const SCENE_TAB_X: f32 = 287.0;
+const PLAY_TAB_X: f32 = 406.0;
 
 pub struct Config {
     pub sqpack_path: String,
@@ -411,6 +415,9 @@ impl eframe::App for SmokeApp {
                 let settle = match step {
                     Step::Model(_) => Duration::from_secs(2),
                     Step::Scene(_) => Duration::from_secs(8),
+                    // A cutscene streams its level and builds a character per participant on top
+                    // of it, each of which is a dozen models of its own.
+                    Step::Cut(_) => Duration::from_secs(75),
                 };
                 if at.elapsed() > settle {
                     self.phase = Phase::Shooting {

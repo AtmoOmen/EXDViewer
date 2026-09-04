@@ -1006,8 +1006,7 @@ impl CharacterBuilder {
         });
     }
 
-    /// The class directory the weapons in hand file this body's packs under, which is what turns
-    /// an emote key into a path. Nothing read yet leaves only the directory every body shares.
+    /// The class directory the weapons in hand file this body's packs under.
     fn directory(&self) -> String {
         let wielded = self.wielded();
         let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
@@ -1015,6 +1014,23 @@ impl CharacterBuilder {
             Some(stance) => stance.directory(set(0), set(1)),
             None => stance::COMMON.to_owned(),
         }
+    }
+
+    /// Where an emote's own key is filed for this body, nearest first: under the class directory
+    /// the weapons in hand put it in, which is the only place a battle emote is filed at all, and
+    /// then under the one every body shares. Both go through the table saying which body really
+    /// holds a pack, since a class that ships none of its own reads another's.
+    fn emote_packs(&self, key: &str) -> Vec<String> {
+        let Some(stance) = &self.stance else {
+            return Vec::new();
+        };
+        let held = self.directory();
+        let shared = stance.pack(self.code, stance::COMMON, key);
+        let mut found = vec![stance.pack(self.code, &held, key)];
+        if found[0] != shared {
+            found.push(shared);
+        }
+        found
     }
 
     /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
@@ -2525,7 +2541,11 @@ impl CharacterBuilder {
                     match emote.expression() {
                         Some(name) => model.express(name),
                         None => {
-                            let (packs, settles) = emote.packs(self.code, &self.directory());
+                            let (start, settles) = emote.keys();
+                            let packs = start.map(|key| self.emote_packs(key)).unwrap_or_default();
+                            let settles = settles.and_then(|key| {
+                                Some(self.stance.as_ref()?.pack(self.code, stance::COMMON, key))
+                            });
                             model.play(&packs, settles.as_deref());
                         }
                     }
@@ -2974,3 +2994,4 @@ mod tests {
         assert_eq!(resolve(8, true, true), 804);
     }
 }
+

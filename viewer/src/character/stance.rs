@@ -706,6 +706,46 @@ mod tests {
         }
     }
 
+    /// A class the game files no packs of its own for reads another's, so a battle emote asked
+    /// for under the class a lone sword puts a body in is really read out of the sword and shield
+    /// one, which is the only place it is filed at all.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_class_with_no_packs_of_its_own_reads_a_battle_emote_out_of_the_one_it_shares() {
+        let packs = installed_packs(&install());
+        let sqpack = SqPack::new(Install::at_sqpack(SQPACK));
+        let filed = |held: &str, file: &str| {
+            let (model, set, held) = packs.filed(101, SET, held, file);
+            path(model, set, held, file)
+        };
+        let held = filed("bt_swd_emp", "emote/battle02");
+        assert_eq!(
+            held,
+            "chara/human/c0101/animation/a0001/bt_swd_sld/emote/battle02.pap"
+        );
+        assert!(sqpack.exists(&held).unwrap_or(false));
+        assert!(
+            !sqpack
+                .exists(&path(101, SET, "bt_swd_emp", "emote/battle02"))
+                .unwrap_or(false),
+            "the class it was asked for files nothing of its own"
+        );
+        // The table moves every emote a lone sword asks for, whether or not that class files one:
+        // the ones every body shares are not there either way, and fall back to the shared
+        // directory on not being found.
+        let shared = filed("bt_swd_emp", "emote/goodbye_st");
+        assert_eq!(
+            shared,
+            "chara/human/c0101/animation/a0001/bt_swd_sld/emote/goodbye_st.pap"
+        );
+        assert!(!sqpack.exists(&shared).unwrap_or(false));
+        assert!(
+            sqpack
+                .exists(&filed(COMMON, "emote/goodbye_st"))
+                .unwrap_or(false)
+        );
+    }
+
     /// What the table moves a request onto, against the install. A redirection is only reached by
     /// counting the bits set before it, so a rank or base read off by one lands on another body's
     /// answer, and this is what says it landed on the right one. Plenty of what it moves is

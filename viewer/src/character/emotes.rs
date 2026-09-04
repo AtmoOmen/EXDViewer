@@ -9,7 +9,6 @@ use anyhow::Result;
 use ironworks::excel::Language;
 
 use crate::backend::Backend;
-use crate::character::stance::COMMON;
 use crate::excel::provider::{ExcelProvider, ExcelRow, ExcelSheet};
 
 /// `Emote`'s name, icon and the two timelines a standing character plays, and `ActionTimeline`'s
@@ -31,24 +30,14 @@ pub struct Emote {
 }
 
 impl Emote {
-    /// The packs a body plays this from: where to look for the motion it starts with, nearest
-    /// first, and the pose it settles into once that has played through. A key is filed under the
-    /// body's own code, so a character of another race reads the same emote out of its own
-    /// directory. A battle emote is filed under the class directory the weapons in hand put the
-    /// body in and under no other, so `held` is tried before the directory every body shares;
-    /// nothing an emote settles into is filed that way.
-    pub fn packs(&self, code: u16, held: &str) -> (Vec<String>, Option<String>) {
-        let filed = |dir: &str, key: &str| {
-            format!("chara/human/c{code:04}/animation/a0001/{dir}/{key}.pap")
-        };
-        let candidates = |key: &String| vec![filed(held, key), filed(COMMON, key)];
+    /// The keys the packs a body plays this from are filed under: the motion it starts with, and
+    /// the pose it settles into once that has played through. An emote that holds a pose forever
+    /// states the motion that plays it in apart from the pose itself; one that only moves states
+    /// the motion alone.
+    pub fn keys(&self) -> (Option<&str>, Option<&str>) {
         match (&self.start, &self.standing) {
-            (Some(start), standing) => (
-                candidates(start),
-                standing.as_ref().map(|key| filed(COMMON, key)),
-            ),
-            (None, Some(standing)) => (candidates(standing), None),
-            (None, None) => (Vec::new(), None),
+            (Some(start), standing) => (Some(start), standing.as_deref()),
+            (None, standing) => (standing.as_deref(), None),
         }
     }
 
@@ -123,42 +112,14 @@ mod tests {
     #[test]
     fn an_emote_starts_before_it_settles() {
         let sit = emote(Some("emote/sit"), Some("event_base/event_base_chair_start"));
-        let (start, settles) = sit.packs(101, "bt_swd_sld");
         assert_eq!(
-            start,
-            [
-                "chara/human/c0101/animation/a0001/bt_swd_sld/event_base/event_base_chair_start.pap",
-                "chara/human/c0101/animation/a0001/bt_common/event_base/event_base_chair_start.pap",
-            ]
-        );
-        assert_eq!(
-            settles.as_deref(),
-            Some("chara/human/c0101/animation/a0001/bt_common/emote/sit.pap")
+            sit.keys(),
+            (Some("event_base/event_base_chair_start"), Some("emote/sit"))
         );
         assert_eq!(sit.expression(), None);
 
         let wave = emote(Some("emote/goodbye_st"), None);
-        assert_eq!(
-            wave.packs(1101, "bt_emp_emp"),
-            (
-                vec![
-                    "chara/human/c1101/animation/a0001/bt_emp_emp/emote/goodbye_st.pap".to_owned(),
-                    "chara/human/c1101/animation/a0001/bt_common/emote/goodbye_st.pap".to_owned(),
-                ],
-                None
-            )
-        );
-    }
-
-    /// A battle emote is only ever filed under a class directory, so the shared one it falls back
-    /// to is never reached and the class it is asked for is what plays.
-    #[test]
-    fn a_battle_emote_is_looked_for_under_the_class_before_the_shared_directory() {
-        let stance = emote(Some("emote/battle02"), None);
-        let (start, settles) = stance.packs(101, "bt_2ax_emp");
-        assert_eq!(start[0], "chara/human/c0101/animation/a0001/bt_2ax_emp/emote/battle02.pap");
-        assert_eq!(start[1], "chara/human/c0101/animation/a0001/bt_common/emote/battle02.pap");
-        assert_eq!(settles, None);
+        assert_eq!(wave.keys(), (Some("emote/goodbye_st"), None));
     }
 
     /// An emote that only makes a face is filed under the face a character wears, not under its

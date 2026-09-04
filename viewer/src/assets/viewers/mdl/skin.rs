@@ -1090,6 +1090,9 @@ impl Animation {
             // by hand, leaves it free to run on its own clock instead.
             match self.body.expression(self.body.time.get()) {
                 Some(expression) if self.synced.get() => {
+                    // The clock is the body's, but the fade between one pose and the next is this
+                    // layer's own and still has to run.
+                    self.face.fading(step);
                     self.face.hold(&expression, self.body.time.get());
                 }
                 _ => self.face.advance(step),

@@ -15,6 +15,7 @@
 pub(super) mod deferred;
 mod deform;
 pub mod dye;
+mod effects;
 mod emote;
 mod export;
 pub(super) mod gpu;
@@ -37,7 +38,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use egui::{Color32, Label, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
-use glam::{Mat3, Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3, Vec4};
 use ironworks::file::{
     File,
     imc::ImageChange,
@@ -517,6 +518,11 @@ pub struct Rendered {
     /// The props, sound and vfx an emote's own timeline states, read against whatever the body is
     /// playing.
     emote: RefCell<emote::Cue>,
+    /// The effects the emote is firing, and where each stood the last frame it was drawn: the
+    /// placement is the posed rig's to say, so it is taken during the draw and stepped on the next
+    /// poll.
+    effects: RefCell<effects::Effects>,
+    fired: RefCell<Vec<effects::Fired>>,
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
@@ -606,6 +612,8 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         attachments: Default::default(),
         glowing: Default::default(),
         emote: Default::default(),
+        effects: Default::default(),
+        fired: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
         customize: Cell::new(program::Customize::default()),
@@ -1651,6 +1659,9 @@ impl Rendered {
             self.emote
                 .borrow_mut()
                 .poll(backend, self.animation.body_playing());
+            self.effects
+                .borrow_mut()
+                .poll(ctx, backend, &self.fired.borrow());
         }
         let mut slots = self.slots.borrow_mut();
         for (index, slot) in slots.iter_mut().enumerate() {
@@ -2348,9 +2359,8 @@ impl Rendered {
         self.camera.set(camera);
 
         let (mut pose, rig) = self.posed(&level);
-        // A marker standing in for a vfx an emote's own timeline fires, and for the effect a
-        // weapon carries while it is drawn: not the game's particles, only where and when one
-        // would draw.
+        // A marker standing in for the effect a weapon carries while it is drawn: this view runs
+        // no particles for one, only where and when it would draw.
         let mut markers = std::mem::take(&mut pose.skeleton);
         if let Some((names, ..)) = &rig {
             for bone in self.glowing.borrow().iter() {
@@ -2373,26 +2383,26 @@ impl Rendered {
                 });
             }
         }
-        if let (Some((_, _, time)), Some((names, ..))) = (self.animation.body_playing(), &rig) {
-            for vfx in self.emote.borrow().active_vfx(time) {
-                let Some(bone) = names.iter().position(|name| *name == vfx.bone) else {
-                    continue;
-                };
-                let Some(&world) = pose.world.get(bone) else {
-                    continue;
-                };
-                let (_, rotation, translation) = vfx.local(world).to_scale_rotation_translation();
-                markers.push(placed::Batch {
-                    shape: placed::Shape::Box,
-                    instances: vec![placed::Instance {
-                        center: translation.to_array(),
-                        scale: [0.08; 3],
-                        turn: rotation.to_array(),
-                        color: vfx.tint(),
-                    }],
-                });
-            }
-        }
+        // Where each vfx the emote's own timeline is running stands this frame, which the next
+        // poll steps and the callback below draws.
+        *self.fired.borrow_mut() = match (self.animation.body_playing(), &rig) {
+            (Some((_, _, time)), Some((names, ..))) => self
+                .emote
+                .borrow()
+                .firing(time)
+                .filter_map(|vfx| {
+                    let bone = names.iter().position(|name| *name == vfx.bone)?;
+                    Some(effects::Fired {
+                        id: vfx.id,
+                        path: vfx.path.to_owned(),
+                        at: *pose.world.get(bone)? * vfx.local,
+                        since: vfx.since,
+                        tint: Vec4::from(vfx.tint),
+                    })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
         // Carried rather than written into the camera, so a motion that walks runs in place and the
         // user's own orbit, pan and zoom still mean what they did.
         let focus = level.home.target + pose.drift;
@@ -2523,8 +2533,7 @@ impl Rendered {
         };
 
         // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in
-        // the mesh it poses. A vfx marker is a placeholder box, not the game's particles, so it
-        // rides the same skeleton toggle rather than drawing on the live view.
+        // the mesh it poses.
         let overlay = self.skeleton.get().then(|| {
             self.overlay.lock().unwrap().replace(markers);
             (self.overlay.clone(), (projection * view).to_cols_array())
@@ -2548,6 +2557,26 @@ impl Rendered {
                 }
             })),
         });
+
+        // The emote's own particles, over the frame the character was composited into: one callback
+        // per file, since a draw is that file's own programs and geometry.
+        for (particles, frame) in self.effects.borrow().frames(
+            &self.fired.borrow(),
+            view,
+            projection,
+            (rect.width(), rect.height()),
+            eye,
+        ) {
+            ui.painter().add(egui::PaintCallback {
+                rect,
+                callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    particles
+                        .lock()
+                        .unwrap()
+                        .draw(painter.gl(), painter, &frame);
+                })),
+            });
+        }
     }
 
     /// How much of what the model needs has landed, against how much it asked for. A material names

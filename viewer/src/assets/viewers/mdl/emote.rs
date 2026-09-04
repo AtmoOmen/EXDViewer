@@ -141,23 +141,29 @@ struct Sound {
     path: String,
 }
 
-/// A vfx's window, where it is bound, and its own tint.
-pub struct Vfx {
+/// A vfx the timeline fires: the file, where it is bound, its own tint, and when it starts. A
+/// command that states a length of its own is over at the end of it; one that starts a loop and
+/// leaves it running states none, and the effect's own length is what ends it instead.
+struct Vfx {
+    id: i16,
     start: f32,
-    end: f32,
-    pub bone: &'static str,
+    end: Option<f32>,
+    bone: &'static str,
+    path: String,
     local: Mat4,
     tint: [f32; 4],
 }
 
-impl Vfx {
-    pub fn local(&self, world: Mat4) -> Mat4 {
-        world * self.local
-    }
-
-    pub fn tint(&self) -> [f32; 4] {
-        self.tint
-    }
+/// One vfx running right now: the bone it hangs from, its placement relative to that bone, and how
+/// far into its own run it is. The id is the firing's own, so a player handed the list again every
+/// frame keeps each firing's particles.
+pub struct Firing<'a> {
+    pub id: u64,
+    pub bone: &'a str,
+    pub path: &'a str,
+    pub local: Mat4,
+    pub tint: [f32; 4],
+    pub since: f32,
 }
 
 /// Everything one motion's timeline states, read once and kept until the motion or the pack
@@ -214,9 +220,11 @@ impl Events {
                         && let Some(bone) = bind_bone(c.bind_type_1(), c.bind_id_1())
                     {
                         events.vfx.push(Vfx {
+                            id: command.id(),
                             start,
-                            end: start + secs(c.duration()),
+                            end: Some(start + secs(c.duration())),
                             bone,
+                            path: c.path().unwrap_or_default().to_owned(),
                             local: local_transform(c.scale(), c.rotation(), c.position()),
                             tint: vec4(c.rgba(), 1.0),
                         });
@@ -227,11 +235,13 @@ impl Events {
                         && let Some(bone) = bind_bone(c.bind_type_1(), c.bind_id_1())
                     {
                         // No duration of its own: the command starts a loop and leaves it running
-                        // rather than waiting on it, so the marker holds for a fixed span instead.
+                        // rather than waiting on it, so what ends it is the effect's own length.
                         events.vfx.push(Vfx {
+                            id: command.id(),
                             start,
-                            end: start + 1.0,
+                            end: None,
                             bone,
+                            path: c.path().unwrap_or_default().to_owned(),
                             local: Mat4::IDENTITY,
                             tint: [1.0; 4],
                         });
@@ -252,7 +262,7 @@ impl Events {
     fn active_vfx(&self, time: f32) -> impl Iterator<Item = &Vfx> {
         self.vfx
             .iter()
-            .filter(move |vfx| time >= vfx.start && time < vfx.end)
+            .filter(move |vfx| time >= vfx.start && vfx.end.is_none_or(|end| time < end))
     }
 
     /// Sounds whose start crossed between `since` (exclusive) and `time` (inclusive), wrapping
@@ -561,15 +571,26 @@ impl Cue {
         rigging.joints(*motion, table, time)
     }
 
-    /// The vfx firing right now.
-    pub fn active_vfx(&self, time: f32) -> impl Iterator<Item = &Vfx> {
+    /// The vfx running right now, each with how far into its own clock it has reached. A firing is
+    /// told apart by the command that started it and the turn round the motion it started on, so
+    /// one that survives a loop is a new firing rather than the same one carried on.
+    pub fn firing(&self, time: f32) -> impl Iterator<Item = Firing<'_>> {
         let ready = match &self.fetch {
             Some(Fetch::Ready(events)) => Some(events),
             _ => None,
         };
+        let turn = u64::from(self.loop_count) << 32;
         ready
             .into_iter()
             .flat_map(move |events| events.active_vfx(time))
+            .map(move |vfx| Firing {
+                id: turn | u64::from(vfx.id as u16),
+                bone: vfx.bone,
+                path: &vfx.path,
+                local: vfx.local,
+                tint: vfx.tint,
+                since: time - vfx.start,
+            })
     }
 }
 
@@ -694,5 +715,39 @@ mod tests {
                 throw.distance(at("n_buki_r"))
             );
         }
+    }
+
+    /// Cheer On: Orange, off the real install: the loop fires one `.avfx` eight times over its four
+    /// seconds, each a firing of its own on its own clock, and every one of them names a file the
+    /// install holds. `C173` states no length, so what is checked here is that the window a firing
+    /// runs in is the motion's rather than one made up.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_emote_fires_its_own_effect_file_over_and_over() {
+        let install = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(SQPACK)));
+        let read = |path: &str| install.file::<Vec<u8>>(path).expect(path);
+
+        let body = "chara/human/c0101/animation/a0001/bt_common/emote_sp/sp78_loop.pap";
+        let events = Events::read(&read(body), "cbem_sp78_2lp").expect("a readable timeline");
+        let sparkle = "vfx/emote_sp/emt_sp078/eff/emt_sp078_2lpc0c.avfx";
+        assert_eq!(
+            events.vfx.iter().filter(|vfx| vfx.path == sparkle).count(),
+            8
+        );
+        for vfx in &events.vfx {
+            assert!(vfx.end.is_none(), "{}: C173 states no length", vfx.path);
+            assert!(
+                install.file::<Vec<u8>>(&vfx.path).is_ok(),
+                "{} is not in the install",
+                vfx.path
+            );
+        }
+        // Four seconds in, every one of them has started and none has been cut short.
+        assert_eq!(events.active_vfx(4.0).count(), events.vfx.len());
+        assert_eq!(
+            events.active_vfx(0.0).count(),
+            1,
+            "only the sync marker fires at frame nought"
+        );
     }
 }

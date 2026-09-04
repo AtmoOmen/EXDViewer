@@ -134,11 +134,139 @@ pub struct Rendered {
     playing: Cell<bool>,
     camera: Cell<Camera>,
     home: Camera,
-    textures: RefCell<HashMap<String, Texture>>,
-    resident: Cell<usize>,
-    /// The apricot packages the effect is drawn with, and what the draw callback last saw of them.
-    packages: RefCell<HashMap<&'static str, Package>>,
-    resolved: RefCell<Arc<gpu::Packages>>,
+    textures: RefCell<Textures>,
+    shaders: RefCell<Shaders>,
+}
+
+/// The textures an effect samples, asked for once each and handed to egui as they arrive.
+#[derive(Default)]
+pub(crate) struct Textures {
+    held: HashMap<String, Texture>,
+    /// What the ones already handed over take of the budget.
+    resident: usize,
+}
+
+impl Textures {
+    /// Asks for whatever `wanted` names that is not in hand yet. Runs every frame; one already
+    /// resolved costs a lookup.
+    pub(crate) fn poll(&mut self, ctx: &egui::Context, backend: &Backend, wanted: &[String]) {
+        let Self { held, resident } = self;
+        for path in wanted {
+            if held.contains_key(path) {
+                continue;
+            }
+            if *resident >= TEXTURE_BUDGET {
+                log::warn!("assets/avfx: {path}: past this effect's texture budget");
+                held.insert(path.clone(), Texture::Absent);
+                continue;
+            }
+            let files = backend.files().clone();
+            let wanted = path.clone();
+            held.insert(
+                path.clone(),
+                Texture::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read_texture(&wanted, Some(TEXTURE_SIZE)).await
+                })),
+            );
+        }
+        for (path, texture) in held.iter_mut() {
+            let Texture::Fetching(promise) = texture else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *texture = match result {
+                Ok(decoded) => {
+                    let handled = crate::utils::tex_loader::fit(ctx, &decoded.image);
+                    let size = [handled.width() as usize, handled.height() as usize];
+                    *resident += size[0] * size[1] * 4;
+                    let image = egui::ColorImage::from_rgba_premultiplied(
+                        size,
+                        handled.as_flat_samples().as_slice(),
+                    );
+                    Texture::Ready(ctx.load_texture(
+                        format!("avfx:{path}"),
+                        image,
+                        TextureOptions {
+                            magnification: egui::TextureFilter::Linear,
+                            minification: egui::TextureFilter::Linear,
+                            wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                            mipmap_mode: Some(egui::TextureFilter::Linear),
+                        },
+                    ))
+                }
+                Err(why) => {
+                    log::error!("assets/avfx: {path}: {why}");
+                    Texture::Absent
+                }
+            };
+        }
+    }
+
+    /// The handle bound to each of `wanted`, or `None` where one has not arrived: held back rather
+    /// than drawn white, since an additive quad with no sampler reads as flat white.
+    pub(crate) fn bound(&self, wanted: &[String]) -> Vec<Option<egui::TextureId>> {
+        wanted
+            .iter()
+            .map(|path| match self.held.get(path) {
+                Some(Texture::Ready(handle)) => Some(handle.id()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The two apricot packages every effect is shaded by, asked for once however many are drawn.
+#[derive(Default)]
+pub(crate) struct Shaders {
+    held: HashMap<&'static str, Package>,
+    resolved: Arc<gpu::Packages>,
+}
+
+impl Shaders {
+    pub(crate) fn poll(&mut self, backend: &Backend) {
+        for path in [program::SHAPE, program::MODEL] {
+            self.held.entry(path).or_insert_with(|| {
+                let files = backend.files().clone();
+                Package::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(path).await
+                }))
+            });
+        }
+        let mut arrived = false;
+        for (path, package) in self.held.iter_mut() {
+            let Package::Fetching(promise) = package else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            arrived = true;
+            *package = match result {
+                Ok(bytes) => Package::Ready(bytes.clone()),
+                Err(why) => {
+                    log::error!("assets/avfx: {path}: {why}");
+                    Package::Failed
+                }
+            };
+        }
+        if !arrived {
+            return;
+        }
+        let held = |path| match self.held.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes.clone()),
+            _ => None,
+        };
+        self.resolved = Arc::new(gpu::Packages {
+            shape: held(program::SHAPE),
+            model: held(program::MODEL),
+        });
+    }
+
+    pub(crate) fn resolved(&self) -> Arc<gpu::Packages> {
+        self.resolved.clone()
+    }
 }
 
 /// The first block carrying `name`.
@@ -663,9 +791,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         camera: Cell::new(home),
         home,
         textures: RefCell::default(),
-        resident: Cell::new(0),
-        packages: RefCell::default(),
-        resolved: RefCell::default(),
+        shaders: RefCell::default(),
     })))
 }
 
@@ -803,104 +929,12 @@ impl Rendered {
             .collect()
     }
 
-    /// Asks for the textures the effect samples and hands what arrived to egui. Runs every frame; a
-    /// texture that is already resolved costs a lookup.
+    /// Asks for the textures the effect samples and the packages it is shaded by.
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
-        self.poll_packages(backend);
-        let mut textures = self.textures.borrow_mut();
-        for path in &self.effect.textures {
-            if textures.contains_key(path) {
-                continue;
-            }
-            if self.resident.get() >= TEXTURE_BUDGET {
-                log::warn!("assets/avfx: {path}: past this effect's texture budget");
-                textures.insert(path.clone(), Texture::Absent);
-                continue;
-            }
-            let files = backend.files().clone();
-            let wanted = path.clone();
-            textures.insert(
-                path.clone(),
-                Texture::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read_texture(&wanted, Some(TEXTURE_SIZE)).await
-                })),
-            );
-        }
-        for (path, texture) in textures.iter_mut() {
-            let Texture::Fetching(promise) = texture else {
-                continue;
-            };
-            let Some(result) = promise.try_get() else {
-                continue;
-            };
-            *texture = match result {
-                Ok(decoded) => {
-                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
-                    let size = [held.width() as usize, held.height() as usize];
-                    self.resident
-                        .set(self.resident.get() + size[0] * size[1] * 4);
-                    let image = egui::ColorImage::from_rgba_premultiplied(
-                        size,
-                        held.as_flat_samples().as_slice(),
-                    );
-                    Texture::Ready(ui.ctx().load_texture(
-                        format!("avfx:{path}"),
-                        image,
-                        TextureOptions {
-                            magnification: egui::TextureFilter::Linear,
-                            minification: egui::TextureFilter::Linear,
-                            wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                            mipmap_mode: Some(egui::TextureFilter::Linear),
-                        },
-                    ))
-                }
-                Err(why) => {
-                    log::error!("assets/avfx: {path}: {why}");
-                    Texture::Absent
-                }
-            };
-        }
-    }
-
-    /// Asks for the two apricot packages, which are what the effect is shaded by.
-    fn poll_packages(&self, backend: &Backend) {
-        let mut packages = self.packages.borrow_mut();
-        for path in [program::SHAPE, program::MODEL] {
-            packages.entry(path).or_insert_with(|| {
-                let files = backend.files().clone();
-                Package::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read(path).await
-                }))
-            });
-        }
-        let mut arrived = false;
-        for (path, package) in packages.iter_mut() {
-            let Package::Fetching(promise) = package else {
-                continue;
-            };
-            let Some(result) = promise.try_get() else {
-                continue;
-            };
-            arrived = true;
-            *package = match result {
-                Ok(bytes) => Package::Ready(bytes.clone()),
-                Err(why) => {
-                    log::error!("assets/avfx: {path}: {why}");
-                    Package::Failed
-                }
-            };
-        }
-        if !arrived {
-            return;
-        }
-        let held = |path| match packages.get(path) {
-            Some(Package::Ready(bytes)) => Some(bytes.clone()),
-            _ => None,
-        };
-        *self.resolved.borrow_mut() = Arc::new(gpu::Packages {
-            shape: held(program::SHAPE),
-            model: held(program::MODEL),
-        });
+        self.shaders.borrow_mut().poll(backend);
+        self.textures
+            .borrow_mut()
+            .poll(ui.ctx(), backend, &self.effect.textures);
     }
 
     /// The playback bar, and the effect running under it.
@@ -1033,7 +1067,7 @@ impl Rendered {
                 ..program::Scene::default()
             },
             batches: self.batches(view, eye, axes.x_axis, axes.y_axis),
-            packages: self.resolved.borrow().clone(),
+            packages: self.shaders.borrow().resolved(),
             tested: false,
             // Nothing behind a particle here, so the soft-particle variant reads an unbound
             // sampler same as before: the preview has no scene depth to copy.
@@ -1057,16 +1091,7 @@ impl Rendered {
     /// The live particles, gathered into one draw apiece per particle definition and blend, furthest
     /// group first. Blending reads what is already there, so the order is part of the picture.
     fn batches(&self, view: Mat4, eye: Vec3, right: Vec3, up: Vec3) -> Vec<gpu::Batch> {
-        let textures = self.textures.borrow();
-        let bound: Vec<Option<egui::TextureId>> = self
-            .effect
-            .textures
-            .iter()
-            .map(|path| match textures.get(path) {
-                Some(Texture::Ready(handle)) => Some(handle.id()),
-                _ => None,
-            })
-            .collect();
+        let bound = self.textures.borrow().bound(&self.effect.textures);
         batches(
             &self.effect,
             self.effect.drawn(&self.live.borrow()),

@@ -640,17 +640,6 @@ impl Player {
         self.duration
     }
 
-    /// The curve set of one id, out of the timeline that holds it.
-    fn set_of(cutscene: &Cutscene, node: usize, id: i16) -> Option<&Curves> {
-        let Some(Node::Timeline(timeline)) = cutscene.nodes().get(node) else {
-            return None;
-        };
-        timeline.items().iter().find_map(|item| match item {
-            Item::Curves(held) if held.id() == id => Some(held),
-            _ => None,
-        })
-    }
-
     /// Every effect running at a time: the ones a participant has fired that its own timeline has
     /// not run past, each standing where that participant now does. A firing keeps its id across
     /// frames, so the particles it has run out are its own.
@@ -677,7 +666,7 @@ impl Player {
                     path: burst.path.clone(),
                     at,
                     frame: along as i32,
-                    tint: Self::set_of(cutscene, burst.node, burst.curves)
+                    tint: set_of(cutscene, burst.node, burst.curves)
                         .map(|set| lit(set, along))
                         .unwrap_or(Vec4::ONE),
                 });
@@ -689,19 +678,24 @@ impl Player {
     /// The camera at a time, or `None` before any shot has started.
     pub fn pose_at(&self, cutscene: &Cutscene, time: f32) -> Option<Pose> {
         let shot = active_shot(&self.shots, time)?;
-        let Some(Node::Timeline(timeline)) = cutscene.nodes().get(shot.node) else {
-            return None;
-        };
-        let set = timeline.items().iter().find_map(|item| match item {
-            Item::Curves(held) if held.id() == shot.curves => Some(held),
-            _ => None,
-        })?;
+        let set = set_of(cutscene, shot.node, shot.curves)?;
         let bound = shot.bound_at(time);
         let targets = rig(set, &shot.bindings, participants(cutscene), &|participant| {
             self.placed(participant, bound)
         });
         eye_pose(set, &targets, time - shot.start, shot.near, shot.far)
     }
+}
+
+/// The curve set of one id, out of the timeline that holds it.
+fn set_of(cutscene: &Cutscene, node: usize, id: i16) -> Option<&Curves> {
+    let Some(Node::Timeline(timeline)) = cutscene.nodes().get(node) else {
+        return None;
+    };
+    timeline.items().iter().find_map(|item| match item {
+        Item::Curves(held) if held.id() == id => Some(held),
+        _ => None,
+    })
 }
 
 /// The helper a participant is written as, where it is one.

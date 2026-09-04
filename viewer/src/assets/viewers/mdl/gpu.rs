@@ -240,7 +240,6 @@ pub struct Pending {
 /// linked program per material.
 #[derive(Default)]
 struct Game {
-    buffers: deferred::Buffers,
     /// One palette per mesh, since a mesh's blend indices name its own bone table.
     joints: Vec<glow::Texture>,
     programs: BTreeMap<(usize, bool, usize), Linked>,
@@ -257,6 +256,9 @@ pub struct Model {
     pending: Option<Pending>,
     program: Option<glow::Program>,
     game: Game,
+    /// The frame this model's own viewport draws into. A model standing in someone else's frame
+    /// fills theirs instead and leaves this one unattached.
+    buffers: deferred::Buffers,
     meshes: Vec<Buffers>,
     /// Color tables arrive with their materials, which is long after the geometry, so they queue
     /// rather than travelling with it.
@@ -281,6 +283,7 @@ impl Model {
             pending: Some(pending),
             program: None,
             game: Game::default(),
+            buffers: deferred::Buffers::default(),
             meshes: Vec::new(),
             queued: Vec::new(),
             rewritten: Vec::new(),
@@ -306,18 +309,18 @@ impl Model {
     /// How much of the G-buffer one pass can write. Four until a frame has asked the context, since
     /// that is what a context is promised.
     pub fn attachments(&self) -> usize {
-        self.game.buffers.attachments()
+        self.buffers.attachments()
     }
 
     /// What the context answered, once it has.
     pub fn attachments_learned(&self) -> Option<usize> {
-        self.game.buffers.attachments_learned()
+        self.buffers.attachments_learned()
     }
 
     /// Carries that answer over to a `Model` built fresh, so it draws its first frame at the real
     /// count rather than the four a context is merely promised.
     pub fn seed_attachments(&mut self, learned: usize) {
-        self.game.buffers.seed_attachments(learned);
+        self.buffers.seed_attachments(learned);
     }
 
     /// Hands a material's color table over for the next draw to upload.
@@ -346,25 +349,17 @@ impl Model {
         self.types = Some(values);
     }
 
-    pub fn draw(
-        &mut self,
-        gl: &glow::Context,
-        painter: &egui_glow::Painter,
-        frame: &Frame,
-        info: &egui::PaintCallbackInfo,
-    ) {
-        bury(gl);
+    /// Everything a draw needs standing that belongs to the model rather than to the frame it is
+    /// drawn into. Answers whether it is worth drawing at all.
+    fn stage(&mut self, gl: &glow::Context, surfaces: usize) -> bool {
         if self.failure.is_some() {
-            return;
+            return false;
         }
-        // Before anything is drawn, shaded or not: the G-buffer is only attached where a frame draws
-        // into it, and by then this frame's passes have already been translated.
-        self.game.buffers.limit(gl);
         if let Some(pending) = self.pending.take()
             && let Err(why) = self.upload(gl, pending)
         {
             self.failure = Some(why);
-            return;
+            return false;
         }
         for (mesh, indices) in std::mem::take(&mut self.rewritten) {
             let Some(buffers) = self.meshes.get(mesh) else {
@@ -383,21 +378,6 @@ impl Model {
                 gl.bind_vertex_array(None);
             }
         }
-        for (id, held) in std::mem::take(&mut self.arrays) {
-            if let Err(why) = self.game.buffers.layered(gl, id, &held) {
-                log::error!("assets/mdl: texture array {id:#010x}: {why}");
-            }
-        }
-        for (path, held) in std::mem::take(&mut self.stacks) {
-            if let Err(why) = self.game.buffers.stack(gl, &path, &held) {
-                log::error!("assets/mdl: {path}: {why}");
-            }
-        }
-        if let Some(values) = self.types.take()
-            && let Err(why) = self.game.buffers.fill_types(gl, &values)
-        {
-            log::error!("assets/mdl: shader types: {why}");
-        }
         for (material, values) in std::mem::take(&mut self.queued) {
             let rows = values.len() as i32 / (TABLE_COLUMNS * 4);
             match upload_table(gl, &values, rows) {
@@ -407,22 +387,88 @@ impl Model {
                 Err(why) => log::error!("assets/mdl: color table: {why}"),
             }
         }
+        // A zip would truncate instead, and a mesh drawn under another mesh's material shows as a
+        // texturing bug rather than as the bookkeeping error it is.
+        if self.meshes.len() != surfaces {
+            self.failure = Some(format!(
+                "{} meshes against {surfaces} surfaces",
+                self.meshes.len(),
+            ));
+            return false;
+        }
+        true
+    }
+
+    /// Fills a G-buffer someone else owns with this model's own surfaces, and nothing else: the
+    /// lighting, the composite and every pass past it belong to the frame it is standing in.
+    pub fn fill(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        buffers: &mut deferred::Buffers,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        if !self.stage(gl, frame.surfaces.len()) {
+            return Ok(());
+        }
+        let held = (
+            std::mem::take(&mut self.arrays),
+            std::mem::take(&mut self.stacks),
+            self.types.take(),
+        );
+        supply(gl, buffers, held);
+        self.game
+            .fill(gl, painter, frame, &self.meshes, buffers, scene)
+    }
+
+    /// The surfaces of this model that answer into the frame rather than into the buffer: drawn
+    /// once the host has resolved its own lighting over what [`Self::fill`] left.
+    pub fn over(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        buffers: &mut deferred::Buffers,
+        lighting: &deferred::Lighting,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        if self.failure.is_some() || self.meshes.len() != frame.surfaces.len() {
+            return Ok(());
+        }
+        self.game
+            .resolve(gl, painter, frame, &self.meshes, buffers, scene)?;
+        self.game
+            .sheer(gl, painter, frame, &self.meshes, buffers, lighting, scene)
+    }
+
+    pub fn draw(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        info: &egui::PaintCallbackInfo,
+    ) {
+        bury(gl);
+        // Before anything is drawn, shaded or not: the G-buffer is only attached where a frame
+        // draws into it, and by then this frame's passes have already been translated.
+        self.buffers.limit(gl);
+        if !self.stage(gl, frame.surfaces.len()) {
+            return;
+        }
+        let held = (
+            std::mem::take(&mut self.arrays),
+            std::mem::take(&mut self.stacks),
+            self.types.take(),
+        );
+        supply(gl, &mut self.buffers, held);
         let Some(program) = self.program else {
             return;
         };
-        // A zip would truncate instead, and a mesh drawn under another mesh's material shows as a
-        // texturing bug rather than as the bookkeeping error it is.
-        if self.meshes.len() != frame.surfaces.len() {
-            self.failure = Some(format!(
-                "{} meshes against {} surfaces",
-                self.meshes.len(),
-                frame.surfaces.len()
-            ));
-            return;
-        }
 
         if frame.surfaces.iter().any(|held| held.shaded.is_some()) {
-            self.game.draw(gl, painter, frame, &self.meshes, info);
+            self.game
+                .draw(gl, painter, frame, &self.meshes, &mut self.buffers, info);
             // Only over the frame the composite resolved: a raw channel is data, and a grid ruled
             // across it would be read as part of it.
             if frame.target >= LIT {
@@ -682,6 +728,7 @@ impl Game {
         painter: &egui_glow::Painter,
         frame: &Frame,
         meshes: &[Buffers],
+        buffers: &mut deferred::Buffers,
         info: &egui::PaintCallbackInfo,
     ) {
         let held = info.viewport_in_pixels();
@@ -691,8 +738,8 @@ impl Game {
         // this work on the web: glow keeps its own map of the resources it created, and a
         // framebuffer read back out of WebGL is a JS object it cannot find in there.
         let bound = painter.intermediate_fbo();
-        let drawn = self.render(gl, painter, frame, meshes, size);
-        let shown = self.buffers.show(
+        let drawn = self.render(gl, painter, frame, meshes, buffers, size);
+        let shown = buffers.show(
             gl,
             frame.target,
             bound,
@@ -701,37 +748,29 @@ impl Game {
         self.failure = drawn.and(shown).err();
     }
 
-    fn render(
+    /// The G-buffer a page at a time, and each page's depth pass before its buffer pass: the game
+    /// runs those as two passes over the whole draw rather than as two draws of one surface.
+    ///
+    /// A mesh whose program will not link or bind is skipped rather than aborting the pass: one
+    /// material a real driver rejects (and a software one does not) would otherwise blank every mesh
+    /// behind it in the loop, and everything the frame does with the buffer along with it, every
+    /// frame from then on. The first such failure is returned once the loop has had its turn, which
+    /// is what still reaches the "game shaders would not build" banner.
+    fn fill(
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
         frame: &Frame,
         meshes: &[Buffers],
-        size: (i32, i32),
+        buffers: &mut deferred::Buffers,
+        scene: &program::Scene,
     ) -> Result<(), String> {
-        self.buffers.attach(gl, size)?;
-        self.buffers.stand_ins(gl)?;
-        // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
-        // has nothing else to turn a fragment into a texel with.
-        let scene = program::Scene {
-            size: (size.0 as f32, size.1 as f32),
-            ..frame.scene.clone()
-        };
         self.palettes(gl, &frame.joints, scene.view * scene.model)?;
-
-        // The G-buffer a page at a time, and each page's depth pass before its buffer pass: the game
-        // runs those as two passes over the whole draw rather than as two draws of one surface.
-        //
-        // A mesh whose program will not link or bind is skipped rather than aborting the pass: one
-        // material a real driver rejects (and a software one does not) would otherwise blank every
-        // mesh behind it in the loop, and the composite below along with it, every frame from then
-        // on. The first such failure is kept and returned once the loop and the composite have both
-        // had their turn, which is what still reaches the "game shaders would not build" banner.
         let mut failed: Option<String> = None;
-        for page in 0..self.buffers.pages() {
-            self.buffers.open(gl, page);
+        for page in 0..buffers.pages() {
+            buffers.open(gl, page);
             for depth in [true, false] {
-                for (at, (buffers, surface)) in meshes.iter().zip(&frame.surfaces).enumerate() {
+                for (at, (mesh, surface)) in meshes.iter().zip(&frame.surfaces).enumerate() {
                     let Some(shaded) = &surface.shaded else {
                         continue;
                     };
@@ -756,7 +795,7 @@ impl Game {
                             let why = format!(
                                 "material {} depth={depth} page={page} attachments={}: {why}",
                                 surface.material,
-                                self.buffers.attachments()
+                                buffers.attachments()
                             );
                             log::error!("assets/mdl: {why}");
                             failed.get_or_insert(why);
@@ -786,12 +825,12 @@ impl Game {
                         }
                     }
                     if let Err(why) =
-                        self.bind(gl, painter, program, held, surface, at, buffers, &scene)
+                        self.bind(gl, painter, program, held, surface, at, mesh, buffers, scene)
                     {
                         let why = format!(
                             "material {} depth={depth} page={page} attachments={}: {why}",
                             surface.material,
-                            self.buffers.attachments()
+                            buffers.attachments()
                         );
                         log::error!("assets/mdl: {why}");
                         failed.get_or_insert(why);
@@ -799,38 +838,61 @@ impl Game {
                 }
             }
         }
+        match failed {
+            Some(why) => Err(why),
+            None => Ok(()),
+        }
+    }
 
+    fn render(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        meshes: &[Buffers],
+        buffers: &mut deferred::Buffers,
+        size: (i32, i32),
+    ) -> Result<(), String> {
+        buffers.attach(gl, size)?;
+        buffers.stand_ins(gl)?;
+        // Only the callback knows how many pixels the widget really covers, and a screen-wide pass
+        // has nothing else to turn a fragment into a texel with.
+        let scene = program::Scene {
+            size: (size.0 as f32, size.1 as f32),
+            ..frame.scene.clone()
+        };
+        let failed = self.fill(gl, painter, frame, meshes, buffers, &scene).err();
         // Only where the lit frame is what is being shown: a raw channel is a page of the G-buffer
         // and owes nothing to the passes past it.
         if let Some(lighting) = frame.lighting.as_ref().filter(|_| frame.target >= TARGETS) {
             // Before anything reads it: every lighting pass and the composite take the occlusion as
             // a weight on what they work out.
             match frame.occlusion.as_ref() {
-                Some(held) => self.buffers.occlude(gl, held, &scene)?,
-                None => self.buffers.unocclude(),
+                Some(held) => buffers.occlude(gl, held, &scene)?,
+                None => buffers.unocclude(),
             }
-            self.buffers
+            buffers
                 .resolve(gl, lighting, &scene, &[frame.scene.lamp])?;
-            self.resolve(gl, painter, frame, meshes, &scene)?;
-            self.sheer(gl, painter, frame, meshes, lighting, &scene)?;
+            self.resolve(gl, painter, frame, meshes, buffers, &scene)?;
+            self.sheer(gl, painter, frame, meshes, buffers, lighting, &scene)?;
             // Over the frame the composite left and before anything spreads or grades it, which is
             // where the game runs it.
             if let Some(reflection) = frame.reflection.as_ref() {
-                self.buffers.mirror(gl, reflection, &scene)?;
+                buffers.mirror(gl, reflection, &scene)?;
             }
             if let Some(glare) = frame.glare.as_ref() {
-                self.buffers.source(gl)?;
-                self.buffers.glare(gl, glare, &scene)?;
+                buffers.source(gl)?;
+                buffers.glare(gl, glare, &scene)?;
             }
             if let Some(post) = frame.post.as_ref() {
-                self.buffers.post(gl, post, &scene)?;
+                buffers.post(gl, post, &scene)?;
             }
             if let Some(smoothing) = frame.smoothing.as_ref() {
-                self.buffers.antialias(gl, smoothing, &scene)?;
+                buffers.antialias(gl, smoothing, &scene)?;
             }
             // Last, over the graded frame, which is where the game draws it.
             if let Some(vignette) = frame.vignette.as_ref() {
-                self.buffers.vignette(gl, vignette, &scene)?;
+                buffers.vignette(gl, vignette, &scene)?;
             }
         }
         match failed {
@@ -859,6 +921,7 @@ impl Game {
         painter: &egui_glow::Painter,
         frame: &Frame,
         meshes: &[Buffers],
+        buffers: &mut deferred::Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let (opaque, mut blended): (Vec<usize>, Vec<usize>) = frame
@@ -892,9 +955,9 @@ impl Game {
             }
             // Tested against a copy of the depth rather than the depth itself: water reads the
             // depth back, and the live one is the framebuffer's own attachment.
-            self.buffers.cut(gl)?;
-            let into = self.buffers.bare().ok_or("no lit frame")?;
-            let size = self.buffers.size();
+            buffers.cut(gl)?;
+            let into = buffers.bare().ok_or("no lit frame")?;
+            let size = buffers.size();
             unsafe {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
                 gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
@@ -924,11 +987,11 @@ impl Game {
             // Water reads whatever stands behind it out of the frame it is about to write, so the
             // copy is taken once before the leg rather than between its draws.
             if !behind {
-                self.buffers.keep(gl)?;
+                buffers.keep(gl)?;
             }
             for at in held {
                 if behind {
-                    self.buffers.keep(gl)?;
+                    buffers.keep(gl)?;
                 }
                 let surface = &frame.surfaces[*at];
                 let Some(mesh) = meshes.get(*at) else {
@@ -952,7 +1015,7 @@ impl Game {
                         false => gl.disable(glow::CULL_FACE),
                     }
                 }
-                self.bind(gl, painter, program, held, surface, *at, mesh, scene)?;
+                self.bind(gl, painter, program, held, surface, *at, mesh, buffers, scene)?;
             }
         }
         unsafe { gl.disable(glow::BLEND) };
@@ -968,12 +1031,14 @@ impl Game {
     ///
     /// The surface fills a G-buffer of its own, the light is gathered again over that, and each
     /// material blends itself into the frame against the depth the opaque half settled.
+    #[allow(clippy::too_many_arguments)]
     fn sheer(
         &mut self,
         gl: &glow::Context,
         painter: &egui_glow::Painter,
         frame: &Frame,
         meshes: &[Buffers],
+        buffers: &mut deferred::Buffers,
         lighting: &deferred::Lighting,
         scene: &program::Scene,
     ) -> Result<(), String> {
@@ -990,7 +1055,7 @@ impl Game {
         if held.is_empty() {
             return Ok(());
         }
-        self.buffers.sheer(gl)?;
+        buffers.sheer(gl)?;
         for (at, buffer, _) in &held {
             let surface = &frame.surfaces[*at];
             let Some(mesh) = meshes.get(*at) else {
@@ -1019,17 +1084,17 @@ impl Game {
                     false => gl.disable(glow::CULL_FACE),
                 }
             }
-            self.bind(gl, painter, program, buffer, surface, *at, mesh, scene)?;
+            self.bind(gl, painter, program, buffer, surface, *at, mesh, buffers, scene)?;
         }
 
-        self.buffers
+        buffers
             .relight(gl, lighting, scene, &[frame.scene.lamp])?;
 
         // Tested against a copy of the depth rather than the depth itself: a surface here also
         // samples it, and the live one is the framebuffer's own attachment.
-        self.buffers.cut(gl)?;
-        let into = self.buffers.bare().ok_or("no lit frame")?;
-        let size = self.buffers.size();
+        buffers.cut(gl)?;
+        let into = buffers.bare().ok_or("no lit frame")?;
+        let size = buffers.size();
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
@@ -1074,7 +1139,7 @@ impl Game {
                     false => gl.disable(glow::CULL_FACE),
                 }
             }
-            self.bind(gl, painter, program, resolve, surface, *at, mesh, scene)?;
+            self.bind(gl, painter, program, resolve, surface, *at, mesh, buffers, scene)?;
         }
         unsafe {
             gl.disable(glow::BLEND);
@@ -1096,12 +1161,13 @@ impl Game {
         surface: &Surface,
         at: usize,
         mesh: &Buffers,
+        buffers: &mut deferred::Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
         let shaded = surface.shaded.as_ref().ok_or("nothing to draw with")?;
         let palette = *self.joints.get(at).ok_or("no joint palette")?;
         let layout = self.layout(gl)?;
-        self.buffers.bind(gl, program, held, scene, &[])?;
+        buffers.bind(gl, program, held, scene, &[])?;
         // Before anything is bound: making a texture binds it to whichever unit happens to be
         // active, so one made partway through the loop below takes over the unit the sampler
         // before it was just given.
@@ -1124,16 +1190,16 @@ impl Game {
                     };
                     match held {
                         Some(held) => held,
-                        None => self.buffers.engine(gl, texture.id)?,
+                        None => buffers.engine(gl, texture.id)?,
                     }
                 }
                 kind => match shaded
                     .bound(texture.id)
                     .and_then(Bound::stacked)
-                    .and_then(|path| self.buffers.stacked(kind, path))
+                    .and_then(|path| buffers.stacked(kind, path))
                 {
                     Some(held) => held,
-                    None => self.buffers.absent(gl, kind, texture.id)?,
+                    None => buffers.absent(gl, kind, texture.id)?,
                 },
             };
             deferred::bind(
@@ -1151,7 +1217,7 @@ impl Game {
         // shader-type table both, and they hold different things.
         for structured in &held.structured {
             let bound = match structured.name.as_str() {
-                TYPES => self.buffers.types(gl)?,
+                TYPES => buffers.types(gl)?,
                 _ => palette,
             };
             sampler(gl, program, &structured.name, unit, bound);
@@ -1224,6 +1290,29 @@ impl Drop for Model {
 /// Points one attribute at the field of a [`Vertex`] its semantic names. The mesh keeps its
 /// influences unsigned and a shader declares them either way, so the pointer's own type follows the
 /// signature: a draw is rejected outright where the two differ in class or in sign.
+/// The game's own textures a model has been handed, the ones its materials name that egui cannot
+/// hold, and the table the shading passes index.
+type Supplied = (Vec<(u32, Layered)>, Vec<(Arc<str>, Layered)>, Option<Vec<u32>>);
+
+/// Those, uploaded into whichever frame the model is being drawn into.
+fn supply(gl: &glow::Context, buffers: &mut deferred::Buffers, (arrays, stacks, types): Supplied) {
+    for (id, held) in arrays {
+        if let Err(why) = buffers.layered(gl, id, &held) {
+            log::error!("assets/mdl: texture array {id:#010x}: {why}");
+        }
+    }
+    for (path, held) in stacks {
+        if let Err(why) = buffers.stack(gl, &path, &held) {
+            log::error!("assets/mdl: {path}: {why}");
+        }
+    }
+    if let Some(values) = types
+        && let Err(why) = buffers.fill_types(gl, &values)
+    {
+        log::error!("assets/mdl: shader types: {why}");
+    }
+}
+
 pub fn attribute(gl: &glow::Context, held: &program::Attribute) {
     let Some((_, lanes, offset, kind)) = FIELDS.iter().find(|(field, ..)| *field == held.field)
     else {

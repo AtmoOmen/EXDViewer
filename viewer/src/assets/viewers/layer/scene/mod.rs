@@ -786,8 +786,8 @@ pub enum Asset {
 /// else in the frame.
 pub struct Standing {
     pub model: Rc<mdl::Rendered>,
-    /// Where it stands, in world space.
-    pub at: Mat4,
+    /// Where it stands, read the same way a layer group's own instances are.
+    pub at: Transform,
 }
 
 /// Something placed in the scene by a host outside this view, alongside what the level itself
@@ -4138,7 +4138,7 @@ impl Scene {
         let cast: Vec<mdl::Cast> = self
             .cast
             .iter()
-            .map(|held| held.model.cast(held.at, attachments))
+            .map(|held| held.model.cast(matrix(held.at), attachments))
             .collect();
 
         let (light, color) = self.ambient.light();

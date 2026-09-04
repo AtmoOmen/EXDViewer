@@ -3350,6 +3350,12 @@ impl Rendered {
 
     /// The bodies to read animation from, nearest first, which the caller reads off the same tree
     /// that says where a body borrows its clothes from.
+    /// Marks this model as standing in a frame this view does not draw, which is what keeps it
+    /// from asking for the passes that light one.
+    pub fn placed(&self) {
+        self.chrome.set(Chrome::Placed);
+    }
+
     pub fn built_on(&self, lineage: Vec<String>) {
         self.animation.built_on(lineage);
     }

@@ -125,6 +125,7 @@ pub const PARTY_STAND_IN: u32 = 1_034_882;
 pub const STABLED_CHOCOBO: u32 = 1_006_001;
 
 /// One of the game's own characters, as far as building it goes.
+#[derive(Clone)]
 pub struct Npc {
     pub name: String,
     pub race: u32,
@@ -139,6 +140,7 @@ pub struct Npc {
 }
 
 /// What a character id builds.
+#[derive(Clone)]
 pub enum Stands {
     /// A body out of the creator's own numbering, dressed in what the row states.
     Human(Box<Npc>),

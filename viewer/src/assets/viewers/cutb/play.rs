@@ -19,6 +19,7 @@ use ironworks::file::tmb::{Channel, CommandKind, Curves, Item, Timeline};
 use crate::assets::viewers::layer;
 use crate::assets::viewers::layer::scene;
 use crate::backend::Backend;
+use crate::character::stand;
 use crate::data::FileProviderExt;
 use crate::utils::{PromiseKind, TrackedPromise};
 
@@ -382,6 +383,39 @@ fn props(cutscene: &Cutscene) -> Vec<scene::Prop> {
         .collect()
 }
 
+/// The character each participant stands for, with no live one on hand to copy. `sub_141B26310`
+/// takes the live character its kind names and falls back to a row: a party member to one fixed
+/// stand-in unless the record forces an id of its own, a stabled chocobo to one whichever id it
+/// names, and the player to the record's own - which every shipping file leaves at a row stating
+/// no race, no equipment and no `ModelChara`, so nothing is drawn for one.
+fn stands_as(participant: &Instance) -> Option<stand::Wanted> {
+    let helper = helper(participant)?;
+    let (roll, id) = match helper.kind() {
+        HelperKind::EventNpc | HelperKind::Player => (stand::Roll::Event, helper.base_id()),
+        HelperKind::BattleNpc => (stand::Roll::Battle, helper.base_id()),
+        HelperKind::PartyMember | HelperKind::PartyMemberAlt | HelperKind::Unknown82 => (
+            stand::Roll::Event,
+            match helper.forces_base_id() {
+                true => helper.base_id(),
+                false => stand::PARTY_STAND_IN,
+            },
+        ),
+        HelperKind::StableChocobo => (stand::Roll::Event, stand::STABLED_CHOCOBO),
+        _ => return None,
+    };
+    (id != 0).then(|| stand::Wanted {
+        roll,
+        id,
+        height: helper.height(),
+        at: stands_at(participant),
+    })
+}
+
+/// Everyone a cutscene stands, at the transforms their own records state.
+fn cast(cutscene: &Cutscene) -> Vec<stand::Wanted> {
+    participants(cutscene).iter().filter_map(stands_as).collect()
+}
+
 /// What a `CTAL` holds, as a count of each kind its participants stand for.
 pub fn roll_call(participants: &[Instance]) -> String {
     let mut held: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
@@ -444,6 +478,9 @@ enum Fetch {
 
 struct State {
     fetch: Fetch,
+    /// Everyone standing in the scene, from the rows their participants name through to the models
+    /// the scene draws.
+    cast: stand::Cast,
     time: f32,
     playing: bool,
     /// Frames a second. No file states one for a cutscene; this is a starting guess the transport
@@ -455,6 +492,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             fetch: Fetch::Idle,
+            cast: stand::Cast::default(),
             time: 0.0,
             playing: false,
             fps: DEFAULT_FPS,
@@ -504,6 +542,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
             Ok(file) => {
                 let mut scene = layer::level_scene(&tab.level, file);
                 scene.place("Cutscene", props(cutscene));
+                state.cast = stand::Cast::new(cast(cutscene));
                 Fetch::Ready(Box::new(scene))
             }
             Err(error) => Fetch::Failed(error.to_string()),
@@ -511,6 +550,8 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     }
 
     let pose = tab.player.pose_at(cutscene, state.time);
+    state.cast.poll(ui.ctx(), backend);
+    let standing = state.cast.standing();
 
     Panel::left("cutb_shots")
         .default_size(200.0)
@@ -533,6 +574,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
             ui.colored_label(egui::Color32::RED, error.clone());
         }
         Fetch::Ready(scene) => {
+            scene.stand(standing);
             if let Some(pose) = pose {
                 scene.drive(pose.drive());
             }

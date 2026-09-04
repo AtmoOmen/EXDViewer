@@ -361,6 +361,18 @@ pub struct Shot {
     far: f32,
 }
 
+impl Shot {
+    /// When to read the placement of whatever the shot binds: where the actor stands now, unless
+    /// the shot says to hold the bind it opened with. Nine shots in ten re-bind, so a camera
+    /// riding someone who walks follows rather than lags a whole shot behind.
+    fn bound_at(&self, time: f32) -> f32 {
+        match self.bindings[HELD_BIND] == 1 {
+            true => self.start,
+            false => time,
+        }
+    }
+}
+
 /// The command ids a timeline's own actors and tracks reach, so a shot nothing plays is told apart
 /// from one its own structure never offers. Empty where the timeline names no actors at all, which
 /// a filter reads as "nothing is excluded" rather than "everything is".
@@ -537,12 +549,7 @@ impl Player {
             Item::Curves(held) if held.id() == shot.curves => Some(held),
             _ => None,
         })?;
-        // A shot binds a role to where the actor stands now unless it says to hold the bind it
-        // opened with, so a camera riding someone who walks follows rather than lags.
-        let bound = match shot.bindings[HELD_BIND] == 1 {
-            true => shot.start,
-            false => time,
-        };
+        let bound = shot.bound_at(time);
         let targets = rig(set, &shot.bindings, participants(cutscene), &|participant| {
             self.placed(participant, bound)
         });
@@ -1038,5 +1045,63 @@ mod test {
     fn a_later_shot_starting_before_an_earlier_one_ends_preempts_it() {
         let shots = vec![shot(0.0, 100.0), shot(10.0, 5.0)];
         assert_eq!(active_shot(&shots, 50.0).unwrap().start, 10.0);
+    }
+
+    #[test]
+    fn a_shot_reads_its_bound_actor_where_it_stands_now_unless_it_holds_the_bind() {
+        let mut held = shot(30.0, 60.0);
+        held.bindings[HELD_BIND] = 0;
+        assert_eq!(held.bound_at(75.0), 75.0);
+        held.bindings[HELD_BIND] = 1;
+        assert_eq!(held.bound_at(75.0), 30.0);
+    }
+
+    fn placed(x: f32) -> Transform {
+        Transform::new([x, 0.0, 0.0], [0.0; 3], [1.0; 3])
+    }
+
+    #[test]
+    fn what_holds_at_a_time_is_the_last_entry_to_have_started() {
+        let held = vec![(0.0, placed(1.0)), (100.0, placed(2.0)), (200.0, placed(3.0))];
+        assert!(latest(&held, -1.0).is_none());
+        assert_eq!(latest(&held, 0.0).unwrap().0, 0);
+        assert_eq!(latest(&held, 99.0).unwrap().1.translation()[0], 1.0);
+        assert_eq!(latest(&held, 100.0).unwrap().1.translation()[0], 2.0);
+        assert_eq!(latest(&held, 5000.0).unwrap().1.translation()[0], 3.0);
+    }
+
+    #[test]
+    fn a_pose_goes_to_the_face_and_a_motion_to_the_body() {
+        let mut part = Part::default();
+        cue(&mut part, 10.0, Some("cfxf_salute"), 0.0);
+        cue(&mut part, 20.0, Some("cbfm_arms"), 3.0);
+        // The face's own blink and lip clips move bones the body does not carry.
+        cue(&mut part, 30.0, Some("cfxb_blink1"), 0.0);
+        cue(&mut part, 40.0, Some("cfxl_lip_nor1"), 0.0);
+        cue(&mut part, 50.0, None, 0.0);
+        assert_eq!(part.faces.len(), 1);
+        assert_eq!(part.faces[0], (10.0, "salute".to_owned()));
+        assert_eq!(part.motions.len(), 1);
+        assert_eq!(part.motions[0].1.motion, "cbfm_arms");
+        assert_eq!(part.motions[0].1.from, 3.0);
+    }
+
+    #[test]
+    fn a_participant_stands_where_its_own_timeline_last_put_it() {
+        let player = Player {
+            shots: Vec::new(),
+            parts: BTreeMap::from([(
+                7,
+                Part {
+                    placed: vec![(0.0, placed(1.0)), (100.0, placed(2.0))],
+                    ..Part::default()
+                },
+            )]),
+            duration: 0.0,
+        };
+        assert_eq!(player.placed(7, 50.0).unwrap().translation()[0], 1.0);
+        assert_eq!(player.placed(7, 150.0).unwrap().translation()[0], 2.0);
+        // A participant its timelines never place keeps whatever its own record states.
+        assert!(player.placed(8, 50.0).is_none());
     }
 }

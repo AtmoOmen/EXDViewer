@@ -238,16 +238,10 @@ impl Stage {
         }
     }
 
-    /// Plays a cue, if its container has been read. A cue whose file is still coming is dropped
-    /// rather than played late.
-    pub fn fire(&mut self, cue: &Cue, time: f32) {
-        self.start(cue, time);
-    }
-
     /// Keeps one track playing under the whole cutscene, which is where a quest's own music sits.
     pub fn under(&mut self, cue: &Cue, time: f32) {
         if self.under.is_none() {
-            self.under = self.start(cue, time);
+            self.under = self.play(cue, time);
         }
     }
 
@@ -256,7 +250,9 @@ impl Stage {
         self.under.is_some()
     }
 
-    fn start(&mut self, cue: &Cue, time: f32) -> Option<u64> {
+    /// Plays a cue, if its container has been read. A cue whose file is still coming is dropped
+    /// rather than played late.
+    pub fn play(&mut self, cue: &Cue, time: f32) -> Option<u64> {
         if !self.enabled {
             return None;
         }

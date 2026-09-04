@@ -1583,7 +1583,7 @@ fn fire(state: &mut State, duration: f32) {
     if state.effects {
         for cue in &state.cues {
             if cue.at > state.sounded && cue.at <= time {
-                state.stage.fire(cue, time);
+                state.stage.play(cue, time);
             }
         }
     }

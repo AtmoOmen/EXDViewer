@@ -10,9 +10,9 @@ use ironworks::excel::Language;
 
 use crate::backend::Backend;
 use crate::excel::provider::ExcelSheet;
+use crate::quests::derive;
 use crate::quests::index::{Fields, integer, text};
 use crate::quests::script::{self, Step};
-use crate::quests::derive;
 
 /// Slots a quest spends on script parameters.
 const PARAMS: usize = 50;

@@ -9,11 +9,88 @@ use std::sync::Arc;
 use ironworks::excel::{Excel, Language};
 use ironworks::file::File;
 use ironworks::file::cutb::{Cutscene, Node};
-use ironworks::file::layer::{HelperKind, InstanceData, InstanceKind};
+use ironworks::file::layer::{HelperKind, Instance, InstanceData, InstanceKind, Transform};
+use ironworks::file::mdl::{Lod, MeshKind, ModelContainer};
+use ironworks::file::sgb::SharedGroupFile;
 use ironworks::{
     Ironworks,
     sqpack::{Install, SqPack},
 };
+
+/// How deep a shared group is followed into another, matching the scene view's own cap.
+const DEPTH: u8 = 8;
+
+/// Whether a model holds geometry the scene view would draw, at the level it asks for first.
+fn drawable(bytes: Vec<u8>) -> Option<usize> {
+    let container = ModelContainer::read(std::io::Cursor::new(bytes)).ok()?;
+    let drawn = container
+        .model(Lod::High)
+        .meshes()
+        .into_iter()
+        .filter(|mesh| {
+            mesh.kinds().iter().any(|kind| {
+                matches!(
+                    kind,
+                    MeshKind::Standard
+                        | MeshKind::Water
+                        | MeshKind::LightShaft
+                        | MeshKind::VerticalFog
+                )
+            }) && mesh.attributes().is_ok()
+                && mesh.indices().is_ok()
+        })
+        .count();
+    Some(drawn)
+}
+
+/// The models a shared group places, following the groups it names in turn.
+fn parts(ironworks: &Ironworks, path: &str, depth: u8, into: &mut BTreeSet<String>) -> bool {
+    if depth >= DEPTH {
+        return true;
+    }
+    let Ok(bytes) = ironworks.file::<Vec<u8>>(path) else {
+        return false;
+    };
+    let Ok(file) = SharedGroupFile::read(std::io::Cursor::new(bytes)) else {
+        return false;
+    };
+    for group in file.scene().layer_groups() {
+        for layer in group.layers() {
+            for instance in layer.instances() {
+                match instance.data() {
+                    InstanceData::BgPart(part)
+                        if part.visible() && !part.asset_path().is_empty() =>
+                    {
+                        into.insert(part.asset_path().clone());
+                    }
+                    InstanceData::SharedGroup(shared) if !shared.asset_path().is_empty() => {
+                        parts(ironworks, shared.asset_path(), depth + 1, into);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Whether a transform states anything other than the identity.
+fn moved(transform: Transform) -> bool {
+    transform.translation().iter().any(|axis| *axis != 0.0)
+        || transform.rotation().iter().any(|angle| *angle != 0.0)
+        || transform.scale().iter().any(|axis| *axis != 1.0)
+}
+
+/// The nested instance a prop participant draws itself from, where it has one.
+fn nested_of(participant: &Instance) -> Option<&Instance> {
+    let InstanceData::HelperObject(helper) = participant.data() else {
+        return None;
+    };
+    matches!(helper.kind(), HelperKind::BgPart | HelperKind::SharedGroup)
+        .then(|| helper.nested())
+        .flatten()
+}
+
 
 const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
 
@@ -48,6 +125,18 @@ fn main() {
     let mut assets: [usize; 2] = [0, 0];
     let mut missing: BTreeSet<String> = BTreeSet::new();
     let mut unresolved: BTreeSet<(String, u32)> = BTreeSet::new();
+
+    let mut props: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut propless = 0usize;
+    let mut prop_override = [0usize; 2];
+    let mut nested_moved = 0usize;
+    let mut invisible = 0usize;
+    let mut shadowing: BTreeMap<String, usize> = BTreeMap::new();
+    let mut spheres = [0usize; 2];
+    let mut fading = 0usize;
+    let mut models: BTreeMap<String, usize> = BTreeMap::new();
+    let mut groups: BTreeMap<String, usize> = BTreeMap::new();
+    let mut carrying: BTreeMap<String, usize> = BTreeMap::new();
 
     for path in paths.lines().filter(|path| path.ends_with(".cutb")) {
         let Ok(bytes) = ironworks.file::<Vec<u8>>(path) else {
@@ -120,6 +209,101 @@ fn main() {
                     }
                 }
 
+                if matches!(helper.kind(), HelperKind::BgPart | HelperKind::SharedGroup) {
+                    let named = match helper.kind() {
+                        HelperKind::BgPart => "BgPart",
+                        _ => "SharedGroup",
+                    };
+                    *props.entry(named).or_default() += 1;
+                    match nested_of(participant) {
+                        None => propless += 1,
+                        Some(inner) => {
+                            nested_moved += usize::from(moved(inner.transform()));
+                            {
+                                let own = participant.transform();
+                                let held = inner.transform();
+                                let gap = |left: [f32; 3], right: [f32; 3]| {
+                                    left.iter()
+                                        .zip(right)
+                                        .map(|(a, b)| (a - b).abs())
+                                        .fold(0.0f32, f32::max)
+                                };
+                                let same = gap(own.translation(), held.translation()) <= 0.001
+                                    && gap(own.rotation(), held.rotation()) <= 0.001
+                                    && gap(own.scale(), held.scale()) <= 0.001;
+                                *carrying
+                                    .entry(
+                                        match (
+                                            same,
+                                            held.scale() == [1.0, 1.0, 1.0],
+                                            held.scale() == [0.0, 0.0, 0.0]
+                                                && held.translation() == [0.0, 0.0, 0.0]
+                                                && held.rotation() == [0.0, 0.0, 0.0],
+                                        ) {
+                                            (true, ..) => "nested states the participant's own",
+                                            (false, true, _) => "nested differs, unit scale",
+                                            (false, _, true) => "nested is all zeroes",
+                                            (false, ..) => "nested differs, scaled",
+                                        }
+                                        .to_owned(),
+                                    )
+                                    .or_default() += 1;
+                            }
+                            if let InstanceData::BgPart(part) = inner.data() {
+                                invisible += usize::from(!part.visible());
+                                *shadowing
+                                    .entry(format!("{:?}", part.world_light_shadow_mode()))
+                                    .or_default() += 1;
+                                spheres[usize::from(part.bounding_sphere_size() > 0.0)] += 1;
+                                fading += usize::from(part.fade_out_distance() > 0.0);
+                            }
+                            match inner.data() {
+                                InstanceData::BgPart(part) => {
+                                    *models.entry(part.asset_path().clone()).or_default() += 1;
+                                }
+                                InstanceData::SharedGroup(group) => {
+                                    *groups.entry(group.asset_path().clone()).or_default() += 1;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    if let Some(placement) = helper.placement().filter(|held| held.flags() & 1 != 0)
+                    {
+                        let own = participant.transform();
+                        let held = placement.transform();
+                        let gap = |left: [f32; 3], right: [f32; 3]| {
+                            left.iter()
+                                .zip(right)
+                                .map(|(a, b)| (a - b).abs())
+                                .fold(0.0f32, f32::max)
+                        };
+                        let differs = gap(own.translation(), held.translation()) > 0.001
+                            || gap(own.rotation(), held.rotation()) > 0.001
+                            || gap(own.scale(), held.scale()) > 0.001;
+                        prop_override[usize::from(differs)] += 1;
+                        let at_origin = |t: [f32; 3]| t.iter().all(|axis| *axis == 0.0);
+                        if differs {
+                            let named = match (
+                                at_origin(own.translation()),
+                                at_origin(held.translation()),
+                            ) {
+                                (true, false) => "participant at the origin, placement away",
+                                (false, true) => "placement at the origin, participant away",
+                                (true, true) => "both at the origin",
+                                (false, false) => "both away from the origin",
+                            };
+                            *carrying.entry(named.to_owned()).or_default() += 1;
+                            *carrying
+                                .entry(format!(
+                                    "  {named}: translation gap over a metre: {}",
+                                    gap(own.translation(), held.translation()) > 1.0
+                                ))
+                                .or_default() += 1;
+                        }
+                    }
+                }
+
                 let Some(inner) = helper.nested() else {
                     continue;
                 };
@@ -169,5 +353,78 @@ fn main() {
     }
     for asset in missing.iter().take(20) {
         println!("  no file {asset}");
+    }
+
+    println!();
+    println!("prop participants {props:?}, {propless} naming no nested instance");
+    println!(
+        "placements overriding a prop: {} state the participant's own transform, {} differ",
+        prop_override[0], prop_override[1]
+    );
+    println!("{nested_moved} nested instances state a transform of their own");
+    println!("where a prop override differs: {carrying:?}");
+    carrying.clear();
+    println!("nested BgPart: {invisible} invisible, {fading} fading, {} with no bounding sphere, shadowing {shadowing:?}", spheres[0]);
+
+    let mut drawn = [0usize, 0, 0];
+    let mut instances = [0usize, 0, 0];
+    let mut empty: BTreeSet<String> = BTreeSet::new();
+    for (path, count) in &models {
+        let held = ironworks
+            .file::<Vec<u8>>(path)
+            .ok()
+            .and_then(drawable)
+            .unwrap_or(0);
+        let slot = usize::from(held > 0);
+        drawn[slot] += 1;
+        instances[slot] += count;
+        if held == 0 {
+            empty.insert(path.clone());
+        }
+    }
+    println!(
+        "BgPart models: {} of {} paths draw, covering {} of {} participants",
+        drawn[1],
+        models.len(),
+        instances[1],
+        instances[0] + instances[1]
+    );
+    for path in empty.iter().take(10) {
+        println!("  nothing drawn from {path}");
+    }
+
+    let mut read = [0usize, 0];
+    let mut placed = [0usize, 0];
+    let mut nothing: BTreeSet<String> = BTreeSet::new();
+    for (path, count) in &groups {
+        let mut named = BTreeSet::new();
+        let ok = parts(&ironworks, path, 0, &mut named);
+        let mut held = 0usize;
+        for model in &named {
+            let drawn = *carrying.entry(model.clone()).or_insert_with(|| {
+                ironworks
+                    .file::<Vec<u8>>(model)
+                    .ok()
+                    .and_then(drawable)
+                    .unwrap_or(0)
+            });
+            held += usize::from(drawn > 0);
+        }
+        let slot = usize::from(ok && held > 0);
+        read[slot] += 1;
+        placed[slot] += count;
+        if slot == 0 {
+            nothing.insert(path.clone());
+        }
+    }
+    println!(
+        "SharedGroups: {} of {} paths place a model that draws, covering {} of {} participants",
+        read[1],
+        groups.len(),
+        placed[1],
+        placed[0] + placed[1]
+    );
+    for path in nothing.iter().take(10) {
+        println!("  nothing drawn from {path}");
     }
 }

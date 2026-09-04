@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use egui::{Align, Button, CentralPanel, Layout, RichText, ScrollArea, containers::panel::Panel};
 use glam::{EulerRot, Quat, Vec3};
 use ironworks::file::cutb::{Cutscene, Node};
-use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData};
+use ironworks::file::layer::{HelperKind, HelperObject, Instance, InstanceData, Transform};
 use ironworks::file::lvb::LevelFile;
 use ironworks::file::tmb::{Channel, CommandKind, Curves, Item, Timeline};
 
@@ -329,14 +329,54 @@ pub fn stands_for(participant: &Instance) -> String {
     }
 }
 
+/// Whether a kind's own setup reads the placement stated beside it. The rest are built by copying
+/// the participant record's header wholesale, transform and all, so the placement never reaches
+/// them: `sub_141B26310` calls the placement-aware `sub_141B282F0` for every other kind, and for
+/// these a plain copy of the record's first 0x30 bytes.
+fn takes_placement(kind: HelperKind) -> bool {
+    !matches!(
+        kind,
+        HelperKind::BgPart | HelperKind::SharedGroup | HelperKind::Weapon | HelperKind::Unknown85
+    )
+}
+
 /// Where a participant stands: the transform its record states apart from the instance's own wins
-/// where it says it does, the way the game's own setup takes it.
-fn stands_at(participant: &Instance) -> Vec3 {
+/// where the flag says so and the kind reads it, the way the game's own setup takes it.
+fn stands_at(participant: &Instance) -> Transform {
     helper(participant)
-        .and_then(|helper| helper.placement())
+        .filter(|helper| takes_placement(helper.kind()))
+        .and_then(HelperObject::placement)
         .filter(|placement| placement.flags() & 1 != 0)
-        .map(|placement| Vec3::from_array(placement.transform().translation()))
-        .unwrap_or_else(|| Vec3::from_array(participant.transform().translation()))
+        .map(|placement| placement.transform())
+        .unwrap_or_else(|| participant.transform())
+}
+
+/// What a prop participant draws itself from, where its nested instance names one.
+fn drawn_from(participant: &Instance) -> Option<scene::Asset> {
+    let nested = helper(participant)?.nested()?;
+    let asset = match nested.data() {
+        InstanceData::BgPart(part) => scene::Asset::Model(part.asset_path().clone()),
+        InstanceData::SharedGroup(group) => scene::Asset::Group(group.asset_path().clone()),
+        _ => return None,
+    };
+    let (scene::Asset::Model(path) | scene::Asset::Group(path)) = &asset;
+    (!path.is_empty()).then_some(asset)
+}
+
+/// The scenery a cutscene brings with it: the participants naming a model or a shared group, at the
+/// transforms their own records state. The nested instance carries the asset and nothing else - its
+/// own transform is all zeroes in every shipping file.
+fn props(cutscene: &Cutscene) -> Vec<scene::Prop> {
+    participants(cutscene)
+        .iter()
+        .filter_map(|participant| {
+            Some(scene::Prop {
+                asset: drawn_from(participant)?,
+                transform: stands_at(participant),
+                id: participant.id(),
+            })
+        })
+        .collect()
 }
 
 /// What a `CTAL` holds, as a count of each kind its participants stand for.
@@ -362,27 +402,29 @@ pub fn roll_call(participants: &[Instance]) -> String {
         .join(", ")
 }
 
-/// The `CTAL` participants a cutscene names, as points to mark rather than characters to draw.
-pub fn markers(cutscene: &Cutscene) -> Vec<(Vec3, String)> {
+/// The `CTAL` a cutscene holds, empty where it names none.
+fn participants(cutscene: &Cutscene) -> &[Instance] {
     cutscene
         .nodes()
         .iter()
         .find_map(|node| match node {
-            Node::Participants(participants) => Some(participants),
+            Node::Participants(participants) => Some(participants.as_slice()),
             _ => None,
         })
-        .map(|participants| {
-            participants
-                .iter()
-                .map(|participant| {
-                    (
-                        stands_at(participant),
-                        format!("{} · {:#x}", stands_for(participant), participant.id()),
-                    )
-                })
-                .collect()
-        })
         .unwrap_or_default()
+}
+
+/// The `CTAL` participants a cutscene names, as points to mark rather than characters to draw.
+pub fn markers(cutscene: &Cutscene) -> Vec<(Vec3, String)> {
+    participants(cutscene)
+        .iter()
+        .map(|participant| {
+            (
+                Vec3::from_array(stands_at(participant).translation()),
+                format!("{} · {:#x}", stands_for(participant), participant.id()),
+            )
+        })
+        .collect()
 }
 
 /// The `.lvb` a `CTDS` names its level by: the same shape the Assets tab's own Zones tab resolves.
@@ -456,7 +498,11 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
             unreachable!()
         };
         state.fetch = match promise.block_and_take() {
-            Ok(file) => Fetch::Ready(Box::new(layer::level_scene(&tab.level, file))),
+            Ok(file) => {
+                let mut scene = layer::level_scene(&tab.level, file);
+                scene.place("Cutscene", props(cutscene));
+                Fetch::Ready(Box::new(scene))
+            }
             Err(error) => Fetch::Failed(error.to_string()),
         };
     }

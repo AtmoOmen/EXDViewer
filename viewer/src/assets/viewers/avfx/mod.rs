@@ -1849,8 +1849,7 @@ mod tests {
         assert_eq!(at(effect, 0)[0].facing, sim::Facing::Screen);
     }
 
-    /// `RBDT` names the two upright bills apart, and the capture the test below reads has them
-    /// meeting different things.
+    /// `RBDT` names the two upright bills apart, and the game turns them to meet different things.
     #[test]
     fn the_two_upright_bills_read_apart() {
         let based = |base| {
@@ -1875,32 +1874,18 @@ mod tests {
     /// are 9 degrees apart at the Ishgard camera, so neither reading can pass for the other.
     #[test]
     fn a_billed_model_turns_the_way_the_game_turns_it() {
-        let ishgard = (
-            Vec3::new(-251.920_83, 8.874_07, 166.831_26),
-            -Vec3::new(0.674_39, 0.404_75, -0.617_55),
-            Vec3::new(-64.0, 8.53, 44.0),
-        );
-        let basis = glam::Mat3::from_quat(super::billed(
-            sim::Toward::Eye,
-            ishgard.2,
-            ishgard.0,
-            ishgard.1,
-        ));
+        let eye = Vec3::new(-251.920_83, 8.874_07, 166.831_26);
+        let back = -Vec3::new(0.674_39, 0.404_75, -0.617_55);
+        let at = Vec3::new(-64.0, 8.53, 44.0);
+        let basis = glam::Mat3::from_quat(super::billed(sim::Toward::Eye, at, eye, back));
         assert!(basis.y_axis.abs_diff_eq(Vec3::Y, 1e-6));
         assert!(basis.z_axis.abs_diff_eq(Vec3::new(-0.837_051, 0.0, 0.547_124), 1e-5));
         assert!(basis.x_axis.abs_diff_eq(Vec3::new(0.547_124, 0.0, 0.837_051), 1e-5));
 
-        let tuli = (
-            Vec3::new(-6.535_23, 18.582_67, 36.727_37),
-            -Vec3::new(-0.568_08, -0.186_75, -0.801_5),
-            Vec3::new(-24.067_76, 10.866_75, 7.599_18),
-        );
-        let basis = glam::Mat3::from_quat(super::billed(
-            sim::Toward::Screen,
-            tuli.2,
-            tuli.0,
-            tuli.1,
-        ));
+        let eye = Vec3::new(-6.535_23, 18.582_67, 36.727_37);
+        let back = -Vec3::new(-0.568_08, -0.186_75, -0.801_5);
+        let at = Vec3::new(-24.067_76, 10.866_75, 7.599_18);
+        let basis = glam::Mat3::from_quat(super::billed(sim::Toward::Screen, at, eye, back));
         assert!(basis.y_axis.abs_diff_eq(Vec3::Y, 1e-6));
         assert!(basis.z_axis.abs_diff_eq(Vec3::new(0.578_258, 0.0, 0.815_854), 1e-4));
         assert!(basis.x_axis.abs_diff_eq(Vec3::new(0.815_854, 0.0, -0.578_258), 1e-4));

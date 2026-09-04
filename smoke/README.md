@@ -575,3 +575,9 @@ build itself (trunk, dev profile) took ~41s on top of the browser gate's run tim
 own dev build took ~6s incrementally or ~42s clean, so on a clean checkout the two are closer than
 the run-time numbers alone suggest, and the gap grows every time either gate runs again without a
 rebuild.
+
+## Waiting on the gate from a script
+
+`smoke.ts` prints its verdict as `PASS: no GL errors, panics or ERROR logs` and exits 0. There is no
+`smoke: PASS` line; a monitor watching for one idles until it times out long after the run finished.
+Match on the exit code, or on `^PASS:`.

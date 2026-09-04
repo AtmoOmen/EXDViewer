@@ -351,10 +351,13 @@ fn stands_at(participant: &Instance) -> Transform {
         .unwrap_or_else(|| participant.transform())
 }
 
-/// What a prop participant draws itself from, where its nested instance names one.
+/// What a prop participant draws itself from, where its nested instance names one. Only the two
+/// kinds that build background out of it: `Unknown85` names a nested shared group as well, and its
+/// own setup takes the path alone, as a kind of instance this view has no notion of.
 fn drawn_from(participant: &Instance) -> Option<scene::Asset> {
-    let nested = helper(participant)?.nested()?;
-    let asset = match nested.data() {
+    let helper = helper(participant)
+        .filter(|helper| matches!(helper.kind(), HelperKind::BgPart | HelperKind::SharedGroup))?;
+    let asset = match helper.nested()?.data() {
         InstanceData::BgPart(part) => scene::Asset::Model(part.asset_path().clone()),
         InstanceData::SharedGroup(group) => scene::Asset::Group(group.asset_path().clone()),
         _ => return None,

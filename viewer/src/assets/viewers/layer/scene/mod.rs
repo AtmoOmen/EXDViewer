@@ -1301,9 +1301,9 @@ impl Scene {
                         transform: here,
                         driven: None,
                         center: here.transform_point3(Vec3::ZERO),
-                        // A prop states no bounding sphere and no fade of its own, and the record
-                        // the game builds for one leaves both at nought as well, so it draws at
-                        // the coarsest detail level and never fades.
+                        // A prop states neither a bounding sphere nor a fade distance, and the
+                        // record the game builds for one leaves both at nought as well, so it
+                        // never fades.
                         radius: 0.0,
                         fade: 0.0,
                         layer: at,

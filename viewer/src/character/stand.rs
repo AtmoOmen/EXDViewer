@@ -129,8 +129,10 @@ struct Packs {
     queue: Vec<String>,
     reading: Option<Naming>,
     named: BTreeMap<String, Vec<String>>,
-    /// What has been queued, so a pack two characters share is read once.
+    /// What has been queued, so a pack two characters share is read once, and which bodies have
+    /// had their resident set queued, so the listing is walked once a body rather than a frame.
     asked: BTreeSet<String>,
+    bodies: BTreeSet<String>,
 }
 
 impl Packs {
@@ -338,13 +340,18 @@ impl Cast {
                 .collect();
             build.poll(ctx, &listing, &reference, backend, &standing);
         }
-        let wanted: Vec<String> = self
+        let bodies: Vec<String> = self
             .builds
             .values()
             .flat_map(|build| build.lineage.iter())
-            .flat_map(|code| resident(&listing, code))
+            .filter(|code| !self.packs.bodies.contains(*code))
+            .cloned()
             .collect();
-        self.packs.ask(wanted);
+        for code in bodies {
+            let held = resident(&listing, &code);
+            self.packs.bodies.insert(code);
+            self.packs.ask(held);
+        }
     }
 
     /// Opens a build per row and height a participant asked for.

@@ -971,6 +971,13 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
                      rows the cast holds",
                 );
         }
+        if !state.cast.loaded() {
+            ui.label(RichText::new("reading the motion packs\u{2026}").weak())
+                .on_hover_text(
+                    "A cutscene names the motions it plays rather than filing them, so nothing \
+                     acts until the packs it loads have been read",
+                );
+        }
         if let Some(why) = state.cast.failure() {
             ui.colored_label(egui::Color32::LIGHT_RED, format!("cast: {why}"));
         }

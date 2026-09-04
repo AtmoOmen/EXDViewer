@@ -129,9 +129,10 @@ struct Packs {
     queue: Vec<String>,
     reading: Option<Naming>,
     named: BTreeMap<String, Vec<String>>,
-    /// What has been queued, so a pack two characters share is read once, and which bodies have
-    /// had their resident set queued, so the listing is walked once a body rather than a frame.
+    /// What has been queued, so a pack two characters share is read once.
     asked: BTreeSet<String>,
+    /// Which bodies have had their resident set queued, so the listing is walked once a body
+    /// rather than once a frame.
     bodies: BTreeSet<String>,
 }
 

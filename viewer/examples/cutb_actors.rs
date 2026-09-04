@@ -22,9 +22,14 @@ const DEPTH: u8 = 8;
 
 /// Whether a model holds geometry the scene view would draw, at the level it asks for first.
 fn drawable(bytes: Vec<u8>) -> Option<usize> {
+    meshes(bytes, Lod::High)
+}
+
+/// How many meshes a model holds that the scene view would draw, at one detail level.
+fn meshes(bytes: Vec<u8>, level: Lod) -> Option<usize> {
     let container = ModelContainer::read(std::io::Cursor::new(bytes)).ok()?;
     let drawn = container
-        .model(Lod::High)
+        .model(level)
         .meshes()
         .into_iter()
         .filter(|mesh| {
@@ -43,8 +48,15 @@ fn drawable(bytes: Vec<u8>) -> Option<usize> {
     Some(drawn)
 }
 
-/// The models a shared group places, following the groups it names in turn.
-fn parts(ironworks: &Ironworks, path: &str, depth: u8, into: &mut BTreeSet<String>) -> bool {
+/// What a shared group places, following the groups it names in turn: the models it stands, and
+/// how many effects, lights and sounds it brings alongside them.
+fn parts(
+    ironworks: &Ironworks,
+    path: &str,
+    depth: u8,
+    into: &mut BTreeSet<String>,
+    beside: &mut BTreeMap<&'static str, usize>,
+) -> bool {
     if depth >= DEPTH {
         return true;
     }
@@ -64,8 +76,13 @@ fn parts(ironworks: &Ironworks, path: &str, depth: u8, into: &mut BTreeSet<Strin
                         into.insert(part.asset_path().clone());
                     }
                     InstanceData::SharedGroup(shared) if !shared.asset_path().is_empty() => {
-                        parts(ironworks, shared.asset_path(), depth + 1, into);
+                        parts(ironworks, shared.asset_path(), depth + 1, into, beside);
                     }
+                    InstanceData::Vfx(vfx) if !vfx.asset_path().is_empty() => {
+                        *beside.entry("vfx").or_default() += 1;
+                    }
+                    InstanceData::Light(_) => *beside.entry("light").or_default() += 1,
+                    InstanceData::Sound(_) => *beside.entry("sound").or_default() += 1,
                     _ => {}
                 }
             }
@@ -137,8 +154,11 @@ fn main() {
     let mut models: BTreeMap<String, usize> = BTreeMap::new();
     let mut groups: BTreeMap<String, usize> = BTreeMap::new();
     let mut carrying: BTreeMap<String, usize> = BTreeMap::new();
+    let mut busiest: Vec<(usize, String)> = Vec::new();
 
+    let mut here;
     for path in paths.lines().filter(|path| path.ends_with(".cutb")) {
+        here = 0usize;
         let Ok(bytes) = ironworks.file::<Vec<u8>>(path) else {
             continue;
         };
@@ -215,6 +235,7 @@ fn main() {
                         _ => "SharedGroup",
                     };
                     *props.entry(named).or_default() += 1;
+                    here += 1;
                     match nested_of(participant) {
                         None => propless += 1,
                         Some(inner) => {
@@ -331,7 +352,9 @@ fn main() {
                 }
             }
         }
+        busiest.push((here, path.to_owned()));
     }
+    busiest.sort_by(|a, b| b.0.cmp(&a.0));
 
     println!("{files} files read, {failed} failed");
     println!("participant instance kinds {instances:?}");
@@ -366,15 +389,17 @@ fn main() {
     carrying.clear();
     println!("nested BgPart: {invisible} invisible, {fading} fading, {} with no bounding sphere, shadowing {shadowing:?}", spheres[0]);
 
+    let mut coarse = [0usize, 0];
     let mut drawn = [0usize, 0, 0];
     let mut instances = [0usize, 0, 0];
     let mut empty: BTreeSet<String> = BTreeSet::new();
     for (path, count) in &models {
-        let held = ironworks
-            .file::<Vec<u8>>(path)
-            .ok()
-            .and_then(drawable)
+        let bytes = ironworks.file::<Vec<u8>>(path).ok();
+        let held = bytes.clone().and_then(drawable).unwrap_or(0);
+        let low = bytes
+            .and_then(|bytes| meshes(bytes, Lod::Low))
             .unwrap_or(0);
+        coarse[usize::from(low == held)] += 1;
         let slot = usize::from(held > 0);
         drawn[slot] += 1;
         instances[slot] += count;
@@ -389,16 +414,22 @@ fn main() {
         instances[1],
         instances[0] + instances[1]
     );
+    println!(
+        "  {} of them hold the same mesh count at the coarsest level, {} fewer",
+        coarse[1], coarse[0]
+    );
     for path in empty.iter().take(10) {
         println!("  nothing drawn from {path}");
     }
 
+    let mut tally: BTreeMap<String, usize> = BTreeMap::new();
     let mut read = [0usize, 0];
     let mut placed = [0usize, 0];
     let mut nothing: BTreeSet<String> = BTreeSet::new();
     for (path, count) in &groups {
         let mut named = BTreeSet::new();
-        let ok = parts(&ironworks, path, 0, &mut named);
+        let mut beside = BTreeMap::new();
+        let ok = parts(&ironworks, path, 0, &mut named, &mut beside);
         let mut held = 0usize;
         for model in &named {
             let drawn = *carrying.entry(model.clone()).or_insert_with(|| {
@@ -414,9 +445,21 @@ fn main() {
         read[slot] += 1;
         placed[slot] += count;
         if slot == 0 {
-            nothing.insert(path.clone());
+            nothing.insert(format!("{path} {beside:?}"));
+            *tally
+                .entry(
+                    match (ok, beside.contains_key("vfx"), beside.is_empty()) {
+                        (false, ..) => "does not parse",
+                        (true, true, _) => "places effects and no model",
+                        (true, false, true) => "places nothing at all",
+                        (true, false, false) => "places lights or sounds and no model",
+                    }
+                    .to_owned(),
+                )
+                .or_default() += 1;
         }
     }
+    println!("busiest cutscenes {:?}", &busiest[..10.min(busiest.len())]);
     println!(
         "SharedGroups: {} of {} paths place a model that draws, covering {} of {} participants",
         read[1],
@@ -424,7 +467,8 @@ fn main() {
         placed[1],
         placed[0] + placed[1]
     );
-    for path in nothing.iter().take(10) {
+    println!("  of the rest {tally:?}");
+    for path in nothing.iter().take(6) {
         println!("  nothing drawn from {path}");
     }
 }

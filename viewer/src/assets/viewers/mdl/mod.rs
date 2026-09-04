@@ -845,18 +845,22 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             // one placeholder per bone it skins to is what gives it joints to be carried on, which
             // `Rendered::carried` fills in every frame. A weapon that skins to more than one, a
             // grimoire's pages or a bow's limbs, loses every vertex past the first without them.
-            let table: Vec<String> = match worn.rigid {
-                true => vec![String::new(); mesh.bone_table().len().max(1)],
-                false => mesh
-                    .bone_table()
-                    .iter()
-                    .map(|bone| {
-                        bone_names
-                            .get(usize::from(*bone))
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .collect(),
+            let slots: Vec<String> = mesh
+                .bone_table()
+                .iter()
+                .map(|bone| {
+                    bone_names
+                        .get(usize::from(*bone))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            // A rigid piece resolves its own bone names against a rig of its own where it has one,
+            // and against nothing at all where it does not, so an empty table still needs the one
+            // slot every vertex of it indexes.
+            let table = match worn.rigid && slots.is_empty() {
+                true => vec![String::new()],
+                false => slots,
             };
             if let Some(deform) = worn.deform {
                 deform.apply(&mut vertices, &table);
@@ -2178,9 +2182,20 @@ impl Rendered {
                 };
                 let carried = world * attachment.local;
                 for (index, mesh) in level.meshes.iter().enumerate() {
-                    if self.pieces[mesh.piece].path == attachment.path {
-                        pose.joints[index] = vec![carried; level.bones[index].len()];
+                    if self.pieces[mesh.piece].path != attachment.path {
+                        continue;
                     }
+                    // A prop that ships a pack of its own is skinned to a rig of its own, walked
+                    // by that pack and carried whole to the point it hangs from: that is what puts
+                    // one of the two things it holds in each hand.
+                    pose.joints[index] = match self
+                        .animation
+                        .body_playing()
+                        .and_then(|(_, _, time)| self.emote.borrow().joints(&level.bones[index], time))
+                    {
+                        Some(joints) => joints.iter().map(|joint| carried * *joint).collect(),
+                        None => vec![carried; level.bones[index].len()],
+                    };
                 }
             }
         }
@@ -3245,11 +3260,11 @@ impl Rendered {
             .collect();
     }
 
-    /// The model an emote's own timeline wants held right now, by the path it is worn as and its
-    /// material variant, where a `C043`/`C198` prop command's window covers the current time.
-    /// `None` once it has played through: the caller is what carries a prop away again, the way a
-    /// weapon put away carries nothing.
-    pub fn wanted_prop(&self) -> Option<(String, u16)> {
+    /// The model an emote's own timeline wants held right now, by the path it is worn as, its
+    /// material variant and the weapon set it is filed under, where a `C043`/`C198` prop command's
+    /// window covers the current time. `None` once it has played through: the caller is what
+    /// carries a prop away again, the way a weapon put away carries nothing.
+    pub fn wanted_prop(&self) -> Option<(String, u16, u16)> {
         let (_, _, time) = self.animation.body_playing()?;
         self.emote.borrow().active_prop(time)
     }

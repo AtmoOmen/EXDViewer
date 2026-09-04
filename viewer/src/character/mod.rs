@@ -386,9 +386,10 @@ pub struct CharacterBuilder {
     /// changed clothes since.
     fetching: Vec<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
-    /// The prop the playing emote's own timeline wants held, by path and material variant, read
+    /// The prop the playing emote's own timeline wants held, by path, material variant and the
+    /// weapon set it hangs from, read
     /// off the model itself once a frame so `worn` picks it up the same way it does a weapon.
-    prop: Option<(String, u16)>,
+    prop: Option<(String, u16, u16)>,
 }
 
 impl Default for CharacterBuilder {
@@ -1046,10 +1047,17 @@ impl CharacterBuilder {
                 found.push(self.attach(weapon.model(), tag(&weapon), false, atch, log));
             }
         }
-        // An emote's own prop, held at the same fallback bone a weapon takes with no `.atch` tag
-        // resolved for it: nothing in the timeline states which point a prop hangs from.
-        if let Some((path, _)) = &self.prop {
-            found.push((path.clone(), weapons::fallback_bone(true).to_owned(), Mat4::IDENTITY));
+        // An emote's own prop hangs off the point its model set names, the same table a weapon
+        // reads: the prop is summoned as one, and one that holds a thing in each hand is moved
+        // into them by a pack of its own rather than by where it hangs.
+        if let Some((path, _, set)) = &self.prop {
+            let atch = self
+                .atch
+                .as_ref()
+                .filter(|(code, _)| *code == self.code)
+                .map(|(_, bytes)| bytes);
+            let tag = weapons::tag(&self.weapon_tags, *set);
+            found.push(self.attach(path.clone(), tag, true, atch, false));
         }
         found
     }
@@ -1448,7 +1456,7 @@ impl CharacterBuilder {
         found.extend(
             self.prop
                 .clone()
-                .map(|(path, variant)| (path, variant, [None, None])),
+                .map(|(path, variant, _)| (path, variant, [None, None])),
         );
         found
     }
@@ -1547,7 +1555,7 @@ impl CharacterBuilder {
                     deform,
                     skin: self.skin,
                     rigid: wielded.contains(path)
-                        || self.prop.as_ref().is_some_and(|(held, _)| held == path),
+                        || self.prop.as_ref().is_some_and(|(held, ..)| held == path),
                 })
             })
             .collect();

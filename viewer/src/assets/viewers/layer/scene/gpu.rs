@@ -1319,6 +1319,10 @@ impl Renderer {
     ///
     /// Each carries its own place in the world and the colours it was made with, which are the two
     /// things the scene constants hold per character rather than per frame.
+    ///
+    /// A character whose own draw fails is skipped rather than failing the frame: the renderer
+    /// takes a failure as final and stops drawing anything at all, and one material a driver
+    /// rejects would then blank the whole zone.
     fn cast(
         &mut self,
         gl: &glow::Context,
@@ -1326,7 +1330,7 @@ impl Renderer {
         frame: &Frame,
         scene: &program::Scene,
         lighting: Option<&Lighting>,
-    ) -> Result<(), String> {
+    ) {
         for cast in &frame.casts {
             let held = program::Scene {
                 model: cast.model,
@@ -1334,14 +1338,14 @@ impl Renderer {
                 ..scene.clone()
             };
             let mut model = cast.gpu.lock().unwrap();
-            match lighting {
+            let drawn = match lighting {
                 None => model.fill(
                     gl,
                     painter,
                     (&cast.surfaces, &cast.joints),
                     &mut self.buffers,
                     &held,
-                )?,
+                ),
                 Some(lighting) => model.over(
                     gl,
                     painter,
@@ -1350,10 +1354,12 @@ impl Renderer {
                     lighting,
                     &frame.lamps,
                     &held,
-                )?,
+                ),
+            };
+            if let Err(why) = drawn {
+                log::error!("assets/layer: character: {why}");
             }
         }
-        Ok(())
     }
 
     fn render(
@@ -1513,7 +1519,7 @@ impl Renderer {
             }
             self.grass(gl, painter, frame, &scene, page)?;
         }
-        self.cast(gl, painter, frame, &scene, None)?;
+        self.cast(gl, painter, frame, &scene, None);
 
         if let Some(lighting) = frame.lighting.as_ref() {
             // Before anything reads it: every lighting pass and the composite take the occlusion as
@@ -1611,7 +1617,7 @@ impl Renderer {
             // Over the sky, the water and the fog: a fringe pixel is one the opaque pass left
             // uncovered, and drawing it any earlier leaves the sky free to paint over it.
             self.sheer(gl, painter, frame, &scene, &offsets, lighting)?;
-            self.cast(gl, painter, frame, &scene, Some(lighting))?;
+            self.cast(gl, painter, frame, &scene, Some(lighting));
             // Before the exposure, since a halo belongs to the frame the lighting left rather than
             // to what a curve made of it.
             if let Some(glare) = frame.glare.as_ref() {

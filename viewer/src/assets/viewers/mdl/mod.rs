@@ -3590,3 +3590,40 @@ impl Rendered {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Source, compose};
+
+    /// `w5341b0001`'s `.imc` names material nought for the one variant it carries, which is the
+    /// game stating that the weapon draws no material at all: worn at that variant it contributes
+    /// no mesh, and at the base colourway its own meshes are there.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_piece_whose_imc_names_no_material_contributes_no_mesh() {
+        let path = "chara/weapon/w5341/obj/body/b0001/model/w5341b0001.mdl";
+        let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
+            ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),
+        ));
+        let bytes: Vec<u8> = install.file(path).expect("the model");
+        let worn = |material| -> usize {
+            compose(&[Source {
+                path: path.to_owned(),
+                bytes: bytes.clone(),
+                variant: 1,
+                material,
+                deform: None,
+                skin: None,
+                rigid: true,
+            }])
+            .expect("a readable model")
+            .level
+            .borrow()
+            .meshes
+            .len()
+        };
+        assert_eq!(worn(Some(0)), 0, "the imc names no material");
+        assert!(worn(Some(1)) > 0, "the base colourway draws");
+        assert!(worn(None) > 0, "nothing states a colourway at all");
+    }
+}

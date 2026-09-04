@@ -326,5 +326,14 @@ mod tests {
             Some("clg"),
             "the second knuckle clamps into the first"
         );
+
+        // Every point a combat weapon set is sent to is one the body's own `.atch` carries. A few
+        // of the tool points are in no player race's file, and those hang off the bare hand bone.
+        let bytes: Vec<u8> = install.file(&atch_path(101)).expect("the attach points");
+        let points = AttachPoints::read(Cursor::new(bytes)).expect("a readable file");
+        for set in (101..=2801).step_by(100) {
+            let held = tag(&tags, set).expect("every set reads a point");
+            assert!(points.point(held).is_some(), "c0101.atch has no {held}");
+        }
     }
 }

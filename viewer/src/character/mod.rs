@@ -28,7 +28,7 @@ use egui::{
     Align, CentralPanel, Color32, Layout, Popup, RectAlign, RichText, ScrollArea, TextEdit,
     containers::panel::Panel,
 };
-use glam::{EulerRot, Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -349,7 +349,7 @@ pub struct CharacterBuilder {
     drawn: bool,
     /// Which motion class each weapon puts the body in, and how long the game blends one motion
     /// into another.
-    stance: Option<stance::Stance>,
+    stance: Option<Rc<stance::Stance>>,
     reading_stance: Option<TrackedPromise<Result<stance::Stance>>>,
     /// The stance the body was last put in, so one it is already standing in is not started over
     /// on every frame.
@@ -387,9 +387,10 @@ pub struct CharacterBuilder {
     /// changed clothes since.
     fetching: Vec<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
-    /// The prop the playing emote's own timeline wants held, by path and material variant, read
+    /// The prop the playing emote's own timeline wants held, by path, material variant and the
+    /// weapon set it hangs from, read
     /// off the model itself once a frame so `worn` picks it up the same way it does a weapon.
-    prop: Option<(String, u16)>,
+    prop: Option<(String, u16, u16)>,
 }
 
 impl Default for CharacterBuilder {
@@ -648,7 +649,7 @@ impl CharacterBuilder {
         }
         if let Some(promise) = self.reading_stance.take() {
             match promise.try_take() {
-                Ok(Ok(read)) => self.stance = Some(read),
+                Ok(Ok(read)) => self.stance = Some(Rc::new(read)),
                 Ok(Err(why)) => log::warn!("character: nothing states a weapon's stance: {why}"),
                 Err(promise) => self.reading_stance = Some(promise),
             }
@@ -948,6 +949,9 @@ impl CharacterBuilder {
             let carried = self.attachments();
             model.glowing(self.effects(&carried));
             model.carried(carried);
+            if let Some(stance) = self.stance.clone() {
+                model.blending(move |from, to| stance.fade(from, to));
+            }
             self.stand(model);
         }
     }
@@ -961,9 +965,7 @@ impl CharacterBuilder {
         let Some(stance) = &self.stance else {
             return;
         };
-        let wielded = self.wielded();
-        let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
-        let held = stance.directory(set(0), set(1));
+        let held = self.directory();
         let mut stood = self.stood_in.borrow_mut();
         if let Some(stood) = stood
             .as_ref()
@@ -1005,6 +1007,33 @@ impl CharacterBuilder {
         });
     }
 
+    /// The class directory the weapons in hand file this body's packs under.
+    fn directory(&self) -> String {
+        let wielded = self.wielded();
+        let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
+        match &self.stance {
+            Some(stance) => stance.directory(set(0), set(1)),
+            None => stance::COMMON.to_owned(),
+        }
+    }
+
+    /// Where an emote's own key is filed for this body, nearest first: under the class directory
+    /// the weapons in hand put it in, which is the only place a battle emote is filed at all, and
+    /// then under the one every body shares. Both go through the table saying which body really
+    /// holds a pack, since a class that ships none of its own reads another's.
+    fn emote_packs(&self, key: &str) -> Vec<String> {
+        let Some(stance) = &self.stance else {
+            return Vec::new();
+        };
+        let held = self.directory();
+        let shared = stance.pack(self.code, stance::COMMON, key);
+        let mut found = vec![stance.pack(self.code, &held, key)];
+        if found[0] != shared {
+            found.push(shared);
+        }
+        found
+    }
+
     /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
     /// and its own placement relative to that bone. Falls back to the plain hand null bone at no
     /// offset where the race's `.atch` file has not landed yet or names this weapon's job nothing.
@@ -1023,7 +1052,7 @@ impl CharacterBuilder {
             let log = self.logged.get() != key;
             self.logged.set(key);
             let tag = |weapon: &weapons::Weapon| weapons::tag(&self.weapon_tags, weapon.set);
-            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, atch, log));
+            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, self.drawn, atch, log));
             let off = match main.covers_off_hand {
                 true => main.off_hand,
                 false => self
@@ -1032,13 +1061,21 @@ impl CharacterBuilder {
                     .map(|piece| piece.weapon),
             };
             if let Some(weapon) = off {
-                found.push(self.attach(weapon.model(), tag(&weapon), false, atch, log));
+                found.push(self.attach(weapon.model(), tag(&weapon), false, self.drawn, atch, log));
             }
         }
-        // An emote's own prop, held at the same fallback bone a weapon takes with no `.atch` tag
-        // resolved for it: nothing in the timeline states which point a prop hangs from.
-        if let Some((path, _)) = &self.prop {
-            found.push((path.clone(), weapons::fallback_bone(true).to_owned(), Mat4::IDENTITY));
+        // An emote's own prop hangs off the point its model set names, the same table a weapon
+        // reads, and always at the drawn placement: it is summoned into a hand rather than worn,
+        // so the stance toggle is nothing to it. One that holds a thing in each hand is moved
+        // into them by a pack of its own rather than by where it hangs.
+        if let Some((path, _, set)) = &self.prop {
+            let atch = self
+                .atch
+                .as_ref()
+                .filter(|(code, _)| *code == self.code)
+                .map(|(_, bytes)| bytes);
+            let tag = weapons::tag(&self.weapon_tags, *set);
+            found.push(self.attach(path.clone(), tag, true, true, atch, false));
         }
         found
     }
@@ -1079,13 +1116,14 @@ impl CharacterBuilder {
         path: String,
         tag: Option<&str>,
         main: bool,
+        drawn: bool,
         atch: Option<&Rc<Vec<u8>>>,
         log: bool,
     ) -> (String, String, Mat4) {
-        let stance = if self.drawn { "drawn" } else { "sheathed" };
+        let stance = if drawn { "drawn" } else { "sheathed" };
         let placed = tag
             .zip(atch)
-            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, self.drawn));
+            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, drawn, !main));
         let Some(placement) = placed else {
             let bone = weapons::fallback_bone(main);
             if log {
@@ -1093,16 +1131,7 @@ impl CharacterBuilder {
             }
             return (path, bone.to_owned(), Mat4::IDENTITY);
         };
-        let local = Mat4::from_scale_rotation_translation(
-            Vec3::splat(placement.scale),
-            Quat::from_euler(
-                EulerRot::XYZ,
-                placement.rotation[0],
-                placement.rotation[1],
-                placement.rotation[2],
-            ),
-            Vec3::from_array(placement.offset),
-        );
+        let local = placement.placement();
         if log {
             log::info!(
                 "character: {path} hangs from {} at offset {:?} scale {}, {stance}",
@@ -1345,7 +1374,7 @@ impl CharacterBuilder {
         found.extend(
             self.prop
                 .clone()
-                .map(|(path, variant)| (path, variant, [None, None])),
+                .map(|(path, variant, _)| (path, variant, [None, None])),
         );
         found
     }
@@ -1444,7 +1473,7 @@ impl CharacterBuilder {
                     deform,
                     skin: self.skin,
                     rigid: wielded.contains(path)
-                        || self.prop.as_ref().is_some_and(|(held, _)| held == path),
+                        || self.prop.as_ref().is_some_and(|(held, ..)| held == path),
                 })
             })
             .collect();
@@ -2413,11 +2442,14 @@ impl CharacterBuilder {
                 if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
                     match emote.expression() {
                         Some(name) => model.express(name),
-                        None => match emote.packs(self.code).as_slice() {
-                            [start, standing] => model.play(start, Some(standing)),
-                            [only] => model.play(only, None),
-                            _ => {}
-                        },
+                        None => {
+                            let (start, settles) = emote.keys();
+                            let packs = start.map(|key| self.emote_packs(key)).unwrap_or_default();
+                            let settles = settles.and_then(|key| {
+                                Some(self.stance.as_ref()?.pack(self.code, stance::COMMON, key))
+                            });
+                            model.play(&packs, settles.as_deref());
+                        }
                     }
                 }
             }
@@ -3003,3 +3035,4 @@ mod tests {
         assert_eq!(resolve(8, true, true), 804);
     }
 }
+

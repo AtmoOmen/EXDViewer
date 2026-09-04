@@ -10,8 +10,10 @@
 //!
 //! Blend lengths are the game's own: `MotionTimeline` gives each motion name a blend group and
 //! `MotionTimelineBlendTable` gives every ordered pair of groups a frame count, which the client
-//! reads at a floor of one frame and 30 frames a second. A pair the table does not state falls
-//! back to the one out of group 0, then to the one into group 0, then to 0 to 0.
+//! reads at a floor of one frame and 30 frames a second. A motion the sheet does not name is in
+//! group 0, and a pair the table does not state falls back to the one out of group 0, then to 0
+//! to 0: the client fills its matrix in place from the top, so every unstated pair in row 0 is
+//! already the 0 to 0 one by the time any other row reads it.
 //!
 //! Which body a pack is actually read out of is `chara/xls/animation/papLoadTable.plt`'s answer.
 //! Most bodies file no animation of their own and most classes share another's, so the client asks
@@ -39,7 +41,7 @@ const PACK_TABLE: &str = "chara/xls/animation/papLoadTable.plt";
 const EMPTY: &str = "emp";
 
 /// The directory every body's own unarmed packs are filed in, whatever it holds.
-const COMMON: &str = "bt_common";
+pub const COMMON: &str = "bt_common";
 
 /// The motion a body stands in sheathed and drawn, and the partial motions it draws and sheathes
 /// with, which are the same names in every class's own packs.
@@ -58,6 +60,10 @@ const GROUP: u32 = 4;
 const DEST: u32 = 0;
 const SOURCE: u32 = 1;
 const FRAMES: u32 = 2;
+/// The frame counts the other kinds of body read, which the table is padded past its last real
+/// row with rows of nothing but zeroes; the client tells those apart by every field being nought
+/// and files no blend for them, so the pair they would spell keeps whatever a real row said.
+const OTHERS: [u32; 3] = [3, 4, 5];
 
 /// The path a pack sits at: the body its model id spells, the animation set, the class directory
 /// and the name inside it, which the client formats as `%s/animation/a%04d/%s/%s.pap`. A model id
@@ -108,11 +114,10 @@ impl Stance {
             let Ok(row) = table.get_row(id) else {
                 continue;
             };
-            if let (Ok(dest), Ok(source), Ok(frames)) = (
-                row.read::<u8>(DEST),
-                row.read::<u8>(SOURCE),
-                row.read::<u8>(FRAMES),
-            ) {
+            let read = |at| row.read::<u8>(at).unwrap_or_default();
+            let (dest, source, frames) = (read(DEST), read(SOURCE), read(FRAMES));
+            let stated = OTHERS.iter().fold(dest | source | frames, |held, at| held | read(*at));
+            if stated != 0 {
                 blends.insert((source, dest), frames);
             }
         }
@@ -156,10 +161,8 @@ impl Stance {
     /// takes the fallbacks the client's own lookup fills the matrix in with, and a stated zero
     /// still runs for a frame.
     pub fn fade(&self, from: &str, to: &str) -> f32 {
-        let (Some(source), Some(dest)) = (self.group(from), self.group(to)) else {
-            return 0.0;
-        };
-        let frames = [(source, dest), (0, dest), (source, 0), (0, 0)]
+        let (source, dest) = (self.group(from), self.group(to));
+        let frames = [(source, dest), (0, dest), (0, 0)]
             .iter()
             .find_map(|pair| self.blends.get(pair))
             .copied()
@@ -167,8 +170,10 @@ impl Stance {
         f32::from(frames.max(1)) / FPS
     }
 
-    fn group(&self, motion: &str) -> Option<u8> {
-        self.groups.get(motion).copied()
+    /// The blend group a motion's own name is in. A name the sheet does not carry reads as group
+    /// 0, which is what the client's own lookup answers for one it cannot find a row for.
+    fn group(&self, motion: &str) -> u8 {
+        self.groups.get(motion).copied().unwrap_or_default()
     }
 }
 
@@ -566,8 +571,9 @@ mod tests {
         assert_eq!(held.directory(None, None), "bt_emp_emp");
     }
 
-    /// The blend table's own fallback order, which fills every unstated pair from the entries out
-    /// of and into group 0 before the one that is both.
+    /// The blend table's own fallback order, which fills every unstated pair from the entry into
+    /// group 0 before the one that is both, and never from the one out of it: the client fills its
+    /// matrix in place, so row 0 is already filled by the time any other row falls back through it.
     #[test]
     fn an_unstated_blend_falls_back_the_way_the_client_fills_its_matrix() {
         let mut held = stance(&[]);
@@ -576,11 +582,20 @@ mod tests {
         held.blends.insert((0, 0), 3);
         assert_eq!(held.fade("from", "to"), 3.0 / FPS);
         held.blends.insert((7, 0), 9);
-        assert_eq!(held.fade("from", "to"), 9.0 / FPS);
+        assert_eq!(held.fade("from", "to"), 3.0 / FPS, "the one out of group 0 is never reached");
         held.blends.insert((0, 6), 4);
         assert_eq!(held.fade("from", "to"), 4.0 / FPS);
         held.blends.insert((7, 6), 12);
         assert_eq!(held.fade("from", "to"), 12.0 / FPS);
+    }
+
+    /// A motion neither name is a `MotionTimeline` row for still blends: both read as group 0, and
+    /// the pair that is both is what the whole matrix falls back through.
+    #[test]
+    fn a_motion_the_sheet_never_names_blends_out_of_group_nought() {
+        let mut held = stance(&[]);
+        held.blends.insert((0, 0), 10);
+        assert_eq!(held.fade("cbem_sp63", "cbem_dance16_2lp"), 10.0 / FPS);
     }
 
     /// Polls a future to completion on the current thread with no real waker, which is enough for
@@ -622,6 +637,28 @@ mod tests {
         assert_eq!(held.directory(Some(401), None), "bt_2ax_emp", "a two-hander");
         assert_eq!(held.fade(SHEATHED, DRAWN), 12.0 / FPS);
         assert_eq!(held.fade(DRAWN, DRAW), 4.0 / FPS);
+    }
+
+    /// What the install's own tables price the two changes the creator makes at. An emote motion
+    /// no `MotionTimeline` row names still blends, out of the pair every unstated one falls back
+    /// through; a change of facial pose takes the one into the group every `cfxf_` name is in,
+    /// whether or not anything was on the face before it.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn the_installs_own_tables_price_an_emote_and_a_change_of_face() {
+        let backend = block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(
+                "/home/asriel/.xlcore/ffxiv/game/sqpack".to_owned(),
+            ),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .expect("the local install");
+        let held = block_on(Stance::read(&backend, Language::English)).expect("the tables");
+        assert_eq!(held.fade(SHEATHED, "cbem_dance16_2lp"), 10.0 / FPS);
+        assert_eq!(held.fade("cfxf_smile", "cfxf_grin"), 5.0 / FPS);
+        assert_eq!(held.fade("", "cfxf_grin"), 5.0 / FPS, "the face was at rest");
+        assert_eq!(held.fade("cfxf_grin", ""), 10.0 / FPS, "and back to rest again");
     }
 
     const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
@@ -667,6 +704,55 @@ mod tests {
             assert!(sub.contains(&DRAW.to_owned()), "{class}: {sub:?}");
             assert!(sub.contains(&SHEATHE.to_owned()), "{class}: {sub:?}");
         }
+    }
+
+    /// A class the game files no packs of its own for reads another's, so a battle emote asked
+    /// for under the class a lone sword puts a body in is really read out of the sword and shield
+    /// one, which is the only place it is filed at all.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_class_with_no_packs_of_its_own_reads_a_battle_emote_out_of_the_one_it_shares() {
+        let packs = installed_packs(&install());
+        let sqpack = SqPack::new(Install::at_sqpack(SQPACK));
+        let filed = |held: &str, file: &str| {
+            let (model, set, held) = packs.filed(101, SET, held, file);
+            path(model, set, held, file)
+        };
+        let bare = filed("bt_emp_emp", "emote/battle02");
+        assert_eq!(
+            bare,
+            "chara/human/c0101/animation/a0001/bt_emp_emp/emote/battle02.pap"
+        );
+        assert!(
+            !sqpack.exists(&bare).unwrap_or(false),
+            "bare hands are moved nowhere and file no battle emote, so there is none to play"
+        );
+        let held = filed("bt_swd_emp", "emote/battle02");
+        assert_eq!(
+            held,
+            "chara/human/c0101/animation/a0001/bt_swd_sld/emote/battle02.pap"
+        );
+        assert!(sqpack.exists(&held).unwrap_or(false));
+        assert!(
+            !sqpack
+                .exists(&path(101, SET, "bt_swd_emp", "emote/battle02"))
+                .unwrap_or(false),
+            "the class it was asked for files nothing of its own"
+        );
+        // The table moves every emote a lone sword asks for, whether or not that class files one:
+        // the ones every body shares are not there either way, and fall back to the shared
+        // directory on not being found.
+        let shared = filed("bt_swd_emp", "emote/goodbye_st");
+        assert_eq!(
+            shared,
+            "chara/human/c0101/animation/a0001/bt_swd_sld/emote/goodbye_st.pap"
+        );
+        assert!(!sqpack.exists(&shared).unwrap_or(false));
+        assert!(
+            sqpack
+                .exists(&filed(COMMON, "emote/goodbye_st"))
+                .unwrap_or(false)
+        );
     }
 
     /// What the table moves a request onto, against the install. A redirection is only reached by
@@ -760,6 +846,10 @@ mod tests {
         held.groups.insert("to".to_owned(), 8);
         held.blends.insert((9, 8), 0);
         assert_eq!(held.fade("from", "to"), 1.0 / FPS);
-        assert_eq!(held.fade("from", "elsewhere"), 0.0, "no group, no blend");
+        assert_eq!(
+            held.fade("from", "elsewhere"),
+            1.0 / FPS,
+            "a name with no row of its own still blends, out of group 0"
+        );
     }
 }

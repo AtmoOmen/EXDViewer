@@ -352,6 +352,10 @@ fn companion(timeline: &[u8], duration: f32) -> Companion {
     companion
 }
 
+/// How long a change from one motion to another blends over, in seconds, by the names their own
+/// packs give them.
+type Blend = dyn Fn(&str, &str) -> f32;
+
 /// A clip on its way out from under whatever replaced it, kept whole so it can go on being
 /// sampled across the fade.
 struct Leaving {
@@ -381,7 +385,8 @@ struct Layer {
     /// Packs still to try, in order, each with the motion it is wanted for, if the one loading now
     /// lands without its own. A name and its file disagree often enough that a guess has to be
     /// verified rather than trusted on sight, and a pack the install lists can still ship empty.
-    retry: RefCell<Vec<(String, String)>>,
+    /// A candidate wanted for no motion in particular is only given way to by one that 404s.
+    retry: RefCell<Vec<(String, Option<String>)>>,
     /// The clip the last change is fading out of, sampled under the incoming one until the fade
     /// closes. A layer with nothing wanted fades this one out to nothing instead, which is what
     /// lets the layers under it back through.
@@ -389,16 +394,32 @@ struct Layer {
     /// How far into the fade, in seconds, and how long it runs. No length is a hard cut.
     fade: Cell<f32>,
     over: Cell<f32>,
+    /// Whether the length is still owed: the blend table is keyed by the two motions' own names,
+    /// and the incoming one is not named until its pack lands, so the fade is held shut until then.
+    pricing: Cell<bool>,
     /// How long to fade this layer out over once the clip has played through with nothing queued
     /// behind it. No length leaves it looping, which is what a pose held forever wants.
     settle: Cell<f32>,
 }
 
 impl Layer {
-    fn load(&self, path: &str, motion: Option<&str>, then: Option<&str>, fade: f32) {
-        *self.leaving.borrow_mut() = (fade > 0.0).then(|| self.leaving_clip()).flatten();
+    /// `fade` is how long to cross-fade over where the caller already knows the length, a cut at
+    /// nought; `None` leaves it to be priced once the incoming pack lands and names the motion it
+    /// opens on, which is the only thing the blend table answers to.
+    fn load(&self, path: &str, motion: Option<&str>, then: Option<&str>, fade: Option<f32>) {
+        // Nothing to play is never left to the blend table: there is no incoming motion for it to
+        // be keyed by, so a layer let go of takes the length it was handed or none at all.
+        let fade = match path.is_empty() {
+            true => Some(fade.unwrap_or_default()),
+            false => fade,
+        };
+        *self.leaving.borrow_mut() = match fade {
+            Some(0.0) => None,
+            _ => self.leaving_clip(),
+        };
         self.fade.set(0.0);
-        self.over.set(fade);
+        self.over.set(fade.unwrap_or_default());
+        self.pricing.set(fade.is_none());
         self.settle.set(0.0);
         path.clone_into(&mut self.wanted.borrow_mut());
         *self.pack.borrow_mut() = None;
@@ -413,8 +434,44 @@ impl Layer {
     /// layer back out over `fade`, which is what an action laid over a base pose does rather than
     /// loop on top of it forever.
     fn once(&self, candidates: Vec<(String, String)>, fade: f32) {
-        self.seek(candidates, fade);
+        self.seek(candidates, Some(fade));
         self.settle.set(fade);
+    }
+
+    /// Plays the first of `candidates` the install actually holds, on whatever motion its pack
+    /// opens on, settling into `then` once that has played through. A candidate that is not there
+    /// gives way to the next, which is how an emote filed under the class directory a body's
+    /// weapons put it in falls back to the one every body shares.
+    fn plays(&self, candidates: &[String], then: Option<&str>, fade: Option<f32>) {
+        let mut candidates = candidates.iter();
+        let first = candidates.next().map(String::as_str).unwrap_or_default();
+        self.load(first, None, then, fade);
+        *self.retry.borrow_mut() = candidates.map(|path| (path.clone(), None)).collect();
+    }
+
+    /// The two motions a change of clip is between, once the incoming one has landed and named
+    /// itself: what the layer is leaving and what it took up, for the caller that can price the
+    /// blend. Answered once per change.
+    fn changed(&self) -> Option<(String, String)> {
+        if !self.pricing.get() {
+            return None;
+        }
+        let pack = self.pack.borrow();
+        let (to, _) = pack
+            .as_ref()
+            .and_then(Fetch::ready)?
+            .named
+            .get(self.motion.get()?)?;
+        let from = self.leaving.borrow().as_ref().and_then(|held| {
+            Some(held.pack.named.get(held.motion)?.0.clone())
+        });
+        self.pricing.set(false);
+        Some((from.unwrap_or_default(), to.clone()))
+    }
+
+    /// Takes the length the blend table priced the change at.
+    fn priced(&self, over: f32) {
+        self.over.set(over);
     }
 
     /// What is playing now, ready to go on being sampled after the layer has moved off it.
@@ -429,23 +486,26 @@ impl Layer {
     }
 
     /// How much of the incoming clip shows: none until the fade opens, all of it once it has
-    /// closed. A layer with nothing wanted reads this as how far its outgoing clip has faded out.
+    /// closed. A layer with nothing wanted reads this as how far its outgoing clip has faded out,
+    /// and one whose change has yet to be priced shows none of it, since the fade has not opened.
     fn share(&self) -> f32 {
-        match self.over.get() > 0.0 {
-            true => (self.fade.get() / self.over.get()).clamp(0.0, 1.0),
-            false => 1.0,
+        match (self.pricing.get(), self.over.get() > 0.0) {
+            (true, _) => 0.0,
+            (false, true) => (self.fade.get() / self.over.get()).clamp(0.0, 1.0),
+            (false, false) => 1.0,
         }
     }
 
     /// Loads the first of `candidates` that opens on the motion it names, keeping the rest to try
     /// in turn if it lands without one. An empty list leaves the layer at rest.
-    fn seek(&self, mut candidates: Vec<(String, String)>, fade: f32) {
+    fn seek(&self, mut candidates: Vec<(String, String)>, fade: Option<f32>) {
         match candidates.is_empty() {
             true => self.load("", None, None, fade),
             false => {
                 let (path, motion) = candidates.remove(0);
                 self.load(&path, Some(&motion), None, fade);
-                *self.retry.borrow_mut() = candidates;
+                *self.retry.borrow_mut() =
+                    candidates.into_iter().map(|(path, motion)| (path, Some(motion))).collect();
             }
         }
     }
@@ -493,7 +553,7 @@ impl Layer {
             };
             if let Some((next, motion)) = next {
                 next.clone_into(&mut self.wanted.borrow_mut());
-                *self.opening.borrow_mut() = Some(motion);
+                *self.opening.borrow_mut() = motion;
                 *self.pack.borrow_mut() = None;
                 self.motion.set(None);
                 self.time.set(0.0);
@@ -504,7 +564,7 @@ impl Layer {
         if failed {
             let then = self.then.borrow_mut().take();
             if let Some(then) = then {
-                self.load(&then, None, None, self.over.get());
+                self.load(&then, None, None, Some(self.over.get()));
             }
         }
     }
@@ -585,8 +645,8 @@ impl Layer {
         let then = self.then.borrow_mut().take();
         let settle = self.settle.get();
         match (then, settle > 0.0) {
-            (Some(then), _) => self.load(&then, None, None, self.over.get()),
-            (None, true) => self.load("", None, None, settle),
+            (Some(then), _) => self.load(&then, None, None, Some(self.over.get())),
+            (None, true) => self.load("", None, None, Some(settle)),
             (None, false) => self.time.set(time - duration),
         }
     }
@@ -596,9 +656,13 @@ impl Layer {
     /// fade towards; a layer with nothing wanted is fading out to whatever is under it and opens
     /// straight away.
     fn fading(&self, step: f32) {
-        if self.fade.get() >= self.over.get()
-            || (self.motion.get().is_none() && !self.wanted.borrow().is_empty())
-        {
+        // A change still waiting on its pack, or on the length the blend table prices it at, has
+        // nothing to fade towards yet, so what it left goes on showing whole until it does.
+        if self.pricing.get() || (self.motion.get().is_none() && !self.wanted.borrow().is_empty()) {
+            return;
+        }
+        if self.fade.get() >= self.over.get() {
+            *self.leaving.borrow_mut() = None;
             return;
         }
         self.fade.set(self.fade.get() + step);
@@ -851,6 +915,9 @@ pub struct Animation {
     /// The `cfxf_` companion last used to drive `face` on the body's own say-so, so a change of it
     /// is what asks for another rather than every frame re-loading the same pack.
     linked: RefCell<Option<String>>,
+    /// How long the game blends one motion into another, by the names their own packs give them,
+    /// for the caller that has read the tables. Nothing on hand leaves every change a hard cut.
+    blend: RefCell<Option<Box<Blend>>>,
     /// The timeline the body's own pack is filed under, and the facial library its `TMPP` names.
     /// A pack that states one of its own needs none of this; the rest leave it to the timeline of
     /// the same key under `chara/action/`.
@@ -921,6 +988,7 @@ impl Animation {
             action: Default::default(),
             face: Default::default(),
             linked: RefCell::new(None),
+            blend: RefCell::new(None),
             keyed: RefCell::new(String::new()),
             library: RefCell::new(None),
             stood: Cell::new(false),
@@ -1008,6 +1076,7 @@ impl Animation {
         for layer in self.layers() {
             layer.poll(backend);
         }
+        self.poll_fades();
         self.poll_ordering(backend);
         self.poll_library(backend);
         self.poll_companion();
@@ -1021,6 +1090,9 @@ impl Animation {
             // by hand, leaves it free to run on its own clock instead.
             match self.body.expression(self.body.time.get()) {
                 Some(expression) if self.synced.get() => {
+                    // The clock is the body's, but the fade between one pose and the next is this
+                    // layer's own and still has to run.
+                    self.face.fading(step);
                     self.face.hold(&expression, self.body.time.get());
                 }
                 _ => self.face.advance(step),
@@ -1034,6 +1106,51 @@ impl Animation {
     /// names over it, then the face over that.
     fn layers(&self) -> [&Layer; 3] {
         [&self.body, &self.action, &self.face]
+    }
+
+    /// What to price a change of clip against, which the caller reading the game's own tables
+    /// hands over as soon as it has them. Taken once: the tables do not change under a body.
+    pub fn blending(&self, blend: impl Fn(&str, &str) -> f32 + 'static) {
+        let mut held = self.blend.borrow_mut();
+        if held.is_none() {
+            *held = Some(Box::new(blend));
+        }
+    }
+
+    /// Prices whatever change of clip has just landed. The blend table answers to the two motions'
+    /// own names, so a layer holds what it was playing until the incoming pack names its own.
+    fn poll_fades(&self) {
+        let blend = self.blend.borrow();
+        let Some(blend) = blend.as_ref() else {
+            return;
+        };
+        for layer in self.layers() {
+            if let Some((from, to)) = layer.changed() {
+                let over = blend(&from, &to);
+                let from = match from.is_empty() {
+                    true => "nothing".to_owned(),
+                    false => from,
+                };
+                log::info!("mdl: {from} into {to} blends over {over:.3}s");
+                layer.priced(over);
+            }
+        }
+    }
+
+    /// No length of its own where the blend table is on hand to price the change once it lands,
+    /// and a hard cut where it is not.
+    fn priced(&self) -> Option<f32> {
+        self.blend.borrow().is_none().then_some(0.0)
+    }
+
+    /// How long a layer fades back out over once nothing is wanted of it: the blend out of the
+    /// motion it is playing into none, which unlike a change of clip has both ends named already.
+    fn released(&self, layer: &Layer) -> f32 {
+        let blend = self.blend.borrow();
+        match (blend.as_ref(), layer.playing()) {
+            (Some(blend), Some((_, from, _))) => blend(&from, ""),
+            _ => 0.0,
+        }
     }
 
     /// Asks for the skeleton each playing motion's tracks are ordered by. A facial motion names a
@@ -1108,7 +1225,7 @@ impl Animation {
             .or_else(|| listed.first().map(|pack| (pack.path.clone(), None)))
             .filter(|_| !self.stood.get())
         {
-            self.body.load(&path, motion, None, 0.0);
+            self.body.load(&path, motion, None, Some(0.0));
         }
         listed
     }
@@ -1215,7 +1332,7 @@ impl Animation {
         if let Some(packs) = packs.as_ref().and_then(|packs| packs.as_ref().ok())
             && let Some((path, motion)) = self.ride_pack(mount, seat, packs)
         {
-            self.body.load(&path, motion, None, 0.0);
+            self.body.load(&path, motion, None, self.priced());
         }
     }
 
@@ -1251,18 +1368,25 @@ impl Animation {
         self.body.playing()
     }
 
-    /// Plays `path`, settling into `then` once it has played through, cross-fading out of whatever
-    /// was playing over `fade` seconds.
+    /// Plays the first of `packs` the install holds, settling into `then` once it has played
+    /// through and cross-fading out of whatever was playing over the length the blend table prices
+    /// the change at.
     ///
     /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
     /// so which of the two it lands on is the pack's to say.
-    pub fn play(&self, path: &str, then: Option<&str>, fade: f32) {
-        let face = facial(path);
+    pub fn play(&self, packs: &[String], then: Option<&str>) {
+        // Nothing named is nothing to play: what is on screen keeps playing rather than the model
+        // dropping to the pose its own file was stored in.
+        let Some(first) = packs.first() else {
+            return;
+        };
+        let face = facial(first);
+        let fade = self.priced();
         if face {
             self.synced.set(false);
-            self.face.load(path, None, then, fade);
+            self.face.plays(packs, then, fade);
         } else {
-            self.body.load(path, None, then, fade);
+            self.body.plays(packs, then, fade);
         }
         // Forces the next poll to re-read the companion rather than see the same name it had
         // last time and assume nothing changed, which is what left a re-picked emote's face
@@ -1286,7 +1410,7 @@ impl Animation {
             .map(|(path, motion)| (path.clone(), (*motion).to_owned()))
             .collect();
         self.stood.set(true);
-        self.body.seek(candidates, fade);
+        self.body.seek(candidates, Some(fade));
         self.running.set(true);
     }
 
@@ -1331,7 +1455,7 @@ impl Animation {
         let mut candidates = vec![asked];
         candidates.extend(listed);
         candidates.push(format!("{root}resident/face.pap"));
-        self.face.seek(opening(candidates, name), 0.0);
+        self.face.seek(opening(candidates, name), self.priced());
         *self.pending.borrow_mut() = Some(name.to_owned());
         self.picked.set(true);
         self.synced.set(false);
@@ -1398,7 +1522,7 @@ impl Animation {
         let Some(name) = name else {
             *self.linked.borrow_mut() = None;
             self.synced.set(false);
-            self.face.load("", None, None, 0.0);
+            self.face.load("", None, None, Some(self.released(&self.face)));
             return;
         };
         let Some(root) = self.face_root() else {
@@ -1422,7 +1546,7 @@ impl Animation {
             .collect();
         drop(held);
         log::info!("mdl: the body lays cfxf_{name} over the face");
-        self.face.seek(opening(candidates, &name), 0.0);
+        self.face.seek(opening(candidates, &name), self.priced());
         *self.pending.borrow_mut() = Some(name.clone());
         *self.linked.borrow_mut() = Some(name);
         self.synced.set(true);
@@ -1459,7 +1583,7 @@ impl Animation {
         match self.poses.borrow_mut().advance(backend, paths, &name) {
             PoseLookup::Pending => {}
             PoseLookup::Found(path) => {
-                self.face.load(&path, Some(&format!("cfxf_{name}")), None, 0.0);
+                self.face.load(&path, Some(&format!("cfxf_{name}")), None, self.priced());
                 *self.pending.borrow_mut() = None;
             }
             PoseLookup::Miss => *self.pending.borrow_mut() = None,
@@ -1572,8 +1696,10 @@ impl Animation {
                 && let Some(binding) = leaving.pack.binding(leaving.motion)
             {
                 // Nothing wanted means the layer is on its way out from over the ones under it, so
-                // what is left of the clip it was playing is all there is to lay.
-                let weight = match layer.wanted.borrow().is_empty() {
+                // what is left of the clip it was playing is all there is to lay. A clip that is a
+                // delta on what is under it gives up its share as the incoming one takes it, since
+                // the two are added rather than one laid over the other.
+                let weight = match layer.wanted.borrow().is_empty() || binding.blend_hint() != 0 {
                     true => 1.0 - share,
                     false => 1.0,
                 };
@@ -1728,7 +1854,7 @@ impl Animation {
                     });
             });
         if let Some(path) = picked {
-            self.play(&path, None, 0.0);
+            self.play(std::slice::from_ref(&path), None);
         }
     }
 
@@ -1753,7 +1879,7 @@ impl Animation {
             .add(egui::TextEdit::singleline(&mut wanted).hint_text("animation pack"))
             .changed()
         {
-            self.body.load(&wanted, None, None, 0.0);
+            self.body.load(&wanted, None, None, self.priced());
         }
         for layer in self.layers() {
             if let Some(Fetch::Failed(why)) = layer.pack.borrow().as_ref() {
@@ -2241,11 +2367,11 @@ mod tests {
     #[test]
     fn seek_queues_the_rest_as_retries() {
         let layer = Layer::default();
-        layer.seek(opening(vec!["a.pap".to_owned(), "b.pap".to_owned()], "salute"), 0.0);
+        layer.seek(opening(vec!["a.pap".to_owned(), "b.pap".to_owned()], "salute"), Some(0.0));
         assert_eq!(*layer.wanted.borrow(), "a.pap");
         assert_eq!(
             *layer.retry.borrow(),
-            vec![("b.pap".to_owned(), "cfxf_salute".to_owned())]
+            vec![("b.pap".to_owned(), Some("cfxf_salute".to_owned()))]
         );
         assert_eq!(layer.opening.borrow().as_deref(), Some("cfxf_salute"));
     }
@@ -2253,7 +2379,7 @@ mod tests {
     #[test]
     fn seek_with_nothing_to_try_rests() {
         let layer = Layer::default();
-        layer.seek(Vec::new(), 0.0);
+        layer.seek(Vec::new(), Some(0.0));
         assert!(layer.wanted.borrow().is_empty());
         assert!(layer.opening.borrow().is_none());
     }
@@ -2262,7 +2388,7 @@ mod tests {
     fn spent_waits_for_a_landing_with_nothing_left_to_try() {
         let layer = Layer::default();
         assert!(layer.spent(), "nothing wanted yet");
-        layer.seek(opening(vec!["a.pap".to_owned()], "salute"), 0.0);
+        layer.seek(opening(vec!["a.pap".to_owned()], "salute"), Some(0.0));
         assert!(!layer.spent(), "still fetching, no candidates behind it");
         *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
         assert!(
@@ -2274,7 +2400,7 @@ mod tests {
     #[test]
     fn spent_stays_false_while_a_retry_is_queued() {
         let layer = Layer::default();
-        layer.seek(opening(vec!["a.pap".to_owned(), "b.pap".to_owned()], "salute"), 0.0);
+        layer.seek(opening(vec!["a.pap".to_owned(), "b.pap".to_owned()], "salute"), Some(0.0));
         *layer.pack.borrow_mut() = Some(Fetch::Failed("boom".to_owned()));
         assert!(!layer.spent(), "b.pap is still queued behind a.pap");
     }
@@ -2371,9 +2497,53 @@ mod tests {
         let layer = Layer::default();
         layer.motion.set(Some(0));
         *layer.pack.borrow_mut() = Some(Fetch::Ready(empty_pack()));
-        layer.load("b.pap", None, None, 0.0);
+        layer.load("b.pap", None, None, Some(0.0));
         assert!(layer.leaving.borrow().is_none());
         assert_eq!(layer.share(), 1.0);
+    }
+
+    /// A pack naming one motion, for the change the blend table is asked to price.
+    fn named_pack(name: &str) -> Rc<Motions> {
+        Rc::new(Motions {
+            named: vec![(name.to_owned(), 0)],
+            companions: Vec::new(),
+            bindings: Vec::new(),
+        })
+    }
+
+    /// A change the caller left to the blend table holds what it was playing whole until both
+    /// motions are named and a length comes back, and only then opens.
+    #[test]
+    fn a_change_left_to_the_blend_table_waits_for_its_length() {
+        let layer = Layer::default();
+        layer.motion.set(Some(0));
+        *layer.pack.borrow_mut() = Some(Fetch::Ready(named_pack("cbnm_id0")));
+        layer.load("b.pap", None, None, None);
+        assert_eq!(layer.share(), 0.0, "none of the incoming clip shows yet");
+        assert_eq!(layer.changed(), None, "its pack has not landed to be named");
+
+        *layer.pack.borrow_mut() = Some(Fetch::Ready(named_pack("cbem_sp63")));
+        layer.motion.set(Some(0));
+        assert_eq!(
+            layer.changed(),
+            Some(("cbnm_id0".to_owned(), "cbem_sp63".to_owned()))
+        );
+        assert_eq!(layer.changed(), None, "asked once per change");
+        layer.priced(0.4);
+        layer.advance(0.2);
+        assert_eq!(layer.share(), 0.5);
+    }
+
+    /// Candidates for one motion the caller cannot name: the first is what plays, and the rest
+    /// wait for it to turn out not to be there.
+    #[test]
+    fn plays_queues_the_rest_behind_whatever_the_first_pack_opens_on() {
+        let layer = Layer::default();
+        let candidates = ["class.pap".to_owned(), "common.pap".to_owned()];
+        layer.plays(&candidates, None, Some(0.0));
+        assert_eq!(*layer.wanted.borrow(), "class.pap");
+        assert!(layer.opening.borrow().is_none());
+        assert_eq!(*layer.retry.borrow(), vec![("common.pap".to_owned(), None)]);
     }
 
     #[test]
@@ -2413,7 +2583,7 @@ mod tests {
         layer.motion.set(Some(0));
         *layer.pack.borrow_mut() = Some(Fetch::Ready(empty_pack()));
         "a.pap".clone_into(&mut layer.wanted.borrow_mut());
-        layer.load("", None, None, 0.5);
+        layer.load("", None, None, Some(0.5));
         assert!(layer.wanted.borrow().is_empty());
         layer.advance(0.25);
         assert_eq!(layer.share(), 0.5, "half of the outgoing clip is left");
@@ -2465,6 +2635,32 @@ mod tests {
         }
     }
 
+    /// What picking a real emote lands on: Battle Stance is filed under the class directory the
+    /// weapons put the body in and under no other, so the shared directory queued behind it is
+    /// never reached; Bee's Knees is only under the shared one, so the class directory ahead of it
+    /// is passed over. Each names the motion the change is then priced from.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_emote_is_played_from_the_class_directory_or_the_one_queued_behind_it() {
+        let backend = local_backend();
+        let filed =
+            |dir: &str, key: &str| format!("chara/human/c0101/animation/a0001/{dir}/{key}.pap");
+        let played = |key: &str| {
+            let layer = Layer::default();
+            layer.plays(&[filed("bt_swd_sld", key), filed("bt_common", key)], None, None);
+            settle(&layer, &backend);
+            (layer.wanted.borrow().clone(), layer.changed())
+        };
+
+        let (path, changed) = played("emote/battle02");
+        assert_eq!(path, filed("bt_swd_sld", "emote/battle02"));
+        assert_eq!(changed, Some((String::new(), "cbbm_emot02".to_owned())));
+
+        let (path, changed) = played("emote/dance16_loop");
+        assert_eq!(path, filed("bt_common", "emote/dance16_loop"));
+        assert_eq!(changed, Some((String::new(), "cbem_dance16_2lp".to_owned())));
+    }
+
     /// `salute.pap` really carries `cfxf_bow`, per `dump`ing the real file: exactly the case the
     /// The draw motion played through once: at the end the layer fades out from over the base
     /// holding its last frame, rather than starting the clip over underneath the fade.
@@ -2513,7 +2709,7 @@ mod tests {
                 ],
                 "salute",
             ),
-            0.0,
+            Some(0.0),
         );
         settle(&layer, &backend);
         assert_eq!(
@@ -2543,7 +2739,7 @@ mod tests {
                 ],
                 "comeon",
             ),
-            0.0,
+            Some(0.0),
         );
         settle(&layer, &backend);
         assert_eq!(

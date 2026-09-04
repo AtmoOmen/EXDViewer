@@ -20,8 +20,11 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use ironworks::file::File;
-use ironworks::file::pap::AnimationPack;
+use ironworks::file::pap::{AnimationPack, Binding};
+use ironworks::file::sklb::SkeletonBinary;
 use ironworks::file::tmb::{CommandKind, Item, Timeline};
+
+use super::super::skeleton::Rig;
 
 use crate::audio::{self, Mixer};
 use crate::backend::Backend;
@@ -41,12 +44,46 @@ fn secs(frames: i32) -> f32 {
     frames as f32 / FPS
 }
 
+fn prop(start: f32, held: f32, set: i16, base: i16, variant: i32) -> Prop {
+    let (set, base) = (u16::try_from(set).unwrap_or(0), u16::try_from(base).unwrap_or(0));
+    Prop {
+        start,
+        end: start + held,
+        set,
+        base,
+        path: prop_model(set, base),
+        variant: u16::try_from(variant).unwrap_or(0),
+    }
+}
+
 /// `chara/weapon/w####/obj/body/b####/model/w####b####.mdl`, the same path a real weapon is
 /// carried as.
-fn prop_model(set: i16, base: i16) -> String {
-    let set = u16::try_from(set).unwrap_or(0);
-    let base = u16::try_from(base).unwrap_or(0);
+fn prop_model(set: u16, base: u16) -> String {
     format!("chara/weapon/w{set:04}/obj/body/b{base:04}/model/w{set:04}b{base:04}.mdl")
+}
+
+/// The rig a prop is skinned to, filed beside its model.
+fn prop_skeleton(set: u16, base: u16) -> String {
+    format!("chara/weapon/w{set:04}/skeleton/base/b{base:04}/skl_w{set:04}b{base:04}.sklb")
+}
+
+/// The pack a prop moves out of, which is the one every weapon of that set shares.
+fn prop_pack(set: u16) -> String {
+    format!("chara/weapon/w{set:04}/animation/a0001/wp_common/resident/weapon.pap")
+}
+
+/// The body a pack is filed under, which its own path names.
+fn body_code(pack: &str) -> Option<&str> {
+    pack.strip_prefix("chara/human/")?.split('/').next()
+}
+
+/// What a body motion is named past the four letters saying which kind of motion it is, which is
+/// what the prop's own pack names its animation for.
+fn motion_key(motion: &str) -> &str {
+    match motion.split_once('_') {
+        Some((_, key)) => key,
+        None => motion,
+    }
 }
 
 /// `C012`/`C173`'s `BindType`, out of VFXEditor's `C012.cs`: which of the two default (`-1`) bind
@@ -87,10 +124,12 @@ fn local_transform(scale: &[f32], rotation: &[f32], position: &[f32]) -> Mat4 {
     )
 }
 
-/// A held prop's window, model and material variant.
+/// A held prop's window, the weapon set and body it is filed under, and its material variant.
 struct Prop {
     start: f32,
     end: f32,
+    set: u16,
+    base: u16,
     path: String,
     variant: u16,
 }
@@ -147,18 +186,20 @@ impl Events {
             };
             let start = secs(i32::from(command.time()));
             match command.kind() {
-                CommandKind::C043(c) => events.props.push(Prop {
+                CommandKind::C043(c) => events.props.push(prop(
                     start,
-                    end: start + secs(c.duration()),
-                    path: prop_model(c.weapon_id(), c.body_id()),
-                    variant: u16::try_from(c.variant_id()).unwrap_or(0),
-                }),
-                CommandKind::C198(c) => events.props.push(Prop {
+                    secs(c.duration()),
+                    c.weapon_id(),
+                    c.body_id(),
+                    c.variant_id(),
+                )),
+                CommandKind::C198(c) => events.props.push(prop(
                     start,
-                    end: start + secs(c.duration()),
-                    path: prop_model(c.model_id(), c.body_id()),
-                    variant: u16::try_from(c.variant()).unwrap_or(0),
-                }),
+                    secs(c.duration()),
+                    c.model_id(),
+                    c.body_id(),
+                    c.variant(),
+                )),
                 CommandKind::C063(c) => {
                     if let Some(path) = c.path() {
                         events.sounds.push(Sound {
@@ -225,9 +266,94 @@ impl Events {
     }
 }
 
+/// A prop's own rig: the skeleton it is skinned to, and the pack that walks its bones through the
+/// emote. A prop that puts one thing in each hand is one model on this rig rather than two hung
+/// apart, so which hand each of its bones ends up in is the pack's to say, not the attach point's.
+struct Rigging {
+    rig: Rig,
+    /// Animation names, each with the motion it plays.
+    named: Vec<(String, usize)>,
+    bindings: Vec<Binding>,
+    /// Where the model rests, inverted: what takes a vertex out of the pose the file stored it in.
+    rest: Vec<Mat4>,
+}
+
+impl Rigging {
+    fn read(skeleton: &[u8], pack: &[u8]) -> anyhow::Result<Self> {
+        let held = SkeletonBinary::read(Cursor::new(skeleton.to_vec()))?.parse_skeleton()?;
+        let rig = Rig::new(held.bones(), held.parent_indices(), held.reference_pose());
+        let file = AnimationPack::read(Cursor::new(pack.to_vec()))?;
+        let bindings = file.parse_animations()?;
+        let named = file
+            .animations()
+            .iter()
+            .filter_map(|animation| {
+                let motion = usize::try_from(animation.havok_index()).ok()?;
+                bindings.get(motion)?;
+                Some((animation.name().to_owned(), motion))
+            })
+            .collect();
+        let rest = rig
+            .world(rig.reference())
+            .iter()
+            .map(|placement| placement.matrix().inverse())
+            .collect();
+        Ok(Self {
+            rig,
+            named,
+            bindings,
+            rest,
+        })
+    }
+
+    /// Which of the pack's animations this body plays: the one named for both the motion and the
+    /// body's own code, then the only one that names the code at all, since a pack files one
+    /// animation per race and a motion's own name is not always spelled the way its prop's is.
+    fn motion(&self, key: &str, code: &str) -> Option<usize> {
+        let wanted = format!("cbew_{key}_{code}");
+        let held = format!("_{code}");
+        self.named
+            .iter()
+            .position(|(name, _)| *name == wanted)
+            .or_else(|| {
+                let mut named = self
+                    .named
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (name, _))| name.ends_with(&held));
+                named.next().filter(|_| named.next().is_none()).map(|(at, _)| at)
+            })
+    }
+
+    /// What each slot of the model's own bone table moves a vertex by, in the prop's own space.
+    fn joints(&self, motion: usize, table: &[String], time: f32) -> Option<Vec<Mat4>> {
+        let binding = self.bindings.get(self.named.get(motion)?.1)?;
+        let mut locals = self.rig.reference().to_vec();
+        self.rig
+            .lay(&mut locals, binding, self.rig.names(), None, time, 1.0);
+        let posed = self.rig.world(&locals);
+        Some(
+            table
+                .iter()
+                .map(|name| match self.rig.bone(name) {
+                    Some(bone) => posed[bone].matrix() * self.rest[bone],
+                    None => Mat4::IDENTITY,
+                })
+                .collect(),
+        )
+    }
+}
+
 enum Fetch {
     Fetching(TrackedPromise<anyhow::Result<Vec<u8>>>),
     Ready(Events),
+    Failed,
+}
+
+/// A prop's own rig on its way in, and the motion this body plays out of it.
+enum Rigged {
+    Fetching(TrackedPromise<anyhow::Result<(Vec<u8>, Vec<u8>)>>),
+    Ready(Rigging, usize),
     Failed,
 }
 
@@ -249,6 +375,9 @@ pub struct Cue {
     decode: HashMap<String, SoundFetch>,
     voices: Option<Mixer<(i16, u32)>>,
     voices_failed: bool,
+    /// The rig the prop now held is posed on, by the set and body it is filed under. A prop that
+    /// ships none is carried whole at the point it hangs from instead.
+    rigged: Option<((u16, u16), Rigged)>,
 }
 
 impl Cue {
@@ -287,6 +416,12 @@ impl Cue {
             }
             Some(_) => {}
         }
+
+        let held = match &self.fetch {
+            Some(Fetch::Ready(events)) => events.active_prop(time).map(|prop| (prop.set, prop.base)),
+            _ => None,
+        };
+        self.poll_rig(backend, held, &name);
 
         let Some(Fetch::Ready(events)) = &self.fetch else {
             return;
@@ -364,15 +499,66 @@ impl Cue {
         }
     }
 
-    /// The model an emote's own timeline wants held right now, by the path it is worn as and its
-    /// material variant.
-    pub fn active_prop(&self, time: f32) -> Option<(String, u16)> {
+    /// Asks for the rig the prop now held is posed on, and takes it up once both its skeleton and
+    /// its pack have landed. A prop the game files no pack for is carried whole instead, which is
+    /// what a failed fetch leaves it as.
+    fn poll_rig(&mut self, backend: &Backend, held: Option<(u16, u16)>, motion: &str) {
+        let Some((set, base)) = held else {
+            self.rigged = None;
+            return;
+        };
+        if self.rigged.as_ref().is_none_or(|(worn, _)| *worn != (set, base)) {
+            let files = backend.files().clone();
+            let (skeleton, pack) = (prop_skeleton(set, base), prop_pack(set));
+            self.rigged = Some((
+                (set, base),
+                Rigged::Fetching(TrackedPromise::spawn_local(async move {
+                    Ok((files.read(&skeleton).await?, files.read(&pack).await?))
+                })),
+            ));
+        }
+        let Some((_, Rigged::Fetching(promise))) = &mut self.rigged else {
+            return;
+        };
+        let Some(landed) = promise.try_get() else {
+            return;
+        };
+        let code = self
+            .key
+            .as_ref()
+            .and_then(|(pack, _)| body_code(pack))
+            .unwrap_or_default()
+            .to_owned();
+        let read = landed
+            .as_ref()
+            .ok()
+            .and_then(|(skeleton, pack)| Rigging::read(skeleton, pack).ok())
+            .and_then(|rigging| {
+                let at = rigging.motion(motion_key(motion), &code)?;
+                log::info!("assets/mdl: the prop plays {}", rigging.named[at].0);
+                Some(Rigged::Ready(rigging, at))
+            });
+        self.rigged = Some(((set, base), read.unwrap_or(Rigged::Failed)));
+    }
+
+    /// The model an emote's own timeline wants held right now, by the path it is worn as, its
+    /// material variant and the weapon set it is filed under.
+    pub fn active_prop(&self, time: f32) -> Option<(String, u16, u16)> {
         let Some(Fetch::Ready(events)) = &self.fetch else {
             return None;
         };
         events
             .active_prop(time)
-            .map(|prop| (prop.path.clone(), prop.variant))
+            .map(|prop| (prop.path.clone(), prop.variant, prop.set))
+    }
+
+    /// Where each slot of the held prop's own bone table stands `time` seconds into the motion,
+    /// in the prop's own space. Nothing where it ships no pack of its own to move it.
+    pub fn joints(&self, table: &[String], time: f32) -> Option<Vec<Mat4>> {
+        let (_, Rigged::Ready(rigging, motion)) = self.rigged.as_ref()? else {
+            return None;
+        };
+        rigging.joints(*motion, table, time)
     }
 
     /// The vfx firing right now.
@@ -384,5 +570,84 @@ impl Cue {
         ready
             .into_iter()
             .flat_map(move |events| events.active_vfx(time))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironworks::Ironworks;
+    use ironworks::sqpack::{Install, SqPack};
+
+    use super::*;
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    /// Blow Bubbles, off the real install: the emote summons one prop, and the pack that prop
+    /// ships walks its two bones into the character's own two hands. Measured as where each of
+    /// them lands against the hand bone the body's own motion puts there at the same moment,
+    /// carried on the point `attach.wtd` sends the prop's set to.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_props_own_pack_walks_it_into_the_hands_the_body_holds_it_in() {
+        let install =
+            Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(SQPACK)));
+        let read = |path: &str| install.file::<Vec<u8>>(path).expect(path);
+
+        let body = "chara/human/c0101/animation/a0001/bt_common/emote_sp/sp63.pap";
+        let events = Events::read(&read(body), "cbem_sp63").expect("a readable timeline");
+        let [prop] = events.props.as_slice() else {
+            panic!("sp63 summons one prop, found {}", events.props.len());
+        };
+        assert_eq!((prop.set, prop.base), (1949, 1));
+
+        let rigging = Rigging::read(
+            &read(&prop_skeleton(prop.set, prop.base)),
+            &read(&prop_pack(prop.set)),
+        )
+        .expect("the prop's own rig");
+        let motion = rigging
+            .motion(motion_key("cbem_sp63"), "c0101")
+            .expect("the pack names this body's own animation");
+        assert_eq!(rigging.named[motion].0, "cbew_sp63_c0101");
+        assert_eq!(
+            rigging.motion(motion_key("cbep_u_sp63"), "c0101"),
+            Some(motion),
+            "the upper-body motion is spelled another way and reads the same animation"
+        );
+
+        // The body's own rig at the same moment, which is what the prop is measured against.
+        let skeleton = SkeletonBinary::read(Cursor::new(read(
+            "chara/human/c0101/skeleton/base/b0001/skl_c0101b0001.sklb",
+        )))
+        .expect("the body skeleton")
+        .parse_skeleton()
+        .expect("a readable tagfile");
+        let rig = Rig::new(
+            skeleton.bones(),
+            skeleton.parent_indices(),
+            skeleton.reference_pose(),
+        );
+        let pack = AnimationPack::read(Cursor::new(read(body))).expect("the body pack");
+        let bindings = pack.parse_animations().expect("the body motion");
+
+        let table = ["n_body".to_owned(), "n_head".to_owned()];
+        let mut apart = [0.0f32; 2];
+        let times = [0.0, 2.0, 5.0, 10.0, 16.0];
+        for time in times {
+            let mut locals = rig.reference().to_vec();
+            rig.lay(&mut locals, &bindings[0], rig.names(), None, time, 1.0);
+            let posed = rig.world(&locals);
+            let held = posed[rig.bone("j_sebo_a").expect("the spine")].matrix();
+            let joints = rigging.joints(motion, &table, time).expect("the prop's pose");
+            for (at, hand) in ["n_buki_l", "n_buki_r"].iter().enumerate() {
+                let bone = posed[rig.bone(hand).expect("a hand")].matrix();
+                let stands = (held * joints[at]).to_scale_rotation_translation().2;
+                apart[at] += stands.distance(bone.to_scale_rotation_translation().2);
+            }
+        }
+        for (at, hand) in ["n_buki_l", "n_buki_r"].iter().enumerate() {
+            let mean = apart[at] / times.len() as f32;
+            assert!(mean < 0.02, "{} stands {mean} from {hand}", table[at]);
+        }
     }
 }

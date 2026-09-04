@@ -30,15 +30,15 @@ pub struct Emote {
 }
 
 impl Emote {
-    /// The packs a body plays this from, the motion it starts with first. A key is filed under the
-    /// body's own code, so a character of another race reads the same emote out of its own
-    /// directory.
-    pub fn packs(&self, code: u16) -> Vec<String> {
-        [&self.start, &self.standing]
-            .into_iter()
-            .flatten()
-            .map(|key| format!("chara/human/c{code:04}/animation/a0001/bt_common/{key}.pap"))
-            .collect()
+    /// The keys the packs a body plays this from are filed under: the motion it starts with, and
+    /// the pose it settles into once that has played through. An emote that holds a pose forever
+    /// states the motion that plays it in apart from the pose itself; one that only moves states
+    /// the motion alone.
+    pub fn keys(&self) -> (Option<&str>, Option<&str>) {
+        match (&self.start, &self.standing) {
+            (Some(start), standing) => (Some(start), standing.as_deref()),
+            (None, standing) => (standing.as_deref(), None),
+        }
     }
 
     /// The expression this emote is, for the ones that only make a face. Those are filed under the
@@ -113,19 +113,13 @@ mod tests {
     fn an_emote_starts_before_it_settles() {
         let sit = emote(Some("emote/sit"), Some("event_base/event_base_chair_start"));
         assert_eq!(
-            sit.packs(101),
-            [
-                "chara/human/c0101/animation/a0001/bt_common/event_base/event_base_chair_start.pap",
-                "chara/human/c0101/animation/a0001/bt_common/emote/sit.pap",
-            ]
+            sit.keys(),
+            (Some("event_base/event_base_chair_start"), Some("emote/sit"))
         );
         assert_eq!(sit.expression(), None);
 
         let wave = emote(Some("emote/goodbye_st"), None);
-        assert_eq!(
-            wave.packs(1101),
-            ["chara/human/c1101/animation/a0001/bt_common/emote/goodbye_st.pap"]
-        );
+        assert_eq!(wave.keys(), (Some("emote/goodbye_st"), None));
     }
 
     /// An emote that only makes a face is filed under the face a character wears, not under its

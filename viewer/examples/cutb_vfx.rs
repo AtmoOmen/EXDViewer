@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use ironworks::file::cutb::{Cutscene, Node};
+use ironworks::file::layer::{HelperKind, InstanceData};
 use ironworks::file::tmb::{CommandKind, Item, Timeline};
 use ironworks::{
     Ironworks,
@@ -51,6 +52,8 @@ struct Census {
     /// complementary at the same frame.
     swapped: usize,
     pairs: usize,
+    /// What a `C019` runs against, by the kind the participant stands for.
+    kinds: BTreeMap<String, usize>,
 
     /// The bodies of the two large unmodelled kinds, and whether a dword of one reaches a string.
     unmodelled: BTreeMap<String, (usize, BTreeMap<usize, usize>)>,
@@ -92,6 +95,31 @@ fn span(timeline: &Timeline) -> f32 {
 
 impl Census {
     fn file(&mut self, path: &str, cutscene: &Cutscene) {
+        let kind_of: BTreeMap<u32, String> = cutscene
+            .nodes()
+            .iter()
+            .filter_map(|node| match node {
+                Node::Participants(held) => Some(held),
+                _ => None,
+            })
+            .flatten()
+            .map(|instance| {
+                let named = match instance.data() {
+                    InstanceData::HelperObject(helper) => match helper.kind() {
+                        HelperKind::EventNpc
+                        | HelperKind::BattleNpc
+                        | HelperKind::Player
+                        | HelperKind::PartyMember
+                        | HelperKind::PartyMemberAlt
+                        | HelperKind::StableChocobo
+                        | HelperKind::Unknown82 => "a character".to_owned(),
+                        kind => format!("{kind:?}"),
+                    },
+                    _ => format!("{:?}", instance.kind()),
+                };
+                (instance.id(), named)
+            })
+            .collect();
         let participants: BTreeSet<u32> = cutscene
             .nodes()
             .iter()
@@ -200,6 +228,11 @@ impl Census {
                         *self.states.entry(held.visibility()).or_default() += 1;
                         if let Some(participant) = participant {
                             states.entry(*participant).or_default().push((at, held.visibility()));
+                            let named = kind_of
+                                .get(participant)
+                                .cloned()
+                                .unwrap_or_else(|| "no participant".to_owned());
+                            *self.kinds.entry(named).or_default() += 1;
                         }
                     }
                     CommandKind::Unknown { magic, body } => {
@@ -313,6 +346,9 @@ impl Census {
              same frame",
             self.swapped, self.pairs
         );
+        for (named, count) in &self.kinds {
+            println!("  {named:>16}  {count}");
+        }
 
         println!("\nthe two large unmodelled kinds, and which dwords of the body are ever set");
         for (magic, (count, words)) in &self.unmodelled {

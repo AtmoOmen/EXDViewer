@@ -29,7 +29,8 @@ struct Census {
     examples: BTreeMap<(&'static str, String), String>,
     /// C043 weapon/body/variant triples seen, with an owning file.
     c043: Vec<(i16, i16, i32, String)>,
-    /// C198 model/body/variant/summon_id/atch_state, with an owning file.
+    /// C198 model/body/variant/summon_id/atch_state, with an owning file. Every one of them: the
+    /// pair of bytes that tells one summon from another is what the census is read for.
     c198: Vec<(i16, i16, i32, u8, u8, String)>,
     /// C107 VFXTrigger rows seen, with an owning file.
     c107: Vec<(i32, String)>,
@@ -181,7 +182,7 @@ fn walk(census: &mut Census, path: &str, timeline: &[u8]) {
                 }
             }
             CommandKind::C198(c) => {
-                if census.c198.len() < 40 {
+                {
                     census.c198.push((
                         c.model_id(),
                         c.body_id(),
@@ -283,8 +284,16 @@ fn main() {
     for (weapon, body, variant, file) in &census.c043 {
         println!("  w{weapon:04}b{body:04} variant {variant} in {file}");
     }
+    println!("\nC198 (summon_id, atch_state) tallies:");
+    let mut pairs: BTreeMap<(u8, u8), usize> = BTreeMap::new();
+    for (_, _, _, summon, atch, _) in &census.c198 {
+        *pairs.entry((*summon, *atch)).or_default() += 1;
+    }
+    for ((summon, atch), count) in &pairs {
+        println!("  summon {summon} atch {atch}: {count}");
+    }
     println!("\nC198 (model_id, body_id, variant, summon_id, atch_state) samples:");
-    for (model, body, variant, summon, atch, file) in &census.c198 {
+    for (model, body, variant, summon, atch, file) in census.c198.iter().take(40) {
         println!(
             "  model {model} body {body} variant {variant} summon {summon} atch {atch} in {file}"
         );

@@ -3015,7 +3015,9 @@ mod tests {
     #[test]
     #[ignore = "reads the real local FFXIV install"]
     fn a_real_facial_pose_composes_to_what_its_own_file_states() {
+        use glam::Quat;
         use ironworks::Ironworks;
+        use ironworks::file::est::ExtraSkeletonTemplate;
         use ironworks::file::pap::AnimationPack;
         use ironworks::file::sklb::SkeletonBinary;
         use ironworks::sqpack::{Install, SqPack};
@@ -3029,11 +3031,20 @@ mod tests {
                 .parse_skeleton()
                 .expect("a readable tagfile")
         };
+        // The face this measures is the one the creator's own default wears. `c0101f0005_fac.mdl`
+        // ships no animation of its own; `.est` is what says which skeleton poses it, and that is
+        // where its expressions are filed.
+        let est: Vec<u8> = install
+            .file("chara/xls/charadb/faceSkeletonTemplate.est")
+            .expect("the face template");
+        let template = ExtraSkeletonTemplate::read(Cursor::new(est)).expect("a readable est");
+        assert_eq!(template.skeleton(101, 5), Some(6));
+
         let body = parsed("chara/human/c0101/skeleton/base/b0001/skl_c0101b0001.sklb");
-        let face = parsed("chara/human/c0101/skeleton/face/f0002/skl_c0101f0002.sklb");
+        let face = parsed("chara/human/c0101/skeleton/face/f0006/skl_c0101f0006.sklb");
         let base = Rig::new(body.bones(), body.parent_indices(), body.reference_pose());
         let merged = base.merged(
-            "f0002",
+            "f0006",
             face.bones(),
             face.parent_indices(),
             face.reference_pose(),
@@ -3041,7 +3052,7 @@ mod tests {
         let alone = Rig::new(face.bones(), face.parent_indices(), face.reference_pose());
 
         let pack = AnimationPack::read(Cursor::new(read(
-            "chara/human/c0101/animation/f0002/nonresident/grin.pap",
+            "chara/human/c0101/animation/f0006/nonresident/grin.pap",
         )))
         .expect("the pack");
         let bindings = pack.parse_animations().expect("its motions");
@@ -3057,7 +3068,7 @@ mod tests {
                 .iter()
                 .filter_map(|name| {
                     let bone = rig
-                        .bone(&format!("f0002\u{0}{name}"))
+                        .bone(&format!("f0006\u{0}{name}"))
                         .or_else(|| rig.bone(name))?;
                     let from = rest[bone].matrix().to_scale_rotation_translation().2;
                     let to = posed[bone].matrix().to_scale_rotation_translation().2;
@@ -3066,8 +3077,21 @@ mod tests {
                 .collect()
         };
 
+        // Nothing the clip turns comes near opening a mouth: the widest is the lower lip at ten
+        // degrees, and no bone leaves its rest by more than the two centimetres asserted below.
+        let mut turned = 0.0f32;
+        {
+            let mut locals = alone.reference().to_vec();
+            alone.lay(&mut locals, binding, face.bones(), None, 0.0, 1.0);
+            for (at, local) in locals.iter().enumerate() {
+                let from = Quat::from_array(alone.reference()[at].rotation);
+                turned = turned.max(from.angle_between(Quat::from_array(local.rotation)));
+            }
+        }
+        assert!(turned.to_degrees() < 12.0, "{} deg", turned.to_degrees());
+
         let held = moved(&alone, None);
-        let over = moved(&merged, Some("f0002"));
+        let over = moved(&merged, Some("f0006"));
         assert_eq!(held.len(), face.bones().len());
         for ((name, one), (_, two)) in held.iter().zip(&over) {
             assert!(

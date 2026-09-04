@@ -119,7 +119,7 @@ fn local_transform(scale: &[f32], rotation: &[f32], position: &[f32]) -> Mat4 {
     let rotation = vec3(rotation, 0.0);
     Mat4::from_scale_rotation_translation(
         vec3(scale, 1.0),
-        Quat::from_euler(EulerRot::XYZ, rotation.x, rotation.y, rotation.z),
+        Quat::from_euler(EulerRot::ZYX, rotation.z, rotation.y, rotation.x),
         vec3(position, 0.0),
     )
 }

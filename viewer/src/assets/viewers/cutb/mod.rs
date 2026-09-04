@@ -3,7 +3,9 @@
 //! The timelines hold the same commands `.tmb` does, and most of what a cutscene puts in them is a
 //! kind that crate does not model, so a row saying only its magic and its size is the honest one.
 
+mod music;
 mod play;
+mod sound;
 
 use std::cell::Cell;
 use std::io::Cursor;
@@ -135,7 +137,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         })
         .sum::<usize>();
 
-    let play = play::Tab::new(level.clone(), &file);
+    let play = play::Tab::new(level.clone(), path, &file);
     let identity = vec![
         ("Nodes", nodes.len().to_string()),
         ("Level", level),

@@ -1051,7 +1051,7 @@ impl CharacterBuilder {
             let log = self.logged.get() != key;
             self.logged.set(key);
             let tag = |weapon: &weapons::Weapon| weapons::tag(&self.weapon_tags, weapon.set);
-            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, atch, log));
+            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, self.drawn, atch, log));
             let off = match main.covers_off_hand {
                 true => main.off_hand,
                 false => self
@@ -1060,11 +1060,12 @@ impl CharacterBuilder {
                     .map(|piece| piece.weapon),
             };
             if let Some(weapon) = off {
-                found.push(self.attach(weapon.model(), tag(&weapon), false, atch, log));
+                found.push(self.attach(weapon.model(), tag(&weapon), false, self.drawn, atch, log));
             }
         }
         // An emote's own prop hangs off the point its model set names, the same table a weapon
-        // reads: the prop is summoned as one, and one that holds a thing in each hand is moved
+        // reads, and always at the drawn placement: it is summoned into a hand rather than worn,
+        // so the stance toggle is nothing to it. One that holds a thing in each hand is moved
         // into them by a pack of its own rather than by where it hangs.
         if let Some((path, _, set)) = &self.prop {
             let atch = self
@@ -1073,7 +1074,7 @@ impl CharacterBuilder {
                 .filter(|(code, _)| *code == self.code)
                 .map(|(_, bytes)| bytes);
             let tag = weapons::tag(&self.weapon_tags, *set);
-            found.push(self.attach(path.clone(), tag, true, atch, false));
+            found.push(self.attach(path.clone(), tag, true, true, atch, false));
         }
         found
     }
@@ -1114,13 +1115,14 @@ impl CharacterBuilder {
         path: String,
         tag: Option<&str>,
         main: bool,
+        drawn: bool,
         atch: Option<&Rc<Vec<u8>>>,
         log: bool,
     ) -> (String, String, Mat4) {
-        let stance = if self.drawn { "drawn" } else { "sheathed" };
+        let stance = if drawn { "drawn" } else { "sheathed" };
         let placed = tag
             .zip(atch)
-            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, self.drawn, !main));
+            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, drawn, !main));
         let Some(placement) = placed else {
             let bone = weapons::fallback_bone(main);
             if log {

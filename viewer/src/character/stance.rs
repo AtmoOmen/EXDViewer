@@ -718,6 +718,15 @@ mod tests {
             let (model, set, held) = packs.filed(101, SET, held, file);
             path(model, set, held, file)
         };
+        let bare = filed("bt_emp_emp", "emote/battle02");
+        assert_eq!(
+            bare,
+            "chara/human/c0101/animation/a0001/bt_emp_emp/emote/battle02.pap"
+        );
+        assert!(
+            !sqpack.exists(&bare).unwrap_or(false),
+            "bare hands are moved nowhere and file no battle emote, so there is none to play"
+        );
         let held = filed("bt_swd_emp", "emote/battle02");
         assert_eq!(
             held,

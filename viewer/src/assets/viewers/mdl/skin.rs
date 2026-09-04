@@ -1127,6 +1127,10 @@ impl Animation {
         for layer in self.layers() {
             if let Some((from, to)) = layer.changed() {
                 let over = blend(&from, &to);
+                let from = match from.is_empty() {
+                    true => "nothing".to_owned(),
+                    false => from,
+                };
                 log::info!("mdl: {from} into {to} blends over {over:.3}s");
                 layer.priced(over);
             }
@@ -1371,7 +1375,12 @@ impl Animation {
     /// A pack of facial motions plays over whatever the body is doing rather than in place of it,
     /// so which of the two it lands on is the pack's to say.
     pub fn play(&self, packs: &[String], then: Option<&str>) {
-        let face = packs.first().is_some_and(|path| facial(path));
+        // Nothing named is nothing to play: what is on screen keeps playing rather than the model
+        // dropping to the pose its own file was stored in.
+        let Some(first) = packs.first() else {
+            return;
+        };
+        let face = facial(first);
         let fade = self.priced();
         if face {
             self.synced.set(false);

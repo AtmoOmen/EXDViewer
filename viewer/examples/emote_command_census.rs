@@ -42,6 +42,10 @@ struct Census {
     c012_bind_id: BTreeMap<i16, usize>,
     /// C063 bind fields.
     c063_bind: BTreeMap<u8, usize>,
+    /// How many distinct `.avfx` one motion's own timeline fires, tallied over every timeline.
+    vfx_per_timeline: BTreeMap<usize, usize>,
+    /// The most any one names, with the file it is in.
+    worst_vfx: (usize, String),
 }
 
 fn kind_name(kind: &CommandKind) -> &'static str {
@@ -147,6 +151,23 @@ fn walk(census: &mut Census, path: &str, timeline: &[u8]) {
         return;
     };
     census.timelines += 1;
+    let mut fires: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for item in parsed.items() {
+        if let Item::Command(command) = item {
+            let named = match command.kind() {
+                CommandKind::C012(c) => c.path(),
+                CommandKind::C173(c) => c.path(),
+                _ => None,
+            };
+            if let Some(named) = named {
+                fires.insert(named.to_owned());
+            }
+        }
+    }
+    *census.vfx_per_timeline.entry(fires.len()).or_default() += 1;
+    if fires.len() > census.worst_vfx.0 {
+        census.worst_vfx = (fires.len(), path.to_owned());
+    }
     for item in parsed.items() {
         let Item::Command(command) = item else {
             continue;
@@ -284,6 +305,14 @@ fn main() {
     for (weapon, body, variant, file) in &census.c043 {
         println!("  w{weapon:04}b{body:04} variant {variant} in {file}");
     }
+    println!("\ndistinct .avfx one timeline fires:");
+    for (count, timelines) in &census.vfx_per_timeline {
+        println!("  {count}: {timelines}");
+    }
+    println!(
+        "  most: {} in {}",
+        census.worst_vfx.0, census.worst_vfx.1
+    );
     println!("\nC198 (summon_id, atch_state) tallies:");
     let mut pairs: BTreeMap<(u8, u8), usize> = BTreeMap::new();
     for (_, _, _, summon, atch, _) in &census.c198 {

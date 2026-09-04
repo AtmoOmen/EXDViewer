@@ -387,10 +387,10 @@ pub struct CharacterBuilder {
     /// changed clothes since.
     fetching: Vec<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
-    /// The prop the playing emote's own timeline wants held, by path, material variant and the
-    /// weapon set it hangs from, read
-    /// off the model itself once a frame so `worn` picks it up the same way it does a weapon.
-    prop: Option<(String, u16, u16)>,
+    /// The props the playing emote's own timeline wants held, each by path, material variant and
+    /// the weapon set it hangs from, read off the model itself once a frame so `worn` picks them up
+    /// the same way it does a weapon. A motion that puts one thing in each hand summons twice.
+    props: Vec<(String, u16, u16)>,
 }
 
 impl Default for CharacterBuilder {
@@ -476,7 +476,7 @@ impl Default for CharacterBuilder {
             held: Files::new(),
             fetching: Vec::new(),
             model: None,
-            prop: None,
+            props: Vec::new(),
         }
     }
 }
@@ -862,10 +862,10 @@ impl CharacterBuilder {
 
         // Read off the model rather than driven from here: an emote's own timeline is what says
         // whether it wants a prop held, and when.
-        self.prop = self.model.as_ref().and_then(|model| match model {
-            Ok(model) => model.wanted_prop(),
-            Err(_) => None,
-        });
+        self.props = match self.model.as_ref() {
+            Some(Ok(model)) => model.wanted_props(),
+            _ => Vec::new(),
+        };
         let full = self.wearing(&listing, &deformers);
         let wanted: Vec<(String, u16)> = full
             .iter()
@@ -1068,14 +1068,27 @@ impl CharacterBuilder {
         // reads, and always at the drawn placement: it is summoned into a hand rather than worn,
         // so the stance toggle is nothing to it. One that holds a thing in each hand is moved
         // into them by a pack of its own rather than by where it hangs.
-        if let Some((path, _, set)) = &self.prop {
-            let atch = self
-                .atch
-                .as_ref()
-                .filter(|(code, _)| *code == self.code)
-                .map(|(_, bytes)| bytes);
+        let atch = self
+            .atch
+            .as_ref()
+            .filter(|(code, _)| *code == self.code)
+            .map(|(_, bytes)| bytes);
+        for (path, _, set) in &self.props {
             let tag = weapons::tag(&self.weapon_tags, *set);
-            found.push(self.attach(path.clone(), tag, true, true, atch, false));
+            let mut placed = self.attach(path.clone(), tag, true, true, atch, false);
+            // A motion summoning two of one model names the same point for both, and nothing in
+            // the command says which hand either goes to, so the second would stack on the first.
+            // The point's own states name the bone on the other side, and state no offset at any
+            // of them, so moving the second there is the whole of it.
+            if found.iter().any(|(_, bone, _)| *bone == placed.1)
+                && let Some(other) = tag
+                    .zip(atch)
+                    .and_then(|(tag, bytes)| weapons::other_hand(bytes, tag, &placed.1))
+            {
+                log::info!("character: a second {path} hangs from {other} instead");
+                placed.1 = other;
+            }
+            found.push(placed);
         }
         found
     }
@@ -1372,9 +1385,9 @@ impl CharacterBuilder {
                 .map(|weapon| (weapon.model(), weapon.variant, [None, None])),
         );
         found.extend(
-            self.prop
-                .clone()
-                .map(|(path, variant, _)| (path, variant, [None, None])),
+            self.props
+                .iter()
+                .map(|(path, variant, _)| (path.clone(), *variant, [None, None])),
         );
         found
     }
@@ -1473,7 +1486,7 @@ impl CharacterBuilder {
                     deform,
                     skin: self.skin,
                     rigid: wielded.contains(path)
-                        || self.prop.as_ref().is_some_and(|(held, ..)| held == path),
+                        || self.props.iter().any(|(held, ..)| held == path),
                 })
             })
             .collect();

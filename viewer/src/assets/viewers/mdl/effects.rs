@@ -18,6 +18,11 @@ use crate::backend::Backend;
 use crate::settings::AVFX_FRAME_RATE;
 use crate::utils::TrackedPromise;
 
+/// How many files to keep parsed and on the card at once. The busiest motion in the game fires
+/// seven distinct `.avfx` (`emote_sp/sp46`), and a change of motion has the outgoing one's files in
+/// hand alongside the incoming one's, so twice that never evicts a file still firing.
+const KEPT: usize = 16;
+
 /// One firing to draw: the file, where it stands in the world, how far into its own run it is, and
 /// the tint the command that started it states.
 pub struct Fired {
@@ -40,14 +45,22 @@ struct Held {
     particles: Arc<Mutex<gpu::Particles>>,
 }
 
+/// A file on its way in or in hand, with the last poll it was fired on.
+struct Kept {
+    file: File,
+    fired: u64,
+}
+
 /// Every effect an emote is firing, kept across frames: the files parsed once each, the particles
 /// each firing has run out, and the textures and packages they are all drawn through.
 #[derive(Default)]
 pub struct Effects {
-    files: HashMap<String, File>,
+    files: HashMap<String, Kept>,
     running: HashMap<u64, sim::State>,
     textures: Textures,
     shaders: Shaders,
+    /// Counts polls, so the least recently fired file is the one to give up.
+    polls: u64,
 }
 
 impl Effects {
@@ -58,16 +71,40 @@ impl Effects {
             return;
         }
         self.shaders.poll(backend);
+        self.polls += 1;
+        let polls = self.polls;
         for held in fired {
-            self.files.entry(held.path.clone()).or_insert_with(|| {
-                let files = backend.files().clone();
-                let wanted = held.path.clone();
-                File::Fetching(TrackedPromise::spawn_local(
-                    async move { files.read(&wanted).await },
-                ))
-            });
+            self.files
+                .entry(held.path.clone())
+                .or_insert_with(|| {
+                    let files = backend.files().clone();
+                    let wanted = held.path.clone();
+                    Kept {
+                        file: File::Fetching(TrackedPromise::spawn_local(async move {
+                            files.read(&wanted).await
+                        })),
+                        fired: polls,
+                    }
+                })
+                .fired = polls;
         }
-        for (path, file) in self.files.iter_mut() {
+        // A file no longer fired is kept against the emote being picked again, but only so many:
+        // its particles hold buffers on the card, and the creator's own list is a few hundred
+        // emotes long.
+        while self.files.len() > KEPT {
+            let Some(stalest) = self
+                .files
+                .iter()
+                .filter(|(_, kept)| kept.fired < polls)
+                .min_by_key(|(_, kept)| kept.fired)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.files.remove(&stalest);
+        }
+        for (path, kept) in self.files.iter_mut() {
+            let file = &mut kept.file;
             let File::Fetching(promise) = file else {
                 continue;
             };
@@ -101,7 +138,7 @@ impl Effects {
         let wanted: Vec<String> = self
             .files
             .values()
-            .filter_map(|file| match file {
+            .filter_map(|kept| match &kept.file {
                 File::Ready(held) => Some(held.effect.textures.clone()),
                 _ => None,
             })
@@ -113,7 +150,7 @@ impl Effects {
         let Self { files, running, .. } = self;
         running.retain(|id, _| fired.iter().any(|held| held.id == *id));
         for held in fired {
-            let Some(File::Ready(file)) = files.get(&held.path) else {
+            let Some(File::Ready(file)) = files.get(&held.path).map(|kept| &kept.file) else {
                 continue;
             };
             let end = match file.effect.bounded {
@@ -141,8 +178,8 @@ impl Effects {
         let (right, up) = (axes.x_axis, axes.y_axis);
         self.files
             .iter()
-            .filter_map(|(path, file)| {
-                let File::Ready(file) = file else {
+            .filter_map(|(path, kept)| {
+                let File::Ready(file) = &kept.file else {
                     return None;
                 };
                 let bound = self.textures.bound(&file.effect.textures);

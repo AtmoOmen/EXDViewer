@@ -185,18 +185,8 @@ impl Attach {
     /// The same placement on the other side of the body: the bone's own `_l` or `_r` flipped, and
     /// the placement reflected across the plane between them.
     fn mirrored(self) -> Self {
-        let flipped = match self.bone.as_bytes() {
-            [.., b'_', b'l'] => Some('r'),
-            [.., b'_', b'r'] => Some('l'),
-            _ => None,
-        };
-        let mut bone = self.bone;
-        if let Some(side) = flipped {
-            bone.pop();
-            bone.push(side);
-        }
         Self {
-            bone,
+            bone: across(&self.bone).unwrap_or(self.bone),
             offset: [self.offset[0], self.offset[1], -self.offset[2]],
             rotation: [-self.rotation[0], -self.rotation[1], self.rotation[2]],
             ..self
@@ -263,6 +253,33 @@ pub fn vfx_path(weapon: &Weapon, bytes: &[u8]) -> Option<String> {
             weapon.set, weapon.base
         )),
     }
+}
+
+/// The same bone on the other side of the body, for a name that carries a side at all.
+fn across(bone: &str) -> Option<String> {
+    let side = match bone.as_bytes() {
+        [.., b'_', b'l'] => 'r',
+        [.., b'_', b'r'] => 'l',
+        _ => return None,
+    };
+    let mut across = bone.to_owned();
+    across.pop();
+    across.push(side);
+    Some(across)
+}
+
+/// The bone on the other side of the body from `bone`, for a point that names it in one of its own
+/// states. A summon states no hand of its own and hangs from the point its model set names, so two
+/// of one set would stack in the same hand; this is what the file itself offers as the other one.
+/// Nothing where the name carries no side, or where the point never names the mirror.
+pub fn other_hand(bytes: &[u8], tag: &str, bone: &str) -> Option<String> {
+    let other = across(bone)?;
+    let file = AttachPoints::read(Cursor::new(bytes.to_vec())).ok()?;
+    let point = file.point(tag)?;
+    file.states(point)?
+        .iter()
+        .any(|state| state.bone() == other)
+        .then_some(other)
 }
 
 /// The bone a weapon hangs from when nothing names an attach point for it: the plain right or left
@@ -426,5 +443,43 @@ mod tests {
             let held = tag(&tags, set).expect("every set reads a point");
             assert!(points.point(held).is_some(), "c0101.atch has no {held}");
         }
+    }
+
+    const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
+
+    /// Where a second summon of one model set goes, off the real install. Cheer On: Orange summons
+    /// `w1980` twice, whose point `nmf` hangs it from `n_buki_r`; the point's own states name
+    /// `n_buki_l` too, which is the hand the second one is moved to. A point that never names the
+    /// mirror offers none, and neither does a bone whose name carries no side.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_second_summon_of_one_set_reads_the_other_hand_off_the_point() {
+        use ironworks::Ironworks;
+        use ironworks::sqpack::{Install, SqPack};
+
+        let install =
+            Ironworks::new().with_resource(Box::new(SqPack::new(Install::at_sqpack(SQPACK))));
+        let bytes: Vec<u8> = install
+            .file("chara/xls/attachoffset/c0101.atch")
+            .expect("the attach points");
+        assert_eq!(
+            other_hand(&bytes, "nmf", "n_buki_r").as_deref(),
+            Some("n_buki_l")
+        );
+        assert_eq!(
+            other_hand(&bytes, "sld", "n_buki_tate_l").as_deref(),
+            Some("n_buki_tate_r"),
+            "a shield is worn left and its point names the right"
+        );
+        assert_eq!(
+            other_hand(&bytes, "nmf", "n_throw"),
+            None,
+            "a bone that names no side has no other one"
+        );
+        assert_eq!(
+            other_hand(&bytes, "avt", "n_buki_r"),
+            None,
+            "a point that only ever throws names neither hand"
+        );
     }
 }

@@ -253,10 +253,12 @@ impl Events {
         Ok(events)
     }
 
-    fn active_prop(&self, time: f32) -> Option<&Prop> {
+    /// Every prop the clock is inside the window of, in the order the timeline summons them: a
+    /// motion that puts one thing in each hand summons twice rather than once.
+    fn active_props(&self, time: f32) -> impl Iterator<Item = &Prop> {
         self.props
             .iter()
-            .find(|prop| time >= prop.start && time < prop.end.max(prop.start + f32::EPSILON))
+            .filter(move |prop| time >= prop.start && time < prop.end.max(prop.start + f32::EPSILON))
     }
 
     fn active_vfx(&self, time: f32) -> impl Iterator<Item = &Vfx> {
@@ -428,7 +430,10 @@ impl Cue {
         }
 
         let held = match &self.fetch {
-            Some(Fetch::Ready(events)) => events.active_prop(time).map(|prop| (prop.set, prop.base)),
+            Some(Fetch::Ready(events)) => events
+                .active_props(time)
+                .next()
+                .map(|prop| (prop.set, prop.base)),
             _ => None,
         };
         self.poll_rig(backend, held, &name);
@@ -551,23 +556,27 @@ impl Cue {
         self.rigged = Some(((set, base), read.unwrap_or(Rigged::Failed)));
     }
 
-    /// The model an emote's own timeline wants held right now, by the path it is worn as, its
-    /// material variant and the weapon set it is filed under.
-    pub fn active_prop(&self, time: f32) -> Option<(String, u16, u16)> {
+    /// The models an emote's own timeline wants held right now, each by the path it is worn as, its
+    /// material variant and the weapon set it is filed under. Several where the motion summons
+    /// several, in the order it names them.
+    pub fn active_props(&self, time: f32) -> Vec<(String, u16, u16)> {
         let Some(Fetch::Ready(events)) = &self.fetch else {
-            return None;
+            return Vec::new();
         };
         events
-            .active_prop(time)
+            .active_props(time)
             .map(|prop| (prop.path.clone(), prop.variant, prop.set))
+            .collect()
     }
 
-    /// Where each slot of the held prop's own bone table stands `time` seconds into the motion,
-    /// in the prop's own space. Nothing where it ships no pack of its own to move it.
-    pub fn joints(&self, table: &[String], time: f32) -> Option<Vec<Mat4>> {
-        let (_, Rigged::Ready(rigging, motion)) = self.rigged.as_ref()? else {
+    /// Where each slot of the held prop's own bone table stands `time` seconds into the motion, in
+    /// the prop's own space, for the prop `path` names. Nothing where it ships no pack of its own to
+    /// move it, and nothing for any prop but the one the rig was fetched for.
+    pub fn joints(&self, path: &str, table: &[String], time: f32) -> Option<Vec<Mat4>> {
+        let ((set, base), Rigged::Ready(rigging, motion)) = self.rigged.as_ref()? else {
             return None;
         };
+        (prop_model(*set, *base) == path).then_some(())?;
         rigging.joints(*motion, table, time)
     }
 
@@ -749,5 +758,27 @@ mod tests {
             1,
             "only the sync marker fires at frame nought"
         );
+    }
+
+    /// Cheer On: Orange summons the same penlight twice at once, which is why one prop is not
+    /// enough: both windows cover the whole four-second loop, and both name `w1980b0001`.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_emote_summons_the_same_model_into_both_hands() {
+        let install = Ironworks::new().with_resource(SqPack::new(Install::at_sqpack(SQPACK)));
+        let read = |path: &str| install.file::<Vec<u8>>(path).expect(path);
+
+        let body = "chara/human/c0101/animation/a0001/bt_common/emote_sp/sp78_loop.pap";
+        let events = Events::read(&read(body), "cbem_sp78_2lp").expect("a readable timeline");
+        let held: Vec<&Prop> = events.active_props(2.0).collect();
+        assert_eq!(held.len(), 2, "one in each hand");
+        assert_eq!(held[0].path, held[1].path);
+        assert_eq!(held[0].path, prop_model(1980, 1));
+        assert_eq!((held[0].variant, held[1].variant), (1, 1));
+
+        // Blow Bubbles summons one, and its own pack is what puts a bone in each hand instead.
+        let alone = "chara/human/c0101/animation/a0001/bt_common/emote_sp/sp63.pap";
+        let events = Events::read(&read(alone), "cbem_sp63").expect("a readable timeline");
+        assert_eq!(events.active_props(2.0).count(), 1);
     }
 }

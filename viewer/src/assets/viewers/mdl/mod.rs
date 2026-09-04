@@ -2191,7 +2191,8 @@ impl Rendered {
         if !self.attachments.borrow().is_empty()
             && let Some((names, ..)) = &rig
         {
-            for attachment in self.attachments.borrow().iter() {
+            let attachments = self.attachments.borrow();
+            for (at, attachment) in attachments.iter().enumerate() {
                 let Some(bone) = names.iter().position(|name| *name == attachment.bone) else {
                     continue;
                 };
@@ -2199,18 +2200,34 @@ impl Rendered {
                     continue;
                 };
                 let carried = world * attachment.local;
+                // A motion that summons the same model twice wears it twice, so the nth carried
+                // piece of a path is the nth piece built from it rather than every one of them.
+                let which = attachments[..at]
+                    .iter()
+                    .filter(|held| held.path == attachment.path)
+                    .count();
+                let Some(worn) = self
+                    .pieces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, piece)| piece.path == attachment.path)
+                    .nth(which)
+                    .map(|(piece, _)| piece)
+                else {
+                    continue;
+                };
                 for (index, mesh) in level.meshes.iter().enumerate() {
-                    if self.pieces[mesh.piece].path != attachment.path {
+                    if mesh.piece != worn {
                         continue;
                     }
                     // A prop that ships a pack of its own is skinned to a rig of its own, walked
                     // by that pack and carried whole to the point it hangs from: that is what puts
                     // one of the two things it holds in each hand.
-                    pose.joints[index] = match self
-                        .animation
-                        .body_playing()
-                        .and_then(|(_, _, time)| self.emote.borrow().joints(&level.bones[index], time))
-                    {
+                    pose.joints[index] = match self.animation.body_playing().and_then(|(_, _, time)| {
+                        self.emote
+                            .borrow()
+                            .joints(&attachment.path, &level.bones[index], time)
+                    }) {
                         Some(joints) => joints.iter().map(|joint| carried * *joint).collect(),
                         None => vec![carried; level.bones[index].len()],
                     };
@@ -3363,13 +3380,15 @@ impl Rendered {
             .collect();
     }
 
-    /// The model an emote's own timeline wants held right now, by the path it is worn as, its
+    /// The models an emote's own timeline wants held right now, each by the path it is worn as, its
     /// material variant and the weapon set it is filed under, where a `C043`/`C198` prop command's
-    /// window covers the current time. `None` once it has played through: the caller is what
+    /// window covers the current time. Empty once they have played through: the caller is what
     /// carries a prop away again, the way a weapon put away carries nothing.
-    pub fn wanted_prop(&self) -> Option<(String, u16, u16)> {
-        let (_, _, time) = self.animation.body_playing()?;
-        self.emote.borrow().active_prop(time)
+    pub fn wanted_props(&self) -> Vec<(String, u16, u16)> {
+        let Some((_, _, time)) = self.animation.body_playing() else {
+            return Vec::new();
+        };
+        self.emote.borrow().active_props(time)
     }
 
     /// Poses the character out of the first of `packs` the install holds, which is what picking

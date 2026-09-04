@@ -14,6 +14,7 @@ mod mounts;
 mod npcs;
 mod palette;
 mod stains;
+mod stance;
 mod weapons;
 
 use std::cell::{Cell, Ref, RefCell};
@@ -236,6 +237,14 @@ type Read = Vec<(String, Vec<u8>)>;
 /// The race a `.atch` fetch was asked for, alongside the bytes once it lands.
 type AtchRead = (u16, Vec<u8>);
 
+/// The stance the body was last put in: the class directory its weapons name, whether they were
+/// drawn, and whether the pose it settled on has been named yet.
+struct Stood {
+    held: String,
+    drawn: bool,
+    told: Cell<bool>,
+}
+
 /// What a picked set is made of, and what to call it.
 struct Set {
     id: u16,
@@ -335,6 +344,16 @@ pub struct CharacterBuilder {
     off_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// Whether the weapon on screen is drawn, which is a whole stance rather than a placement.
     drawn: bool,
+    /// Which motion class each weapon puts the body in, and how long the game blends one motion
+    /// into another.
+    stance: Option<stance::Stance>,
+    reading_stance: Option<TrackedPromise<Result<stance::Stance>>>,
+    /// The stance the body was last put in, so one it is already standing in is not started over
+    /// on every frame.
+    stood_in: RefCell<Option<Stood>>,
+    /// The effects the drawn weapons were last carrying, so they are named once rather than on
+    /// every frame they play.
+    glowed: RefCell<Vec<String>>,
     /// What was last logged a weapon's placement, so a stance held for a thousand frames names its
     /// bone and offset once rather than on every one of them.
     logged: Cell<(bool, Option<usize>, Option<usize>, bool)>,
@@ -437,6 +456,10 @@ impl Default for CharacterBuilder {
             main_matched: Default::default(),
             off_matched: Default::default(),
             drawn: false,
+            stance: None,
+            reading_stance: None,
+            stood_in: RefCell::new(None),
+            glowed: RefCell::new(Vec::new()),
             logged: Cell::new((false, None, None, false)),
             atch: None,
             reading_atch: None,
@@ -491,6 +514,8 @@ impl CharacterBuilder {
         self.main_matched.take();
         self.off_matched.take();
         self.logged.set((false, None, None, false));
+        self.stood_in.take();
+        self.glowed.take();
         self.atch = None;
         self.reading_atch = None;
         self.stood = false;
@@ -580,6 +605,10 @@ impl CharacterBuilder {
         self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
             npcs::read(&standing, language).await
         }));
+        let stanced = backend.clone();
+        self.reading_stance = Some(TrackedPromise::spawn_local(async move {
+            stance::Stance::read(&stanced, language).await
+        }));
     }
 
     fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
@@ -610,6 +639,13 @@ impl CharacterBuilder {
                 }
                 Ok(Err(why)) => log::warn!("character: no characters to stand in: {why}"),
                 Err(promise) => self.reading_npcs = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_stance.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.stance = Some(read),
+                Ok(Err(why)) => log::warn!("character: nothing states a weapon's stance: {why}"),
+                Err(promise) => self.reading_stance = Some(promise),
             }
         }
         if let Some(promise) = self.reading_worn.take() {
@@ -903,8 +939,83 @@ impl CharacterBuilder {
             model.hinged(self.raised());
             model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
-            model.carried(self.attachments());
+            let carried = self.attachments();
+            model.glowing(self.effects(&carried));
+            model.carried(carried);
+            self.stand(model);
         }
+    }
+
+    /// Puts the body in the pose its weapons and the stance toggle state, playing the transition
+    /// between the two over it. A class the install files no drawn idle for keeps the sheathed
+    /// one: `bt_swd_emp` ships the draw and sheathe motions and no idle to hold after them, and
+    /// `bt_emp_emp`'s idle pack holds no animation at all, which is bare hands having no drawn
+    /// pose to take.
+    fn stand(&self, model: &mdl::Rendered) {
+        let Some(stance) = &self.stance else {
+            return;
+        };
+        let wielded = self.wielded();
+        let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
+        let held = stance.directory(set(0), set(1));
+        let mut stood = self.stood_in.borrow_mut();
+        if let Some(stood) = stood
+            .as_ref()
+            .filter(|stood| stood.held == held && stood.drawn == self.drawn)
+        {
+            // Named once the pack has landed rather than when it was asked for: a class with no
+            // drawn pose of its own settles into the sheathed one, and this is what says so.
+            if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
+                log::info!("character: {} settled into {name}", stood.held);
+            }
+            return;
+        }
+
+        // Over the whole lineage rather than this body alone: most bodies file no animation of
+        // their own and play the one they are built on, which is the same tree their clothes come
+        // from.
+        let lineage = match self.lineage() {
+            found if found.is_empty() => vec![format!("c{:04}", self.code)],
+            found => found,
+        };
+        let mut poses = Vec::new();
+        if self.drawn {
+            poses.extend(lineage.iter().map(|code| {
+                (
+                    stance::pack(code, &held, "resident/idle.pap"),
+                    stance::DRAWN,
+                )
+            }));
+        }
+        poses.extend(
+            lineage
+                .iter()
+                .map(|code| (stance::sheathed_pack(code), stance::SHEATHED)),
+        );
+
+        let wanted = poses[0].1;
+        let fade = model.standing().map_or(0.0, |from| stance.fade(&from, wanted));
+        log::info!("character: {held} asks for {wanted}, blending over {fade:.3}s");
+        model.stand(&poses, fade);
+
+        if stood.as_ref().is_some_and(|stood| stood.drawn != self.drawn) {
+            let over = match self.drawn {
+                true => stance::DRAW,
+                false => stance::SHEATHE,
+            };
+            let packs: Vec<String> = lineage
+                .iter()
+                .map(|code| stance::pack(code, &held, "resident/sub.pap"))
+                .collect();
+            let fade = stance.fade(stance::DRAWN, over);
+            log::info!("character: {over} over it, blending over {fade:.3}s");
+            model.act(&packs, over, fade);
+        }
+        *stood = Some(Stood {
+            held,
+            drawn: self.drawn,
+            told: Cell::new(false),
+        });
     }
 
     /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
@@ -940,6 +1051,35 @@ impl CharacterBuilder {
         // resolved for it: nothing in the timeline states which point a prop hangs from.
         if let Some((path, _)) = &self.prop {
             found.push((path.clone(), weapons::fallback_bone(true).to_owned(), Mat4::IDENTITY));
+        }
+        found
+    }
+
+    /// The bone each drawn weapon's own effect plays from, for the ones whose `.imc` names one.
+    /// The game only plays a weapon's effect in a battle stance, so nothing sheathed carries one.
+    fn effects(&self, carried: &[(String, String, Mat4)]) -> Vec<String> {
+        if !self.drawn {
+            self.glowed.take();
+            return Vec::new();
+        }
+        let mut named = Vec::new();
+        let found = self
+            .wielded()
+            .into_iter()
+            .filter_map(|weapon| {
+                let model = weapon.model();
+                let imc = mdl::imc_path(&model).and_then(|path| self.held.get(&path))?;
+                let path = weapons::vfx_path(&weapon, imc)?;
+                let (_, bone, _) = carried.iter().find(|(held, ..)| *held == model)?;
+                named.push(path);
+                Some(bone.clone())
+            })
+            .collect();
+        if *self.glowed.borrow() != named {
+            for path in &named {
+                log::info!("character: a drawn weapon plays {path}");
+            }
+            *self.glowed.borrow_mut() = named;
         }
         found
     }
@@ -2401,12 +2541,7 @@ impl CharacterBuilder {
             Some(Pick::Seat(seat)) => self.mount_seat = seat,
             Some(Pick::Weapon(weapon)) => self.main_hand = weapon,
             Some(Pick::OffHand(weapon)) => self.off_hand = weapon,
-            Some(Pick::Stance(drawn)) => {
-                self.drawn = drawn;
-                if let Some(Ok(model)) = &self.model {
-                    model.play(&weapons::stance_pack(self.code, drawn), None);
-                }
-            }
+            Some(Pick::Stance(drawn)) => self.drawn = drawn,
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }

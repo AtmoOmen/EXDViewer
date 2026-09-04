@@ -12,6 +12,7 @@ use anyhow::Result;
 use ironworks::excel::Language;
 use ironworks::file::File;
 use ironworks::file::atch::AttachPoints;
+use ironworks::file::imc::ImageChange;
 use std::io::Cursor;
 
 use crate::backend::Backend;
@@ -227,6 +228,26 @@ pub fn attach(bytes: &[u8], tag: &str, drawn: bool) -> Option<Attach> {
     })
 }
 
+/// The lowest effect id filed apart from any one weapon, out of `Weapon::ResolveVfxPath`: below
+/// this the effect is the weapon's own, at or above it the shared one every weapon reads from.
+const SHARED_VFX: u8 = 100;
+
+/// Where the effect a weapon's own `.imc` names is filed, for the variant it is worn at. The game
+/// only plays this while the weapon is drawn, which is what makes a relic glow in a battle stance
+/// and not out of one.
+pub fn vfx_path(weapon: &Weapon, bytes: &[u8]) -> Option<String> {
+    let file = ImageChange::read(Cursor::new(bytes.to_vec())).ok()?;
+    let vfx = file.entry(0, weapon.variant)?.vfx_id();
+    match vfx {
+        0 => None,
+        SHARED_VFX.. => Some(format!("vfx/weapon/eff/vw{vfx:04}.avfx")),
+        _ => Some(format!(
+            "chara/weapon/w{:04}/obj/body/b{:04}/vfx/eff/vw{vfx:04}.avfx",
+            weapon.set, weapon.base
+        )),
+    }
+}
+
 /// The bone a weapon hangs from when nothing names an attach point for it: the plain right or left
 /// hand null bone, whichever `main` says.
 pub fn fallback_bone(main: bool) -> &'static str {
@@ -234,16 +255,6 @@ pub fn fallback_bone(main: bool) -> &'static str {
         true => "n_buki_r",
         false => "n_buki_l",
     }
-}
-
-/// The idle pack a race plays drawn or sheathed. Sheathed is `a0001`, which is what the body plays
-/// regardless of what it holds; drawn is `a0034`, a battle idle measured to exist for c0101
-/// alongside it (`cbbm_id0`, the `b` where `a0001`'s own idle is `cbnm_id0`'s `n`). Nothing on disk
-/// states which of the many other numbered battle idles a given weapon style should play instead,
-/// so every drawn weapon shares this one until that is resolved.
-pub fn stance_pack(code: u16, drawn: bool) -> String {
-    let set = if drawn { 34 } else { 1 };
-    format!("chara/human/c{code:04}/animation/a{set:04}/bt_common/resident/idle.pap")
 }
 
 #[cfg(test)]
@@ -262,6 +273,55 @@ mod tests {
 
         let hora = Weapon::read(0x0000_0002_0009_012d).unwrap();
         assert_eq!((hora.set, hora.base, hora.variant), (301, 9, 2));
+    }
+
+    /// The split `Weapon::ResolveVfxPath` makes: below a hundred the effect is filed under the
+    /// weapon's own directory, at or above it under the one every weapon shares.
+    #[test]
+    fn an_effect_is_the_weapons_own_until_it_is_shared() {
+        let weapon = Weapon {
+            set: 201,
+            base: 1,
+            variant: 0,
+        };
+        let entry = |vfx: u8| {
+            let mut bytes = vec![0, 0, 1, 0];
+            bytes.extend([0, 0, 0, 0, vfx, 0]);
+            bytes
+        };
+        assert_eq!(vfx_path(&weapon, &entry(0)), None);
+        assert_eq!(
+            vfx_path(&weapon, &entry(2)).as_deref(),
+            Some("chara/weapon/w0201/obj/body/b0001/vfx/eff/vw0002.avfx")
+        );
+        assert_eq!(
+            vfx_path(&weapon, &entry(150)).as_deref(),
+            Some("vfx/weapon/eff/vw0150.avfx")
+        );
+    }
+
+    /// One weapon the install itself gives an effect: `w0401b0080`'s third variant names vfx 2,
+    /// and the file that resolves to is one the install ships.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_weapon_variant_that_names_an_effect_resolves_a_file_the_install_holds() {
+        let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
+            ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),
+        ));
+        let imc: Vec<u8> = install
+            .file("chara/weapon/w0401/obj/body/b0080/b0080.imc")
+            .expect("the imc");
+        let weapon = Weapon {
+            set: 401,
+            base: 80,
+            variant: 2,
+        };
+        let path = vfx_path(&weapon, &imc).expect("this variant names an effect");
+        assert_eq!(path, "chara/weapon/w0401/obj/body/b0080/vfx/eff/vw0002.avfx");
+        assert!(install.file::<Vec<u8>>(&path).is_ok(), "{path}");
+
+        let plain = Weapon { variant: 0, ..weapon };
+        assert_eq!(vfx_path(&plain, &imc), None, "the default variant has none");
     }
 
     #[test]

@@ -473,8 +473,10 @@ struct Acting {
     /// The same again, over the participants that stand a character.
     cast: BTreeSet<(String, u32)>,
     cast_moving: BTreeSet<(String, u32)>,
-    /// Named motions, split by whether a pack the cutscene loads holds them.
+    /// Named motions, split by whether a pack the cutscene loads holds them, and of the ones it
+    /// does, how many lay over the pose the body is in rather than replacing it.
     motions: [usize; 2],
+    laid_over: usize,
     missing: BTreeMap<String, usize>,
 }
 
@@ -501,7 +503,13 @@ fn addressed(timeline: &ironworks::file::tmb::Timeline) -> BTreeMap<i16, u32> {
 }
 
 impl Acting {
-    fn read(&mut self, path: &str, file: &Cutscene, holds: &BTreeSet<&str>, cast: &BTreeSet<u32>) {
+    fn read(
+        &mut self,
+        path: &str,
+        file: &Cutscene,
+        holds: &BTreeMap<&str, bool>,
+        cast: &BTreeSet<u32>,
+    ) {
         for node in file.nodes() {
             let Node::Timeline(timeline) = node else {
                 continue;
@@ -552,9 +560,10 @@ impl Acting {
                 if motion.starts_with("cfx") {
                     continue;
                 }
-                self.motions[usize::from(holds.contains(motion))] += 1;
-                if !holds.contains(motion) {
-                    *self.missing.entry(motion.to_owned()).or_default() += 1;
+                self.motions[usize::from(holds.contains_key(motion))] += 1;
+                match holds.get(motion) {
+                    Some(over) => self.laid_over += usize::from(*over),
+                    None => *self.missing.entry(motion.to_owned()).or_default() += 1,
                 }
             }
         }
@@ -568,8 +577,8 @@ fn loaded<'a>(
     file: &Cutscene,
     shipped: &BTreeSet<&str>,
     ironworks: &Ironworks,
-    holding: &'a mut BTreeMap<String, BTreeSet<String>>,
-) -> BTreeSet<&'a str> {
+    holding: &'a mut BTreeMap<String, BTreeMap<String, bool>>,
+) -> BTreeMap<&'a str, bool> {
     let listed: Vec<&str> = file
         .nodes()
         .iter()
@@ -612,9 +621,17 @@ fn loaded<'a>(
                 .ok()
                 .and_then(|bytes| AnimationPack::read(std::io::Cursor::new(bytes)).ok())
                 .map(|held| {
+                    let bindings = held.parse_animations().unwrap_or_default();
                     held.animations()
                         .iter()
-                        .map(|animation| animation.name().to_owned())
+                        .map(|animation| {
+                            let at =
+                                usize::try_from(animation.havok_index()).unwrap_or(usize::MAX);
+                            let over = bindings
+                                .get(at)
+                                .is_some_and(|binding| binding.blend_hint() == 1);
+                            (animation.name().to_owned(), over)
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -623,7 +640,7 @@ fn loaded<'a>(
     holding
         .iter()
         .filter(|(path, _)| packs.contains(*path))
-        .flat_map(|(_, names)| names.iter().map(String::as_str))
+        .flat_map(|(_, names)| names.iter().map(|(name, over)| (name.as_str(), *over)))
         .collect()
 }
 
@@ -727,7 +744,7 @@ fn main() {
     let mut acting = Acting::default();
     // Every motion each pack holds, read once and kept: a cutscene names its packs rather than
     // filing its motions, and the packs it names are largely shared between cutscenes.
-    let mut holding: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut holding: BTreeMap<String, BTreeMap<String, bool>> = BTreeMap::new();
     let shipped: BTreeSet<&str> = paths.lines().filter(|path| path.ends_with(".pap")).collect();
 
     let mut here;
@@ -1375,6 +1392,10 @@ fn main() {
     println!(
         "body motions named: {} a pack the cutscene has on hand holds, {} none does",
         acting.motions[1], acting.motions[0]
+    );
+    println!(
+        "  {} of those lay over the pose the body is in rather than replacing it",
+        acting.laid_over
     );
     let mut missing: Vec<_> = acting.missing.iter().collect();
     missing.sort_by(|left, right| right.1.cmp(left.1));

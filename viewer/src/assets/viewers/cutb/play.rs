@@ -281,7 +281,7 @@ pub struct Subtitle {
     /// The key of the row it names, in the sheet the cutscene's `CTIS` node holds.
     pub key: String,
     /// How long the line stands in each language, in milliseconds, nought where that language
-    /// states nothing. Half the lines the game ships state nothing in any language.
+    /// states nothing.
     lengths: Vec<i32>,
 }
 
@@ -301,8 +301,8 @@ impl Subtitle {
     }
 }
 
-/// Which of a `C048`'s captions a language reads. The client walks `ja`, `en`, `de`, `fr`, `chs`,
-/// a slot it rejects, `ko`, `tc`; nothing the game ships fills the last two.
+/// Which of a `C048`'s captions a language reads: the client indexes them by the language itself,
+/// in the order `ja`, `en`, `de`, `fr`, `chs`, a slot it rejects, `ko`, `tc`.
 fn caption_slot(language: Language) -> Option<usize> {
     Some(match language {
         Language::Japanese => 0,
@@ -908,11 +908,7 @@ enum Lines {
 }
 
 /// Reads a cutscene's dialogue sheet: two string columns of key and text, keyed by the first.
-async fn read_lines(
-    backend: Backend,
-    sheet: String,
-    language: Language,
-) -> anyhow::Result<Said> {
+async fn read_lines(backend: Backend, sheet: String, language: Language) -> anyhow::Result<Said> {
     let opened = backend.excel().get_sheet(&sheet, language).await?;
     let columns = SheetColumnDefinition::from_sheet(&opened);
     let [key, text, ..] = columns.as_slice() else {
@@ -1108,9 +1104,12 @@ const DESIGN: egui::Vec2 = egui::Vec2::new(1280.0, 720.0);
 const SUBTITLE_AT: egui::Vec2 = egui::Vec2::new(0.50, 0.95);
 
 /// What `TalkSubtitle.uld`'s three text nodes state: one run at size 18, with a copy a pixel above
-/// and a pixel below it. Both its fill and its edge read from the UI theme rather than the file.
+/// and a pixel below it. Their fills are `UIColor` rows 1 and 7, white over black in the theme the
+/// game opens in.
 const TEXT_SIZE: f32 = 18.0;
 const EDGE: f32 = 1.0;
+const SAID: Color32 = Color32::WHITE;
+const SHADOW: Color32 = Color32::BLACK;
 
 /// Puts the cutscene's own frame and its lines over the scene.
 fn overlay(ui: &mut egui::Ui, tab: &Tab, state: &State, frame: Rect, language: Language) {
@@ -1150,19 +1149,14 @@ fn overlay(ui: &mut egui::Ui, tab: &Tab, state: &State, frame: Rect, language: L
     };
     let scale = inner.height() / DESIGN.y;
     let font = FontId::proportional(TEXT_SIZE * scale);
-    let laid = ui.ctx().fonts_mut(|fonts| {
-        fonts.layout(
-            text,
-            font,
-            ui.visuals().strong_text_color(),
-            DESIGN.x * scale,
-        )
-    });
+    let laid = ui
+        .ctx()
+        .fonts_mut(|fonts| fonts.layout(text, font, SAID, DESIGN.x * scale));
     let at = inner.min + inner.size() * SUBTITLE_AT - vec2(laid.size().x * 0.5, laid.size().y * 0.5);
     for (offset, color) in [
-        (-EDGE * scale, Color32::BLACK),
-        (EDGE * scale, Color32::BLACK),
-        (0.0, ui.visuals().strong_text_color()),
+        (-EDGE * scale, SHADOW),
+        (EDGE * scale, SHADOW),
+        (0.0, SAID),
     ] {
         painter.galley(at + vec2(0.0, offset), laid.clone(), color);
     }

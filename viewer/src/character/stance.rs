@@ -639,6 +639,28 @@ mod tests {
         assert_eq!(held.fade(DRAWN, DRAW), 4.0 / FPS);
     }
 
+    /// What the install's own tables price the two changes the creator makes at. An emote motion
+    /// no `MotionTimeline` row names still blends, out of the pair every unstated one falls back
+    /// through; a change of facial pose takes the one into the group every `cfxf_` name is in,
+    /// whether or not anything was on the face before it.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn the_installs_own_tables_price_an_emote_and_a_change_of_face() {
+        let backend = block_on(crate::backend::Backend::new(crate::settings::BackendConfig {
+            api_url: "https://exd.camora.dev".to_owned(),
+            location: crate::settings::InstallLocation::Sqpack(
+                "/home/asriel/.xlcore/ffxiv/game/sqpack".to_owned(),
+            ),
+            schema: crate::settings::SchemaLocation::Local("/home/asriel/Code/EXDSchema".to_owned()),
+        }))
+        .expect("the local install");
+        let held = block_on(Stance::read(&backend, Language::English)).expect("the tables");
+        assert_eq!(held.fade(SHEATHED, "cbem_dance16_2lp"), 10.0 / FPS);
+        assert_eq!(held.fade("cfxf_smile", "cfxf_grin"), 5.0 / FPS);
+        assert_eq!(held.fade("", "cfxf_grin"), 5.0 / FPS, "the face was at rest");
+        assert_eq!(held.fade("cfxf_grin", ""), 10.0 / FPS, "and back to rest again");
+    }
+
     const SQPACK: &str = "/home/asriel/.xlcore/ffxiv/game/sqpack";
 
     fn install() -> Ironworks {

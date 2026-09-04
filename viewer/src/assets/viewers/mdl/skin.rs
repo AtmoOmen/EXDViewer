@@ -1123,7 +1123,9 @@ impl Animation {
         };
         for layer in self.layers() {
             if let Some((from, to)) = layer.changed() {
-                layer.priced(blend(&from, &to));
+                let over = blend(&from, &to);
+                log::info!("mdl: {from} into {to} blends over {over:.3}s");
+                layer.priced(over);
             }
         }
     }
@@ -2619,6 +2621,32 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// What picking a real emote lands on: Battle Stance is filed under the class directory the
+    /// weapons put the body in and under no other, so the shared directory queued behind it is
+    /// never reached; Bee's Knees is only under the shared one, so the class directory ahead of it
+    /// is passed over. Each names the motion the change is then priced from.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_real_emote_is_played_from_the_class_directory_or_the_one_queued_behind_it() {
+        let backend = local_backend();
+        let filed =
+            |dir: &str, key: &str| format!("chara/human/c0101/animation/a0001/{dir}/{key}.pap");
+        let played = |key: &str| {
+            let layer = Layer::default();
+            layer.plays(&[filed("bt_swd_sld", key), filed("bt_common", key)], None, None);
+            settle(&layer, &backend);
+            (layer.wanted.borrow().clone(), layer.changed())
+        };
+
+        let (path, changed) = played("emote/battle02");
+        assert_eq!(path, filed("bt_swd_sld", "emote/battle02"));
+        assert_eq!(changed, Some((String::new(), "cbbm_emot02".to_owned())));
+
+        let (path, changed) = played("emote/dance16_loop");
+        assert_eq!(path, filed("bt_common", "emote/dance16_loop"));
+        assert_eq!(changed, Some((String::new(), "cbem_dance16_2lp".to_owned())));
     }
 
     /// `salute.pap` really carries `cfxf_bow`, per `dump`ing the real file: exactly the case the

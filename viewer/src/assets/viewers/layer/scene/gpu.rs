@@ -22,7 +22,7 @@ use super::super::super::mdl::deferred::{
 use super::super::super::mdl::gpu::{
     Bound, Exposure, Glare, Lighting, Occlusion, Shaded, Smoothing, attribute,
 };
-use super::super::super::mdl::{Vertex, program};
+use super::super::super::mdl::{self, Vertex, program};
 
 /// The color table, which the game's own shaders address as a texture of their own.
 const TABLE: u32 = 0x2005_679f;
@@ -229,6 +229,8 @@ pub struct Frame {
     pub haze: Option<Arc<program::Program>>,
     /// The two draws that put clouds over that sky, the horizon band first.
     pub clouds: [Option<Arc<program::Program>>; 2],
+    /// The sheet drawn again from where the sun stands, and the blur the map it fills is left in.
+    pub cloud_shadow: Option<(Arc<program::Program>, Arc<program::Program>)>,
     /// The chain that spreads the bright end of the frame into a halo, once its four shaders have
     /// arrived.
     pub glare: Option<Arc<Glare>>,
@@ -238,11 +240,17 @@ pub struct Frame {
     pub occlusion: Option<Arc<Occlusion>>,
     /// The chain that reflects the frame off itself.
     pub reflection: Option<Arc<deferred::Reflection>>,
+    /// The one that fills what water reflects itself through.
+    pub water_mirror: Option<Arc<deferred::WaterMirror>>,
     /// The one that darkens its corners, which runs after all of them.
     pub vignette: Option<Arc<program::Program>>,
     /// Every light the zone places that reaches the frame.
     pub lamps: Vec<program::Lamp>,
     pub batches: Vec<Batch>,
+    /// The characters standing in the scene, each drawn from a model of its own: a character is
+    /// assembled rather than placed, so it fills the same G-buffer through its own geometry instead
+    /// of through an instance of the scene's.
+    pub casts: Vec<mdl::Cast>,
     /// The zone's own grass, once its package has arrived, and the grids it stands over.
     pub grass: Option<Arc<Grass>>,
     pub blades: Vec<Blades>,
@@ -271,6 +279,9 @@ pub struct Renderer {
     types: Option<Vec<u32>>,
     /// One linked pair per material, pass and page of the G-buffer.
     programs: BTreeMap<(usize, bool, bool, usize), Linked>,
+    /// The two members of water's own reflection chain drawn over the water itself, which are one
+    /// program each however many materials the zone's water is made of.
+    water_programs: BTreeMap<usize, Linked>,
     tables: BTreeMap<usize, glow::Texture>,
     /// Every object of the frame, in the layout the packages read them, and how far apart its
     /// windows sit.
@@ -299,6 +310,7 @@ impl Renderer {
             stacks: Vec::new(),
             types: None,
             programs: BTreeMap::new(),
+            water_programs: BTreeMap::new(),
             tables: BTreeMap::new(),
             instances: None,
             shadow_instances: None,
@@ -801,6 +813,14 @@ impl Renderer {
             gl.enable(glow::DEPTH_TEST);
             gl.depth_mask(false);
         }
+        self.mirror_water(gl, frame, scene)?;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            gl.viewport(0, 0, size.0, size.1);
+            gl.enable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+        }
         self.leg(gl, painter, frame, scene, offsets, false, false)?;
         unsafe {
             gl.depth_func(glow::LESS);
@@ -808,6 +828,126 @@ impl Renderer {
             gl.disable(glow::DEPTH_TEST);
         }
         Ok(())
+    }
+
+    /// The two members of water's own reflection chain that are drawn over the water itself: the
+    /// mask, which stamps a stencil wherever the frame covers water, and the march, which walks the
+    /// depth pyramid for what each of those pixels reflects. Everything past them is a quad and
+    /// belongs to the graph.
+    ///
+    /// Its own projection rather than the frame's, which is what the camera buffer these read
+    /// already holds where nothing named its fields: the near plane at the ordering the pyramid is
+    /// stored in, and the second row negated. That negation turns the winding inside out, so the
+    /// side culled is the other one, and it puts the answer the way round water addresses this map.
+    fn mirror_water(
+        &mut self,
+        gl: &glow::Context,
+        frame: &Frame,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let Some(chain) = frame.water_mirror.clone() else {
+            return Ok(());
+        };
+        if !frame
+            .batches
+            .iter()
+            .flat_map(|batch| &batch.surfaces)
+            .filter_map(|surface| surface.shaded.as_ref())
+            .any(watery)
+        {
+            return Ok(());
+        }
+        let watering = self.buffers.watering(gl, scene)?;
+        // Every member of the chain reads the texel of what it is drawing into out of the same
+        // buffer, which is the one the two below fill.
+        let scene = &program::Scene {
+            reflect: program::Reflect {
+                level: 0,
+                texel: glam::Vec2::new(
+                    1.0 / watering.size.0 as f32,
+                    1.0 / watering.size.1 as f32,
+                ),
+            },
+            ..scene.clone()
+        };
+        // Both faces. The game culls the back one, which it can only do because it knows which way
+        // its own water is wound; drawn under a projection whose second row is negated the winding
+        // is the other way round, and culling the wrong side leaves the whole chain empty.
+        unsafe { gl.disable(glow::CULL_FACE) };
+        for (at, member) in [&chain.mask, &chain.march].into_iter().enumerate() {
+            let program = deferred::link(gl, &mut self.water_programs, at, member)?;
+            unsafe {
+                gl.use_program(Some(program));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                match at {
+                    // The mask writes no color at all: what it leaves behind is the stencil the
+                    // march and every quad past it are cut to.
+                    0 => {
+                        gl.color_mask(false, false, false, false);
+                        gl.stencil_mask(0xff);
+                        gl.stencil_func(glow::ALWAYS, program::WATER_MIRROR_STENCIL, 0xff);
+                        gl.stencil_op(glow::KEEP, glow::KEEP, glow::REPLACE);
+                    }
+                    _ => {
+                        gl.color_mask(true, true, true, true);
+                        gl.stencil_mask(0);
+                        gl.stencil_func(glow::EQUAL, program::WATER_MIRROR_STENCIL, 0xff);
+                        gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+                    }
+                }
+            }
+            for (unit, texture) in member.textures.iter().enumerate() {
+                let bound = match texture.name.as_str() {
+                    program::REFLECTION_DEPTH => watering.depth,
+                    program::REFLECTION_FRAME => watering.frame,
+                    _ => self.buffers.engine(gl, texture.id)?,
+                };
+                deferred::bind(
+                    gl,
+                    program,
+                    &texture.name,
+                    unit as u32,
+                    bound,
+                    deferred::target(texture.kind),
+                    0.0,
+                );
+            }
+            for batch in &frame.batches {
+                let meshes: Vec<i32> = match self
+                    .models
+                    .get(batch.model)
+                    .and_then(Option::as_ref)
+                    .and_then(|model| model.levels.get(batch.level))
+                {
+                    Some(level) => level.meshes.iter().map(|mesh| mesh.count).collect(),
+                    None => continue,
+                };
+                for (mesh, (indices, surface)) in meshes.iter().zip(&batch.surfaces).enumerate() {
+                    if surface.hidden || !surface.shaded.as_ref().is_some_and(watery) {
+                        continue;
+                    }
+                    let Some(array) = self.array(gl, batch, mesh, &member.attributes)? else {
+                        continue;
+                    };
+                    for instance in &batch.instances {
+                        let held = program::Scene {
+                            model: instance.transform,
+                            ..scene.clone()
+                        };
+                        self.buffers.bind(gl, program, member, &held, &[])?;
+                        unsafe {
+                            gl.bind_vertex_array(Some(array));
+                            gl.draw_elements(glow::TRIANGLES, *indices, glow::UNSIGNED_SHORT, 0);
+                            gl.bind_vertex_array(None);
+                        }
+                    }
+                }
+            }
+        }
+        unsafe {
+            gl.color_mask(true, true, true, true);
+        }
+        self.buffers.water_mirror(gl, &chain, scene)
     }
 
     /// Every placed effect, one draw per unique file no matter how many placements share it. Tested
@@ -932,7 +1072,6 @@ impl Renderer {
         fringe: bool,
     ) -> Result<(), String> {
         let instances = self.instances.ok_or("no instance buffer")?;
-        let size = self.buffers.size();
         for (batch, (offset, windows, window)) in frame.batches.iter().zip(offsets) {
             let meshes: Vec<i32> = match self
                 .models
@@ -984,15 +1123,8 @@ impl Renderer {
                     program::Pass::Shaft => (glow::ONE, glow::ONE),
                     _ => (glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
                 };
-                // What the fragment's own coordinate is turned back into the game's convention by.
-                // Left at nought a pass reading it addresses every buffer at a negative row, and
-                // water reads five of them: the frame behind it, the lighting and where it stands.
-                let viewport = deferred::uniform(gl, program, "dx_Viewport");
                 unsafe {
                     gl.use_program(Some(program));
-                    if let Some(location) = viewport {
-                        gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-                    }
                     gl.depth_func(glow::LESS);
                     match filling {
                         // Cut to what this buffer holds, which is one channel short of the
@@ -1182,6 +1314,55 @@ impl Renderer {
         Ok(())
     }
 
+    /// Every character standing in the scene: with no lighting, what each fills the G-buffer with,
+    /// and with one, what each answers into the frame the lighting left.
+    ///
+    /// Each carries its own place in the world and the colours it was made with, which are the two
+    /// things the scene constants hold per character rather than per frame.
+    ///
+    /// A character whose own draw fails is skipped rather than failing the frame: the renderer
+    /// takes a failure as final and stops drawing anything at all, and one material a driver
+    /// rejects would then blank the whole zone.
+    fn cast(
+        &mut self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        scene: &program::Scene,
+        lighting: Option<&Lighting>,
+    ) {
+        for cast in &frame.casts {
+            let held = program::Scene {
+                model: cast.model,
+                customize: cast.customize,
+                opacity: cast.opacity,
+                ..scene.clone()
+            };
+            let mut model = cast.gpu.lock().unwrap();
+            let drawn = match lighting {
+                None => model.fill(
+                    gl,
+                    painter,
+                    (&cast.surfaces, &cast.joints),
+                    &mut self.buffers,
+                    &held,
+                ),
+                Some(lighting) => model.over(
+                    gl,
+                    painter,
+                    &cast.surfaces,
+                    &mut self.buffers,
+                    lighting,
+                    &frame.lamps,
+                    &held,
+                ),
+            };
+            if let Err(why) = drawn {
+                log::error!("assets/layer: character: {why}");
+            }
+        }
+    }
+
     fn render(
         &mut self,
         gl: &glow::Context,
@@ -1284,7 +1465,6 @@ impl Renderer {
                             .iter()
                             .position(|buffer| buffer.instances() > 1)
                             .unwrap_or(0) as u32;
-                        let viewport = deferred::uniform(gl, program, "dx_Viewport");
                         let Some(array) = self.array(gl, batch, mesh, &held.attributes)? else {
                             continue;
                         };
@@ -1294,9 +1474,6 @@ impl Renderer {
                             false => 0,
                         };
                         unsafe {
-                            if let Some(location) = viewport {
-                                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
-                            }
                             gl.bind_vertex_array(Some(array));
                             for at in 0..taken {
                                 gl.bind_buffer_range(
@@ -1343,6 +1520,7 @@ impl Renderer {
             }
             self.grass(gl, painter, frame, &scene, page)?;
         }
+        self.cast(gl, painter, frame, &scene, None);
 
         if let Some(lighting) = frame.lighting.as_ref() {
             // Before anything reads it: every lighting pass and the composite take the occlusion as
@@ -1356,6 +1534,26 @@ impl Renderer {
             match lighting.shadow.as_ref() {
                 Some(held) => self.buffers.shade(gl, held, &scene)?,
                 None => self.buffers.unshade(),
+            }
+            // And the cloud's own shadow beside it, which that same variant reads as a second
+            // weight. The sheet is drawn from where the sun is rather than from the camera, and it
+            // stands where the sky's own draw of it will.
+            match frame.cloud_shadow.as_ref() {
+                Some((sheet, blur)) => {
+                    let (view, projection) =
+                        program::Cloud::shadow_camera(scene.light, scene.view);
+                    let overhead = program::Scene {
+                        model: program::Cloud::placement(
+                            program::Pass::CloudSheet,
+                            scene.view.inverse().w_axis.truncate(),
+                        ),
+                        view,
+                        projection,
+                        ..scene.clone()
+                    };
+                    self.buffers.cloud_shadow(gl, sheet, blur, &overhead)?;
+                }
+                None => self.buffers.unclouded(),
             }
             self.buffers.resolve(gl, lighting, &scene, &frame.lamps)?;
             // Before the exposure, which reads the whole frame: a black hole where the sky belongs
@@ -1420,6 +1618,7 @@ impl Renderer {
             // Over the sky, the water and the fog: a fringe pixel is one the opaque pass left
             // uncovered, and drawing it any earlier leaves the sky free to paint over it.
             self.sheer(gl, painter, frame, &scene, &offsets, lighting)?;
+            self.cast(gl, painter, frame, &scene, Some(lighting));
             // Before the exposure, since a halo belongs to the frame the lighting left rather than
             // to what a curve made of it.
             if let Some(glare) = frame.glare.as_ref() {
@@ -1497,6 +1696,14 @@ fn filled(shaded: &Shaded) -> Option<&Arc<program::Program>> {
         .buffer
         .first()
         .filter(|held| held.pass == program::Pass::Blended)
+}
+
+/// Whether a surface is water, which is the one thing the chain that fills its reflection draws.
+fn watery(shaded: &Shaded) -> bool {
+    shaded
+        .resolve
+        .as_ref()
+        .is_some_and(|held| held.pass == program::Pass::Water)
 }
 
 /// The next offset a uniform buffer will let a window start on.

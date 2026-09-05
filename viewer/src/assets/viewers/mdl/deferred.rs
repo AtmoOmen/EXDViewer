@@ -25,9 +25,8 @@ const WATER_VIEW_POSITION: u32 = 0x34a0_4363;
 /// What water reads for whatever stands behind it, which is the frame as the lighting left it.
 const REFRACTION: u32 = 0xa38e_45e1;
 /// What water reads its own local reflection through, and all of it: `river.shpk` reaches no cube.
-/// The game fills this from a chain of its own - `WaterReflectionMaskPS`, a march, two blurs and
-/// `WaterReflectionBlurMergePS` - which is not the frame-wide one [`Reflection`] runs, and nothing
-/// here draws it, so it falls to the neutral answer below.
+/// [`WaterMirror`] fills it, which is not the frame-wide chain [`Reflection`] runs; where that chain
+/// has not drawn, it falls to the neutral answer below.
 const REFLECTION_MAP: u32 = 0xc705_a5b6;
 const LIGHT_DIFFUSE: u32 = 0x23d0_f850;
 const LIGHT_SPECULAR: u32 = 0x6c19_aca4;
@@ -37,6 +36,12 @@ const OCCLUSION: u32 = 0x3266_7bd7;
 const SHADOW_MASK: u32 = 0x8187_d13f;
 /// The sun's own depth map, which the resolve compares a pixel against.
 const SHADOW_DEPTH: u32 = 0x58ad_2b38;
+/// What the lighting reads a cloud's shadow through, which the sheet fills from the sun's own side.
+/// Where no sheet is drawn it falls to the opaque white below and the term comes to one.
+const CLOUD_SHADOW: u32 = 0xb821_f0d3;
+/// What the softening gathers that same map's own depths through rather than comparing against
+/// them, spelled the way `directionalshadow` spells it.
+const GATHER_SAMPLER: &str = "g_SamplerGahter";
 /// The table the subsurface blur reads its taps out of. The engine builds it per frame and no file
 /// states one, so what ships here is the table read whole off a frame the game drew: 32 taps by 64
 /// rows, `.xyz` a weight per channel and `.w` the offset.
@@ -86,7 +91,7 @@ pub const RAMP: (u32, &str, u32) = (
 ///
 /// The kernel is addressed at whole texels, a profile to a row and a Gaussian to a column, so
 /// filtering it would answer with the mean of two profiles and of two Gaussians alike.
-pub const ENGINE: [(u32, &str, u32); 15] = [
+pub const ENGINE: [(u32, &str, u32); 17] = [
     // The two tiled arrays a background surface lays over its own textures up close, which its
     // material picks a layer of by `g_DetailID`. Without them a stone wall is its albedo and nothing
     // finer, however near the camera stands.
@@ -154,10 +159,27 @@ pub const ENGINE: [(u32, &str, u32); 15] = [
     // to repeat rather than clamp, handled in `Buffers::layered`.
     (WIND_SAMPLE_0, "bgcommon/nature/wind/texture/wind_001.tex", glow::LINEAR),
     (WIND_SAMPLE_1, "bgcommon/nature/wind/texture/wind_002.tex", glow::LINEAR),
+    // The angle the shadow softening turns each pixel's disc of taps by, read at whole texels. The
+    // game holds sixteen of these and steps to the next one every frame, which only pays off where
+    // the frames are accumulated; one alone leaves the dither still rather than crawling.
+    (
+        0x94a1_94c2,
+        "common/graphics/texture/-bn_64_00.tex",
+        glow::NEAREST,
+    ),
+    // The threshold a dither clip tests an object's own opacity against, four by four and read at
+    // a quarter of the pixel's own coordinate, so one texel covers one pixel.
+    (DITHER, "common/graphics/texture/-dither.tex", glow::NEAREST),
 ];
 
 const WIND_SAMPLE_0: u32 = 0x78d3_e3b7;
 const WIND_SAMPLE_1: u32 = 0x0fd4_d321;
+const DITHER: u32 = 0x9f46_7267;
+
+/// The noise field a hair strand takes its flutter out of. Kept out of [`ENGINE`] because the
+/// engine builds it rather than reading it: [`super::noise::perlin`] draws the same field, and
+/// nothing fetches a path for it.
+pub const PERLIN_2D: u32 = 0xc06f_eb5b;
 
 /// The decal a face paint is drawn through, and where the set the creator picks is filed. Kept out
 /// of [`ENGINE`] because which one binds is what a character was made with rather than a fixed path.
@@ -201,6 +223,15 @@ const REFLECT: usize = 31;
 /// range, since several of their own upper bounds are sized off the frame or the lamp count rather
 /// than fixed.
 const STAR: usize = 70;
+
+/// The sheet drawn from the sun's own side, and the blur that map is left in.
+const CLOUD_SHADOW_DRAW: usize = 72;
+const CLOUD_SHADOW_BLUR: usize = 73;
+
+/// The four members of water's own reflection chain drawn over a quad: the blur pair, the wide
+/// blur's first half and the merge. The two drawn over the water itself are linked by the caller
+/// that holds the geometry.
+const WATER_REFLECT: usize = 80;
 
 /// One slot per kind of lamp and falloff power, so a frame holding both a linear and a cubic light
 /// of the same kind does not relink one of them on every lamp it draws.
@@ -297,7 +328,7 @@ const STAND_IN: [u8; 4] = [128, 128, 128, 255];
 const NEUTRAL: [(u32, [u8; 4]); 5] = [
     (0x342f_2734, [255, 255, 255, 255]),
     (0x6e23_1669, [0, 0, 0, 0]),
-    (0xb821_f0d3, [255, 255, 255, 255]),
+    (CLOUD_SHADOW, [255, 255, 255, 255]),
     (0x0efb_24f7, [0, 0, 0, 0]),
     (REFLECTION_MAP, [0, 0, 0, 0]),
 ];
@@ -534,8 +565,9 @@ enum Over {
     Sheering(Sheered),
     /// A pass of the glare chain, over a target of its own and against what the pass before it left.
     Glaring((i32, i32), Glared),
-    /// The blur among them, drawn over the triangle that carries a coordinate of its own: the game's
-    /// own vertex shader builds its seven taps off that lane rather than off the position.
+    /// The blur among them and the cloud shadow's own, drawn over the triangle that carries a
+    /// coordinate of its own: the vertex shader the game pairs each with builds its taps off that
+    /// lane rather than off the position.
     Blurring((i32, i32), glow::Texture),
     /// A member of the reflection chain, over a target of its own and against what the members
     /// before it left. Which member is drawing is carried with them: two of the names its files use
@@ -573,12 +605,14 @@ struct Glared {
     merge: Option<glow::Texture>,
 }
 
-/// One cloud mesh as the card holds it, and what it is drawn with.
+/// One cloud mesh as the card holds it, what it is drawn with, and how wide the target it is drawn
+/// into stands: the sheet is drawn once over the frame and again into a map of its own.
 #[derive(Clone, Copy)]
 struct Clouded {
     layout: glow::VertexArray,
     indices: i32,
     texture: glow::Texture,
+    size: (i32, i32),
 }
 
 /// Which of the passes a zone runs over and above the lighting actually drew this frame. A picture
@@ -589,6 +623,8 @@ pub struct Drawn {
     pub sky: bool,
     /// Whether the frame was reflected off itself this frame.
     pub reflection: bool,
+    /// Whether water's own chain filled the map it reflects itself through.
+    pub water: bool,
     pub sun: bool,
     pub moon: bool,
     pub stars: bool,
@@ -596,8 +632,12 @@ pub struct Drawn {
     pub vignette: bool,
     /// Whether the sun's own depth was drawn and resolved into a mask this frame.
     pub shadow: bool,
+    /// Whether the chain that weights a pixel by how much sky reaches it ran this frame.
+    pub occlusion: bool,
     /// The horizon band and the overhead sheet, in that order.
     pub clouds: [bool; 2],
+    /// Whether the sheet was drawn again into the map the sun reads a cloud's shadow out of.
+    pub cloud_shadow: bool,
 }
 
 /// What the fog pass reads, by the names its file gives them.
@@ -673,6 +713,7 @@ pub enum Dead {
     Program(glow::Program),
     Renderbuffer(glow::Renderbuffer),
     Frame(glow::Framebuffer),
+    Sampler(glow::Sampler),
 }
 
 pub fn graveyard() -> &'static std::sync::Mutex<Vec<Dead>> {
@@ -808,6 +849,7 @@ pub fn bury(gl: &glow::Context) {
                 Dead::Program(program) => gl.delete_program(program),
                 Dead::Renderbuffer(held) => gl.delete_renderbuffer(held),
                 Dead::Frame(held) => gl.delete_framebuffer(held),
+                Dead::Sampler(held) => gl.delete_sampler(held),
             }
         }
     }
@@ -881,6 +923,19 @@ pub struct Reflection {
     pub copy: std::sync::Arc<program::Program>,
 }
 
+/// The chain that fills what water reflects itself through, in the order it runs. Not the one above:
+/// `river.shpk` and `water.shpk` reach no cube and read a screen-wide map this leaves, and the two
+/// chains share only the depth pyramid and the frame.
+pub struct WaterMirror {
+    pub mask: std::sync::Arc<program::Program>,
+    pub march: std::sync::Arc<program::Program>,
+    /// The two halves of the first blur, across and then down.
+    pub blur: [std::sync::Arc<program::Program>; 2],
+    /// The first half of the second, which is what the merge is handed.
+    pub wide: std::sync::Arc<program::Program>,
+    pub merge: std::sync::Arc<program::Program>,
+}
+
 /// The chain that works out how much of the sky reaches each pixel, in the order it runs.
 pub struct Occlusion {
     pub scale: std::sync::Arc<program::Program>,
@@ -910,6 +965,27 @@ struct Mirrored {
     mask: (glow::Framebuffer, glow::Texture),
     chain: [(glow::Texture, Vec<glow::Framebuffer>); 2],
     size: (i32, i32),
+}
+
+/// What water's own reflection chain draws into: the marched reflection, the buffer each blur half
+/// hands the next, and what the merge leaves for water to read. One stencil across all three, since
+/// every member past the mask is cut to the pixels the mask stamped.
+struct Watered {
+    sharp: (glow::Framebuffer, glow::Texture),
+    scratch: (glow::Framebuffer, glow::Texture),
+    merged: (glow::Framebuffer, glow::Texture),
+    stencil: glow::Renderbuffer,
+    size: (i32, i32),
+}
+
+/// What the two members of that chain drawn over the water itself need: where they write, the
+/// pyramid the march walks and the frame it reads, and how much of the screen they cover.
+#[derive(Clone, Copy)]
+pub struct Watering {
+    pub into: glow::Framebuffer,
+    pub depth: glow::Texture,
+    pub frame: glow::Texture,
+    pub size: (i32, i32),
 }
 
 /// A linked pair of the game's own shaders, and the source it was built from so a change rebuilds
@@ -976,6 +1052,8 @@ pub struct Buffers {
     sourced: Option<(glow::Framebuffer, glow::Texture)>,
     /// The reflection chain's own buffers, at a fraction of the frame.
     mirrored: Option<Mirrored>,
+    /// Water's own chain's, at the same fraction.
+    watered: Option<Watered>,
     /// The program that builds the pyramid the march walks. The game builds it in a compute shader,
     /// which a context this draws through has none of.
     hierarchy: Option<glow::Program>,
@@ -1021,6 +1099,8 @@ pub struct Buffers {
     /// The same, for the ones a material names rather than the engine, under the path it named.
     stacked: BTreeMap<String, (u32, glow::Texture)>,
     neutrals: BTreeMap<u32, glow::Texture>,
+    /// A sampler that compares nothing, built once for the unit that gathers the sun's map raw.
+    gather: Option<glow::Sampler>,
     unoccluded: Option<glow::Texture>,
     reflection: Option<glow::Texture>,
     /// The sky the reflection cube was built from, so a frame asking for the same one keeps it.
@@ -1033,6 +1113,12 @@ pub struct Buffers {
     strips: [Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>; 2],
     /// The texture each draws, under the file it came from so a weather that has not moved keeps it.
     sheets: [Option<(String, glow::Texture)>; 2],
+    /// The map the sheet's own shadow is drawn into, and the one the blur leaves it in. Fixed at the
+    /// size the game draws it, so neither follows the frame.
+    clouded: Option<[(glow::Framebuffer, glow::Texture); 2]>,
+    /// Whether that map holds this frame's clouds. The lighting reads the opaque white stand-in
+    /// until it does, and again from the frame a weather stops stating a sheet.
+    clouding: bool,
     /// The star field's own dome, built once since it depends on nothing a frame carries.
     dome: Option<(glow::VertexArray, glow::Buffer, glow::Buffer, i32)>,
     /// Its three textures: colour, band, twinkle. Fixed paths rather than weather-named, so unlike
@@ -1343,6 +1429,13 @@ impl Buffers {
         {
             dead.push(Dead::Frame(frame));
             dead.extend(textures.into_iter().map(Dead::Texture));
+        }
+        if let Some(held) = self.watered.take() {
+            dead.push(Dead::Renderbuffer(held.stencil));
+            for (frame, texture) in [held.sharp, held.scratch, held.merged] {
+                dead.push(Dead::Frame(frame));
+                dead.push(Dead::Texture(texture));
+            }
         }
         if let Some(held) = self.mirrored.take() {
             let (texture, frames) = held.depth;
@@ -1997,6 +2090,7 @@ impl Buffers {
                 layout,
                 indices,
                 texture,
+                size: self.size,
             }),
         );
         unsafe {
@@ -2050,6 +2144,98 @@ impl Buffers {
             }
         }
         Ok(())
+    }
+
+    /// The sheet again, drawn from where the sun stands into a map the lighting reads a cloud's
+    /// shadow out of, and blurred there. Before the lighting, which takes it as a weight on the sun.
+    ///
+    /// The map is cleared to nought in the two channels the blur reads, so wherever the sheet does
+    /// not cover it the blur leaves opaque light. A weather that draws no sheet leaves the lighting
+    /// on the white stand-in instead, which comes to the same thing without the two passes.
+    pub fn cloud_shadow(
+        &mut self,
+        gl: &glow::Context,
+        held: &std::sync::Arc<program::Program>,
+        blur: &std::sync::Arc<program::Program>,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let Some(texture) = self.sheets[1].as_ref().map(|(_, held)| *held) else {
+            self.clouding = false;
+            return Ok(());
+        };
+        let [(source, drawn), (into, _)] = self.clouded(gl)?;
+        let (layout, _, _, indices) = self.strip(gl, 1)?;
+        let size = (program::CLOUD_SHADOW_MAP, program::CLOUD_SHADOW_MAP);
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::CULL_FACE);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+            gl.depth_mask(false);
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(source));
+            gl.viewport(0, 0, size.0, size.1);
+            gl.clear_color(1.0, 1.0, 0.0, 0.0);
+            gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        self.pass(
+            gl,
+            CLOUD_SHADOW_DRAW,
+            held,
+            source,
+            scene,
+            Over::Clouding(Clouded {
+                layout,
+                indices,
+                texture,
+                size,
+            }),
+        )?;
+        self.pass(
+            gl,
+            CLOUD_SHADOW_BLUR,
+            blur,
+            into,
+            scene,
+            Over::Blurring(size, drawn),
+        )?;
+        self.clouding = true;
+        self.drawn.cloud_shadow = true;
+        Ok(())
+    }
+
+    /// Leaves the lighting reading opaque light again.
+    pub fn unclouded(&mut self) {
+        self.clouding = false;
+    }
+
+    /// The pair that map is drawn and blurred into, built the first time it is. Wrapped rather than
+    /// clamped: the lighting reads it at a coordinate that runs past its own edge.
+    fn clouded(
+        &mut self,
+        gl: &glow::Context,
+    ) -> Result<[(glow::Framebuffer, glow::Texture); 2], String> {
+        if let Some(held) = self.clouded {
+            return Ok(held);
+        }
+        let size = (program::CLOUD_SHADOW_MAP, program::CLOUD_SHADOW_MAP);
+        let one = || -> Result<(glow::Framebuffer, glow::Texture), String> {
+            let map = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+            unsafe {
+                gl.bind_texture(glow::TEXTURE_2D, Some(map));
+                for (name, value) in [
+                    (glow::TEXTURE_MIN_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_MAG_FILTER, glow::LINEAR),
+                    (glow::TEXTURE_WRAP_S, glow::REPEAT),
+                    (glow::TEXTURE_WRAP_T, glow::REPEAT),
+                ] {
+                    gl.tex_parameter_i32(glow::TEXTURE_2D, name, value as i32);
+                }
+            }
+            Ok((frame_of(gl, &[map], None)?, map))
+        };
+        let held = [one()?, one()?];
+        self.clouded = Some(held);
+        Ok(held)
     }
 
     /// One of the cloud meshes on the card, built the first time it is drawn.
@@ -2590,6 +2776,173 @@ impl Buffers {
         drawn
     }
 
+    /// What water's own reflection chain draws into, built where the frame has moved under it. The
+    /// same fraction of the frame as the chain above, which is what makes the pyramid's texel and
+    /// this chain's the one register the game's own upload writes twice.
+    ///
+    /// The marched reflection carries more than a byte a channel: what it holds is the frame as the
+    /// lighting left it, before anything took that into range.
+    fn waters(&mut self, gl: &glow::Context) -> Result<&Watered, String> {
+        let size = (
+            (self.size.0 / program::REFLECTION_SCALE).max(1),
+            (self.size.1 / program::REFLECTION_SCALE).max(1),
+        );
+        if self.watered.as_ref().is_some_and(|held| held.size == size) {
+            return Ok(self.watered.as_ref().expect("just measured"));
+        }
+        let sharp = plane(gl, size, glow::RGBA16F, glow::RGBA, glow::FLOAT)?;
+        smooth(gl, sharp);
+        let scratch = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+        smooth(gl, scratch);
+        let merged = plane(gl, size, glow::RGBA8, glow::RGBA, glow::UNSIGNED_BYTE)?;
+        smooth(gl, merged);
+        let stencil = unsafe {
+            let held = gl.create_renderbuffer()?;
+            gl.bind_renderbuffer(glow::RENDERBUFFER, Some(held));
+            gl.renderbuffer_storage(glow::RENDERBUFFER, glow::DEPTH24_STENCIL8, size.0, size.1);
+            held
+        };
+        let mut frames = Vec::new();
+        for texture in [sharp, scratch, merged] {
+            let held = frame_of(gl, &[texture], None)?;
+            unsafe {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(held));
+                gl.framebuffer_renderbuffer(
+                    glow::FRAMEBUFFER,
+                    glow::DEPTH_STENCIL_ATTACHMENT,
+                    glow::RENDERBUFFER,
+                    Some(stencil),
+                );
+                let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                if status != glow::FRAMEBUFFER_COMPLETE {
+                    return Err(format!("water's reflection would not complete: {status:#x}"));
+                }
+            }
+            frames.push(held);
+        }
+        self.watered = Some(Watered {
+            sharp: (frames[0], sharp),
+            scratch: (frames[1], scratch),
+            merged: (frames[2], merged),
+            stencil,
+            size,
+        });
+        Ok(self.watered.as_ref().expect("just built"))
+    }
+
+    /// The buffers that chain draws into, with the pyramid built, everything cleared and the state
+    /// the two members drawn over the water itself want already standing.
+    ///
+    /// The frame the march reads is the one the composite resolved, which is what stands behind the
+    /// water at the point this runs.
+    pub fn watering(
+        &mut self,
+        gl: &glow::Context,
+        scene: &program::Scene,
+    ) -> Result<Watering, String> {
+        self.hierarchy(gl, scene)?;
+        let frame = self.resolved.ok_or("no resolved frame")?;
+        let depth = self.mirrors(gl)?.depth.0;
+        let held = self.waters(gl)?;
+        let (into, size) = (held.sharp.0, held.size);
+        let frames = [held.sharp.0, held.scratch.0, held.merged.0];
+        unsafe {
+            gl.disable(glow::SCISSOR_TEST);
+            gl.disable(glow::DEPTH_TEST);
+            gl.disable(glow::BLEND);
+            gl.depth_mask(false);
+            gl.color_mask(true, true, true, true);
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            gl.clear_stencil(0);
+            gl.stencil_mask(0xff);
+            for held in frames {
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(held));
+                gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+                gl.clear(glow::COLOR_BUFFER_BIT | glow::STENCIL_BUFFER_BIT);
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.viewport(0, 0, size.0, size.1);
+            gl.enable(glow::STENCIL_TEST);
+        }
+        Ok(Watering {
+            into,
+            depth,
+            frame,
+            size,
+        })
+    }
+
+    /// The four members of that chain drawn over a quad: the blur across and down, the wide blur's
+    /// first half, and the merge that picks between the sharp answer and the spread one per pixel.
+    ///
+    /// The game runs a second wide half after this one, into the same buffer the merge writes and
+    /// with nothing between them, so its answer never reaches water; what the merge is handed is the
+    /// first half, which is what the game's own bindings hand it.
+    pub fn water_mirror(
+        &mut self,
+        gl: &glow::Context,
+        held: &WaterMirror,
+        scene: &program::Scene,
+    ) -> Result<(), String> {
+        let buffers = self.waters(gl)?;
+        let (sharp, scratch, merged, size) =
+            (buffers.sharp, buffers.scratch, buffers.merged, buffers.size);
+        let reads = Reflecting {
+            depth: sharp.1,
+            frame: sharp.1,
+            normal: sharp.1,
+            mask: sharp.1,
+            blurred: sharp.1,
+        };
+        let scene = &program::Scene {
+            reflect: program::Reflect {
+                level: 0,
+                texel: glam::Vec2::new(1.0 / size.0 as f32, 1.0 / size.1 as f32),
+            },
+            ..scene.clone()
+        };
+        unsafe {
+            gl.stencil_func(glow::NOTEQUAL, 0, 0xff);
+            gl.stencil_op(glow::KEEP, glow::KEEP, glow::KEEP);
+            gl.stencil_mask(0);
+        }
+        for (at, program, into, source) in [
+            (0, &held.blur[0], scratch.0, sharp.1),
+            (1, &held.blur[1], sharp.0, scratch.1),
+            (2, &held.wide, scratch.0, sharp.1),
+        ] {
+            self.pass(
+                gl,
+                WATER_REFLECT + at,
+                program,
+                into,
+                scene,
+                Over::Reflecting(size, Member::Blur, Reflecting {
+                    blurred: source,
+                    ..reads
+                }),
+            )?;
+        }
+        let drawn = self.pass(
+            gl,
+            WATER_REFLECT + 3,
+            &held.merge,
+            merged.0,
+            scene,
+            Over::Reflecting(size, Member::Blur, Reflecting {
+                frame: sharp.1,
+                blurred: scratch.1,
+                ..reads
+            }),
+        );
+        unsafe {
+            gl.disable(glow::STENCIL_TEST);
+            gl.stencil_mask(0xff);
+        }
+        self.drawn.water = drawn.is_ok();
+        drawn
+    }
+
     /// What the reflection chain draws into, built where the frame has moved under it.
     fn mirrors(&mut self, gl: &glow::Context) -> Result<&Mirrored, String> {
         let size = (
@@ -2975,7 +3328,9 @@ impl Buffers {
     }
 
     /// Clears one page of the G-buffer and points the draw buffers at every attachment it has.
-    pub fn open(&self, gl: &glow::Context, page: usize) {
+    /// Binds a page and stands its state up, leaving whatever it already holds: a model standing in
+    /// someone else's frame fills a buffer that frame has already written into.
+    pub fn reopen(&self, gl: &glow::Context, page: usize) {
         let Some(held) = self.frames.get(page) else {
             return;
         };
@@ -2990,10 +3345,6 @@ impl Buffers {
                 .collect();
             gl.draw_buffers(&attachments);
             gl.viewport(0, 0, self.size.0, self.size.1);
-            gl.clear_color(0.0, 0.0, 0.0, 0.0);
-            // Said rather than assumed: the pass that puts the frame on screen reads this value
-            // back as the sign that nothing drew.
-            gl.clear_depth_f32(1.0);
             // egui leaves the scissor set to the widget's rect in the window's own coordinates, and
             // the frame is a buffer of its own that starts at nought: leaving it on clips the clear
             // and every draw after it to whatever part of the frame the rect happens to overlap.
@@ -3003,6 +3354,20 @@ impl Buffers {
             gl.depth_func(glow::LEQUAL);
             gl.depth_mask(true);
             gl.color_mask(true, true, true, true);
+        }
+    }
+
+    /// The same, emptied first.
+    pub fn open(&self, gl: &glow::Context, page: usize) {
+        self.reopen(gl, page);
+        if self.frames.get(page).is_none() {
+            return;
+        }
+        unsafe {
+            gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            // Said rather than assumed: the pass that puts the frame on screen reads this value
+            // back as the sign that nothing drew.
+            gl.clear_depth_f32(1.0);
             // Every page draws the same geometry against one depth buffer, so only the first of
             // them clears it: what a later page does not draw still covered the pixel.
             gl.clear(match page {
@@ -3444,12 +3809,11 @@ impl Buffers {
     /// the engine's own set is reached.
     pub fn layered(&mut self, gl: &glow::Context, id: u32, held: &Layered) -> Result<(), String> {
         let held = Self::upload(gl, held)?;
-        // The wind field is read at a world-scaled UV that runs well past a single tile, unlike
-        // anything else `ENGINE` names, so `upload`'s own `Kind`-based guess of clamping a plane
-        // is wrong for it specifically. No file states this sampler's own state at all - grass.shpk
-        // declares it with no material behind it - so REPEAT is read off the shader's own math
-        // rather than off any capture.
-        if matches!(id, WIND_SAMPLE_0 | WIND_SAMPLE_1) {
+        // The wind field is read at a world-scaled UV and the dither at a quarter of the pixel's
+        // own coordinate, both of which run well past a single tile, so `upload`'s own `Kind`-based
+        // guess of clamping a plane is wrong for these two. No file states either sampler's state
+        // at all, so REPEAT is read off the shaders' own math rather than off any capture.
+        if matches!(id, WIND_SAMPLE_0 | WIND_SAMPLE_1 | DITHER) {
             unsafe {
                 gl.bind_texture(held.0, Some(held.1));
                 gl.tex_parameter_i32(held.0, glow::TEXTURE_WRAP_S, glow::REPEAT as i32);
@@ -3479,6 +3843,31 @@ impl Buffers {
             .get(path)
             .filter(|(at, _)| *at == target(kind))
             .map(|(_, held)| *held)
+    }
+
+    /// The sampler the sun's own map is gathered through. The map is set to compare, and a texture
+    /// set to compare answers nothing at all where the sampler reading it does not; the softening
+    /// reads it both ways in one draw, so the unit doing the gathering takes a sampler of its own,
+    /// which is where that state sits once one is bound.
+    fn gathering(&mut self, gl: &glow::Context) -> Result<glow::Sampler, String> {
+        if let Some(held) = self.gather {
+            return Ok(held);
+        }
+        let held = unsafe {
+            let held = gl.create_sampler()?;
+            for (name, value) in [
+                (glow::TEXTURE_MIN_FILTER, glow::NEAREST),
+                (glow::TEXTURE_MAG_FILTER, glow::NEAREST),
+                (glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE),
+                (glow::TEXTURE_COMPARE_MODE, glow::NONE),
+            ] {
+                gl.sampler_parameter_i32(held, name, value as i32);
+            }
+            held
+        };
+        self.gather = Some(held);
+        Ok(held)
     }
 
     /// The file a resource id names, where one has arrived and its own target is the one a sampler
@@ -3543,6 +3932,20 @@ impl Buffers {
         }
         if let Some(held) = self.supplied(program::Kind::Plane, id) {
             return Ok(held);
+        }
+        // Before the neutral below, which is what water reads where nothing drew its chain.
+        if id == REFLECTION_MAP
+            && let Some(held) = self.watered.as_ref()
+        {
+            return Ok(held.merged.1);
+        }
+        // Before it as well, and the same shape: opaque white until a sheet has been drawn from the
+        // sun's own side, and again from the frame a weather stops stating one.
+        if id == CLOUD_SHADOW
+            && self.clouding
+            && let Some([_, (_, map)]) = self.clouded
+        {
+            return Ok(map);
         }
         if let Some(held) = self.neutrals.get(&id) {
             return Ok(*held);
@@ -3621,6 +4024,7 @@ impl Buffers {
     ) -> Result<(), String> {
         let size = match over {
             Over::Fraction => self.fraction(),
+            Over::Clouding(held) => held.size,
             Over::Exposing(size, _)
             | Over::Sized(size)
             | Over::Glaring(size, _)
@@ -3677,6 +4081,7 @@ impl Buffers {
         self.bind(gl, program, held, scene, &[])?;
         self.stand_ins(gl)?;
         let mut unit = 0;
+        let mut gathering = None;
         for texture in &held.textures {
             let bound = match texture.kind {
                 program::Kind::Plane => match over {
@@ -3759,6 +4164,9 @@ impl Buffers {
                 target(texture.kind),
                 0.0,
             );
+            if texture.name.ends_with(GATHER_SAMPLER) {
+                gathering = Some(unit);
+            }
             unit += 1;
         }
         for structured in &held.structured {
@@ -3769,9 +4177,13 @@ impl Buffers {
             sampler(gl, program, &structured.name, unit, bound);
             unit += 1;
         }
+        let gathering = match gathering {
+            Some(unit) => Some((unit, self.gathering(gl)?)),
+            None => None,
+        };
         unsafe {
-            if let Some(location) = gl.get_uniform_location(program, "dx_Viewport") {
-                gl.uniform_2_f32(Some(&location), size.0 as f32, size.1 as f32);
+            if let Some((unit, held)) = gathering {
+                gl.bind_sampler(unit, Some(held));
             }
             // What a pass reading a square of its own source steps between the corners of it.
             if let Some(location) = gl.get_uniform_location(program, "u_texel") {
@@ -3800,6 +4212,11 @@ impl Buffers {
                 _ => gl.draw_arrays(glow::TRIANGLES, 0, 3),
             }
             gl.bind_vertex_array(None);
+            // A sampler stands on its unit until something takes it off, so a later pass reading a
+            // texture there would read it through this one.
+            if let Some((unit, _)) = gathering {
+                gl.bind_sampler(unit, None);
+            }
         }
         Ok(())
     }
@@ -3853,9 +4270,12 @@ impl Buffers {
         lamps: &[program::Lamp],
     ) -> Result<(), String> {
         // The frame starts again here, so what ran over the last one is forgotten - except the
-        // sun's own pass, which runs ahead of this one and would be forgotten before it was read.
+        // sun's own pass and the occlusion, which run ahead of this one and would be forgotten
+        // before they were read.
         self.drawn = Drawn {
             shadow: self.shadowing,
+            occlusion: self.occluding,
+            cloud_shadow: self.clouding,
             ..Drawn::default()
         };
         let (position, _) = self.position.ok_or("no view position")?;
@@ -4017,6 +4437,7 @@ impl Drop for Buffers {
             dead.push(Dead::Texture(held));
         }
         dead.extend(self.scattered.take().map(Dead::Texture));
+        dead.extend(self.gather.take().map(Dead::Sampler));
         if let Some(held) = self.sheer.take() {
             dead.push(Dead::Frame(held.frame));
             dead.extend(held.color.into_iter().map(Dead::Texture));
@@ -4622,7 +5043,18 @@ pub fn build_pair(
 
 #[cfg(test)]
 mod test {
-    use super::{BAND, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
+    use super::{BAND, ENGINE, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
+
+    /// The id the file the shadow softening dithers by is bound under. Nothing in the table says
+    /// which sampler an entry answers except this number, and the packages derive it from the name.
+    #[test]
+    fn the_shadow_dither_is_bound_under_the_name_its_shader_reads() {
+        let (id, _, _) = ENGINE
+            .into_iter()
+            .find(|(_, path, _)| path.contains("-bn_64_"))
+            .expect("the engine table names a blue noise file");
+        assert_eq!(id, shaders::names::hash(b"tBlueNoise"));
+    }
 
     /// Both meshes and both strips, against what the buffers a capture of the running game bound
     /// hold. The engine builds these rather than reading them out of a file, so the counts and the

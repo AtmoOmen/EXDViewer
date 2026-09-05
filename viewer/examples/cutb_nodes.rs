@@ -143,8 +143,6 @@ struct Census {
     /// `CTPA`'s middle dword, over twelve.
     groups: BTreeMap<u32, usize>,
     records: usize,
-    /// How far a `CTAL` record's body reaches past its transform.
-    participants: BTreeMap<usize, usize>,
     /// The authoring id at a `C004`'s `+0x10`, and how many are distinct within one file.
     cameras: usize,
     distinct: usize,
@@ -170,14 +168,6 @@ impl Census {
             .map(|(value, count)| format!("{value}: {count}"))
             .collect();
         println!("  commonest: {}", held.join(", "));
-
-        println!("\nCTAL record bodies, by the bytes they spend past the transform");
-        let mut sizes: Vec<(&usize, &usize)> = self.participants.iter().collect();
-        sizes.sort_by_key(|(_, count)| std::cmp::Reverse(**count));
-        for (size, count) in sizes.iter().take(10) {
-            println!("  {:>4} bytes of record: {count}", **size + 0x30);
-        }
-        println!("  {} distinct sizes", self.participants.len());
 
         println!(
             "\nC004 +0x10: {} cameras, {} of them holding an id no other camera in the same file \
@@ -227,14 +217,6 @@ fn main() {
                             census.records += 1;
                             *census.groups.entry(word(record, 4) / 12).or_default() += 1;
                         }
-                    }
-                }
-                Node::Participants(participants) => {
-                    for participant in participants {
-                        *census
-                            .participants
-                            .entry(participant.body().len())
-                            .or_default() += 1;
                     }
                 }
                 Node::Timeline(timeline) => {

@@ -133,6 +133,9 @@ pub struct Instance {
     pub depth_offset: f32,
     /// What each of the object's uv sets does to a texture coordinate, two registers a set.
     pub uv: [[f32; 4]; UV_SETS * UV_REGISTERS],
+    /// How much of the color texture's own color and alpha reach the particle's, which the package
+    /// lerps the sampled texel towards white by.
+    pub calculate: [f32; 2],
 }
 
 impl Default for Instance {
@@ -143,6 +146,7 @@ impl Default for Instance {
             rim: Rim::default(),
             depth_offset: 0.0,
             uv: UV_IDENTITY,
+            calculate: [1.0; 2],
         }
     }
 }
@@ -453,7 +457,10 @@ impl Program {
         let mut buffers: Vec<Buffer> = Vec::new();
         for (program, names) in [(&vertex, &vs_names), (&fragment, &ps_names)] {
             for (name, registers) in hlsl::glsl::extents(program, names) {
-                if buffers.iter().any(|held| held.name == name) {
+                // Filled to whichever stage declares the most of it, which is the extent both are
+                // spelled at. Taking the first stage's leaves the other reading nought past it.
+                if let Some(held) = buffers.iter_mut().find(|held| held.name == name) {
+                    held.registers = held.registers.max(registers);
                     continue;
                 }
                 buffers.push(Buffer {
@@ -569,12 +576,10 @@ impl Buffer {
         put("WorldPosition", vec![0.0, 0.0, 0.0, 1.0]);
         put("ViewportPosition", vec![0.0, 0.0, width, height]);
 
-        // Scaling the world position out of the axis above, so it reads as `eye - surface`. What
-        // follows is how much of each texture's own contribution reaches the color, and whether the
-        // tone map does: all the way, and it does not.
+        // Scaling the world position out of the axis above, so it reads as `eye - surface`.
         put("FresnelAxisModifier", vec![1.0]);
-        put("CalculateColor", vec![1.0]);
-        put("CalculateAlpha", vec![1.0]);
+        put("CalculateColor", vec![instance.calculate[0]]);
+        put("CalculateAlpha", vec![instance.calculate[1]]);
         put("ApplyToneMap", vec![0.0]);
         put("BlendStateType", vec![0.0]);
 
@@ -680,6 +685,28 @@ mod test {
             lane(&held.fill(&Scene::default(), &Instance::default()), 0),
             1.0
         );
+    }
+
+    /// `CalculateColor` and `CalculateAlpha` sit in the two lanes after the axis, and a particle
+    /// whose color texture carries no color states the first of them at nought.
+    #[test]
+    fn the_calculate_ratios_reach_the_lanes_after_the_axis() {
+        let held = buffer(
+            "g_PS_InstanceExtraParameters",
+            &[
+                ("FresnelAxisModifier", 0, 4),
+                ("CalculateColor", 4, 4),
+                ("CalculateAlpha", 8, 4),
+            ],
+            2,
+        );
+        let instance = Instance {
+            calculate: [0.0, 0.25],
+            ..Instance::default()
+        };
+        let bytes = held.fill(&Scene::default(), &instance);
+        assert_eq!(lane(&bytes, 4), 0.0);
+        assert_eq!(lane(&bytes, 8), 0.25);
     }
 
     #[test]

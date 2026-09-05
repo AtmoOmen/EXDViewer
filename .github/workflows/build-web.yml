@@ -1,5 +1,12 @@
 name: Build Docker Web Image
-on: push
+on:
+  push:
+    # Nothing under these can change the image, and a full build is ~30 minutes.
+    paths-ignore:
+      - 'smoke/**'
+      - 'capture/**'
+      - '**.md'
+      - '.gitignore'
 
 env:
   REGISTRY: ghcr.io

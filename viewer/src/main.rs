@@ -36,6 +36,7 @@ fn smoke_config(mut args: std::iter::Skip<std::env::Args>) -> viewer::smoke::Con
             match kind {
                 "model" => viewer::smoke::Step::Model(path.to_string()),
                 "scene" => viewer::smoke::Step::Scene(path.to_string()),
+                "cut" => viewer::smoke::Step::Cut(path.to_string()),
                 other => panic!("unknown step kind {other}"),
             }
         })

@@ -14,6 +14,8 @@ mod mounts;
 mod npcs;
 mod palette;
 mod stains;
+pub mod stand;
+mod stance;
 mod weapons;
 
 use std::cell::{Cell, Ref, RefCell};
@@ -26,7 +28,7 @@ use egui::{
     Align, CentralPanel, Color32, Layout, Popup, RectAlign, RichText, ScrollArea, TextEdit,
     containers::panel::Panel,
 };
-use glam::{EulerRot, Mat4, Quat, Vec3};
+use glam::{Mat4, Vec3};
 use ironworks::excel::Language;
 
 use crate::assets::viewers::mdl;
@@ -45,7 +47,7 @@ use crate::utils::{
 /// its material, which is the skin their own body is drawn with.
 const BODY_SET: u16 = 1;
 /// What each body differs from the one it is built on by.
-const DEFORMERS: &str = "chara/xls/boneDeformer/human.pbd";
+pub(super) const DEFORMERS: &str = "chara/xls/boneDeformer/human.pbd";
 
 /// How big a set's icon is drawn, and how far apart the grid sets them.
 const ICON: f32 = 40.0;
@@ -63,24 +65,24 @@ const PANEL_MIN_WIDTH: f32 = 180.0;
 
 /// Which customisation each of the creator's menus drives, as `Customize` numbers them. Every one
 /// of these is measured from `CharaMakeType` rather than named by any file.
-const FACE: u32 = 5;
-const HAIRSTYLE: u32 = 6;
+pub(super) const FACE: u32 = 5;
+pub(super) const HAIRSTYLE: u32 = 6;
 const SKIN_COLOR: u32 = 8;
 const EYE_COLOR: u32 = 9;
 const HAIR_COLOR: u32 = 10;
 const FEATURES: u32 = 12;
 const TATTOO_COLOR: u32 = 13;
 const LIP_COLOR: u32 = 20;
-const FACE_PAINT: u32 = 24;
+pub(super) const FACE_PAINT: u32 = 24;
 const FACE_PAINT_COLOR: u32 = 25;
-const HEIGHT: u32 = 3;
+pub(super) const HEIGHT: u32 = 3;
 /// Muscle tone, on a body the creator offers no tail or ears; every other race spends the same
 /// customisation on the length of whatever its [`TAIL`] menu shapes.
 const MUSCLE_TONE: u32 = 21;
 const BUST: u32 = 23;
 /// A tail, or a Viera's ears: the game files both under the one customisation, and under one
 /// numbered set beneath the body that grows it.
-const TAIL: u32 = 22;
+pub(super) const TAIL: u32 = 22;
 
 /// What the creator ticks beside a menu rather than offering as a menu of its own, keyed past every
 /// menu number so the two can never collide. The game holds each of them all the same: a highlight
@@ -192,7 +194,7 @@ impl Slot {
 
     /// Whether a set worn here is filed as an accessory rather than as equipment, which is both
     /// the directory it sits in and the letter its models are named with.
-    fn adornment(self) -> bool {
+    pub(super) fn adornment(self) -> bool {
         Self::ADORNMENT.contains(&self)
     }
 }
@@ -236,8 +238,19 @@ type Read = Vec<(String, Vec<u8>)>;
 /// The race a `.atch` fetch was asked for, alongside the bytes once it lands.
 type AtchRead = (u16, Vec<u8>);
 
+/// The stance the body was last put in: the class directory its weapons name, whether they were
+/// drawn, and whether the pose it settled on has been named yet.
+struct Stood {
+    held: String,
+    drawn: bool,
+    told: Cell<bool>,
+}
+
+/// The emotes the game names and the poses each seat cycles, which are read together.
+type Played = (Vec<emotes::Emote>, emotes::Poses);
+
 /// What a picked set is made of, and what to call it.
-struct Set {
+pub(super) struct Set {
     id: u16,
     parts: Vec<String>,
 }
@@ -310,7 +323,11 @@ pub struct CharacterBuilder {
     npcs_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The emotes the game names, and which of them is being played.
     emotes: Vec<emotes::Emote>,
-    reading_emotes: Option<TrackedPromise<Result<Vec<emotes::Emote>>>>,
+    reading_emotes: Option<TrackedPromise<Result<Played>>>,
+    /// The poses each seat cycles through, and where in one the body currently stands.
+    poses: emotes::Poses,
+    posture: emotes::Posture,
+    pose: usize,
     emote: Option<usize>,
     emote_search: String,
     emotes_matched: RefCell<(Option<String>, Vec<usize>)>,
@@ -326,6 +343,8 @@ pub struct CharacterBuilder {
     /// list is worn.
     weapons_main: Vec<weapons::Piece>,
     weapons_off: Vec<weapons::Piece>,
+    /// Which `.atch` point each weapon model set hangs from.
+    weapon_tags: weapons::Tags,
     reading_weapons: Option<TrackedPromise<Result<weapons::Pieces>>>,
     main_hand: Option<usize>,
     off_hand: Option<usize>,
@@ -335,6 +354,16 @@ pub struct CharacterBuilder {
     off_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// Whether the weapon on screen is drawn, which is a whole stance rather than a placement.
     drawn: bool,
+    /// Which motion class each weapon puts the body in, and how long the game blends one motion
+    /// into another.
+    stance: Option<Rc<stance::Stance>>,
+    reading_stance: Option<TrackedPromise<Result<stance::Stance>>>,
+    /// The stance the body was last put in, so one it is already standing in is not started over
+    /// on every frame.
+    stood_in: RefCell<Option<Stood>>,
+    /// The effects the drawn weapons were last carrying, so they are named once rather than on
+    /// every frame they play.
+    glowed: RefCell<Vec<String>>,
     /// What was last logged a weapon's placement, so a stance held for a thousand frames names its
     /// bone and offset once rather than on every one of them.
     logged: Cell<(bool, Option<usize>, Option<usize>, bool)>,
@@ -365,9 +394,10 @@ pub struct CharacterBuilder {
     /// changed clothes since.
     fetching: Vec<TrackedPromise<Result<Read>>>,
     model: Option<Result<Box<mdl::Rendered>, String>>,
-    /// The prop the playing emote's own timeline wants held, by path and material variant, read
-    /// off the model itself once a frame so `worn` picks it up the same way it does a weapon.
-    prop: Option<(String, u16)>,
+    /// The props the playing emote's own timeline wants held, each by path, material variant and
+    /// the weapon set it hangs from, read off the model itself once a frame so `worn` picks them up
+    /// the same way it does a weapon. A motion that puts one thing in each hand summons twice.
+    props: Vec<(String, u16, u16)>,
 }
 
 impl Default for CharacterBuilder {
@@ -418,6 +448,9 @@ impl Default for CharacterBuilder {
             npcs_matched: Default::default(),
             emotes: Vec::new(),
             reading_emotes: None,
+            poses: emotes::Poses::default(),
+            posture: emotes::Posture::default(),
+            pose: 0,
             emote: None,
             emote_search: String::new(),
             emotes_matched: Default::default(),
@@ -429,6 +462,7 @@ impl Default for CharacterBuilder {
             mounts_matched: Default::default(),
             weapons_main: Vec::new(),
             weapons_off: Vec::new(),
+            weapon_tags: Vec::new(),
             reading_weapons: None,
             main_hand: None,
             off_hand: None,
@@ -437,6 +471,10 @@ impl Default for CharacterBuilder {
             main_matched: Default::default(),
             off_matched: Default::default(),
             drawn: false,
+            stance: None,
+            reading_stance: None,
+            stood_in: RefCell::new(None),
+            glowed: RefCell::new(Vec::new()),
             logged: Cell::new((false, None, None, false)),
             atch: None,
             reading_atch: None,
@@ -448,7 +486,7 @@ impl Default for CharacterBuilder {
             held: Files::new(),
             fetching: Vec::new(),
             model: None,
-            prop: None,
+            props: Vec::new(),
         }
     }
 }
@@ -475,6 +513,9 @@ impl CharacterBuilder {
         self.npc = None;
         self.npcs_matched.take();
         self.emotes.clear();
+        self.poses = emotes::Poses::default();
+        self.posture = emotes::Posture::default();
+        self.pose = 0;
         self.reading_emotes = None;
         self.emote = None;
         self.emotes_matched.take();
@@ -485,12 +526,15 @@ impl CharacterBuilder {
         self.mounts_matched.take();
         self.weapons_main.clear();
         self.weapons_off.clear();
+        self.weapon_tags.clear();
         self.reading_weapons = None;
         self.main_hand = None;
         self.off_hand = None;
         self.main_matched.take();
         self.off_matched.take();
         self.logged.set((false, None, None, false));
+        self.stood_in.take();
+        self.glowed.take();
         self.atch = None;
         self.reading_atch = None;
         self.stood = false;
@@ -580,6 +624,10 @@ impl CharacterBuilder {
         self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
             npcs::read(&standing, language).await
         }));
+        let stanced = backend.clone();
+        self.reading_stance = Some(TrackedPromise::spawn_local(async move {
+            stance::Stance::read(&stanced, language).await
+        }));
     }
 
     fn poll(&mut self, ctx: &egui::Context, backend: &Backend) {
@@ -612,6 +660,13 @@ impl CharacterBuilder {
                 Err(promise) => self.reading_npcs = Some(promise),
             }
         }
+        if let Some(promise) = self.reading_stance.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => self.stance = Some(Rc::new(read)),
+                Ok(Err(why)) => log::warn!("character: nothing states a weapon's stance: {why}"),
+                Err(promise) => self.reading_stance = Some(promise),
+            }
+        }
         if let Some(promise) = self.reading_worn.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => self.worn_over = Some(read),
@@ -622,7 +677,9 @@ impl CharacterBuilder {
         if let Some(promise) = self.reading_emotes.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => {
+                    let (read, poses) = read;
                     self.emotes = read;
+                    self.poses = poses;
                     self.emotes_matched.take();
                 }
                 Ok(Err(why)) => log::warn!("角色：没有可播放的情感动作：{why}"),
@@ -705,9 +762,10 @@ impl CharacterBuilder {
         }
         if let Some(promise) = self.reading_weapons.take() {
             match promise.try_take() {
-                Ok(Ok((main_hand, off_hand))) => {
+                Ok(Ok((main_hand, off_hand, tags))) => {
                     self.weapons_main = main_hand;
                     self.weapons_off = off_hand;
+                    self.weapon_tags = tags;
                     self.main_matched.take();
                     self.off_matched.take();
                 }
@@ -819,10 +877,10 @@ impl CharacterBuilder {
 
         // Read off the model rather than driven from here: an emote's own timeline is what says
         // whether it wants a prop held, and when.
-        self.prop = self.model.as_ref().and_then(|model| match model {
-            Ok(model) => model.wanted_prop(),
-            Err(_) => None,
-        });
+        self.props = match self.model.as_ref() {
+            Some(Ok(model)) => model.wanted_props(),
+            _ => Vec::new(),
+        };
         let full = self.wearing(&listing, &deformers);
         let wanted: Vec<(String, u16)> = full
             .iter()
@@ -903,8 +961,114 @@ impl CharacterBuilder {
             model.hinged(self.raised());
             model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
-            model.carried(self.attachments());
+            let carried = self.attachments();
+            model.glowing(self.effects(&carried));
+            model.carried(carried);
+            if let Some(stance) = self.stance.clone() {
+                model.blending(move |from, to| stance.fade(from, to));
+            }
+            self.stand(model);
         }
+    }
+
+    /// Puts the body in the pose its weapons and the stance toggle state, playing the transition
+    /// between the two over it. A class the install files no drawn idle for keeps the sheathed
+    /// one: `bt_swd_emp` ships the draw and sheathe motions and no idle to hold after them, and
+    /// `bt_emp_emp`'s idle pack holds no animation at all, which is bare hands having no drawn
+    /// pose to take.
+    fn stand(&self, model: &mdl::Rendered) {
+        let Some(stance) = &self.stance else {
+            return;
+        };
+        // A body that has sat down holds the pose its seat names until it stands back up, which is
+        // what forgets this and asks for the idle again.
+        if self.posture != emotes::Posture::Standing {
+            return;
+        }
+        let held = self.directory();
+        let mut stood = self.stood_in.borrow_mut();
+        if let Some(stood) = stood
+            .as_ref()
+            .filter(|stood| stood.held == held && stood.drawn == self.drawn)
+        {
+            // Named once the pack has landed rather than when it was asked for: a class with no
+            // drawn pose of its own settles into the sheathed one, and this is what says so.
+            if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
+                log::info!("character: {} settled into {name}", stood.held);
+            }
+            return;
+        }
+
+        let mut poses = Vec::new();
+        if self.drawn {
+            poses.push((stance.pack(self.code, &held, "resident/idle"), stance::DRAWN));
+        }
+        poses.push((stance.sheathed_pack(self.code), stance::SHEATHED));
+
+        let wanted = poses[0].1;
+        let fade = model.standing().map_or(0.0, |from| stance.fade(&from, wanted));
+        log::info!("character: {held} asks for {wanted}, blending over {fade:.3}s");
+        model.stand(&poses, fade);
+
+        if stood.as_ref().is_some_and(|stood| stood.drawn != self.drawn) {
+            let over = match self.drawn {
+                true => stance::DRAW,
+                false => stance::SHEATHE,
+            };
+            let packs = vec![stance.pack(self.code, &held, "resident/sub")];
+            let fade = stance.fade(stance::DRAWN, over);
+            log::info!("character: {over} over it, blending over {fade:.3}s");
+            model.act(&packs, over, fade);
+        }
+        *stood = Some(Stood {
+            held,
+            drawn: self.drawn,
+            told: Cell::new(false),
+        });
+    }
+
+    /// The class directory the weapons in hand file this body's packs under.
+    fn directory(&self) -> String {
+        let wielded = self.wielded();
+        let set = |hand: usize| wielded.get(hand).map(|weapon| weapon.set);
+        match &self.stance {
+            Some(stance) => stance.directory(set(0), set(1)),
+            None => stance::COMMON.to_owned(),
+        }
+    }
+
+    /// Where an emote's own key is filed for this body, nearest first: under the class directory
+    /// the weapons in hand put it in, which is the only place a battle emote is filed at all, and
+    /// then under the one every body shares. Both go through the table saying which body really
+    /// holds a pack, since a class that ships none of its own reads another's.
+    /// The pack the body holds its seat's current pose out of, which is what an emote played
+    /// sitting down settles back into.
+    fn pose_pack(&self) -> Option<String> {
+        let key = self.poses.of(self.posture).get(self.pose)?;
+        Some(self.stance.as_ref()?.pack(self.code, stance::COMMON, key))
+    }
+
+    /// Sits the body in the pose its seat and place in that seat's own cycle name, which is what
+    /// picking a seat or stepping through it is.
+    fn sit(&self, model: &mdl::Rendered) {
+        let Some(key) = self.poses.of(self.posture).get(self.pose) else {
+            return;
+        };
+        log::info!("character: sitting in {key}");
+        model.play(&self.emote_packs(key), None);
+    }
+
+    fn emote_packs(&self, key: &str) -> Vec<String> {
+        let Some(stance) = &self.stance else {
+            return Vec::new();
+        };
+        let held = self.directory();
+        let shared = stance.pack(self.code, stance::COMMON, key);
+        let mut found = vec![stance.pack(self.code, &held, key)];
+        if found[0] != shared {
+            found.push(shared);
+        }
+        found
     }
 
     /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
@@ -924,22 +1088,73 @@ impl CharacterBuilder {
             let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
             let log = self.logged.get() != key;
             self.logged.set(key);
-            found.push(self.attach(main.weapon.model(), main.tag, true, atch, log));
+            let tag = |weapon: &weapons::Weapon| weapons::tag(&self.weapon_tags, weapon.set);
+            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, self.drawn, atch, log));
             let off = match main.covers_off_hand {
-                true => main.off_hand.map(|weapon| (weapon, main.tag)),
+                true => main.off_hand,
                 false => self
                     .off_hand
                     .and_then(|at| self.weapons_off.get(at))
-                    .map(|piece| (piece.weapon, piece.tag)),
+                    .map(|piece| piece.weapon),
             };
-            if let Some((weapon, tag)) = off {
-                found.push(self.attach(weapon.model(), tag, false, atch, log));
+            if let Some(weapon) = off {
+                found.push(self.attach(weapon.model(), tag(&weapon), false, self.drawn, atch, log));
             }
         }
-        // An emote's own prop, held at the same fallback bone a weapon takes with no `.atch` tag
-        // resolved for it: nothing in the timeline states which point a prop hangs from.
-        if let Some((path, _)) = &self.prop {
-            found.push((path.clone(), weapons::fallback_bone(true).to_owned(), Mat4::IDENTITY));
+        // An emote's own prop hangs off the point its model set names, the same table a weapon
+        // reads, and always at the drawn placement: it is summoned into a hand rather than worn,
+        // so the stance toggle is nothing to it. One that holds a thing in each hand is moved
+        // into them by a pack of its own rather than by where it hangs.
+        let atch = self
+            .atch
+            .as_ref()
+            .filter(|(code, _)| *code == self.code)
+            .map(|(_, bytes)| bytes);
+        for (path, _, set) in &self.props {
+            let tag = weapons::tag(&self.weapon_tags, *set);
+            let mut placed = self.attach(path.clone(), tag, true, true, atch, false);
+            // A motion summoning two of one model names the same point for both, and nothing in
+            // the command says which hand either goes to, so the second would stack on the first.
+            // The point's own states name the bone on the other side, and state no offset at any
+            // of them, so moving the second there is the whole of it.
+            if found.iter().any(|(_, bone, _)| *bone == placed.1)
+                && let Some(other) = tag
+                    .zip(atch)
+                    .and_then(|(tag, bytes)| weapons::other_hand(bytes, tag, &placed.1))
+            {
+                log::info!("character: a second {path} hangs from {other} instead");
+                placed.1 = other;
+            }
+            found.push(placed);
+        }
+        found
+    }
+
+    /// The bone each drawn weapon's own effect plays from, for the ones whose `.imc` names one.
+    /// The game only plays a weapon's effect in a battle stance, so nothing sheathed carries one.
+    fn effects(&self, carried: &[(String, String, Mat4)]) -> Vec<String> {
+        if !self.drawn {
+            self.glowed.take();
+            return Vec::new();
+        }
+        let mut named = Vec::new();
+        let found = self
+            .wielded()
+            .into_iter()
+            .filter_map(|weapon| {
+                let model = weapon.model();
+                let imc = mdl::imc_path(&model).and_then(|path| self.held.get(&path))?;
+                let path = weapons::vfx_path(&weapon, imc)?;
+                let (_, bone, _) = carried.iter().find(|(held, ..)| *held == model)?;
+                named.push(path);
+                Some(bone.clone())
+            })
+            .collect();
+        if *self.glowed.borrow() != named {
+            for path in &named {
+                log::info!("character: a drawn weapon plays {path}");
+            }
+            *self.glowed.borrow_mut() = named;
         }
         found
     }
@@ -951,13 +1166,14 @@ impl CharacterBuilder {
         path: String,
         tag: Option<&str>,
         main: bool,
+        drawn: bool,
         atch: Option<&Rc<Vec<u8>>>,
         log: bool,
     ) -> (String, String, Mat4) {
-        let stance = if self.drawn { "drawn" } else { "sheathed" };
+        let stance = if drawn { "drawn" } else { "sheathed" };
         let placed = tag
             .zip(atch)
-            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, self.drawn));
+            .and_then(|(tag, bytes)| weapons::attach(bytes, tag, drawn, !main));
         let Some(placement) = placed else {
             let bone = weapons::fallback_bone(main);
             if log {
@@ -965,16 +1181,7 @@ impl CharacterBuilder {
             }
             return (path, bone.to_owned(), Mat4::IDENTITY);
         };
-        let local = Mat4::from_scale_rotation_translation(
-            Vec3::splat(placement.scale),
-            Quat::from_euler(
-                EulerRot::XYZ,
-                placement.rotation[0],
-                placement.rotation[1],
-                placement.rotation[2],
-            ),
-            Vec3::from_array(placement.offset),
-        );
+        let local = placement.placement();
         if log {
             log::info!(
                 "角色：{path} 挂在 {} 上，偏移 {:?}，缩放 {}，{stance}",
@@ -989,116 +1196,15 @@ impl CharacterBuilder {
     /// What the creator's menus have been left at, and what the shaders and the model make of it:
     /// the colours to tint with, the parts to leave undrawn and the shape keys to deform by.
     fn made(&self) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32, Vec3) {
-        let mut customize = mdl::Customize::default();
-        // Every feature the face declares, less the ones the creator has been left on.
-        let mut hidden: BTreeSet<String> = FEATURE_LETTERS
-            .iter()
-            .map(|letter| format!("{FEATURE}{letter}"))
-            .collect();
-        hidden.extend(self.covered());
-        let mut shapes = BTreeSet::new();
-        let mut stature = 1.0;
-        let mut bust = Vec3::ONE;
-        let mut tone = 1.0;
-        let Some(body) = self.creator.body(self.tribe, self.female) else {
-            return (customize, hidden, shapes, stature, bust);
-        };
-        // A body that is offered a tail or a pair of ears lengthens those with the customisation
-        // the rest spend on muscle, and is left at the tone a race with none to set is given.
-        let muscled = !body.menus.iter().any(|menu| menu.customize == TAIL);
-        let palettes = self
-            .made
-            .as_ref()
-            .map(|made| made.palettes(self.tribe, self.female));
-        for menu in &body.menus {
-            let at = self.choice(menu) as usize;
-            if let Some(palettes) = &palettes {
-                let color = match menu.customize {
-                    SKIN_COLOR => Some((&palettes.skin, &mut customize.skin)),
-                    HAIR_COLOR => Some((&palettes.hair, &mut customize.hair)),
-                    LIP_COLOR => Some((&palettes.lips, &mut customize.lip)),
-                    EYE_COLOR => Some((&palettes.eyes, &mut customize.right_eye)),
-                    _ => None,
-                };
-                if let Some((swatches, held)) = color {
-                    *held = swatches.shaded(at);
-                }
-                // A strand is mixed between the two hair colours by its mask, so with the
-                // highlight left off both are the one colour: leaving it white is what drew brown
-                // hair silver. Eyes go the same way, one colour unless they are made odd.
-                if menu.customize == HAIR_COLOR {
-                    customize.highlight = match self.ticked(HIGHLIGHTS) {
-                        true => palettes.highlights.shaded(self.held(HIGHLIGHT_COLOR) as usize),
-                        false => customize.hair,
-                    };
-                }
-                if menu.customize == EYE_COLOR {
-                    customize.left_eye = match self.ticked(ODD_EYES) {
-                        true => palettes.eyes.shaded(self.held(LEFT_EYE_COLOR) as usize),
-                        false => customize.right_eye,
-                    };
-                }
-                // What the shaders call the option colour is the race feature: a limbal ring, a
-                // Miqo'te's ear tuft, the tattoo the creator names it after. Face paint has a
-                // colour of its own, which the game hands to the decal rather than to this.
-                if menu.customize == TATTOO_COLOR {
-                    let [red, green, blue, _] = palettes.features.shaded(at);
-                    customize.option = [red, green, blue];
-                }
-                if menu.customize == FACE_PAINT_COLOR {
-                    customize.decal = palettes.face_paint.shaded(at);
-                }
-            }
-            // Only the lane, since the muscle tone menu comes before the skin colour that would
-            // otherwise write over what it left.
-            if menu.customize == MUSCLE_TONE && muscled {
-                tone = slid(menu, at as u32);
-            }
-            if menu.customize == HEIGHT
-                && let Some(palettes) = &palettes
-            {
-                let [short, tall] = palettes.height;
-                stature = short + (tall - short) * slid(menu, at as u32);
-            }
-            if menu.customize == BUST
-                && let Some(palettes) = &palettes
-            {
-                let [small, full] = palettes.bust;
-                bust = Vec3::from(small).lerp(Vec3::from(full), slid(menu, at as u32));
-            }
-            if menu.customize == FEATURES {
-                // The two menus that share this one number are halves of the same run of parts,
-                // and each states where in it its own toggles start.
-                let first = body
-                    .menus
-                    .iter()
-                    .take_while(|held| !std::ptr::eq(*held, menu))
-                    .filter(|held| held.customize == FEATURES)
-                    .map(|held| held.count as usize)
-                    .sum::<usize>();
-                for bit in first..first + menu.count as usize {
-                    if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(bit) {
-                        hidden.remove(&format!("{FEATURE}{letter}"));
-                    }
-                }
-            }
-            if let Some((_, prefix)) = SHAPED.iter().find(|(held, _)| *held == menu.customize)
-                && at > 0
-                && let Some(letter) = FEATURE_LETTERS.get(at - 1)
-            {
-                shapes.insert(format!("{prefix}_{letter}"));
-            }
-        }
-        customize.skin[3] = tone;
-        customize.paint = self.paint();
-        if customize.paint.is_none() {
-            customize.decal[3] = 0.0;
-        }
-        // Lip colour carries its own opacity, and the creator's own box is what it is worn at all.
-        if !self.ticked(LIPSTICK) {
-            customize.lip[3] = 0.0;
-        }
-        (customize, hidden, shapes, stature, bust)
+        appearance(
+            &self.creator,
+            self.made.as_ref(),
+            self.tribe,
+            self.female,
+            &self.choices,
+            self.covered(),
+            self.paint(),
+        )
     }
 
     /// How far the visor of the hat being worn has been raised, which is nothing at all where the
@@ -1212,7 +1318,20 @@ impl CharacterBuilder {
                 }
             }
         }
+        // A fist weapon's gauntlets are the visible half of it: its own knuckle models are
+        // three-index stubs, and the game draws the hands from the item's `ModelSub` over whatever
+        // is worn there.
+        if let Some(gauntlets) = self.gauntlets() {
+            outfit[Slot::Hands as usize] = Some(gauntlets);
+        }
         (outfit, hidden)
+    }
+
+    /// The gauntlets the wielded fist weapon puts on the hands, where one is wielded at all.
+    fn gauntlets(&self) -> Option<Gear> {
+        self.main_hand
+            .and_then(|at| self.weapons_main.get(at))?
+            .gauntlets
     }
 
     /// The outfit the picked attire dresses the character in.
@@ -1303,9 +1422,9 @@ impl CharacterBuilder {
                 .map(|weapon| (weapon.model(), weapon.variant, [None, None])),
         );
         found.extend(
-            self.prop
-                .clone()
-                .map(|(path, variant)| (path, variant, [None, None])),
+            self.props
+                .iter()
+                .map(|(path, variant, _)| (path.clone(), *variant, [None, None])),
         );
         found
     }
@@ -1404,7 +1523,7 @@ impl CharacterBuilder {
                     deform,
                     skin: self.skin,
                     rigid: wielded.contains(path)
-                        || self.prop.as_ref().is_some_and(|(held, _)| held == path),
+                        || self.props.iter().any(|(held, ..)| held == path),
                 })
             })
             .collect();
@@ -1993,6 +2112,59 @@ impl CharacterBuilder {
 
     /// Which of a mount's own seats the character rides in, for one seating more than one. Seat
     /// zero is the one the mount's skeleton names first, whatever the game calls it in its own UI.
+    /// Where the body sits and which of that seat's own poses it holds, which is what `/cpose`
+    /// steps through. A rider reads none of this: a mount states the seat it holds one in.
+    fn posture_ui(&self, ui: &mut egui::Ui) -> Option<Pick> {
+        if self.mount.is_some() {
+            return None;
+        }
+        let mut picked = None;
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Posture").strong());
+            for held in emotes::Posture::ALL {
+                if held != emotes::Posture::Standing && self.poses.of(held).is_empty() {
+                    continue;
+                }
+                if ui
+                    .selectable_label(self.posture == held, held.name())
+                    .clicked()
+                {
+                    picked = Some(Pick::Posture(held));
+                }
+            }
+        });
+        let poses = self.poses.of(self.posture);
+        if poses.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Pose").strong());
+                for at in 0..poses.len() {
+                    if ui
+                        .selectable_label(self.pose == at, (at + 1).to_string())
+                        .clicked()
+                    {
+                        picked = Some(Pick::Pose(at));
+                    }
+                }
+            });
+        }
+        picked
+    }
+
+    /// Takes the body into or out of a seat. Sitting plays the pose it settles into; standing back
+    /// up forgets what it was standing in, so the idle its weapons state names is asked for again.
+    fn seated_changed(&self) {
+        let Some(Ok(model)) = &self.model else {
+            return;
+        };
+        match self.posture {
+            emotes::Posture::Standing => {
+                self.stood_in.borrow_mut().take();
+            }
+            _ => self.sit(model),
+        }
+    }
+
     fn seat_ui(&self, ui: &mut egui::Ui, extra_seats: u8) -> Option<Pick> {
         let mut picked = None;
         ui.horizontal_wrapped(|ui| {
@@ -2315,6 +2487,10 @@ impl CharacterBuilder {
                             self.slot_ui(ui, backend, icons, listing, slot);
                         }
                     }
+                    // Beside the weapon's own sheathed and drawn, since both say what the body is
+                    // doing rather than what it is wearing, and neither wants to sit under a list.
+                    self.posture_ui(ui)
+                        .inspect(|posture| picked = Some(*posture));
                     self.weapons_ui(ui, backend, icons)
                         .inspect(|pick| picked = Some(*pick));
                     self.appearance(ui, backend, icons)
@@ -2371,29 +2547,49 @@ impl CharacterBuilder {
             Some(Pick::Emote(emote)) => {
                 self.emote = Some(emote);
                 if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
-                    match emote.expression() {
-                        Some(name) => model.express(name),
-                        None => match emote.packs(self.code).as_slice() {
-                            [start, standing] => model.play(start, Some(standing)),
-                            [only] => model.play(only, None),
-                            _ => {}
-                        },
+                    let mounted = self.mount.is_some().then(|| emote.mounted()).flatten();
+                    let seated = emote.seated(self.posture);
+                    match (emote.expression(), mounted, seated) {
+                        (Some(name), _, _) => model.express(name),
+                        // A rider keeps the pose the mount holds it in, so the emote it plays is
+                        // the partial the sheet names for that rather than the whole-body one.
+                        (None, Some(key), _) => model.play_over(&self.emote_packs(key)),
+                        // A body already sat down states a whole motion of its own, and settles
+                        // back into the pose it was sitting in rather than standing up.
+                        (None, None, Some(key)) => {
+                            model.play(&self.emote_packs(key), self.pose_pack().as_deref())
+                        }
+                        (None, None, None) => {
+                            let (start, settles) = emote.keys();
+                            let packs = start.map(|key| self.emote_packs(key)).unwrap_or_default();
+                            let settles = settles.and_then(|key| {
+                                Some(self.stance.as_ref()?.pack(self.code, stance::COMMON, key))
+                            });
+                            model.play(&packs, settles.as_deref());
+                        }
                     }
                 }
+            }
+            Some(Pick::Posture(posture)) => {
+                self.posture = posture;
+                self.pose = 0;
+                self.seated_changed();
+            }
+            Some(Pick::Pose(pose)) => {
+                self.pose = pose;
+                self.seated_changed();
             }
             Some(Pick::Mount(mount)) => {
                 self.mount = mount;
                 self.mount_seat = 0;
+                // Nothing sits down on a mount: it states the seat it holds a rider in.
+                self.posture = emotes::Posture::Standing;
+                self.pose = 0;
             }
             Some(Pick::Seat(seat)) => self.mount_seat = seat,
             Some(Pick::Weapon(weapon)) => self.main_hand = weapon,
             Some(Pick::OffHand(weapon)) => self.off_hand = weapon,
-            Some(Pick::Stance(drawn)) => {
-                self.drawn = drawn;
-                if let Some(Ok(model)) = &self.model {
-                    model.play(&weapons::stance_pack(self.code, drawn), None);
-                }
-            }
+            Some(Pick::Stance(drawn)) => self.drawn = drawn,
             Some(Pick::Made(customize, choice)) => {
                 self.choices.insert(customize, choice);
             }
@@ -2423,6 +2619,9 @@ enum Pick {
     /// The same, where what a menu holds is the number the file tree files the choice under.
     Choice(u32, u16),
     Emote(usize),
+    /// Where the body sits, and which of that seat's own poses it holds.
+    Posture(emotes::Posture),
+    Pose(usize),
     /// A mount to seat the character on, or none to stand it on the ground again.
     Mount(Option<usize>),
     /// Which of the mount's own seats to ride in.
@@ -2471,7 +2670,146 @@ const BUILT_ON: [u16; 16] = [1, 3, 5, 5, 11, 11, 7, 7, 9, 9, 13, 13, 15, 15, 17,
 const ADULT: u16 = 1;
 const CHILD: u16 = 4;
 
-fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
+
+/// Where a menu has been left, which is where the creator opens it until it is picked from. Not
+/// bounded by the count: a lip colour past the dark half is where the light one starts.
+fn choice(choices: &BTreeMap<u32, u32>, menu: &menus::Menu) -> u32 {
+    choices.get(&menu.customize).copied().unwrap_or(menu.init)
+}
+
+/// What one of the creator's own boxes has been left at, and whether it is ticked.
+fn left_at(choices: &BTreeMap<u32, u32>, key: u32) -> u32 {
+    choices.get(&key).copied().unwrap_or(0)
+}
+
+fn ticked(choices: &BTreeMap<u32, u32>, key: u32) -> bool {
+    left_at(choices, key) != 0
+}
+
+/// The colours a body was made with, the seams it hides, the shapes it wears, how tall it stands
+/// and how full its chest is: everything the creator's own menus decide, off where each has been
+/// left. `covered` is what the outfit hides on top of that, and `paint` the face paint it wears.
+#[allow(clippy::too_many_arguments)]
+pub fn appearance(
+creator: &menus::Creator,
+made: Option<&palette::Made>,
+tribe: u32,
+female: bool,
+choices: &BTreeMap<u32, u32>,
+covered: BTreeSet<String>,
+paint: Option<u16>,
+) -> (mdl::Customize, BTreeSet<String>, BTreeSet<String>, f32, Vec3) {
+    let mut customize = mdl::Customize::default();
+    // Every feature the face declares, less the ones the creator has been left on.
+    let mut hidden: BTreeSet<String> = FEATURE_LETTERS
+        .iter()
+        .map(|letter| format!("{FEATURE}{letter}"))
+        .collect();
+    hidden.extend(covered);
+    let mut shapes = BTreeSet::new();
+    let mut stature = 1.0;
+    let mut bust = Vec3::ONE;
+    let mut tone = 1.0;
+    let Some(body) = creator.body(tribe, female) else {
+        return (customize, hidden, shapes, stature, bust);
+    };
+    // A body that is offered a tail or a pair of ears lengthens those with the customisation
+    // the rest spend on muscle, and is left at the tone a race with none to set is given.
+    let muscled = !body.menus.iter().any(|menu| menu.customize == TAIL);
+    let palettes = made.map(|made| made.palettes(tribe, female));
+    for menu in &body.menus {
+        let at = choice(choices, menu) as usize;
+        if let Some(palettes) = &palettes {
+            let color = match menu.customize {
+                SKIN_COLOR => Some((&palettes.skin, &mut customize.skin)),
+                HAIR_COLOR => Some((&palettes.hair, &mut customize.hair)),
+                LIP_COLOR => Some((&palettes.lips, &mut customize.lip)),
+                EYE_COLOR => Some((&palettes.eyes, &mut customize.right_eye)),
+                _ => None,
+            };
+            if let Some((swatches, held)) = color {
+                *held = swatches.shaded(at);
+            }
+            // A strand is mixed between the two hair colours by its mask, so with the
+            // highlight left off both are the one colour: leaving it white is what drew brown
+            // hair silver. Eyes go the same way, one colour unless they are made odd.
+            if menu.customize == HAIR_COLOR {
+                customize.highlight = match ticked(choices, HIGHLIGHTS) {
+                    true => palettes.highlights.shaded(left_at(choices, HIGHLIGHT_COLOR) as usize),
+                    false => customize.hair,
+                };
+            }
+            if menu.customize == EYE_COLOR {
+                customize.left_eye = match ticked(choices, ODD_EYES) {
+                    true => palettes.eyes.shaded(left_at(choices, LEFT_EYE_COLOR) as usize),
+                    false => customize.right_eye,
+                };
+            }
+            // What the shaders call the option colour is the race feature: a limbal ring, a
+            // Miqo'te's ear tuft, the tattoo the creator names it after. Face paint has a
+            // colour of its own, which the game hands to the decal rather than to this.
+            if menu.customize == TATTOO_COLOR {
+                let [red, green, blue, _] = palettes.features.shaded(at);
+                customize.option = [red, green, blue];
+            }
+            if menu.customize == FACE_PAINT_COLOR {
+                customize.decal = palettes.face_paint.shaded(at);
+            }
+        }
+        // Only the lane, since the muscle tone menu comes before the skin colour that would
+        // otherwise write over what it left.
+        if menu.customize == MUSCLE_TONE && muscled {
+            tone = slid(menu, at as u32);
+        }
+        if menu.customize == HEIGHT
+            && let Some(palettes) = &palettes
+        {
+            let [short, tall] = palettes.height;
+            stature = short + (tall - short) * slid(menu, at as u32);
+        }
+        if menu.customize == BUST
+            && let Some(palettes) = &palettes
+        {
+            let [small, full] = palettes.bust;
+            bust = Vec3::from(small).lerp(Vec3::from(full), slid(menu, at as u32));
+        }
+        if menu.customize == FEATURES {
+            // The two menus that share this one number are halves of the same run of parts,
+            // and each states where in it its own toggles start.
+            let first = body
+                .menus
+                .iter()
+                .take_while(|held| !std::ptr::eq(*held, menu))
+                .filter(|held| held.customize == FEATURES)
+                .map(|held| held.count as usize)
+                .sum::<usize>();
+            for bit in first..first + menu.count as usize {
+                if at & 1 << bit != 0 && let Some(letter) = FEATURE_LETTERS.get(bit) {
+                    hidden.remove(&format!("{FEATURE}{letter}"));
+                }
+            }
+        }
+        if let Some((_, prefix)) = SHAPED.iter().find(|(held, _)| *held == menu.customize)
+            && at > 0
+            && let Some(letter) = FEATURE_LETTERS.get(at - 1)
+        {
+            shapes.insert(format!("{prefix}_{letter}"));
+        }
+    }
+    customize.skin[3] = tone;
+    customize.paint = paint;
+    if customize.paint.is_none() {
+        customize.decal[3] = 0.0;
+    }
+    // Lip colour carries its own opacity, and the creator's own box is what it is worn at all.
+    if !ticked(choices, LIPSTICK) {
+        customize.lip[3] = 0.0;
+    }
+    (customize, hidden, shapes, stature, bust)
+}
+
+
+pub(super) fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
     let body = BUILT_ON
         .get(tribe.max(1) as usize - 1)
         .copied()
@@ -2480,7 +2818,7 @@ fn resolve(tribe: u32, female: bool, child: bool) -> u16 {
 }
 
 /// The body a model was made for, which its own file name states.
-fn made_for(model: &str) -> Option<u16> {
+pub(super) fn made_for(model: &str) -> Option<u16> {
     let name = model.rsplit('/').next()?;
     name.strip_prefix('c')?.get(..4)?.parse().ok()
 }
@@ -2491,7 +2829,7 @@ fn root(code: u16) -> String {
 
 /// Every model one numbered set of a kind holds. A face is several files and a body one, and which
 /// is which is the directory's to say rather than a list of suffixes here.
-fn parts(listing: &Listing, under: &str, id: u16) -> Vec<String> {
+pub(super) fn parts(listing: &Listing, under: &str, id: u16) -> Vec<String> {
     let letter = under.rsplit('/').next().unwrap_or_default().as_bytes()[0] as char;
     let mut found = listing.under(&format!("{under}/{letter}{id:04}/model/"));
     found.retain(|path| path.ends_with(".mdl"));
@@ -2500,7 +2838,7 @@ fn parts(listing: &Listing, under: &str, id: u16) -> Vec<String> {
 }
 
 /// The numbered sets of a kind the code carries, each with the models it holds.
-fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
+pub(super) fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
     let under = format!("{}/obj/{kind}", root(*code));
     let letter = kind.as_bytes()[0] as char;
     listing
@@ -2522,7 +2860,7 @@ fn sets(listing: &Listing, code: &u16, kind: &str) -> Vec<Set> {
 
 /// The sets of whichever part the body grows: a tail where it has one, a Viera's ears where it does
 /// not. Both are numbered the same way and neither body ships the other.
-fn grown(listing: &Listing, code: u16) -> Vec<Set> {
+pub(super) fn grown(listing: &Listing, code: u16) -> Vec<Set> {
     ["tail", "zear"]
         .into_iter()
         .map(|kind| sets(listing, &code, kind))
@@ -2535,7 +2873,7 @@ fn grown(listing: &Listing, code: u16) -> Vec<Set> {
 ///
 /// Few bodies have a model of their own for a given slot: the rest wear the nearest one they are
 /// built on, which is what the deformers between the two then shape onto them.
-fn equipment(
+pub(super) fn equipment(
     listing: &Listing,
     deformers: &mdl::Deformers,
     code: u16,
@@ -2562,7 +2900,7 @@ fn equipment(
 /// The body whose skin another one's model is drawn with: its own where it ships a material for
 /// the set, and the nearest body it is built on where it does not. Elezen, Miqo'te, Roegadyn women
 /// and Lalafell women ship none, and each of those is a body whose skin is its parent's.
-fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16> {
+pub(super) fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16> {
     deformers.lineage(code).find(|code| {
         let under = format!("{}/obj/body/b{BODY_SET:04}/material/", root(*code));
         !listing.under(&under).is_empty()
@@ -2572,7 +2910,7 @@ fn skin(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Option<u16>
 /// The models a body is built out of. The game holds one of them, `c0101b0001`, and stands every
 /// other body on it deformed, which is why no other code ships a model of the set while twelve of
 /// them ship the skin it is drawn with.
-fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String> {
+pub(super) fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String> {
     deformers
         .lineage(code)
         .map(|code| parts(listing, &format!("{}/obj/body", root(code)), BODY_SET))
@@ -2581,20 +2919,20 @@ fn body(listing: &Listing, deformers: &mdl::Deformers, code: u16) -> Vec<String>
 }
 
 /// Which of a set's models covers one slot.
-fn part(parts: &[String], slot: Slot) -> Option<String> {
+pub(super) fn part(parts: &[String], slot: Slot) -> Option<String> {
     let tail = format!("_{}.mdl", slot.suffix());
     parts.iter().find(|path| path.ends_with(&tail)).cloned()
 }
 
 /// The picked set if the code still carries it, and its lowest otherwise.
-fn pick(sets: &[Set], wanted: u16) -> u16 {
+pub(super) fn pick(sets: &[Set], wanted: u16) -> u16 {
     match sets.iter().any(|set| set.id == wanted) {
         true => wanted,
         false => sets.first().map_or(wanted, |set| set.id),
     }
 }
 
-fn held(sets: &[Set], wanted: u16) -> Vec<String> {
+pub(super) fn held(sets: &[Set], wanted: u16) -> Vec<String> {
     sets.iter()
         .find(|set| set.id == wanted)
         .map(|set| set.parts.clone())
@@ -2829,3 +3167,4 @@ mod tests {
         assert_eq!(resolve(8, true, true), 804);
     }
 }
+

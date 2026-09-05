@@ -321,7 +321,11 @@ impl Particles {
                 }
             }
         }
-        self.bind(gl, batch.def, &frame.scene, &Instance::default())?;
+        let instance = Instance {
+            calculate: batch.shading.calculate,
+            ..Instance::default()
+        };
+        self.bind(gl, batch.def, &frame.scene, &instance)?;
         unsafe { gl.draw_arrays(glow::TRIANGLES, 0, batch.vertices.len() as i32) };
         Ok(())
     }
@@ -362,7 +366,11 @@ impl Particles {
             }
         }
         for instance in &batch.instances {
-            self.bind(gl, batch.def, &frame.scene, instance)?;
+            let instance = Instance {
+                calculate: batch.shading.calculate,
+                ..*instance
+            };
+            self.bind(gl, batch.def, &frame.scene, &instance)?;
             unsafe {
                 gl.draw_elements(glow::TRIANGLES, count, glow::UNSIGNED_SHORT, 0);
             }
@@ -489,12 +497,9 @@ fn blend(gl: &glow::Context, blend: Blend) {
                 glow::ZERO,
                 glow::ONE,
             ),
-            Blend::Multiply => gl.blend_func_separate(
-                glow::DST_COLOR,
-                glow::ONE_MINUS_SRC_ALPHA,
-                glow::ZERO,
-                glow::ONE,
-            ),
+            Blend::Multiply => {
+                gl.blend_func_separate(glow::ZERO, glow::SRC_COLOR, glow::ZERO, glow::ONE)
+            }
             Blend::Screen => {
                 gl.blend_func_separate(glow::ONE, glow::ONE_MINUS_SRC_COLOR, glow::ZERO, glow::ONE)
             }

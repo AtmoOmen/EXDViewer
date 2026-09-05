@@ -341,10 +341,10 @@ impl Motion {
                 Mat4::from_scale_rotation_translation(
                     size,
                     Quat::from_euler(
-                        glam::EulerRot::XYZ,
-                        turn.x.to_radians(),
-                        turn.y.to_radians(),
+                        glam::EulerRot::ZYX,
                         turn.z.to_radians(),
+                        turn.y.to_radians(),
+                        turn.x.to_radians(),
                     ),
                     shift,
                 )
@@ -393,7 +393,7 @@ impl Motion {
                 Mat4::from_scale_rotation_translation(
                     Vec3::from_array(placement.scale()) * size,
                     Quat::from_mat3(&rotation(placement.rotation()))
-                        * Quat::from_euler(glam::EulerRot::XYZ, turn.x, turn.y, turn.z),
+                        * Quat::from_euler(glam::EulerRot::ZYX, turn.z, turn.y, turn.x),
                     Vec3::from_array(placement.translation()) + shift,
                 )
             }
@@ -773,6 +773,46 @@ pub struct Drive {
     pub far: f32,
 }
 
+/// The asset a [`Prop`] draws itself from.
+pub enum Asset {
+    /// A model, placed as one instance.
+    Model(String),
+    /// A shared group, expanded the way the scene expands one of its own.
+    Group(String),
+}
+
+/// A character a host outside this view stands in the scene. It is assembled rather than placed:
+/// what the scene draws of it is the model's own geometry, filling the same G-buffer as everything
+/// else in the frame.
+pub struct Standing {
+    pub model: Rc<mdl::Rendered>,
+    /// Where it stands, read the same way a layer group's own instances are.
+    pub at: Transform,
+    /// How much of it is drawn, which its own dither clip tests each pixel against.
+    pub opacity: f32,
+}
+
+/// One effect a host outside this view is running: which file, where it stands, how far into its
+/// own timeline it now is, and the color to draw it through. The id is the firing's own, so a
+/// host that hands the list over again every frame keeps each firing's particles.
+pub struct Fired {
+    pub id: u64,
+    pub path: String,
+    pub at: Mat4,
+    pub frame: i32,
+    pub tint: Vec4,
+}
+
+/// Something placed in the scene by a host outside this view, alongside what the level itself
+/// holds.
+pub struct Prop {
+    pub asset: Asset,
+    /// Where it stands, read the same way a layer group's own instances are.
+    pub transform: Transform,
+    /// The instance it stands for, which is the key the level's `.svb` and `.lcb` are read by.
+    pub id: u32,
+}
+
 /// A 16:9-authored vertical field of view, carried to another aspect ratio by keeping its
 /// horizontal field rather than its vertical one.
 fn refit_16_9_fov(vertical_degrees: f32, aspect: f32) -> f32 {
@@ -791,6 +831,14 @@ pub struct Scene {
     /// Markers a host outside this view wants drawn over the frame, in scene space with a label.
     /// Cleared the same way [`Self::drive`] is.
     markers: Vec<(Vec3, String)>,
+    /// The characters a host outside this view wants standing in the scene. Held rather than
+    /// cleared each frame: a model keeps asking for what it still needs, and the host hands its
+    /// cast over once.
+    cast: Vec<Standing>,
+    /// The props a host outside this view has taken out of the frame, by the ids it placed them
+    /// under. A shared group's own placements carry the id it was placed under as well, so hiding
+    /// one takes the whole subtree with it.
+    unplaced: BTreeSet<u32>,
     /// Whether the last frame drawn was driven, for the side panel to grey its own camera controls
     /// against: [`Self::drive`] itself is forgotten the instant a frame reads it.
     driving: bool,
@@ -842,6 +890,8 @@ pub struct Scene {
     /// The two cloud draws, the band first, and the texture each reads: the weather names one per
     /// mesh by id, so moving the hour or the weather fetches the next.
     clouds: [Option<Arc<program::Program>>; 2],
+    /// The sheet drawn again from where the sun stands, and the blur the map it fills is left in.
+    cloud_shadow: Option<(Arc<program::Program>, Arc<program::Program>)>,
     cloud_files: [Aside; 2],
     cloud_wanted: [Option<u16>; 2],
     /// The night star field's tier 0, its own two `.shcd` translated into one program, and its three
@@ -862,10 +912,16 @@ pub struct Scene {
     /// The one that darkens its corners, and what the passes past the composite are run with.
     vignette: Option<Arc<program::Program>>,
     reflection: Option<Arc<mdl::deferred::Reflection>>,
+    /// The chain that fills what water reflects itself through, which is not that one.
+    water_mirror: Option<Arc<mdl::deferred::WaterMirror>>,
     look: program::Look,
     ambient: ambient::Ambient,
     lights: Vec<Light>,
     effects: Vec<Vfx>,
+    /// The effects a host outside this view is running, replaced every frame the way
+    /// [`Scene::stand`]'s cast is, and the particles each firing has run out.
+    fired: Vec<Fired>,
+    firing: HashMap<u64, avfx::sim::State>,
     effect_files: Vec<Effect>,
     effect_at: HashMap<String, usize>,
     sound: sound::SoundStage,
@@ -918,7 +974,7 @@ pub struct Scene {
     absent: usize,
 }
 
-fn rotation(angles: [f32; 3]) -> Mat3 {
+pub fn rotation(angles: [f32; 3]) -> Mat3 {
     Mat3::from_rotation_z(angles[2])
         * Mat3::from_rotation_y(angles[1])
         * Mat3::from_rotation_x(angles[0])
@@ -1002,7 +1058,7 @@ fn aside(path: Option<&String>) -> Aside {
     }
 }
 
-fn matrix(transform: Transform) -> Mat4 {
+pub fn matrix(transform: Transform) -> Mat4 {
     Mat4::from_scale_rotation_translation(
         Vec3::from_array(transform.scale()),
         Quat::from_mat3(&rotation(transform.rotation())),
@@ -1136,6 +1192,7 @@ impl Scene {
             moonlight: None,
             haze: None,
             clouds: [None, None],
+            cloud_shadow: None,
             cloud_files: [Aside::Done, Aside::Done],
             cloud_wanted: [None, None],
             starlight: None,
@@ -1149,10 +1206,13 @@ impl Scene {
             occlusion: None,
             vignette: None,
             reflection: None,
+            water_mirror: None,
             look: program::Look::default(),
             ambient: ambient::Ambient::new(source.scene()),
             lights: Vec::new(),
             effects: Vec::new(),
+            fired: Vec::new(),
+            firing: HashMap::new(),
             effect_files: Vec::new(),
             effect_at: HashMap::new(),
             effect_shape: None,
@@ -1186,6 +1246,8 @@ impl Scene {
             standing: 0,
             fitted: 0,
             renderer: gpu::Renderer::new(),
+            cast: Vec::new(),
+            unplaced: BTreeSet::new(),
             placed: Vec::new(),
             casts: Vec::new(),
             motions: Vec::new(),
@@ -1247,6 +1309,87 @@ impl Scene {
     /// driven camera shows. Forgotten the same way [`Self::drive`] is.
     pub fn mark(&mut self, markers: Vec<(Vec3, String)>) {
         self.markers = markers;
+    }
+
+    /// The characters standing in the scene, replacing whoever stood there before. Unlike
+    /// [`Self::place`] a host may call this every frame: a cast that changes is one whose models
+    /// have finished arriving, not a scene to build again.
+    pub fn stand(&mut self, cast: Vec<Standing>) {
+        self.cast = cast;
+    }
+
+    /// Which of the props a host placed are out of the frame, replacing whatever was out before.
+    /// Called every frame the way [`Self::stand`] is.
+    pub fn hide(&mut self, unplaced: BTreeSet<u32>) {
+        if self.unplaced != unplaced {
+            self.unplaced = unplaced;
+            self.dirty = true;
+        }
+    }
+
+    /// The effects a host outside this view is running, replacing whatever it ran before. Called
+    /// every frame the way [`Self::stand`] is: what a firing has run out is kept by its id, so the
+    /// list itself is only where each one stands and how far along it is.
+    pub fn fire(&mut self, fired: Vec<Fired>) {
+        self.fired = fired;
+    }
+
+    /// Adds props to the scene under a layer of their own. Unlike [`Self::drive`] and
+    /// [`Self::mark`] this appends, so a host builds a scene's props once rather than every frame.
+    pub fn place(&mut self, layer: &str, props: Vec<Prop>) {
+        if props.is_empty() {
+            return;
+        }
+        self.layers.push(Layer {
+            name: layer.to_owned(),
+            origin: None,
+            visible: true,
+            festival: 0,
+            shown: true,
+            placements: 0,
+        });
+        let at = self.layers.len() - 1;
+        for prop in props {
+            let here = matrix(prop.transform);
+            let key = reach((0, [0; 4]), 0, prop.id);
+            match prop.asset {
+                Asset::Model(path) => {
+                    let model = self.model(&path);
+                    self.models[model].instances += 1;
+                    self.layers[at].placements += 1;
+                    self.placements.push(Placement {
+                        model,
+                        transform: here,
+                        driven: None,
+                        center: here.transform_point3(Vec3::ZERO),
+                        // A prop states neither a bounding sphere nor a fade distance, and the
+                        // record the game builds for one leaves both at nought as well, so it
+                        // never fades.
+                        radius: 0.0,
+                        fade: 0.0,
+                        layer: at,
+                        key,
+                        glow: None,
+                        casts: true,
+                        wind_phase: None,
+                    });
+                }
+                Asset::Group(path) => self.waiting.push(Expand {
+                    path,
+                    transform: here,
+                    key,
+                    scale: Vec3::from_array(prop.transform.scale())
+                        .abs()
+                        .max_element()
+                        .max(0.001),
+                    layer: Some(at),
+                    depth: 1,
+                    chain: Vec::new(),
+                    since: Mat4::IDENTITY,
+                }),
+            }
+        }
+        self.dirty = true;
     }
 
     /// Reads placements out of a file's layers, queueing every shared group it names.
@@ -1973,7 +2116,7 @@ impl Scene {
             from,
             along,
             self.placements.iter().enumerate().filter_map(|(at, placement)| {
-                if !self.layers[placement.layer].shown {
+                if !self.layers[placement.layer].shown || self.unplaced.contains(&placement.key.0) {
                     return None;
                 }
                 let span = (placement.center - eye).length() - placement.radius;
@@ -2000,7 +2143,7 @@ impl Scene {
 
         for at in 0..self.placements.len() {
             let placement = self.placements[at].clone();
-            if !self.layers[placement.layer].shown {
+            if !self.layers[placement.layer].shown || self.unplaced.contains(&placement.key.0) {
                 continue;
             }
             let span = (placement.center - eye).length() - placement.radius;
@@ -2112,22 +2255,7 @@ impl Scene {
                 let EffectState::Ready(parsed, live, _) = &effect.state else {
                     return None;
                 };
-                // Held back rather than drawn white: a texture still fetching would otherwise bind
-                // no sampler at all, and an additive quad with none reads as flat white.
-                let ready = parsed.textures.iter().all(|path| {
-                    matches!(self.textures.get(path.as_str()), Some(Texture::Ready(_)))
-                });
-                if !ready {
-                    return None;
-                }
-                let bound: Vec<Option<egui::TextureId>> = parsed
-                    .textures
-                    .iter()
-                    .map(|path| match self.textures.get(path) {
-                        Some(Texture::Ready(handle)) => Some(handle.id()),
-                        _ => None,
-                    })
-                    .collect();
+                let bound = self.bound_textures(parsed)?;
                 let base = parsed.drawn(live);
                 let mut drawn = Vec::new();
                 for vfx in self.effects.iter().filter(|vfx| vfx.path == effect.path) {
@@ -2153,6 +2281,43 @@ impl Scene {
                     batches,
                     fade_range: parsed.fade_range,
                 })
+            })
+            .chain(self.fired.iter().filter_map(|held| {
+                let Some(EffectState::Ready(parsed, ..)) = self
+                    .effect_at
+                    .get(&held.path)
+                    .map(|at| &self.effect_files[*at].state)
+                else {
+                    return None;
+                };
+                let bound = self.bound_textures(parsed)?;
+                let (scale, rotation, translation) = held.at.to_scale_rotation_translation();
+                let scale = scale.abs().max_element().max(0.001);
+                let drawn: Vec<_> = parsed
+                    .drawn(self.firing.get(&held.id)?)
+                    .into_iter()
+                    .map(|item| item.placed(rotation, translation, scale, held.tint))
+                    .collect();
+                let batches = avfx::batches(parsed, drawn, &bound, view, eye, right, up);
+                (!batches.is_empty()).then_some(gpu::EffectDraw {
+                    path: held.path.clone(),
+                    batches,
+                    fade_range: parsed.fade_range,
+                })
+            }))
+            .collect()
+    }
+
+    /// The handle bound to each texture an effect samples, or `None` where one has not arrived:
+    /// held back rather than drawn white, since an additive quad with no sampler reads as flat
+    /// white.
+    fn bound_textures(&self, parsed: &avfx::sim::Effect) -> Option<Vec<Option<egui::TextureId>>> {
+        parsed
+            .textures
+            .iter()
+            .map(|path| match self.textures.get(path.as_str()) {
+                Some(Texture::Ready(handle)) => Some(Some(handle.id())),
+                _ => None,
             })
             .collect()
     }
@@ -2343,6 +2508,7 @@ impl Scene {
             .effects
             .iter()
             .map(|vfx| vfx.path.clone())
+            .chain(self.fired.iter().map(|held| held.path.clone()))
             .collect::<Vec<_>>()
         {
             if self.effect_at.contains_key(&path) {
@@ -2411,11 +2577,32 @@ impl Scene {
             };
             parsed.seek(live, target);
         }
+
+        // A firing runs once rather than over and over: the host says when it started, so it plays
+        // to the end its own file states and settles there. Held to that end, and to the longest
+        // run the simulation reaches at all, since stepping is what moves a particle and a scrub
+        // deep into a cutscene would otherwise replay every frame of it in one paint.
+        self.firing
+            .retain(|id, _| self.fired.iter().any(|held| held.id == *id));
+        for held in &self.fired {
+            let Some(EffectState::Ready(parsed, ..)) = self
+                .effect_at
+                .get(&held.path)
+                .map(|at| &self.effect_files[*at].state)
+            else {
+                continue;
+            };
+            let end = match parsed.bounded {
+                true => parsed.length,
+                false => avfx::sim::LONGEST,
+            };
+            parsed.seek(self.firing.entry(held.id).or_default(), held.frame.clamp(0, end));
+        }
     }
 
     /// The two apricot packages an effect is drawn with, fetched once the zone places any at all.
     fn load_effect_packages(&mut self, backend: &Backend) {
-        if self.effects.is_empty() {
+        if self.effects.is_empty() && self.fired.is_empty() {
             return;
         }
         for (held, path) in [
@@ -2688,6 +2875,7 @@ impl Scene {
 
     /// Reads one detail level of a model and hands its geometry to the card.
     fn decode(&mut self, at: usize, bytes: Vec<u8>, level: u8) -> Result<()> {
+        let path = self.models[at].path.clone();
         let container = ModelContainer::read(Cursor::new(bytes))?;
         let model = container.model(mdl::detail(level));
         let mut built = Vec::new();
@@ -2703,7 +2891,7 @@ impl Scene {
                 continue;
             };
             let name = mesh.material().unwrap_or_default();
-            let resolved = mdl::material::path(&name, 0, None).unwrap_or(name);
+            let resolved = mdl::material::path(&path, &name, 0, None).unwrap_or(name);
             used.push(self.material(&resolved));
             built.push(geometry);
         }
@@ -2796,6 +2984,7 @@ impl Scene {
         }
         wanted.extend(program::GLARE.map(str::to_owned));
         wanted.extend(program::REFLECTION.map(str::to_owned));
+        wanted.extend(program::WATER_MIRROR.map(str::to_owned));
         wanted.extend([
             program::FXAA_LUMA.to_owned(),
             program::FXAA.to_owned(),
@@ -2804,6 +2993,9 @@ impl Scene {
             program::MOON.to_owned(),
             program::SHADOW.to_owned(),
             program::VIGNETTE.to_owned(),
+            program::DOWN_SCALE.to_owned(),
+            program::GATHER.to_owned(),
+            self.look.occluder(),
         ]);
         // Only where the weather states a fog of its own, the same way the exposure chain is only
         // asked for where there is something to run it under.
@@ -2812,6 +3004,8 @@ impl Scene {
         }
         if self.ambient.clouds().is_some() {
             wanted.push(program::CLOUD.to_owned());
+            wanted.push(program::CLOUD_SHADOW.to_owned());
+            wanted.push(program::CLOUD_SHADOW_VERTEX.to_owned());
         }
         if self.ambient.starfield().is_some() {
             wanted.push(program::STAR_VERTEX.to_owned());
@@ -3129,6 +3323,37 @@ impl Scene {
         }))
     }
 
+    /// The chain that fills what water reflects itself through, translated once its ten shaders
+    /// have arrived. Each member is drawn with the vertex shader the game pairs it with, and the two
+    /// that run over the water itself with the one shared vertex shader.
+    fn watering(&self) -> Option<Arc<mdl::deferred::WaterMirror>> {
+        let ready = |path: &str| match self.packages.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes),
+            _ => None,
+        };
+        let held = |path: &str, vertex: &str| {
+            let mut held = program::Program::sampling(path, ready(path)?, ready(vertex)?)
+                .inspect_err(|why| log::warn!("assets/layer: {path}: {why}"))
+                .ok()?;
+            held.pass = program::Pass::WaterMirror;
+            Some(Arc::new(held))
+        };
+        let over = |path: &str| held(path, program::WATER_MIRROR_VERTEX);
+        Some(Arc::new(mdl::deferred::WaterMirror {
+            mask: over(program::WATER_MIRROR_MASK)?,
+            march: over(program::WATER_MIRROR_MARCH)?,
+            blur: [
+                held(program::WATER_MIRROR_BLUR, program::WATER_MIRROR_BLUR_X)?,
+                held(program::WATER_MIRROR_BLUR, program::WATER_MIRROR_BLUR_Y)?,
+            ],
+            wide: held(program::WATER_MIRROR_WIDE, program::WATER_MIRROR_WIDE_X)?,
+            merge: held(
+                program::WATER_MIRROR_MERGE,
+                program::WATER_MIRROR_MERGE_VERTEX,
+            )?,
+        }))
+    }
+
     /// The pair that smooths the frame's edges, and the three that work out how much sky reaches
     /// each pixel, each translated once all of its own shaders have arrived.
     fn edges(&self) -> Option<Arc<mdl::gpu::Smoothing>> {
@@ -3163,13 +3388,15 @@ impl Scene {
         }))
     }
 
-    /// Withheld until its thresholds mean something here. The occlusion pass takes the distance past
-    /// which two samples stop being one surface as a fraction of the depth the frame spans, and the
-    /// fractions are the model viewer's, where a frame spans one model. A zone spans thousands of
-    /// units, so the same fraction is hundreds of them: every tap would read as the same surface. No
-    /// file states the pass's own constants, so there is nothing to scale them by yet.
+    /// The chain that works out how much of the sky reaches each pixel, translated once its three
+    /// shaders have arrived. The taps ship as a file per quality, so a change there is a chain of
+    /// its own rather than a constant.
     fn occluders(&self) -> Option<Arc<mdl::gpu::Occlusion>> {
-        None
+        Some(Arc::new(mdl::gpu::Occlusion {
+            scale: self.effect(program::DOWN_SCALE, program::POST_VERTEX)?,
+            gather: self.effect(program::GATHER, program::GATHER_VERTEX)?,
+            occlude: self.effect(&self.look.occluder(), program::POST_VERTEX)?,
+        }))
     }
 
     /// The exposure chain, translated once all six of its shaders have arrived. The three that
@@ -3266,20 +3493,33 @@ impl Scene {
             && lighting.shadow.is_none()
             && matches!(self.packages.get(program::SHADOW), Some(Package::Ready(_)))
         {
-            // Nine taps rather than one: a single comparison shows every texel of the map as a
-            // step. Both keys are asked for here alone, so no other package moves with them.
+            // The strongest softening rather than a fixed square: a square of any width blurs an
+            // edge by as much where it meets the thing casting it as it does far away from it. Both
+            // keys are asked for here alone, so no other package moves with them.
             let shadow = self.screen(
                 program::SHADOW,
                 program::Pass::Lighting,
                 attachments,
                 &[
-                    (program::SHADOW_SOFT, program::SHADOW_SOFT_3X3),
+                    (program::SHADOW_SOFT, program::SHADOW_SOFT_PCSS),
                     (program::TRANSFORM_PROJ, program::TRANSFORM_PROJ_PLANE_FAR),
                 ],
             );
             if shadow.is_none() {
                 self.packages
                     .insert(program::SHADOW.to_owned(), Package::Failed);
+            }
+            // The dither it turns each pixel's disc by, which the engine binds and no material ever
+            // names as a path.
+            for texture in shadow.iter().flat_map(|held| &held.textures) {
+                if let Some((id, path, _)) = mdl::deferred::ENGINE
+                    .iter()
+                    .find(|(held, _, _)| *held == texture.id)
+                {
+                    self.engine
+                        .entry(*id)
+                        .or_insert_with(|| Aside::Wanted(path.to_string()));
+                }
             }
             self.lighting = Some(Arc::new(mdl::gpu::Lighting {
                 shadow,
@@ -3313,6 +3553,29 @@ impl Scene {
                     .ok()
                     .map(Arc::new);
             }
+        }
+        // One target, whatever the frame's own packing takes: the map holds a weight rather than a
+        // channel of the G-buffer.
+        if self.cloud_shadow.is_none()
+            && let Some(Package::Ready(bytes)) = self.packages.get(program::CLOUD)
+            && let (Some(Package::Ready(blur)), Some(Package::Ready(vertex))) = (
+                self.packages.get(program::CLOUD_SHADOW),
+                self.packages.get(program::CLOUD_SHADOW_VERTEX),
+            )
+        {
+            let sheet = program::Program::cloud(bytes, program::Pass::CloudShadow, 1)
+                .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::CLOUD))
+                .ok();
+            let held = program::Program::sampling(program::CLOUD_SHADOW, blur, vertex)
+                .inspect_err(|why| log::warn!("assets/layer: {}: {why}", program::CLOUD_SHADOW))
+                .ok()
+                .map(|mut held| {
+                    held.pass = program::Pass::CloudShadow;
+                    held
+                });
+            self.cloud_shadow = sheet
+                .zip(held)
+                .map(|(sheet, blur)| (Arc::new(sheet), Arc::new(blur)));
         }
         if self.starlight.is_none()
             && let (Some(Package::Ready(vertex)), Some(Package::Ready(fragment))) = (
@@ -3349,6 +3612,9 @@ impl Scene {
         }
         if self.reflection.is_none() {
             self.reflection = self.mirror();
+        }
+        if self.water_mirror.is_none() {
+            self.water_mirror = self.watering();
         }
         if self.smoothing.is_none() {
             self.smoothing = self.edges();
@@ -3764,6 +4030,7 @@ impl Scene {
     fn passes(&self) -> String {
         let held = self.renderer.lock().unwrap().drawn();
         let ran: Vec<&str> = [
+            (held.occlusion, "occlusion"),
             (held.shadow, "shadow"),
             (held.sky, "sky"),
             (held.sun, "sun"),
@@ -3771,11 +4038,13 @@ impl Scene {
             (held.stars, "stars"),
             (held.clouds[0], "band"),
             (held.clouds[1], "sheet"),
+            (held.cloud_shadow, "cloud shadow"),
             (held.fog, "fog"),
             (held.reflection, "reflection"),
+            (held.water, "water mirror"),
             (held.vignette, "vignette"),
             (
-                !self.effects.is_empty()
+                !(self.effects.is_empty() && self.fired.is_empty())
                     && self
                         .effect_files
                         .iter()
@@ -3949,12 +4218,23 @@ impl Scene {
             }
         }
 
+        let attachments = self.renderer.lock().unwrap().attachments();
+        let cast: Vec<mdl::Cast> = self
+            .cast
+            .iter()
+            .map(|held| mdl::Cast {
+                opacity: held.opacity,
+                ..held.model.cast(matrix(held.at), attachments)
+            })
+            .collect();
+
         let (light, color) = self.ambient.light();
         let blades = self.sown();
         self.standing = blades.iter().map(|held| self.turf[held.turf].blades).sum();
         let effects = self.effect_draws(view, eye);
         let effects_drawn = effects.iter().map(|held| held.batches.len()).sum();
         let frame = gpu::Frame {
+            casts: cast,
             scene: program::Scene {
                 view,
                 projection,
@@ -4023,11 +4303,13 @@ impl Scene {
             starlight: self.starlight.clone(),
             haze: self.haze.clone(),
             clouds: self.clouds.clone(),
+            cloud_shadow: self.cloud_shadow.clone(),
             glare: self.glare.clone(),
             smoothing: self.smoothing.clone(),
-            occlusion: self.occlusion.clone(),
+            occlusion: self.look.occlude.then(|| self.occlusion.clone()).flatten(),
             vignette: self.look.vignette.then(|| self.vignette.clone()).flatten(),
             reflection: self.look.reflect.then(|| self.reflection.clone()).flatten(),
+            water_mirror: self.look.reflect.then(|| self.water_mirror.clone()).flatten(),
             lamps: self.lamps(),
             batches,
             grass: self.sward.clone(),
@@ -4112,7 +4394,7 @@ impl Scene {
             step,
             placed: self.placements.len(),
             drawn: self.placed.iter().flatten().map(Vec::len).sum(),
-            effects: self.effects.len(),
+            effects: self.effects.len() + self.fired.len(),
             effects_drawn,
             casting: self.casts.iter().flatten().sum(),
             models: format!(
@@ -4167,7 +4449,7 @@ impl Scene {
                 basis.y_axis / scale.y,
                 basis.z_axis / scale.z,
             );
-            let (y, x, z) = Quat::from_mat3(&upright).to_euler(glam::EulerRot::YXZ);
+            let (z, y, x) = Quat::from_mat3(&upright).to_euler(glam::EulerRot::ZYX);
             Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees())
         });
         let place = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
@@ -4556,6 +4838,22 @@ impl Scene {
                         .changed();
                 }
             }
+let quality = self.look.quality;
+            ui.checkbox(&mut self.look.occlude, "环境光遮蔽").on_hover_text(
+                "用游戏自带的 HDAO 为褶皱处着色，所有越过太阳的光线和合成权重都按它计算",
+            );
+            ui.add_enabled_ui(self.look.occlude, |ui| {
+                egui::ComboBox::from_id_salt("layer-occluder")
+                    .selected_text(program::OCCLUDERS[self.look.quality])
+                    .show_ui(ui, |ui| {
+                        for (at, what) in program::OCCLUDERS.iter().enumerate() {
+                            ui.selectable_value(&mut self.look.quality, at, *what);
+                        }
+                    });
+            });
+            if self.look.quality != quality {
+                self.occlusion = None;
+            }
             ui.checkbox(&mut self.look.vignette, "暗角").on_hover_text(
                 "用游戏自带的通道压暗画面四角。暗角椭圆随画面自身的形状展开，\
                  但下面两项是自定义选择：没有任何文件给出定义",
@@ -4861,6 +5159,11 @@ mod tests {
         let quarter = std::f32::consts::FRAC_PI_2;
         assert!((rotation([0.0, quarter, 0.0]) * Vec3::Z - Vec3::X).length() < 1e-5);
         assert!((rotation([quarter, 0.0, quarter]) * Vec3::Z - Vec3::X).length() < 1e-5);
+        // The timeline deltas take the same order through glam's own sequence instead.
+        assert!(
+            Quat::from_euler(glam::EulerRot::ZYX, 1.1, 0.7, 0.3)
+                .abs_diff_eq(Quat::from_mat3(&rotation([0.3, 0.7, 1.1])), 1e-5)
+        );
     }
 
     #[test]

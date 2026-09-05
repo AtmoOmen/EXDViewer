@@ -23,7 +23,23 @@ fn main() {
             for (index, mesh) in container.model(lod).meshes().into_iter().enumerate() {
                 let material = mesh.material().unwrap_or_default();
                 let count = mesh.indices().map(|held| held.len()).unwrap_or(0);
-                let parts: Vec<usize> = mesh.submeshes().iter().map(|part| part.count).collect();
+                let names = container.model(lod).attribute_names().unwrap_or_default();
+                let parts: Vec<String> = mesh
+                    .submeshes()
+                    .iter()
+                    .map(|part| {
+                        let held: Vec<&str> = names
+                            .iter()
+                            .enumerate()
+                            .filter(|(bit, _)| part.attributes & (1 << bit) != 0)
+                            .map(|(_, name)| name.as_str())
+                            .collect();
+                        match held.is_empty() {
+                            true => part.count.to_string(),
+                            false => format!("{} {}", part.count, held.join("+")),
+                        }
+                    })
+                    .collect();
                 println!("  lod {lod:?} mesh {index:3} {count:8} indices  {parts:?}  {material}");
             }
         }

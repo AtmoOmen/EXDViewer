@@ -3,7 +3,9 @@
 //! The timelines hold the same commands `.tmb` does, and most of what a cutscene puts in them is a
 //! kind that crate does not model, so a row saying only its magic and its size is the honest one.
 
+mod music;
 mod play;
+mod sound;
 
 use std::cell::Cell;
 use std::io::Cursor;
@@ -63,12 +65,9 @@ fn holds(node: &Node) -> String {
         Node::Sheet(sheet) => format!("工作表 {sheet}"),
         Node::Scene(scene) => format!("{}, {} 个条目", scene.level(), scene.entries().len()),
         Node::Participants(participants) => format!(
-            "{} 个参与者, {} 字节未读",
+            "{} 个参与者: {}",
             participants.len(),
-            participants
-                .iter()
-                .map(|participant| participant.body().len())
-                .sum::<usize>()
+            play::roll_call(participants)
         ),
         Node::Groups(groups) => format!(
             "{} 个分组, {} 条记录",
@@ -138,7 +137,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         })
         .sum::<usize>();
 
-    let play = play::Tab::new(level.clone(), &file);
+    let play = play::Tab::new(level.clone(), path, &file);
     let identity = vec![
         ("节点", nodes.len().to_string()),
         ("关卡", level),

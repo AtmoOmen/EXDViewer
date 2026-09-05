@@ -491,6 +491,9 @@ impl Ambient {
     /// sum there, but `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength per layer, so
     /// [`layers`](program::Wind::layers) carries them apart as well.
     ///
+    /// The azimuth turns the other way from the plain reading: a capture's own `g_WindInfo` holds
+    /// `(-sin, 0, cos)` of both azimuths this zone states, neither of which the plain reading fits.
+    ///
     /// Each layer's `wavelength` feeds `grass.shpk`'s own world-to-texel scale for sampling
     /// `bgcommon/nature/wind/texture/wind_00{1,2}.tex`, as `1.0 / wavelength` with no term beside
     /// it. `min_strength` is read now that it has a real consumer (the same texture sample, squared,
@@ -502,7 +505,7 @@ impl Ambient {
             let of = |field: &str| scalar(held, &format!("layer_{which}_{field}"), 0.0);
             let heading = of("azimuth_degrees").to_radians();
             program::WindLayer {
-                heading: Vec3::new(heading.sin(), 0.0, heading.cos()),
+                heading: Vec3::new(-heading.sin(), 0.0, heading.cos()),
                 max_strength: of("max_strength"),
                 min_strength: of("min_strength"),
                 wavelength: of("wavelength"),

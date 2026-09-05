@@ -542,6 +542,24 @@ so nothing swallows it.
   nine `.avfx` effects the browser gate's full run walks. Nothing stops `--smoke` from taking more
   steps; `smoke/native.sh` just does not ask for more yet.
 
+### Shooting a cutscene
+
+A third step kind, `cut:<path.cutb>`, opens a cutscene and clicks its "Play" tab, which is the only
+way to see the level, the props and the cast a `.cutb` stands. No step list asks for one, so it is
+driven by hand:
+
+```
+cargo build -q -p viewer --bin viewer --profile smoke
+Xvfb -displayfd 3 3>display -screen 0 1600x1000x24 &
+DISPLAY=":$(cat display)" target/smoke/viewer --smoke "$sqpack" out \
+    cut:cut/ex1/heavnc/heavnc11015/heavnc11015.cutb
+```
+
+**Build it with the `smoke` profile, not the dev one `native.sh` uses.** A field zone loaded under a
+cutscene streams a level, hundreds of props and a model per character; a dev build's decode is slow
+enough that even a 75-second settle shoots a black frame, which reads as a broken change rather than
+as a starved one.
+
 ### Comparability with the browser gate
 Both gates can be pointed at the same assets: `native.sh`'s `steps` array and `smoke.ts`'s
 `MODEL`/`SCENE`/`LEVEL` defaults were kept in sync (`bg/ex1/01_roc_r2/dun/r2d1/...`) for exactly
@@ -557,3 +575,9 @@ build itself (trunk, dev profile) took ~41s on top of the browser gate's run tim
 own dev build took ~6s incrementally or ~42s clean, so on a clean checkout the two are closer than
 the run-time numbers alone suggest, and the gap grows every time either gate runs again without a
 rebuild.
+
+## Waiting on the gate from a script
+
+`smoke.ts` prints its verdict as `PASS: no GL errors, panics or ERROR logs` and exits 0. There is no
+`smoke: PASS` line; a monitor watching for one idles until it times out long after the run finished.
+Match on the exit code, or on `^PASS:`.

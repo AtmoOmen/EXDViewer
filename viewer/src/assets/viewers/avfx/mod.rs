@@ -134,11 +134,139 @@ pub struct Rendered {
     playing: Cell<bool>,
     camera: Cell<Camera>,
     home: Camera,
-    textures: RefCell<HashMap<String, Texture>>,
-    resident: Cell<usize>,
-    /// The apricot packages the effect is drawn with, and what the draw callback last saw of them.
-    packages: RefCell<HashMap<&'static str, Package>>,
-    resolved: RefCell<Arc<gpu::Packages>>,
+    textures: RefCell<Textures>,
+    shaders: RefCell<Shaders>,
+}
+
+/// The textures an effect samples, asked for once each and handed to egui as they arrive.
+#[derive(Default)]
+pub(crate) struct Textures {
+    held: HashMap<String, Texture>,
+    /// What the ones already handed over take of the budget.
+    resident: usize,
+}
+
+impl Textures {
+    /// Asks for whatever `wanted` names that is not in hand yet. Runs every frame; one already
+    /// resolved costs a lookup.
+    pub(crate) fn poll(&mut self, ctx: &egui::Context, backend: &Backend, wanted: &[String]) {
+        let Self { held, resident } = self;
+        for path in wanted {
+            if held.contains_key(path) {
+                continue;
+            }
+            if *resident >= TEXTURE_BUDGET {
+                log::warn!("assets/avfx: {path}: 超出本特效的纹理预算");
+                held.insert(path.clone(), Texture::Absent);
+                continue;
+            }
+            let files = backend.files().clone();
+            let wanted = path.clone();
+            held.insert(
+                path.clone(),
+                Texture::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read_texture(&wanted, Some(TEXTURE_SIZE)).await
+                })),
+            );
+        }
+        for (path, texture) in held.iter_mut() {
+            let Texture::Fetching(promise) = texture else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            *texture = match result {
+                Ok(decoded) => {
+                    let handled = crate::utils::tex_loader::fit(ctx, &decoded.image);
+                    let size = [handled.width() as usize, handled.height() as usize];
+                    *resident += size[0] * size[1] * 4;
+                    let image = egui::ColorImage::from_rgba_premultiplied(
+                        size,
+                        handled.as_flat_samples().as_slice(),
+                    );
+                    Texture::Ready(ctx.load_texture(
+                        format!("avfx:{path}"),
+                        image,
+                        TextureOptions {
+                            magnification: egui::TextureFilter::Linear,
+                            minification: egui::TextureFilter::Linear,
+                            wrap_mode: egui::TextureWrapMode::ClampToEdge,
+                            mipmap_mode: Some(egui::TextureFilter::Linear),
+                        },
+                    ))
+                }
+                Err(why) => {
+                    log::error!("assets/avfx: {path}: {why}");
+                    Texture::Absent
+                }
+            };
+        }
+    }
+
+    /// The handle bound to each of `wanted`, or `None` where one has not arrived: held back rather
+    /// than drawn white, since an additive quad with no sampler reads as flat white.
+    pub(crate) fn bound(&self, wanted: &[String]) -> Vec<Option<egui::TextureId>> {
+        wanted
+            .iter()
+            .map(|path| match self.held.get(path) {
+                Some(Texture::Ready(handle)) => Some(handle.id()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The two apricot packages every effect is shaded by, asked for once however many are drawn.
+#[derive(Default)]
+pub(crate) struct Shaders {
+    held: HashMap<&'static str, Package>,
+    resolved: Arc<gpu::Packages>,
+}
+
+impl Shaders {
+    pub(crate) fn poll(&mut self, backend: &Backend) {
+        for path in [program::SHAPE, program::MODEL] {
+            self.held.entry(path).or_insert_with(|| {
+                let files = backend.files().clone();
+                Package::Fetching(TrackedPromise::spawn_local(async move {
+                    files.read(path).await
+                }))
+            });
+        }
+        let mut arrived = false;
+        for (path, package) in self.held.iter_mut() {
+            let Package::Fetching(promise) = package else {
+                continue;
+            };
+            let Some(result) = promise.try_get() else {
+                continue;
+            };
+            arrived = true;
+            *package = match result {
+                Ok(bytes) => Package::Ready(bytes.clone()),
+                Err(why) => {
+                    log::error!("assets/avfx: {path}: {why}");
+                    Package::Failed
+                }
+            };
+        }
+        if !arrived {
+            return;
+        }
+        let held = |path| match self.held.get(path) {
+            Some(Package::Ready(bytes)) => Some(bytes.clone()),
+            _ => None,
+        };
+        self.resolved = Arc::new(gpu::Packages {
+            shape: held(program::SHAPE),
+            model: held(program::MODEL),
+        });
+    }
+
+    pub(crate) fn resolved(&self) -> Arc<gpu::Packages> {
+        self.resolved.clone()
+    }
 }
 
 /// The first block carrying `name`.
@@ -663,9 +791,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         camera: Cell::new(home),
         home,
         textures: RefCell::default(),
-        resident: Cell::new(0),
-        packages: RefCell::default(),
-        resolved: RefCell::default(),
+        shaders: RefCell::default(),
     })))
 }
 
@@ -803,104 +929,12 @@ impl Rendered {
             .collect()
     }
 
-    /// Asks for the textures the effect samples and hands what arrived to egui. Runs every frame; a
-    /// texture that is already resolved costs a lookup.
+    /// Asks for the textures the effect samples and the packages it is shaded by.
     fn poll(&self, ui: &egui::Ui, backend: &Backend) {
-        self.poll_packages(backend);
-        let mut textures = self.textures.borrow_mut();
-        for path in &self.effect.textures {
-            if textures.contains_key(path) {
-                continue;
-            }
-            if self.resident.get() >= TEXTURE_BUDGET {
-                log::warn!("assets/avfx: {path}: 超出本特效的纹理预算");
-                textures.insert(path.clone(), Texture::Absent);
-                continue;
-            }
-            let files = backend.files().clone();
-            let wanted = path.clone();
-            textures.insert(
-                path.clone(),
-                Texture::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read_texture(&wanted, Some(TEXTURE_SIZE)).await
-                })),
-            );
-        }
-        for (path, texture) in textures.iter_mut() {
-            let Texture::Fetching(promise) = texture else {
-                continue;
-            };
-            let Some(result) = promise.try_get() else {
-                continue;
-            };
-            *texture = match result {
-                Ok(decoded) => {
-                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
-                    let size = [held.width() as usize, held.height() as usize];
-                    self.resident
-                        .set(self.resident.get() + size[0] * size[1] * 4);
-                    let image = egui::ColorImage::from_rgba_premultiplied(
-                        size,
-                        held.as_flat_samples().as_slice(),
-                    );
-                    Texture::Ready(ui.ctx().load_texture(
-                        format!("avfx:{path}"),
-                        image,
-                        TextureOptions {
-                            magnification: egui::TextureFilter::Linear,
-                            minification: egui::TextureFilter::Linear,
-                            wrap_mode: egui::TextureWrapMode::ClampToEdge,
-                            mipmap_mode: Some(egui::TextureFilter::Linear),
-                        },
-                    ))
-                }
-                Err(why) => {
-                    log::error!("assets/avfx: {path}: {why}");
-                    Texture::Absent
-                }
-            };
-        }
-    }
-
-    /// Asks for the two apricot packages, which are what the effect is shaded by.
-    fn poll_packages(&self, backend: &Backend) {
-        let mut packages = self.packages.borrow_mut();
-        for path in [program::SHAPE, program::MODEL] {
-            packages.entry(path).or_insert_with(|| {
-                let files = backend.files().clone();
-                Package::Fetching(TrackedPromise::spawn_local(async move {
-                    files.read(path).await
-                }))
-            });
-        }
-        let mut arrived = false;
-        for (path, package) in packages.iter_mut() {
-            let Package::Fetching(promise) = package else {
-                continue;
-            };
-            let Some(result) = promise.try_get() else {
-                continue;
-            };
-            arrived = true;
-            *package = match result {
-                Ok(bytes) => Package::Ready(bytes.clone()),
-                Err(why) => {
-                    log::error!("assets/avfx: {path}: {why}");
-                    Package::Failed
-                }
-            };
-        }
-        if !arrived {
-            return;
-        }
-        let held = |path| match packages.get(path) {
-            Some(Package::Ready(bytes)) => Some(bytes.clone()),
-            _ => None,
-        };
-        *self.resolved.borrow_mut() = Arc::new(gpu::Packages {
-            shape: held(program::SHAPE),
-            model: held(program::MODEL),
-        });
+        self.shaders.borrow_mut().poll(backend);
+        self.textures
+            .borrow_mut()
+            .poll(ui.ctx(), backend, &self.effect.textures);
     }
 
     /// The playback bar, and the effect running under it.
@@ -1033,7 +1067,7 @@ impl Rendered {
                 ..program::Scene::default()
             },
             batches: self.batches(view, eye, axes.x_axis, axes.y_axis),
-            packages: self.resolved.borrow().clone(),
+            packages: self.shaders.borrow().resolved(),
             tested: false,
             // Nothing behind a particle here, so the soft-particle variant reads an unbound
             // sampler same as before: the preview has no scene depth to copy.
@@ -1057,16 +1091,7 @@ impl Rendered {
     /// The live particles, gathered into one draw apiece per particle definition and blend, furthest
     /// group first. Blending reads what is already there, so the order is part of the picture.
     fn batches(&self, view: Mat4, eye: Vec3, right: Vec3, up: Vec3) -> Vec<gpu::Batch> {
-        let textures = self.textures.borrow();
-        let bound: Vec<Option<egui::TextureId>> = self
-            .effect
-            .textures
-            .iter()
-            .map(|path| match textures.get(path) {
-                Some(Texture::Ready(handle)) => Some(handle.id()),
-                _ => None,
-            })
-            .collect();
+        let bound = self.textures.borrow().bound(&self.effect.textures);
         batches(
             &self.effect,
             self.effect.drawn(&self.live.borrow()),
@@ -1162,8 +1187,9 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
             spun(across, away.cross(across))
         }
         // Standing upright is the whole of what this one asks for, so it takes no turn: a roll would
-        // lean the quad off the axis it is billed about.
-        sim::Facing::Upright => {
+        // lean the quad off the axis it is billed about. Which of the two bills a sprite takes went
+        // unmeasured, so both meet the eye here as they always did.
+        sim::Facing::Upright(_) => {
             let across = Vec3::Y
                 .cross(eye - Vec3::from(drawn.center))
                 .normalize_or(right);
@@ -1184,6 +1210,18 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
     }
 }
 
+/// The turn a model billed about the world's up axis is drawn under. The game hands its own model
+/// package a world matrix and the package never reads the view, so this is the whole of the bill:
+/// the particle's own turn does not survive it.
+fn billed(toward: sim::Toward, center: Vec3, eye: Vec3, back: Vec3) -> glam::Quat {
+    let aim = match toward {
+        sim::Toward::Eye => eye - center,
+        sim::Toward::Screen => back,
+    };
+    let aim = Vec3::new(aim.x, 0.0, aim.z).normalize_or(Vec3::Z);
+    glam::Quat::from_mat3(&glam::Mat3::from_cols(Vec3::Y.cross(aim), Vec3::Y, aim))
+}
+
 /// One batch per particle definition, shape and blend, furthest group first since blending reads
 /// what is already there. Takes already-placed draws: a zone merges every instance of the same file
 /// into one set before calling this, so a placement costs a transform rather than a draw of its own.
@@ -1196,6 +1234,7 @@ pub(crate) fn batches(
     right: Vec3,
     up: Vec3,
 ) -> Vec<gpu::Batch> {
+    let back = right.cross(up);
     let mut groups: BTreeMap<_, Vec<(f32, sim::Drawn)>> = BTreeMap::new();
     for drawn in drawn {
         let center = Vec3::from(drawn.center);
@@ -1230,7 +1269,12 @@ pub(crate) fn batches(
                         instances.push(program::Instance {
                             transform: Mat4::from_scale_rotation_translation(
                                 Vec3::from(drawn.scale),
-                                glam::Quat::from_array(drawn.turn),
+                                match drawn.facing {
+                                    sim::Facing::Upright(toward) => {
+                                        billed(toward, Vec3::from(drawn.center), eye, back)
+                                    }
+                                    _ => glam::Quat::from_array(drawn.turn),
+                                },
                                 Vec3::from(drawn.center),
                             ),
                             color: Vec4::from(drawn.color),
@@ -1830,6 +1874,48 @@ mod tests {
         assert_eq!(at(effect, 0)[0].facing, sim::Facing::Screen);
     }
 
+    /// `RBDT` names the two upright bills apart, and the game turns them to meet different things.
+    #[test]
+    fn the_two_upright_bills_read_apart() {
+        let based = |base| {
+            let effect = &playing(
+                &[
+                    life(-1.0),
+                    block("PrVT", &integer(5)),
+                    block("RBDT", &integer(base)),
+                ],
+                (0, 0),
+            )
+            .effect;
+            at(effect, 0)[0].facing
+        };
+        assert_eq!(based(4), sim::Facing::Upright(sim::Toward::Screen));
+        assert_eq!(based(8), sim::Facing::Upright(sim::Toward::Eye));
+    }
+
+    /// The two bills a model takes about the world's up axis, against the world matrices the game
+    /// hands its own model package: `b0025_aet1_o` over Ishgard at `RBDT 8`, which meets the eye,
+    /// and `b2923_aet1_o` at Tuliyollal's aetheryte at `RBDT 4`, which meets the screen. The two
+    /// are 9 degrees apart at the Ishgard camera, so neither reading can pass for the other.
+    #[test]
+    fn a_billed_model_turns_the_way_the_game_turns_it() {
+        let eye = Vec3::new(-251.920_83, 8.874_07, 166.831_26);
+        let back = -Vec3::new(0.674_39, 0.404_75, -0.617_55);
+        let at = Vec3::new(-64.0, 8.53, 44.0);
+        let basis = glam::Mat3::from_quat(super::billed(sim::Toward::Eye, at, eye, back));
+        assert!(basis.y_axis.abs_diff_eq(Vec3::Y, 1e-6));
+        assert!(basis.z_axis.abs_diff_eq(Vec3::new(-0.837_051, 0.0, 0.547_124), 1e-5));
+        assert!(basis.x_axis.abs_diff_eq(Vec3::new(0.547_124, 0.0, 0.837_051), 1e-5));
+
+        let eye = Vec3::new(-6.535_23, 18.582_67, 36.727_37);
+        let back = -Vec3::new(-0.568_08, -0.186_75, -0.801_5);
+        let at = Vec3::new(-24.067_76, 10.866_75, 7.599_18);
+        let basis = glam::Mat3::from_quat(super::billed(sim::Toward::Screen, at, eye, back));
+        assert!(basis.y_axis.abs_diff_eq(Vec3::Y, 1e-6));
+        assert!(basis.z_axis.abs_diff_eq(Vec3::new(0.578_258, 0.0, 0.815_854), 1e-4));
+        assert!(basis.x_axis.abs_diff_eq(Vec3::new(0.815_854, 0.0, -0.578_258), 1e-4));
+    }
+
     /// A quad billed against the camera can carry the turn about its own normal, and that is the one
     /// the file writes as `Rot/Z`.
     #[test]
@@ -1922,13 +2008,14 @@ mod tests {
         assert_eq!(at(effect, 1000).len(), settled);
     }
 
-    /// Where the emitter itself never stops either, a particle stating no life of its own would
-    /// otherwise pile up forever: it is capped to `length`, the same as under a bounded effect.
+    /// Where the emitter itself never stops either, only the pass an entry names bounds how many
+    /// pile up. This one is made on the emitter's interval, so one lands every frame it comes round
+    /// and nothing the file states clears them.
     #[test]
-    fn a_particle_with_no_life_is_capped_where_its_emitter_never_stops_either() {
+    fn a_particle_with_no_life_piles_up_where_its_emitter_never_stops_either() {
         let effect = &playing(&[life(-1.0)], (0, -1)).effect;
         assert!(!effect.bounded);
-        assert_eq!(at(effect, 1000).len(), 301);
+        assert_eq!(at(effect, 1000).len(), 1001);
     }
 
     #[test]

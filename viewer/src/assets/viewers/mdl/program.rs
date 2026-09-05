@@ -266,6 +266,18 @@ pub const CLOUD: &str = "shader/sm5/shpk/cloud.shpk";
 pub const CLOUD_BAND: u32 = 0xa2f7_6b97;
 pub const CLOUD_SHEET: u32 = 0xd9d5_8038;
 
+/// The subview the sheet answers with the shadow it casts rather than with its own colour, which is
+/// what fills the map the sun's lighting reads a cloud out of. Spelled the way this package's own
+/// generation spells a subview, so it is none of the ids a drawing package answers to.
+const CLOUD_SHADOW_VIEW: u32 = 0x344c_e408;
+
+/// The blur that map is left in, over the four taps the vertex shader the game pairs it with builds.
+pub const CLOUD_SHADOW: &str = "shader/sm5/posteffect/CloudShadow.shcd";
+pub const CLOUD_SHADOW_VERTEX: &str = "shader/sm5/posteffect/VSSampling4.shcd";
+
+/// How wide it is drawn.
+pub const CLOUD_SHADOW_MAP: i32 = 256;
+
 /// The textures each draws, which the environment's cloud set names by id. A sheet of nought is a
 /// weather that draws none: no such file exists.
 pub fn cloud_texture(id: u16) -> String {
@@ -482,6 +494,55 @@ pub const REFLECTION_FADE: [f32; 4] = [16.0, 32.0, 0.0625, 0.0];
 pub const REFLECTION_POWER: f32 = 2.5;
 pub const REFLECTION_ROUGHNESS: f32 = 0.8;
 
+/// The chain water reflects itself off, which is not the one above: `river.shpk` and `water.shpk`
+/// reach no cube and read a screen-wide `g_SamplerReflectionMap` this fills. The mask stamps a
+/// stencil over the water the frame covers, the march walks the same pyramid the frame-wide chain
+/// does for what each of those pixels reflects, a blur pair spreads it, a second one spreads it
+/// further and the merge picks between the two per pixel.
+///
+/// The march ships under no name; the crc32 of `WaterRaytracingHighPS.shcd` is the hash its
+/// directory records it under, which is how it is asked for.
+pub const WATER_MIRROR_VERTEX: &str = "shader/sm5/shcd/WaterReflectionVS.shcd";
+pub const WATER_MIRROR_MASK: &str = "shader/sm5/shcd/WaterReflectionMaskPS.shcd";
+pub const WATER_MIRROR_MARCH: &str = "shader/sm5/shcd/9402c299";
+pub const WATER_MIRROR_BLUR_X: &str = "shader/sm5/shcd/WaterReflectionFirstBlurXVS.shcd";
+pub const WATER_MIRROR_BLUR_Y: &str = "shader/sm5/shcd/WaterReflectionFirstBlurYVS.shcd";
+pub const WATER_MIRROR_BLUR: &str = "shader/sm5/shcd/WaterReflectionFirstBlurPS.shcd";
+pub const WATER_MIRROR_WIDE_X: &str = "shader/sm5/shcd/WaterReflectionSecondBlurXVS.shcd";
+pub const WATER_MIRROR_WIDE: &str = "shader/sm5/shcd/WaterReflectionSecondBlurPS.shcd";
+pub const WATER_MIRROR_MERGE_VERTEX: &str = "shader/sm5/shcd/WaterReflectionBlurMergeVS.shcd";
+pub const WATER_MIRROR_MERGE: &str = "shader/sm5/shcd/WaterReflectionBlurMergePS.shcd";
+
+/// Every file that chain takes, for one fetch list.
+pub const WATER_MIRROR: [&str; 10] = [
+    WATER_MIRROR_VERTEX,
+    WATER_MIRROR_MASK,
+    WATER_MIRROR_MARCH,
+    WATER_MIRROR_BLUR_X,
+    WATER_MIRROR_BLUR_Y,
+    WATER_MIRROR_BLUR,
+    WATER_MIRROR_WIDE_X,
+    WATER_MIRROR_WIDE,
+    WATER_MIRROR_MERGE_VERTEX,
+    WATER_MIRROR_MERGE,
+];
+
+/// The reference the mask stamps and every member after it draws against.
+pub const WATER_MIRROR_STENCIL: i32 = 1;
+
+/// The lane past the fog's own start distance that the game uploads and no member of the chain
+/// reads.
+pub const WATER_MIRROR_UNREAD: f32 = 3500.0;
+
+/// The weights each blur reads its sixteen taps through, eight of them since the kernel is
+/// symmetric. A Gaussian of variance twenty-five taken between texels and normalized over the whole
+/// kernel, which is the game's own upload to six figures.
+fn blur_weights() -> [f32; 8] {
+    let held: [f32; 8] = std::array::from_fn(|at| (-(at as f32 + 0.5).powi(2) / 50.0).exp());
+    let total = held.iter().sum::<f32>() * 2.0;
+    held.map(|weight| weight / total)
+}
+
 /// The buffers the chain reads itself out of, and the one every stage of the engine takes the camera
 /// from.
 const REFLECTION_PARAM: &str = "g_ReflectionParameter";
@@ -538,12 +599,27 @@ const MERGE_WEIGHT: &str = "cMergeWeight";
 const SOFT_FOCUS_PARAM: &str = "cSoftFocusParam";
 const SAMPLING_PARAM: &str = "cParam";
 const SAMPLING_OFFSET: &str = "cSamplingOffset";
+
+/// How far the blur takes the light down where the sheet is at its thickest. The first pair weighs
+/// what the lighting reads under the middle of the map and the second what it reads at the edge, and
+/// within each the first lane is the diffuse's share and the second the specular's.
+const CLOUD_SHADOW_PARAM: &str = "cCloudShadowParam";
+const CLOUD_SHADOW_WEIGHTS: [f32; 4] = [0.5, 0.5, 1.0, 0.5];
+
+/// Where the lighting reads that map, which the package names its buffer and its one member alike.
+const CLOUD_SHADOW_MATRIX: &str = "g_CloudShadowMatrix";
 const VIGNETTING_PARAM: &str = "cVignettingParam";
 
-/// How many taps the shadow resolve reads. One is a single comparison and shows every texel of the
-/// map as a step; nine is what softens the edge.
+/// How the shadow resolve softens an edge. The package names its first two levels a single
+/// comparison and a nine-tap square; the strongest it leaves unnamed, and that one is a different
+/// thing rather than a wider square. It gathers the depths under a disc, sizes a penumbra from how
+/// far behind the pixel the blockers it found stand, and filters at that size.
 pub const SHADOW_SOFT: u32 = 0xa89d_89f0;
-pub const SHADOW_SOFT_3X3: u32 = 0x9915_3ff0;
+pub const SHADOW_SOFT_PCSS: u32 = 0x2b16_de56;
+
+/// How wide the sun stands: the penumbra a unit of distance between a blocker and what it falls on
+/// widens by. Read off the five cascades of a captured frame, exact in each.
+const SUN_SOFTNESS: f32 = 0.007;
 
 /// What geometry a pass covers the frame with. The resolve's far-plane variant stands its quad at
 /// the second lane of `m_ShadowDistance`, which is where a split stops.
@@ -584,6 +660,16 @@ const SHEET_RISE: f32 = 1000.0;
 
 /// The radius the band stands at around the camera.
 const BAND_RADIUS: f32 = 2000.0;
+
+/// What the sheet's shadow map is sized to cover: one period of its own texture, so a texel of the
+/// map is a fixed share of a cloud however far across the world the sheet is drawn. The near plane
+/// is a thousandth of the far one, which is the sheet's own span.
+const CLOUD_SHADOW_SPAN: f32 = SHEET_SPAN / SHEET_TILING;
+const CLOUD_SHADOW_NEAR: f32 = SHEET_SPAN * 0.001;
+const CLOUD_SHADOW_FAR: f32 = SHEET_SPAN;
+
+/// How thin the box may be taken where the light lies along one of the world's own axes.
+const CLOUD_SHADOW_FLOOR: f32 = 0.001;
 
 /// How far the view direction is carried toward straight down before a cloud is lit against it, and
 /// the alpha the sheet fades toward overhead. One number does both, and it is a single sample: only
@@ -792,6 +878,9 @@ const INSTANCE_FIELDS: [(&str, u32); 9] = [
     ("m_HeadUpVector", 16),
 ];
 
+/// The clock every animated package shares, which the engine drives and no file states.
+const PBR: &str = "g_PbrParameterCommon";
+
 fn decal_field() -> Vec<hlsl::layout::Member> {
     vec![hlsl::layout::Member {
         name: DECAL.to_owned(),
@@ -829,12 +918,18 @@ pub enum Pass {
     Fur,
     CloudBand,
     CloudSheet,
+    /// The sheet again, drawn from the sun's own side into the map the lighting reads a cloud's
+    /// shadow out of.
+    CloudShadow,
     Composite,
     CompositeBlended,
     /// What a semitransparent surface that lights itself resolves through.
     BlendedLighting,
     /// What water shades itself with, reading the lit frame back rather than filling the G-buffer.
     Water,
+    /// A member of the chain that fills what water reads its own reflection through, which reads
+    /// the same buffer as the frame-wide one under a layout of its own.
+    WaterMirror,
     /// A shaft of light a zone places, added to the frame the lighting left.
     Shaft,
     /// A slab of fog a zone places, blended into that same frame.
@@ -851,11 +946,13 @@ impl Pass {
             Self::Buffer => PASS_G_OPAQUE,
             Self::Blended => PASS_G_SEMITRANSPARENCY,
             Self::Lighting | Self::Lamp => PASS_LIGHTING_OPAQUE,
-            Self::Fur | Self::CloudBand | Self::CloudSheet | Self::Star => PASS_7,
+            Self::Fur | Self::CloudBand | Self::CloudSheet | Self::CloudShadow | Self::Star => {
+                PASS_7
+            }
             Self::Composite => PASS_COMPOSITE_OPAQUE,
             Self::CompositeBlended => PASS_COMPOSITE_SEMITRANSPARENCY,
             Self::BlendedLighting => PASS_LIGHTING_SEMITRANSPARENCY,
-            Self::Water => PASS_WATER,
+            Self::Water | Self::WaterMirror => PASS_WATER,
             Self::Shaft => PASS_SEMITRANSPARENCY,
             Self::Layer => PASS_WATER_Z,
         }
@@ -1433,6 +1530,33 @@ impl Cloud {
             }
         }
     }
+
+    /// Where the sun stands to draw the sheet's own shadow, as a view and an orthographic
+    /// projection. It looks along the light from where the camera is, turned the shortest way from
+    /// the world's own third axis, and its box is what the two horizontal axes throw across the
+    /// light: a low sun reaches further along its own heading than a high one. Depth is left to the
+    /// sheet's vertex shader, which clamps what would fall outside the planes rather than losing it.
+    pub fn shadow_camera(light: Vec3, view: Mat4) -> (Mat4, Mat4) {
+        let eye = view.inverse().w_axis.truncate();
+        // Taken to the upper half whichever way it was handed in, so the sheet is always overhead.
+        let toward = light.normalize_or(Vec3::Y) * light.y.signum();
+        let turn = glam::Quat::from_rotation_arc(Vec3::Z, toward);
+        let span = |axis: Vec3| {
+            CLOUD_SHADOW_SPAN * axis.cross(toward).length().max(CLOUD_SHADOW_FLOOR)
+        };
+        let (wide, tall) = (span(Vec3::X), span(Vec3::Z));
+        (
+            Mat4::from_rotation_translation(turn, eye).inverse(),
+            Mat4::orthographic_rh(
+                -wide,
+                wide,
+                -tall,
+                tall,
+                CLOUD_SHADOW_NEAR,
+                CLOUD_SHADOW_FAR,
+            ),
+        )
+    }
 }
 
 /// White clouds reaching as far as every weather measured has them reach.
@@ -1605,6 +1729,8 @@ pub struct Scene {
     pub star: Star,
     /// The colours the character was made with.
     pub customize: Customize,
+    /// How much of the object at hand is drawn, which its dither clip tests each pixel against.
+    pub opacity: f32,
     /// Seconds since the viewer opened, which is what every wave and every leaf is a sine of.
     pub clock: f32,
     pub wind: Wind,
@@ -1683,11 +1809,27 @@ pub const WAVING_RATE: f32 = 1.0;
 /// `uvOffset` by `heading * max_strength * worldScale` times it, wrapping the pair into `0..1`.
 const WIND_SCROLL_INTERVAL: f32 = 30.0;
 
+/// What a layer's stated strength reaches `grass.shpk` at. Read off `ffxiv_dx11.exe`: the renderer
+/// keeps it in the slot straight after the wind block and nothing writes it past the constructor.
+/// The advection is not taken down by it, only the two the shader leans a blade between.
+const WIND_POWER_SCALE: f32 = 0.15;
+
 /// World units a leaf leans by at the far end of one sway. Measured off `m_WindVector` in real
-/// frames rather than derived: the reach a wind set sums to is several times this and is not what the
-/// engine hands over, and zones stating the same set do not hold the same length, so whatever varies
-/// it is not the set and is not placed here.
+/// frames rather than derived: the reach a wind set sums to is several times this and is not what
+/// the engine hands over. Every frame whose `g_WindInfo` holds the calm pair holds this same length
+/// and a storm's holds a longer one, so the set does decide it, but the engine gets there by
+/// sampling the wind texture itself and leaning each layer by what it reads, and this viewer takes
+/// no such read.
 pub const WIND_REACH: f32 = 1.467_972;
+
+/// What a character's own wind is capped and scaled by before a strand is swayed along it. Both off
+/// `ffxiv_dx11.exe`: the vector is normalised, then scaled by `min(speed, 30) * 0.0005`.
+const WIND_SPEED_CAP: f32 = 30.0;
+const WIND_SCALE: f32 = 0.0005;
+
+/// Ticks a second the shared animation clock counts, and the mask its accumulator is held to.
+const LOOP_TICKS: u16 = 1024;
+const LOOP_WRAP: u64 = 0x1f_ffff;
 
 /// What a leaf is swayed by. `bg.shpk`'s `g_WavingParam` is three registers, so `heading` and `reach`
 /// hold both wind layers already summed; `grass.shpk`'s `g_WindInfo` keeps a texture-sampled strength
@@ -1777,6 +1919,7 @@ impl Default for Scene {
             shaft: Shaft::default(),
             star: Star::default(),
             customize: Customize::default(),
+            opacity: 1.0,
             clock: 0.0,
             wind: Wind::default(),
             blur: Blur::Along(Vec2::ZERO),
@@ -2149,7 +2292,10 @@ impl Program {
             Pass::CloudBand => CLOUD_BAND,
             _ => CLOUD_SHEET,
         };
-        let subview = package.technique_subview()[1];
+        let subview = match pass {
+            Pass::CloudShadow => CLOUD_SHADOW_VIEW,
+            _ => package.technique_subview()[1],
+        };
         let (vs, ps) = pair(&package, &[], &[], pass.id(), technique, subview)
             .ok_or("the cloud package holds no such technique")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
@@ -2248,7 +2394,10 @@ impl Program {
                 }
             }
             for (name, registers) in hlsl::glsl::extents(program, names) {
-                if buffers.iter().any(|held| held.name == name) {
+                // Filled to whichever stage declares the most of it, which is the extent both are
+                // spelled at. Taking the first stage's leaves the other reading nought past it.
+                if let Some(held) = buffers.iter_mut().find(|held| held.name == name) {
+                    held.registers = held.registers.max(registers);
                     continue;
                 }
                 buffers.push(Buffer {
@@ -2444,6 +2593,24 @@ impl Program {
         signatures(blob, &mut names);
         let extents = hlsl::glsl::extents(&program, &names);
         let mut held = Self::effect(path, bytes, "", &extents)?;
+        // What a member drawn over geometry rather than over a quad reads a vertex through. A quad
+        // pass carries a layout of its own and never looks at these.
+        held.attributes = names
+            .inputs
+            .iter()
+            .filter_map(|(register, entry)| {
+                Some(Attribute {
+                    location: *register,
+                    field: field(&entry.name)?,
+                    components: match entry.kind.as_str() {
+                        held if held.starts_with("uint") => Components::Unsigned,
+                        held if held.starts_with("int") => Components::Signed,
+                        _ => Components::Float,
+                    },
+                })
+            })
+            .collect();
+        held.attributes.sort_by_key(|held| held.location);
         for (name, registers) in extents {
             match held.buffers.iter_mut().find(|buffer| buffer.name == name) {
                 Some(buffer) => buffer.registers = buffer.registers.max(registers),
@@ -2598,7 +2765,10 @@ impl Program {
                 }
             }
             for (name, registers) in hlsl::glsl::extents(program, names) {
-                if buffers.iter().any(|held| held.name == name) {
+                // Filled to whichever stage declares the most of it, which is the extent both are
+                // spelled at. Taking the first stage's leaves the other reading nought past it.
+                if let Some(held) = buffers.iter_mut().find(|held| held.name == name) {
+                    held.registers = held.registers.max(registers);
                     continue;
                 }
                 let fixed = (name == "g_MaterialParameter")
@@ -2812,10 +2982,11 @@ impl Buffer {
         // Two layers, each a heading, and a strength between `windPowerMin` and `windPowerMin +
         // windPower * sample^2`, where `sample` is a texel of `wind_0{1,2}.tex` at `worldPos.xz *
         // worldScale - uvOffset`. `worldScale` is the plain reading of the file's own stated cycle
-        // length. The engine advects `uvOffset` along the layer's heading by its own strength, so a
-        // stronger wind runs the field past faster; it wraps the pair every cycle, which is what
-        // keeps the coordinate exact however long the clock has run. `windViewDir` is read by no
-        // vertex shader this viewer runs, so it is left at nought.
+        // length. The pair the blade leans between is the stated range rather than the stated
+        // strength, both taken down by [`WIND_POWER_SCALE`]. The engine advects `uvOffset` along the
+        // layer's heading by its own strength, so a stronger wind runs the field past faster; it
+        // wraps the pair every cycle, which keeps the coordinate exact however long the clock has
+        // run. `windViewDir` is read by no vertex shader this viewer runs, so it is left at nought.
         if self.name == "g_WindInfo" {
             for (at, layer) in scene.wind.layers.iter().enumerate() {
                 let world_scale = match layer.wavelength > 0.0 {
@@ -2833,9 +3004,14 @@ impl Buffer {
                         layer.heading.x,
                         layer.heading.y,
                         layer.heading.z,
-                        layer.max_strength,
+                        (layer.max_strength - layer.min_strength) * WIND_POWER_SCALE,
                     ]);
-                    write(&mut out, base + 1, &[offset.x, offset.y, world_scale, layer.min_strength]);
+                    write(&mut out, base + 1, &[
+                        offset.x,
+                        offset.y,
+                        world_scale,
+                        layer.min_strength * WIND_POWER_SCALE,
+                    ]);
                 }
             }
             return out;
@@ -2887,12 +3063,62 @@ impl Buffer {
             }
             return out;
         }
+        // The one register run the water chain's own vertex shader takes an object through, for a
+        // pass whose reflection gives no members either. It takes a vertex straight into view space
+        // and the projection above carries it from there.
+        if self.name == INSTANCE && self.members.is_empty() {
+            for (at, row) in rows(view * model, 3).chunks(4).enumerate() {
+                write(&mut out, at, row);
+            }
+            return out;
+        }
+        // The march steps its ray one cell of this at a time, and the cells it counts are of the
+        // buffer it is drawing into rather than of the frame. What the game's own upload holds here
+        // could not be recovered: the window it stands in had been written over by the time the
+        // capture was taken.
+        if matches!(pass, Pass::WaterMirror) && self.name == SCREEN_PARAM {
+            let texel = scene.reflect.texel;
+            write(&mut out, 0, &[1.0 / texel.x, 1.0 / texel.y, texel.x, texel.y]);
+            return out;
+        }
         if self.name == SCREEN_PARAM {
             let (width, height) = (size.0.max(1.0), size.1.max(1.0));
             for at in 0..2 {
                 write(&mut out, at, &[width, height, 1.0 / width, 1.0 / height]);
             }
             write(&mut out, 2, &[1.0, 1.0, 1.0, 1.0]);
+            return out;
+        }
+        // The same buffer as below under the layout water's own chain names its fields by: a texel
+        // and a half-texel of each buffer it addresses, then what the reflection fades toward, the
+        // blur weights and how much of the frame a dynamic resolution is standing at. What the
+        // chain draws into and the pyramid it walks are both half the frame, which is why the
+        // first and third of these are the same register twice, as the game's own upload has them.
+        // The mip the march starts at is the last register and stays at nought, which is the top
+        // of the pyramid.
+        if matches!(pass, Pass::WaterMirror) && self.name == REFLECTION_PARAM {
+            let texel = scene.reflect.texel;
+            let (width, height) = (size.0.max(1.0), size.1.max(1.0));
+            let weights = blur_weights();
+            let step = [texel.x, texel.y, texel.x * 0.5, texel.y * 0.5];
+            write(&mut out, 0, &step);
+            write(&mut out, 1, &[
+                1.0 / width,
+                1.0 / height,
+                0.5 / width,
+                0.5 / height,
+            ]);
+            write(&mut out, 2, &step);
+            // What the reflection is taken over by with distance is the zone's own vertical fog,
+            // read out of the same four fields the fog pass takes: the color it fades toward, the
+            // most of it that ever arrives, then where the fade starts and how much a unit past
+            // that adds.
+            let fog = scene.fog;
+            write(&mut out, 3, &[fog.color.x, fog.color.y, fog.color.z, fog.cap]);
+            write(&mut out, 4, &[fog.rate, fog.start, WATER_MIRROR_UNREAD, 1.0]);
+            write(&mut out, 5, &weights[..4]);
+            write(&mut out, 6, &weights[4..]);
+            write(&mut out, 7, &[1.0, 1.0, 0.0, 0.0]);
             return out;
         }
         if self.name == REFLECTION_PARAM {
@@ -2995,15 +3221,15 @@ impl Buffer {
         // same four fields, written positionally instead.
         if self.name == "g_CommonParameter" && self.members.is_empty() {
             let (width, height) = (size.0.max(1.0), size.1.max(1.0));
-            write(&mut out, 0, &[1.0 / width, -1.0 / height, 0.0, 1.0]);
-            write(&mut out, 1, &[2.0 / width, -2.0 / height, -1.0, 1.0]);
+            write(&mut out, 0, &[1.0 / width, 1.0 / height, 0.0, 0.0]);
+            write(&mut out, 1, &[2.0 / width, 2.0 / height, -1.0, -1.0]);
             let bloom = scene.bloom;
             let [gain, floor] = REFLECTION_WEIGHT;
             write(&mut out, 2, &[bloom.specular, bloom.emissive, gain, floor]);
             write(&mut out, 3, &[encode, 0.0, 0.0, 0.0]);
             return out;
         }
-        if matches!(pass, Pass::CloudBand | Pass::CloudSheet)
+        if matches!(pass, Pass::CloudBand | Pass::CloudSheet | Pass::CloudShadow)
             && let Some(register) = [VS_PARAM, PS_PARAM].iter().position(|held| self.name == *held)
         {
             let held = scene.cloud;
@@ -3110,10 +3336,11 @@ impl Buffer {
                 Vec4::new(0.0, 0.0, 1.0, 0.0),
                 Vec4::new((column + 0.5) / columns, (row + 0.5) / grid_rows, 0.0, 1.0),
             );
+            let map = half * onto * sun * view.inverse();
             put(
                 DIRECTIONAL_SHADOW_PARAM,
                 "m_ShadowProjectionMatrix",
-                rows(half * onto * sun * view.inverse(), 4),
+                rows(map, 4),
             );
             // Where this split stops, as the depth buffer holds it: the resolve draws a quad there
             // and keeps what stands nearer, which is how a pixel reaches the nearest split that
@@ -3133,6 +3360,19 @@ impl Buffer {
             put(DIRECTIONAL_SHADOW_PARAM, "m_ShadowMapParameter", vec![
                 1.0 / (SHADOW_MAP * ATLAS_COLUMNS as i32) as f32,
                 1.0 / (SHADOW_MAP * ATLAS_ROWS as i32) as f32,
+                0.0,
+                1.0,
+            ]);
+            // What the softening sizes a penumbra with. The second lane turns a depth of the map
+            // back into a distance along the light, which is the whole span the box covers since
+            // its own near plane sits at nought; the first turns such a distance into a radius of
+            // the disc the taps stand on, which the shader states in the shorter side of the whole
+            // image. A negative first lane is also what tells it the map is orthographic.
+            let cell = 1.0 / (ATLAS_ROWS as f32 * map.row(1).truncate().length());
+            let short = (SHADOW_MAP * ATLAS_COLUMNS.min(ATLAS_ROWS) as i32) as f32;
+            put(DIRECTIONAL_SHADOW_PARAM, "m_NearFarParam", vec![
+                -SUN_SOFTNESS * SHADOW_MAP as f32 / (cell * short),
+                -1.0 / map.row(2).truncate().length(),
                 0.0,
                 1.0,
             ]);
@@ -3198,6 +3438,10 @@ impl Buffer {
             ]);
             return out;
         }
+        if self.name == CLOUD_SHADOW_PARAM {
+            write(&mut out, 0, &CLOUD_SHADOW_WEIGHTS);
+            return out;
+        }
         if self.name == SAMPLING_PARAM {
             // The quad this is drawn over already carries clip space and the coordinate to read at,
             // so the position is only turned the way round the pass expects and the coordinate is
@@ -3207,6 +3451,15 @@ impl Buffer {
             return out;
         }
         if self.name == SAMPLING_OFFSET {
+            // The cloud shadow's own four, which stand on a cross rather than on a square: each is a
+            // whole texel of the map one way and half a texel the other.
+            if matches!(pass, Pass::CloudShadow) {
+                let texel = 1.0 / CLOUD_SHADOW_MAP as f32;
+                let half = texel * 0.5;
+                write(&mut out, 0, &[-texel, -half, texel, half]);
+                write(&mut out, 1, &[half, -texel, -half, texel]);
+                return out;
+            }
             // Which tap lands in which lane is settled by the weight the pass pairs with it, and the
             // middle of the kernel is the first lane here rather than the lone coordinate.
             match scene.blur {
@@ -3357,7 +3610,14 @@ impl Buffer {
         // nought the buffer would otherwise sit at, which silently stands every blade still.
         put(grass, "m_GrassWindSpeedScale", vec![1.0]);
         put(grass, "m_BushWindSpeedScale", vec![1.0]);
-        put(INSTANCE, "m_MulColor", vec![1.0; 4]);
+        put(INSTANCE, "m_MulColor", vec![1.0, 1.0, 1.0, scene.opacity]);
+        // What a hair strand flutters along. The engine hands over a unit heading scaled by the
+        // wind's own speed, capped at thirty and taken down by a factor of two thousand, and leaves
+        // the last lane at nought. Heading and speed are this viewer's own, read off the zone's
+        // `.envb`; the engine samples an ambient field at the character's position instead, and
+        // whether the two are the same quantity is the one thing here nothing states.
+        let gust = scene.wind.heading * scene.wind.reach.min(WIND_SPEED_CAP) * WIND_SCALE;
+        put(INSTANCE, "m_Wind", vec![gust.x, gust.y, gust.z, 0.0]);
         // Declared by all five character packages; only `character`'s own G pass reads the first
         // lane, scaling the fur march by it. A capture confirms the game writes the same identity
         // here.
@@ -3373,13 +3633,15 @@ impl Buffer {
             "m_EmissiveColor",
             vec![1.0; 3],
         );
-        // The projection a cloud's shadow falls through. Nothing here casts one and the sampler it
-        // pairs with stands in opaque white, so the term resolves to one; the identity is what keeps
-        // the lighting from dividing by a zero row and carrying a NaN through every lit pixel.
+        // Where a lit pixel stands in the map the sheet's own shadow was drawn into. The lighting
+        // hands this a view-space position and turns the clip coordinate into a texture one itself,
+        // so unlike the sun's own map this takes no half of its rows. A weather that draws no sheet
+        // leaves the map opaque white, and the term is one wherever this lands.
+        let (cloud, onto) = Cloud::shadow_camera(scene.light, view);
         put(
-            "g_CloudShadowMatrix",
-            "g_CloudShadowMatrix",
-            rows(Mat4::IDENTITY, 4),
+            CLOUD_SHADOW_MATRIX,
+            CLOUD_SHADOW_MATRIX,
+            rows(onto * cloud * view.inverse(), 4),
         );
         // The weight the character resolve carries a material's own emissive into the frame's alpha
         // at, which the glare pass reads that frame back through. It reaches no color of its own,
@@ -3393,6 +3655,12 @@ impl Buffer {
             0.15, 0.15, 0.15, 0.17, 0.01584, 0.9, 0.01584, 0.8,
         ]);
         put("g_ModelParameter", "m_Params", vec![1.0; 4]);
+        // The clock every animated package shares. A tick is a thousand-and-twenty-fourth of a
+        // second and the engine's accumulator is masked to twenty-one bits, so this runs to exactly
+        // 2048 and back, which is what makes the periods the hair shader snaps to divide it evenly.
+        put(PBR, "m_LoopTime", vec![
+            ((clock * f32::from(LOOP_TICKS)) as u64 & LOOP_WRAP) as f32 / f32::from(LOOP_TICKS),
+        ]);
         // What skin showing through a stocking is multiplied by, which is not the light's own color
         // of the same name.
         put("g_SkinMaterialParameter", "m_DiffuseColor", vec![1.0; 3]);
@@ -3437,21 +3705,21 @@ impl Buffer {
         ]);
         put(customize, "m_OptionColor0", held.option.to_vec());
 
-        // A pixel's own place, which a screen-wide pass has nothing else to work from. The row a
-        // texture coordinate names counts from the far side of the one a fragment coordinate does,
-        // so the height goes in negative and the offset takes it back.
+        // A pixel's own place, which a screen-wide pass has nothing else to work from.
         let (width, height) = (size.0.max(1.0), size.1.max(1.0));
         let common = "g_CommonParameter";
-        put(
-            common,
-            "m_RenderTarget",
-            vec![1.0 / width, -1.0 / height, 0.0, 1.0],
-        );
-        put(
-            common,
-            "m_Viewport",
-            vec![2.0 / width, -2.0 / height, -1.0, 1.0],
-        );
+        put(common, "m_RenderTarget", vec![
+            1.0 / width,
+            1.0 / height,
+            0.0,
+            0.0,
+        ]);
+        put(common, "m_Viewport", vec![
+            2.0 / width,
+            2.0 / height,
+            -1.0,
+            -1.0,
+        ]);
         // The two lanes the composite weighs its glare by before it divides that through by the
         // colour and leaves the share in the frame's alpha, which the weather states, and then the
         // pair a surface takes the brightness it stands in through to weigh what it reflects.
@@ -4039,14 +4307,16 @@ pub fn table(held: &mtrl::ColorTable) -> Option<(Vec<u16>, usize, usize)> {
 mod test {
     use std::io::Cursor;
 
-    use glam::{Mat3, Mat4, Vec3, Vec4};
+    use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
-        ADAPT_LUM_PARAM, Ambient, Buffer, Customize, DECAL, Exposure, FOG_PARAM, FXAA_PARAM, Fog,
-        HDAO_PARAM, INSTANCE, INSTANCING, JOINT, ROW, SETTLE, SHADER_TYPE, SUN_PARAM, WAVING, Pass,
-        Scene, Sky, Volume, Wind, WindLayer, ambient, decal_field, encode, instance_fields, joints,
-        moon_phase, moon_roll, moon_softness, moon_terminator, selector, shader_types, sun,
+        ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, CLOUD_SHADOW_MATRIX, Customize,
+        DECAL, DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
+        INSTANCING, JOINT, REFLECTION_PARAM, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS,
+        SUN_PARAM, WAVING, WIND_POWER_SCALE, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer,
+        ambient, decal_field, encode, instance_fields, joints, moon_phase, moon_roll, moon_softness,
+        moon_terminator, selector, shader_types, sun,
     };
 
     /// The two buffers of the post chain no reflection describes, against what the game's own
@@ -4091,6 +4361,177 @@ mod test {
             10.0,
             0.3
         ]);
+    }
+
+    /// Where a screen-wide pass reads the frame it is drawing into. `SV_Position` reaches the body
+    /// as `gl_FragCoord`, which counts rows from the corner a texture coordinate counts them from,
+    /// so this pair scales a fragment's own place into the frame and never turns it over. Both the
+    /// buffer named by its fields and the one the star shaders leave bare hold the same four lanes.
+    #[test]
+    fn a_pixel_reads_the_frame_at_its_own_row() {
+        let scene = Scene {
+            size: (1920.0, 1080.0),
+            ..Default::default()
+        };
+        let filled = |members: Vec<(&str, u32, u32)>| {
+            let held = Buffer {
+                name: "g_CommonParameter".to_owned(),
+                members: members
+                    .into_iter()
+                    .map(|(name, offset, size)| hlsl::layout::Member {
+                        name: name.to_owned(),
+                        offset,
+                        size,
+                        kind: "float4".to_owned(),
+                    })
+                    .collect(),
+                registers: 4,
+                fixed: None,
+            };
+            held.fill(&scene, Pass::Composite, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect::<Vec<f32>>()
+        };
+        for held in [
+            filled(vec![("m_RenderTarget", 0, 16), ("m_Viewport", 16, 16)]),
+            filled(Vec::new()),
+        ] {
+            let corner = |row: usize, at: Vec2| {
+                Vec2::new(
+                    at.x * held[row * 4] + held[row * 4 + 2],
+                    at.y * held[row * 4 + 1] + held[row * 4 + 3],
+                )
+            };
+            let (low, high) = (Vec2::new(0.5, 0.5), Vec2::new(1919.5, 1079.5));
+            assert!(
+                corner(0, low).abs_diff_eq(Vec2::ZERO, 1e-3),
+                "the near corner of the frame reads the near corner of it: {held:?}"
+            );
+            assert!(
+                corner(0, high).abs_diff_eq(Vec2::ONE, 1e-3),
+                "and the far one the far: {held:?}"
+            );
+            assert!(
+                corner(1, low).abs_diff_eq(Vec2::NEG_ONE, 1e-3),
+                "clip space runs the same way: {held:?}"
+            );
+            assert!(
+                corner(1, high).abs_diff_eq(Vec2::ONE, 1e-3),
+                "at both ends: {held:?}"
+            );
+        }
+    }
+
+    /// What the shadow softening sizes a penumbra with, read back through the arithmetic its own
+    /// shader does: a unit of distance between a blocker and what it falls on has to come out as
+    /// `SUN_SOFTNESS` world units of penumbra, on every split.
+    #[test]
+    fn the_shadow_penumbra_is_as_wide_as_the_sun_stands() {
+        for split in 0..SPLITS {
+            let scene = Scene {
+                view: Mat4::look_at_rh(Vec3::new(0.0, 3.0, 12.0), Vec3::ZERO, Vec3::Y),
+                projection: Mat4::perspective_rh(0.96, 1.6, 0.1, 1000.0),
+                light: Vec3::new(0.3, 0.8, 0.5).normalize(),
+                reach: 300.0,
+                split,
+                ..Default::default()
+            };
+            let held = Buffer {
+                name: DIRECTIONAL_SHADOW_PARAM.to_owned(),
+                members: [("m_ShadowProjectionMatrix", 0, 64), ("m_NearFarParam", 112, 16)]
+                    .into_iter()
+                    .map(|(name, offset, size)| hlsl::layout::Member {
+                        name: name.to_owned(),
+                        offset,
+                        size,
+                        kind: "float4".to_owned(),
+                    })
+                    .collect(),
+                registers: 8,
+                fixed: None,
+            };
+            let filled: Vec<f32> = held
+                .fill(&scene, Pass::Lighting, &[])
+                .chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect();
+            let row = |at: usize| Vec3::new(filled[at * 4], filled[at * 4 + 1], filled[at * 4 + 2]);
+            let [x, y, z, w] = [filled[28], filled[29], filled[30], filled[31]];
+            // A world unit along the light moves the map's depth by the length of the row that
+            // answers it, and this is what the shader turns that depth back into a distance with.
+            let along = |depth: f32| -(depth * y + z) / w;
+            let step = row(2).length();
+            assert!((along(step) - along(0.0) - 1.0).abs() < 1e-4, "split {split}");
+            // Its disc is stated in the shorter side of the whole image, and that many texels of
+            // one split's own cell is what the penumbra measures in the world. Against the width
+            // the frame was captured at rather than against the constant, which would move with it.
+            let short = (SHADOW_MAP * ATLAS_COLUMNS.min(ATLAS_ROWS) as i32) as f32;
+            let across = -x * short / (SHADOW_MAP as f32 * ATLAS_ROWS as f32 * row(1).length());
+            assert!((across - 0.007).abs() < 1e-6, "split {split}: {across}");
+        }
+    }
+
+    /// Where a lit pixel is read in the map a cloud's shadow was drawn into, against the matrix a
+    /// captured frame of Ishgard bound at the same camera and hour. The frame's own view goes in and
+    /// the whole of the game's own matrix has to come out: the box, its planes, and the turn that
+    /// stands the map's camera under the light are each only right if every lane of this lands.
+    #[test]
+    fn the_cloud_shadow_matrix_comes_out_as_the_game_held_it() {
+        // Rows of the frame's own world-to-view matrix, as its camera buffer holds them.
+        let held = [
+            [0.675_344_3, 9.536_745e-7, 0.737_502_75, 47.094_776],
+            [-0.298_507_6, 0.914_425_9, 0.273_347_5, -128.917_86],
+            [-0.674_391_3, -0.404_753_77, 0.617_552_34, -269.328_43],
+        ];
+        let column = |at: usize| Vec4::new(held[0][at], held[1][at], held[2][at], 0.0);
+        let scene = Scene {
+            view: Mat4::from_cols(column(0), column(1), column(2), column(3) + Vec4::W),
+            light: Vec3::new(0.806_444_64, 0.512_089_13, 0.295_654_77),
+            ..Default::default()
+        };
+        let buffer = Buffer {
+            name: CLOUD_SHADOW_MATRIX.to_owned(),
+            members: vec![hlsl::layout::Member {
+                name: CLOUD_SHADOW_MATRIX.to_owned(),
+                offset: 0,
+                size: 64,
+                kind: "float4".to_owned(),
+            }],
+            registers: 4,
+            fixed: None,
+        };
+        let filled: Vec<f32> = buffer
+            .fill(&scene, Pass::Lighting, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        let held = [
+            -2.184_979_4e-4,
+            -5.585_666e-4,
+            -5.960_442_4e-4,
+            0.0,
+            -3.103_349_6e-4,
+            3.582_748_8e-4,
+            -2.219_851_2e-4,
+            0.0,
+            -3.817_188_5e-5,
+            -1.543_313_7e-5,
+            2.845_579_4e-5,
+            -1.001_001e-3,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        ];
+        // The lanes that carry the box are exact to a part in ten thousand of their own last digit;
+        // the ones that carry nothing land on the same 1e-8 of float noise the game's own frames do.
+        for (at, (filled, held)) in filled.iter().zip(held).enumerate() {
+            assert!(
+                (filled - held).abs() < 2e-8,
+                "lane {at}: {filled} against {held}"
+            );
+        }
     }
 
     /// The three buffers the exposure chain reads, against the bytes a capture of the running game
@@ -4183,6 +4624,122 @@ mod test {
             .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
             .collect();
         assert_eq!(filled[2], SETTLE);
+    }
+
+    /// Water's own reflection chain reads one buffer for everything it is told, against the bytes a
+    /// capture of the running game held in it: the frame there is 2560 by 1440 and the chain runs at
+    /// half of it, which is why the game's own upload writes the same register twice. The fog is the
+    /// one that zone's own environment states at the hour the capture was taken.
+    #[test]
+    fn the_water_reflection_buffer_comes_out_as_the_game_held_it() {
+        let scene = Scene {
+            size: (2560.0, 1440.0),
+            reflect: Reflect {
+                level: 0,
+                texel: Vec2::new(1.0 / 1280.0, 1.0 / 720.0),
+            },
+            fog: Fog {
+                color: Vec3::new(0.734657, 0.543774, 0.758775),
+                cap: 0.860343,
+                rate: 0.0001,
+                start: 200.0,
+                ..Fog::default()
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: REFLECTION_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 9,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::WaterMirror, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        let step = [1.0 / 1280.0, 1.0 / 720.0, 1.0 / 2560.0, 1.0 / 1440.0];
+        assert_eq!(filled[0..4], step);
+        assert_eq!(filled[4..8], [
+            1.0 / 2560.0,
+            1.0 / 1440.0,
+            1.0 / 5120.0,
+            1.0 / 2880.0
+        ]);
+        assert_eq!(filled[8..12], step);
+        assert_eq!(filled[12..16], [0.734657, 0.543774, 0.758775, 0.860343]);
+        assert_eq!(filled[16..20], [0.0001, 200.0, 3500.0, 1.0]);
+        for (at, want) in [
+            0.0891034, 0.0856096, 0.0790276, 0.0700912, 0.0597278, 0.048901, 0.0384669, 0.0290726,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(
+                (filled[20 + at] - want).abs() < 1e-6,
+                "tap {at} came out {} rather than {want}",
+                filled[20 + at]
+            );
+        }
+        assert_eq!(filled[28..32], [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(filled[32], 0.0);
+    }
+
+    /// The same two registers under a second zone, against a capture taken there: neither lane the
+    /// march reads is the first zone's.
+    #[test]
+    fn the_water_reflection_fog_is_the_zone_standing_under_it() {
+        let scene = Scene {
+            fog: Fog {
+                color: Vec3::new(0.478431, 0.672222, 0.783333),
+                cap: 0.995752,
+                rate: 0.00026,
+                start: 300.0,
+                ..Fog::default()
+            },
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: REFLECTION_PARAM.to_owned(),
+            members: Vec::new(),
+            registers: 9,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::WaterMirror, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        assert_eq!(filled[12..16], [0.478431, 0.672222, 0.783333, 0.995752]);
+        assert_eq!(filled[16..20], [0.00026, 300.0, 3500.0, 1.0]);
+    }
+
+    /// The two members of that chain drawn over the water itself take a vertex into view space
+    /// through one register run, and the reflection their file carries names no field for a write to
+    /// land in.
+    #[test]
+    fn water_reflection_takes_a_vertex_into_view_space() {
+        let scene = Scene {
+            view: Mat4::from_translation(Vec3::new(1.0, 2.0, 3.0)),
+            model: Mat4::from_scale(Vec3::new(2.0, 2.0, 2.0)),
+            ..Default::default()
+        };
+        let held = Buffer {
+            name: INSTANCE.to_owned(),
+            members: Vec::new(),
+            registers: 4,
+            fixed: None,
+        };
+        let filled: Vec<f32> = held
+            .fill(&scene, Pass::WaterMirror, &[])
+            .chunks_exact(4)
+            .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+            .collect();
+        // One row per register, the way the shader dots them: the scale down the diagonal and the
+        // translation in the last lane.
+        assert_eq!(filled[0..4], [2.0, 0.0, 0.0, 1.0]);
+        assert_eq!(filled[4..8], [0.0, 2.0, 0.0, 2.0]);
+        assert_eq!(filled[8..12], [0.0, 0.0, 2.0, 3.0]);
     }
 
     /// The instance record a character is drawn with, against the bytes a capture of the running
@@ -4552,6 +5109,60 @@ mod test {
         assert!((phase(3.0) - phase(1.0) - 2.0).abs() < 1e-5);
     }
 
+    /// What a strand of hair is swayed along and the clock it flutters on, neither of which any file
+    /// states and both of which the engine drives.
+    #[test]
+    fn a_strand_takes_a_capped_wind_and_a_wrapping_clock() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let instance = Buffer {
+            name: INSTANCE.to_owned(),
+            members: instance_fields(),
+            registers: 11,
+            fixed: None,
+        };
+        let gust = |reach| {
+            let scene = Scene {
+                wind: Wind {
+                    heading: Vec3::Z,
+                    reach,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            floats(instance.fill(&scene, Pass::Buffer, &[]))[20..24].to_vec()
+        };
+        // A unit heading taken down by two thousand, and a last lane the engine zeroes outright.
+        assert!((gust(4.0)[2] - 0.002).abs() < 1e-9);
+        assert_eq!(gust(4.0)[0], 0.0);
+        assert_eq!(gust(4.0)[3], 0.0);
+        // Past thirty the speed stops counting.
+        assert!((gust(200.0)[2] - 0.015).abs() < 1e-9);
+        assert_eq!(gust(200.0), gust(30.0));
+
+        let loop_time = |clock| {
+            let held = Buffer {
+                name: "g_PbrParameterCommon".to_owned(),
+                members: vec![hlsl::layout::Member {
+                    name: "m_LoopTime".to_owned(),
+                    offset: 0,
+                    size: 4,
+                    kind: "float".to_owned(),
+                }],
+                registers: 1,
+                fixed: None,
+            };
+            floats(held.fill(&Scene { clock, ..Default::default() }, Pass::Buffer, &[]))[0]
+        };
+        // Held to a tick, and back to nought where the accumulator wraps.
+        assert_eq!(loop_time(1.0 + 0.5 / 1024.0), 1.0);
+        assert_eq!(loop_time(2048.0), 0.0);
+        assert_eq!(loop_time(2049.0), 1.0);
+    }
+
     /// The register water wanders its whitecaps by, which is the noise texture's own size: the
     /// shader multiplies a world position by `.zw`, so those have to be the reciprocal of a real
     /// texture rather than a one.
@@ -4576,6 +5187,55 @@ mod test {
         let filled = floats(water.fill(&Scene::default(), Pass::Water, &[]));
         assert_eq!(filled[..2], [128.0, 128.0]);
         assert_eq!(filled[2..4], [1.0 / 128.0, 1.0 / 128.0]);
+    }
+
+    /// The buffer the game itself uploads at the Tuliyollal preset, where the zone's own `.envb`
+    /// states two layers of strength 8 and 1 at azimuth 90 and 120, both reaching nought at their
+    /// weakest. Read out of `~/rdcaps/tuli.zip`.
+    #[test]
+    fn a_blade_leans_between_the_pair_the_game_hands_it() {
+        let floats = |held: Vec<u8>| -> Vec<f32> {
+            held.chunks_exact(4)
+                .map(|held| f32::from_le_bytes(held.try_into().unwrap()))
+                .collect()
+        };
+        let layer = |azimuth: f32, max_strength, wavelength| {
+            let held = f32::to_radians(azimuth);
+            WindLayer {
+                heading: Vec3::new(-held.sin(), 0.0, held.cos()),
+                max_strength,
+                min_strength: 0.0,
+                wavelength,
+            }
+        };
+        let info = Buffer {
+            name: "g_WindInfo".to_owned(),
+            members: Vec::new(),
+            registers: 12,
+            fixed: None,
+        };
+        let scene = Scene {
+            clock: 0.0,
+            wind: Wind {
+                layers: [layer(90.0, 8.0, 512.0), layer(120.0, 1.0, 128.0)],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let filled = floats(info.fill(&scene, Pass::Buffer, &[]));
+        let close = |held: f32, want: f32| assert!((held - want).abs() < 1e-5, "{held} not {want}");
+        close(filled[0], -1.0);
+        close(filled[1], 0.0);
+        close(filled[2], 0.0);
+        close(filled[3], 1.2);
+        close(filled[6], 1.0 / 512.0);
+        close(filled[7], 0.0);
+        close(filled[12], -0.866_025);
+        close(filled[13], 0.0);
+        close(filled[14], -0.5);
+        close(filled[15], 0.15);
+        close(filled[18], 1.0 / 128.0);
+        close(filled[19], 0.0);
     }
 
     /// The gust the engine advects: a cycle over `wavelength` world units, carried along the
@@ -4611,8 +5271,8 @@ mod test {
         let filled = held(30.0);
         // The world-to-uv scale is the stated cycle length and nothing else.
         assert_eq!(filled[6], 1.0 / 512.0);
-        assert_eq!(filled[3], 8.0);
-        assert_eq!(filled[7], 2.0);
+        assert_eq!(filled[3], (8.0 - 2.0) * WIND_POWER_SCALE);
+        assert_eq!(filled[7], 2.0 * WIND_POWER_SCALE);
         // Thirty seconds at strength eight carries the field eight cycles' worth of texels.
         assert!((filled[5] - (8.0 / 512.0)).abs() < 1e-6, "{}", filled[5]);
         assert_eq!(filled[4], 0.0);

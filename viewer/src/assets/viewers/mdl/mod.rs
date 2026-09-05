@@ -15,15 +15,18 @@
 pub(super) mod deferred;
 mod deform;
 pub mod dye;
+mod effects;
 mod emote;
 mod export;
 pub(super) mod gpu;
 mod grid;
 pub(crate) mod material;
+mod noise;
 pub(super) mod program;
 mod skin;
 
 pub use deform::{Deform, Deformers};
+pub use skin::motion_names;
 pub use dye::Templates as DyeTemplates;
 pub use program::Customize;
 
@@ -35,7 +38,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use egui::{Color32, Label, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
-use glam::{Mat3, Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3, Vec4};
 use ironworks::file::{
     File,
     imc::ImageChange,
@@ -96,6 +99,12 @@ const GET_NORMAL_MAP_PARALLAX: u32 = 0xd9fd_8a1c;
 const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
 const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 
+/// `ApplyDitherClip`, and the value that puts the clip a partly faded character is drawn through
+/// in. The variant it selects discards each pixel whose `-dither.tex` texel stands above
+/// `m_MulColor.w`, so at full opacity it discards nothing and the two readings draw the same frame.
+const APPLY_DITHER_CLIP: u32 = 0x8b03_6665;
+const APPLY_DITHER_CLIP_ON: u32 = 0x61b0_cf19;
+
 /// `ApplyWavingAnim`, and the value that lets the wind reach a surface. Set only where the model's
 /// own header allows it, which is what keeps a wall from swaying with the leaves.
 const APPLY_WAVING_ANIM: u32 = 0x105c_6a52;
@@ -128,6 +137,10 @@ const CHARACTER_TRANSPARENT_PACKAGES: [&str; 11] = [
 /// Where the key light stands, in the model's own space. Anchored rather than carried with the
 /// camera: a rig that turns with the eye shades every angle alike, so orbiting reveals no form.
 const KEY: Vec3 = Vec3::new(-0.45, 0.78, 0.44);
+
+/// The marker a drawn weapon's own effect is stood in for by, apart from the emote vfx marker's
+/// own tint so the two read as different things.
+const WEAPON_VFX_COLOR: [f32; 4] = [0.35, 0.95, 0.65, 1.0];
 
 /// How far the placed light reaches, in radii of the model. A lamp is drawn as the box it covers
 /// and cut off at the sphere of its own reach, and both of those show as a hard edge where they
@@ -356,9 +369,9 @@ struct Piece {
     /// Which one it was asked for, which is not always where it settles: a file whose variants are
     /// alternatives rather than toggles is drawn at the first of them.
     asked: u16,
-    /// The material variant to draw with, where a caller has already resolved the imc's own
-    /// `material_id` for `variant`. Equal to `variant` wherever it has not.
-    material: u16,
+    /// The imc's own `material_id` for `variant`, where a caller has already resolved one. `None`
+    /// wherever nothing states one, and the folder `variant` names is what the piece draws with.
+    material: Option<u16>,
     deform: Option<Arc<Deform>>,
     skin: Option<u16>,
     rigid: bool,
@@ -370,10 +383,10 @@ pub struct Source {
     pub path: String,
     pub bytes: Vec<u8>,
     pub variant: u16,
-    /// The material variant to draw with, where it differs from `variant`: several imc variants
-    /// commonly share one material, and a caller that already has the imc in hand states the
-    /// `material_id` it names here rather than the raw variant. Equal to `variant` otherwise.
-    pub material: u16,
+    /// The imc's own `material_id` for `variant`, where a caller that has the imc in hand has
+    /// resolved one: several imc variants commonly share one material, and nought is the entry
+    /// stating that the slot draws no material at all. `None` wherever nothing states one.
+    pub material: Option<u16>,
     /// What to move the file's vertices by, where it was modelled for a body other than the one
     /// wearing it.
     pub deform: Option<Arc<Deform>>,
@@ -405,6 +418,7 @@ impl Piece {
     fn wears(&self, source: &Source) -> bool {
         self.path == source.path
             && self.asked == source.variant
+            && self.material == source.material
             && self.skin == source.skin
             && self.rigid == source.rigid
             && match (&self.deform, &source.deform) {
@@ -499,9 +513,16 @@ pub struct Rendered {
     /// A piece hung rigidly off a bone rather than skinned to the shared rig, by the path it was
     /// worn as: a weapon, carried at the placement its attach point states this frame.
     attachments: RefCell<Vec<Attachment>>,
+    /// The bones a weapon's own effect would play from, for the weapons carrying one and drawn.
+    glowing: RefCell<Vec<String>>,
     /// The props, sound and vfx an emote's own timeline states, read against whatever the body is
     /// playing.
     emote: RefCell<emote::Cue>,
+    /// The effects the emote is firing, and where each stood the last frame it was drawn: the
+    /// placement is the posed rig's to say, so it is taken during the draw and stepped on the next
+    /// poll.
+    effects: RefCell<effects::Effects>,
+    fired: RefCell<Vec<effects::Fired>>,
     camera: Cell<Camera>,
     /// Which of the two viewers this is, which is what decides how much of the model it takes apart.
     chrome: Cell<Chrome>,
@@ -541,7 +562,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         path: path.to_owned(),
         bytes: bytes.to_vec(),
         variant: 0,
-        material: 0,
+        material: None,
         deform: None,
         skin: None,
         rigid: false,
@@ -589,7 +610,10 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         stains: Default::default(),
         dyed: Default::default(),
         attachments: Default::default(),
+        glowing: Default::default(),
         emote: Default::default(),
+        effects: Default::default(),
+        fired: Default::default(),
         camera: Cell::new(camera),
         chrome: Cell::new(Chrome::Character),
         customize: Cell::new(program::Customize::default()),
@@ -692,6 +716,13 @@ pub(crate) fn imc_path(path: &str) -> Option<String> {
     }
     let base = &path[..path.rfind("/model/")?];
     let part = base.rsplit('/').next()?;
+    // The off-hand half of a paired weapon ships none of its own and reads the main hand's.
+    if let Some(tail) = base.strip_prefix("chara/weapon/w")
+        && let Ok(set) = tail.get(..4)?.parse::<u32>()
+    {
+        let shared = material::shared_set(set);
+        return Some(format!("chara/weapon/w{shared:04}{}/{part}.imc", &tail[4..]));
+    }
     Some(format!("{base}/{part}.imc"))
 }
 
@@ -760,7 +791,7 @@ fn exclusive_variants(image_change: &ImageChange, part: u8, declared: usize) -> 
 struct Worn<'a> {
     path: &'a str,
     variant: u16,
-    material: u16,
+    material: Option<u16>,
     deform: Option<&'a Deform>,
     skin: Option<u16>,
     rigid: bool,
@@ -777,6 +808,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
     let mut shapes: Vec<Shape> = Vec::new();
     let mut declares: Vec<usize> = Vec::new();
     let mut skipped: Vec<MeshKind> = Vec::new();
+    let mut unbound = 0usize;
     let mut skinned = false;
     let mut waving = false;
 
@@ -799,6 +831,14 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
                 }
                 continue;
             }
+            let name = mesh.material().unwrap_or_default();
+            // An imc entry naming material nought states that the slot draws no material at all:
+            // every material its colourway files resolves to no path, and the game leaves a mesh
+            // whose material never bound out of the frame.
+            if worn.material == Some(0) && material::colourwayed(worn.path, &name) {
+                unbound += 1;
+                continue;
+            }
             let built = match (mesh.attributes(), mesh.indices()) {
                 (Ok(attributes), Ok(indices)) => {
                     skinned |= attributes.iter().any(|attribute| {
@@ -817,20 +857,25 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             };
 
             // A rigid piece carries no bone table of its own to resolve against the shared rig:
-            // one placeholder entry is what gives it a joint to be carried on, which
-            // `Rendered::carried` fills in every frame.
-            let table: Vec<String> = match worn.rigid {
+            // one placeholder per bone it skins to is what gives it joints to be carried on, which
+            // `Rendered::carried` fills in every frame. A weapon that skins to more than one, a
+            // grimoire's pages or a bow's limbs, loses every vertex past the first without them.
+            let slots: Vec<String> = mesh
+                .bone_table()
+                .iter()
+                .map(|bone| {
+                    bone_names
+                        .get(usize::from(*bone))
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect();
+            // A rigid piece resolves its own bone names against a rig of its own where it has one,
+            // and against nothing at all where it does not, so an empty table still needs the one
+            // slot every vertex of it indexes.
+            let table = match worn.rigid && slots.is_empty() {
                 true => vec![String::new()],
-                false => mesh
-                    .bone_table()
-                    .iter()
-                    .map(|bone| {
-                        bone_names
-                            .get(usize::from(*bone))
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .collect(),
+                false => slots,
             };
             if let Some(deform) = worn.deform {
                 deform.apply(&mut vertices, &table);
@@ -842,8 +887,13 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
                 high = high.max(position);
             }
 
-            let name = mesh.material().unwrap_or_default();
-            let resolved = material::path(&name, worn.material, worn.skin).unwrap_or(name);
+            let resolved = material::path(
+                worn.path,
+                &name,
+                worn.material.unwrap_or(worn.variant),
+                worn.skin,
+            )
+            .unwrap_or(name);
             let material = names
                 .iter()
                 .position(|held| *held == resolved)
@@ -945,15 +995,12 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             Bytes(vertices * size_of::<Vertex>() + triangles * 6).to_string(),
         ),
     ];
-    if !skipped.is_empty() {
-        identity.push((
-            "未绘制",
-            skipped
-                .iter()
-                .map(|kind| kind_name(*kind))
-                .collect::<Vec<_>>()
-                .join(", "),
-        ));
+let mut left_out: Vec<&str> = skipped.iter().map(|kind| kind_name(*kind)).collect();
+    if unbound != 0 {
+        left_out.push("无材质");
+    }
+    if !left_out.is_empty() {
+        identity.push(("未绘制", left_out.join(", ")));
     }
 
     log::info!(
@@ -1215,11 +1262,32 @@ fn shown(parts: &[Part]) -> Vec<Range<i32>> {
     runs
 }
 
-/// What the viewer is for: taking a file apart, or standing a character up the way the game does.
+/// What the viewer is for: taking a file apart, standing a character up the way the game does, or
+/// standing one in a frame this view does not draw.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Chrome {
     Asset,
     Character,
+    Placed,
+}
+
+/// A model standing in a frame someone else draws: the card holding its geometry, what each of its
+/// meshes draws with, and where in that frame it stands.
+///
+/// Everything the model owns that belongs to a frame - the camera, the G-buffer, the lighting and
+/// every pass past it - is the host's here. What crosses is geometry, one joint palette per mesh,
+/// and the two things a character puts into the scene constants beside every other surface.
+pub struct Cast {
+    pub gpu: Arc<Mutex<gpu::Model>>,
+    pub surfaces: Vec<gpu::Surface>,
+    /// One palette per mesh, in the model's own space, since a mesh's blend indices run over its
+    /// own bone table.
+    pub joints: Vec<Vec<Mat4>>,
+    /// Where it stands, at the height it was built.
+    pub model: Mat4,
+    pub customize: program::Customize,
+    /// How much of it is drawn, which its own dither clip tests each pixel against.
+    pub opacity: f32,
 }
 
 /// What the debug row offers, in the order it offers it.
@@ -1379,15 +1447,13 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         model.animation.ui(ui);
     }
 
-    model.poll(ui, backend);
+    model.poll(ui.ctx(), backend);
     model.viewport(ui);
 }
 
-/// The constants the passes past the composite are run with. Every one of these is a value a shader
-/// reads and no file states, so the numbers are the user's to move rather than the viewer's to
-/// settle. The occlusion and glare ones are a guess: those buffers report no member names, no
-/// defaults and no units at all, and the lengths among the first are taken as fractions of what the
-/// frame itself spans.
+/// Which of the passes past the composite run, and what each is run with. Every constant here comes
+/// out of a buffer no file describes, so each is stated beside its control rather than left to a
+/// slider; the two lanes of the vignette are the exception and are picks.
 fn settings(ui: &mut egui::Ui, model: &Rendered) {
     let mut look = model.look.get();
     ui.horizontal_wrapped(|ui| {
@@ -1558,17 +1624,41 @@ impl Rendered {
             .collect()
     }
 
-    fn poll(&self, ui: &egui::Ui, backend: &Backend) {
+    /// What a host outside this view draws this model with, at the transform it stands at and for
+    /// as much of a G-buffer as that host's own frame writes.
+    ///
+    /// A motion is set the way the character tab sets one, through [`Self::act`] and [`Self::play`]:
+    /// nothing about this seam names a pose, so what it stands in is whatever was last asked for.
+    pub fn cast(&self, at: Mat4, attachments: usize) -> Cast {
+        let level = self.level.borrow();
+        self.translate(level.skinned, level.waving, attachments);
+        let (pose, _) = self.posed(&level);
+        Cast {
+            gpu: level.gpu.clone(),
+            surfaces: self.surfaces(&level),
+            joints: pose.joints,
+            model: at * Mat4::from_scale(Vec3::splat(self.stature.get())),
+            customize: self.made_up(),
+            opacity: 1.0,
+        }
+    }
+
+    /// Asks for whatever this model still needs. Called by the view drawing it, which is not always
+    /// this one.
+    pub fn poll(&self, ctx: &egui::Context, backend: &Backend) {
         self.export
             .borrow_mut()
             .take_if(|promise| promise.try_get().is_some());
 
         let level = self.level.borrow();
         if level.skinned {
-            self.animation.poll(ui.ctx(), backend);
+            self.animation.poll(ctx, backend);
             self.emote
                 .borrow_mut()
                 .poll(backend, self.animation.body_playing());
+            self.effects
+                .borrow_mut()
+                .poll(ctx, backend, &self.fired.borrow());
         }
         let mut slots = self.slots.borrow_mut();
         for (index, slot) in slots.iter_mut().enumerate() {
@@ -1666,14 +1756,22 @@ impl Rendered {
                     Slot::Ready(material) => Some(material.package()),
                     _ => None,
                 })
+                // The passes that light a frame and grade it belong to whoever draws the frame,
+                // which for a placed model is not this one.
                 .chain(
-                    [
-                        program::VIEW_POSITION,
-                        program::DIRECTIONAL,
-                        program::POINT,
-                        program::COMPOSITE,
-                        program::TONE_ADJUST,
-                    ]
+                    match self.chrome.get() {
+                        Chrome::Placed => [].as_slice(),
+                        _ => [
+                            program::VIEW_POSITION,
+                            program::DIRECTIONAL,
+                            program::POINT,
+                            program::COMPOSITE,
+                            program::TONE_ADJUST,
+                        ]
+                        .as_slice(),
+                    }
+                    .iter()
+                    .copied()
                     .map(str::to_owned),
                 )
                 // Asked for only where the viewer is drawing with them, so a frame nobody wants
@@ -1819,6 +1917,22 @@ impl Rendered {
                     Array::Failed
                 }
             };
+        }
+        // The one texture the game states no path for. Held in the same map as the fetched set so
+        // that dropping that map drops this too, and drawn once: the field is deterministic.
+        if let std::collections::btree_map::Entry::Vacant(entry) =
+            arrays.entry(deferred::PERLIN_2D)
+            && self.shaded.get()
+        {
+            let held = deferred::Layered {
+                size: (noise::SIZE as i32, noise::SIZE as i32),
+                layers: 1,
+                pixels: noise::perlin(),
+                filter: glow::LINEAR,
+                kind: program::Kind::Plane,
+            };
+            level.gpu.lock().unwrap().queue_array(deferred::PERLIN_2D, held.clone());
+            entry.insert(Array::Ready(held));
         }
 
         let mut parameters = self.parameters.borrow_mut();
@@ -1999,7 +2113,7 @@ impl Rendered {
             };
             *texture = match result {
                 Ok(decoded) => {
-                    let held = crate::utils::tex_loader::fit(ui.ctx(), &decoded.image);
+                    let held = crate::utils::tex_loader::fit(ctx, &decoded.image);
                     let size = [held.width() as usize, held.height() as usize];
                     self.resident
                         .set(self.resident.get() + size[0] * size[1] * 4);
@@ -2045,7 +2159,7 @@ impl Rendered {
                             mipmap_mode: Some(egui::TextureFilter::Linear),
                         },
                     };
-                    Texture::Ready(ui.ctx().load_texture(format!("mdl:{path}"), image, options))
+                    Texture::Ready(ctx.load_texture(format!("mdl:{path}"), image, options))
                 }
                 Err(why) => {
                     log::error!("assets/mdl: {path}: {why}");
@@ -2056,61 +2170,11 @@ impl Rendered {
     }
 
     /// The model itself: an orbit camera over a paint callback.
-    fn viewport(&self, ui: &mut egui::Ui) {
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
-        if rect.width() < 1.0 || rect.height() < 1.0 {
-            return;
-        }
-        // The game's own shaders move a surface against a clock, so a frame under them is never the
-        // same twice and the viewer has to keep asking for another.
-        if self.shaded.get() {
-            let step = ui.input(|input| input.stable_dt).min(0.25);
-            self.clock.set(self.clock.get() + step);
-            ui.ctx().request_repaint();
-        }
-
-        let level = self.level.borrow();
-        let mut camera = self.camera.get();
-        let pan = |camera: &mut Camera, delta: egui::Vec2| {
-            let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
-            let right = Vec3::new(cos_yaw, 0.0, -sin_yaw);
-            let scale = camera.distance * 0.002;
-            camera.target += (right * -delta.x + Vec3::Y * delta.y) * scale;
-        };
-        let zoom = |camera: &mut Camera, scale: f32| {
-            camera.distance = (camera.distance * scale)
-                .clamp(level.home.distance * 0.02, level.home.distance * 20.0);
-        };
-
-        // A second finger takes the gesture over: egui carries on reporting a primary drag through
-        // one, so leaving the orbit armed would spin the model while it is being pinched.
-        let touch = ui.input(|input| input.multi_touch());
-        match touch.filter(|_| response.dragged()) {
-            Some(touch) => {
-                zoom(&mut camera, 1.0 / touch.zoom_delta);
-                pan(&mut camera, touch.translation_delta);
-            }
-            None => {
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    let delta = response.drag_delta();
-                    camera.yaw -= delta.x * 0.01;
-                    camera.pitch = (camera.pitch + delta.y * 0.01).clamp(-1.5, 1.5);
-                }
-                if response.dragged_by(egui::PointerButton::Secondary) {
-                    pan(&mut camera, response.drag_delta());
-                }
-            }
-        }
-        if response.hovered() {
-            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                zoom(&mut camera, 1.0 - scroll * 0.002);
-            }
-        }
-        self.camera.set(camera);
-
-        // The joints move the geometry after the file stated its bounds, so where the model stands
-        // has to be worked out before anything is framed or clipped against it.
+    /// The pose the model stands in, in its own space, and the rig it was posed on.
+    ///
+    /// The joints move the geometry after the file stated its bounds, so where the model stands has
+    /// to be worked out before anything is framed or clipped against it.
+    fn posed(&self, level: &Level) -> (skin::Pose, Option<skin::RigInfo>) {
         let worn: Vec<&str> = level
             .meshes
             .iter()
@@ -2124,7 +2188,8 @@ impl Rendered {
         if !self.attachments.borrow().is_empty()
             && let Some((names, ..)) = &rig
         {
-            for attachment in self.attachments.borrow().iter() {
+            let attachments = self.attachments.borrow();
+            for (at, attachment) in attachments.iter().enumerate() {
                 let Some(bone) = names.iter().position(|name| *name == attachment.bone) else {
                     continue;
                 };
@@ -2132,74 +2197,46 @@ impl Rendered {
                     continue;
                 };
                 let carried = world * attachment.local;
+                // A motion that summons the same model twice wears it twice, so the nth carried
+                // piece of a path is the nth piece built from it rather than every one of them.
+                let which = attachments[..at]
+                    .iter()
+                    .filter(|held| held.path == attachment.path)
+                    .count();
+                let Some(worn) = self
+                    .pieces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, piece)| piece.path == attachment.path)
+                    .nth(which)
+                    .map(|(piece, _)| piece)
+                else {
+                    continue;
+                };
                 for (index, mesh) in level.meshes.iter().enumerate() {
-                    if self.pieces[mesh.piece].path == attachment.path {
-                        pose.joints[index] = vec![carried];
+                    if mesh.piece != worn {
+                        continue;
                     }
+                    // A prop that ships a pack of its own is skinned to a rig of its own, walked
+                    // by that pack and carried whole to the point it hangs from: that is what puts
+                    // one of the two things it holds in each hand.
+                    pose.joints[index] = match self.animation.body_playing().and_then(|(_, _, time)| {
+                        self.emote
+                            .borrow()
+                            .joints(&attachment.path, &level.bones[index], time)
+                    }) {
+                        Some(joints) => joints.iter().map(|joint| carried * *joint).collect(),
+                        None => vec![carried; level.bones[index].len()],
+                    };
                 }
             }
         }
-        // A marker standing in for a vfx an emote's own timeline fires: not the game's particles,
-        // only where and when one would draw.
-        let mut markers = std::mem::take(&mut pose.skeleton);
-        if let (Some((_, _, time)), Some((names, ..))) = (self.animation.body_playing(), &rig) {
-            for vfx in self.emote.borrow().active_vfx(time) {
-                let Some(bone) = names.iter().position(|name| *name == vfx.bone) else {
-                    continue;
-                };
-                let Some(&world) = pose.world.get(bone) else {
-                    continue;
-                };
-                let (_, rotation, translation) = vfx.local(world).to_scale_rotation_translation();
-                markers.push(placed::Batch {
-                    shape: placed::Shape::Box,
-                    instances: vec![placed::Instance {
-                        center: translation.to_array(),
-                        scale: [0.08; 3],
-                        turn: rotation.to_array(),
-                        color: vfx.tint(),
-                    }],
-                });
-            }
-        }
-        // Carried rather than written into the camera, so a motion that walks runs in place and the
-        // user's own orbit, pan and zoom still mean what they did.
-        let focus = level.home.target + pose.drift;
-        let reach = level.radius + pose.stretch;
+        (pose, rig)
+    }
 
-        let target = camera.target + pose.drift;
-        let eye = camera.eye() + pose.drift;
-        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
-        // Cut to the model's own bounding sphere. A fixed ratio leaves a large piece with almost no
-        // depth precision where it is actually drawn.
-        let span = (eye - focus).length();
-        let near = (span - reach).max(reach * 0.005);
-        // Past the light box's own far corner rather than past the model, since the volume a lamp
-        // is drawn as is clipped by these planes whether or not anything depth tests against them.
-        let far = span + reach.max(level.radius * (1.0 + LAMP_SPAN * 2.0));
-        let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
-
-        // Fill and rim follow the camera; a fill weighted toward the eye is the whole of what keeps
-        // a surface turned away from the key from reading as a silhouette. Both are built from the
-        // camera's axes rather than from a fragment's view vector, which would give every pixel a
-        // rig of its own and sweep it across the surface as the camera moves.
-        let axes = Mat3::from_mat4(view).transpose();
-        let (right, up, back) = (axes.x_axis, axes.y_axis, axes.z_axis);
-        let fill = back - right * 0.5 - up * 0.2;
-        let rim = -back * 0.55 + up * 0.6 - right * 0.55;
-        let mut lights = [0.0; 9];
-        for (slot, light) in lights.chunks_exact_mut(3).zip([KEY, fill, rim]) {
-            slot.copy_from_slice(&light.normalize().to_array());
-        }
-
-        let attachments = level.gpu.lock().unwrap().attachments();
-        let lighting = match self.shaded.get() {
-            true => {
-                self.translate(level.skinned, level.waving, attachments);
-                self.lighting(attachments)
-            }
-            false => None,
-        };
+    /// What each mesh of the level is drawn with, once its material and that material's own shaders
+    /// have arrived.
+    fn surfaces(&self, level: &Level) -> Vec<gpu::Surface> {
         let translated = self.translated.borrow();
         let tables = self.tables.borrow();
         let slots = self.slots.borrow();
@@ -2224,7 +2261,7 @@ impl Rendered {
                 Some(Texture::Ready(_) | Texture::Absent)
             ) && !matches!(stacks.get(path), Some(Array::Ready(_) | Array::Failed))
         };
-        let surfaces = level
+        level
             .meshes
             .iter()
             .map(|mesh| {
@@ -2279,7 +2316,146 @@ impl Rendered {
                     cull: material.cull(),
                 }
             })
-            .collect();
+            .collect()
+    }
+
+    fn viewport(&self, ui: &mut egui::Ui) {
+        let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+        if rect.width() < 1.0 || rect.height() < 1.0 {
+            return;
+        }
+        // The game's own shaders move a surface against a clock, so a frame under them is never the
+        // same twice and the viewer has to keep asking for another.
+        if self.shaded.get() {
+            let step = ui.input(|input| input.stable_dt).min(0.25);
+            self.clock.set(self.clock.get() + step);
+            ui.ctx().request_repaint();
+        }
+
+        let level = self.level.borrow();
+        let mut camera = self.camera.get();
+        let pan = |camera: &mut Camera, delta: egui::Vec2| {
+            let (sin_yaw, cos_yaw) = camera.yaw.sin_cos();
+            let right = Vec3::new(cos_yaw, 0.0, -sin_yaw);
+            let scale = camera.distance * 0.002;
+            camera.target += (right * -delta.x + Vec3::Y * delta.y) * scale;
+        };
+        let zoom = |camera: &mut Camera, scale: f32| {
+            camera.distance = (camera.distance * scale)
+                .clamp(level.home.distance * 0.02, level.home.distance * 20.0);
+        };
+
+        // A second finger takes the gesture over: egui carries on reporting a primary drag through
+        // one, so leaving the orbit armed would spin the model while it is being pinched.
+        let touch = ui.input(|input| input.multi_touch());
+        match touch.filter(|_| response.dragged()) {
+            Some(touch) => {
+                zoom(&mut camera, 1.0 / touch.zoom_delta);
+                pan(&mut camera, touch.translation_delta);
+            }
+            None => {
+                if response.dragged_by(egui::PointerButton::Primary) {
+                    let delta = response.drag_delta();
+                    camera.yaw -= delta.x * 0.01;
+                    camera.pitch = (camera.pitch + delta.y * 0.01).clamp(-1.5, 1.5);
+                }
+                if response.dragged_by(egui::PointerButton::Secondary) {
+                    pan(&mut camera, response.drag_delta());
+                }
+            }
+        }
+        if response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                zoom(&mut camera, 1.0 - scroll * 0.002);
+            }
+        }
+        self.camera.set(camera);
+
+        let (mut pose, rig) = self.posed(&level);
+        // A marker standing in for the effect a weapon carries while it is drawn: this view runs
+        // no particles for one, only where and when it would draw.
+        let mut markers = std::mem::take(&mut pose.skeleton);
+        if let Some((names, ..)) = &rig {
+            for bone in self.glowing.borrow().iter() {
+                let Some(&world) = names
+                    .iter()
+                    .position(|name| name == bone)
+                    .and_then(|bone| pose.world.get(bone))
+                else {
+                    continue;
+                };
+                let (_, rotation, translation) = world.to_scale_rotation_translation();
+                markers.push(placed::Batch {
+                    shape: placed::Shape::Box,
+                    instances: vec![placed::Instance {
+                        center: translation.to_array(),
+                        scale: [0.06; 3],
+                        turn: rotation.to_array(),
+                        color: WEAPON_VFX_COLOR,
+                    }],
+                });
+            }
+        }
+        // Where each vfx the emote's own timeline is running stands this frame, which the next
+        // poll steps and the callback below draws.
+        *self.fired.borrow_mut() = match (self.animation.body_playing(), &rig) {
+            (Some((_, _, time)), Some((names, ..))) => self
+                .emote
+                .borrow()
+                .firing(time)
+                .filter_map(|vfx| {
+                    let bone = names.iter().position(|name| *name == vfx.bone)?;
+                    Some(effects::Fired {
+                        id: vfx.id,
+                        path: vfx.path.to_owned(),
+                        at: *pose.world.get(bone)? * vfx.local,
+                        since: vfx.since,
+                        tint: Vec4::from(vfx.tint),
+                    })
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        // Carried rather than written into the camera, so a motion that walks runs in place and the
+        // user's own orbit, pan and zoom still mean what they did.
+        let focus = level.home.target + pose.drift;
+        let reach = level.radius + pose.stretch;
+
+        let target = camera.target + pose.drift;
+        let eye = camera.eye() + pose.drift;
+        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        // Cut to the model's own bounding sphere. A fixed ratio leaves a large piece with almost no
+        // depth precision where it is actually drawn.
+        let span = (eye - focus).length();
+        let near = (span - reach).max(reach * 0.005);
+        // Past the light box's own far corner rather than past the model, since the volume a lamp
+        // is drawn as is clipped by these planes whether or not anything depth tests against them.
+        let far = span + reach.max(level.radius * (1.0 + LAMP_SPAN * 2.0));
+        let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
+
+        // Fill and rim follow the camera; a fill weighted toward the eye is the whole of what keeps
+        // a surface turned away from the key from reading as a silhouette. Both are built from the
+        // camera's axes rather than from a fragment's view vector, which would give every pixel a
+        // rig of its own and sweep it across the surface as the camera moves.
+        let axes = Mat3::from_mat4(view).transpose();
+        let (right, up, back) = (axes.x_axis, axes.y_axis, axes.z_axis);
+        let fill = back - right * 0.5 - up * 0.2;
+        let rim = -back * 0.55 + up * 0.6 - right * 0.55;
+        let mut lights = [0.0; 9];
+        for (slot, light) in lights.chunks_exact_mut(3).zip([KEY, fill, rim]) {
+            slot.copy_from_slice(&light.normalize().to_array());
+        }
+
+        let attachments = level.gpu.lock().unwrap().attachments();
+        let lighting = match self.shaded.get() {
+            true => {
+                self.translate(level.skinned, level.waving, attachments);
+                self.lighting(attachments)
+            }
+            false => None,
+        };
+        let surfaces = self.surfaces(&level);
 
         // The game's own shaders were compiled for a clip depth running from nought to one, and the
         // backend moves what they compute into the range GL clips against. A projection built for GL
@@ -2371,8 +2547,7 @@ impl Rendered {
         };
 
         // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in
-        // the mesh it poses. A vfx marker is a placeholder box, not the game's particles, so it
-        // rides the same skeleton toggle rather than drawing on the live view.
+        // the mesh it poses.
         let overlay = self.skeleton.get().then(|| {
             self.overlay.lock().unwrap().replace(markers);
             (self.overlay.clone(), (projection * view).to_cols_array())
@@ -2396,6 +2571,26 @@ impl Rendered {
                 }
             })),
         });
+
+        // The emote's own particles, over the frame the character was composited into: one callback
+        // per file, since a draw is that file's own programs and geometry.
+        for (particles, frame) in self.effects.borrow().frames(
+            &self.fired.borrow(),
+            view,
+            projection,
+            (rect.width(), rect.height()),
+            eye,
+        ) {
+            ui.painter().add(egui::PaintCallback {
+                rect,
+                callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                    particles
+                        .lock()
+                        .unwrap()
+                        .draw(painter.gl(), painter, &frame);
+                })),
+            });
+        }
     }
 
     /// How much of what the model needs has landed, against how much it asked for. A material names
@@ -2831,7 +3026,11 @@ impl Rendered {
         // The keys the engine sets rather than the material: a mesh carrying bone indices is one the
         // game would draw through the skinning variant. `GetNormalMap` is added per material below,
         // since only `bg.shpk` has a node for the parallax value.
-        let mut base = vec![(APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON), (GET_RLR, GET_RLR_ON)];
+        let mut base = vec![
+            (APPLY_ALPHA_CLIP, APPLY_ALPHA_CLIP_ON),
+            (APPLY_DITHER_CLIP, APPLY_DITHER_CLIP_ON),
+            (GET_RLR, GET_RLR_ON),
+        ];
         if skinned {
             base.push((TRANSFORM_VIEW, TRANSFORM_VIEW_SKIN));
         }
@@ -3178,18 +3377,62 @@ impl Rendered {
             .collect();
     }
 
-    /// The model an emote's own timeline wants held right now, by the path it is worn as and its
-    /// material variant, where a `C043`/`C198` prop command's window covers the current time.
-    /// `None` once it has played through: the caller is what carries a prop away again, the way a
-    /// weapon put away carries nothing.
-    pub fn wanted_prop(&self) -> Option<(String, u16)> {
-        let (_, _, time) = self.animation.body_playing()?;
-        self.emote.borrow().active_prop(time)
+    /// The models an emote's own timeline wants held right now, each by the path it is worn as, its
+    /// material variant and the weapon set it is filed under, where a `C043`/`C198` prop command's
+    /// window covers the current time. Empty once they have played through: the caller is what
+    /// carries a prop away again, the way a weapon put away carries nothing.
+    pub fn wanted_props(&self) -> Vec<(String, u16, u16)> {
+        let Some((_, _, time)) = self.animation.body_playing() else {
+            return Vec::new();
+        };
+        self.emote.borrow().active_props(time)
     }
 
-    /// Poses the character out of a different pack, which is what picking an emote is.
-    pub fn play(&self, path: &str, then: Option<&str>) {
-        self.animation.play(path, then);
+    /// Poses the character out of the first of `packs` the install holds, which is what picking
+    /// an emote is.
+    pub fn play(&self, packs: &[String], then: Option<&str>) {
+        self.animation.play(packs, then);
+    }
+
+    /// Poses the character out of the first of `packs` the install holds over whatever it is
+    /// already doing, which is what picking an emote while mounted is.
+    pub fn play_over(&self, packs: &[String]) {
+        self.animation.play_over(packs);
+    }
+
+    /// What to price a change of clip against, out of the game's own blend tables.
+    pub fn blending(&self, blend: impl Fn(&str, &str) -> f32 + 'static) {
+        self.animation.blending(blend);
+    }
+
+    /// Where each drawn weapon's own effect would play, by the bone it hangs from. The character
+    /// scene runs no particles, so this marks the place the way an emote's own vfx is marked.
+    pub fn glowing(&self, bones: Vec<String>) {
+        *self.glowing.borrow_mut() = bones;
+    }
+
+    /// Stands the character in the first of `poses` its own pack actually holds, cross-fading out
+    /// of whatever it was standing in, which is what a change of weapon or of stance is.
+    pub fn stand(&self, poses: &[(String, &str)], fade: f32) {
+        self.animation.stand(poses, fade);
+    }
+
+    /// Lays one motion over the pose the character is standing in for as long as it runs, which is
+    /// what drawing or sheathing a weapon is.
+    pub fn act(&self, packs: &[String], motion: &str, fade: f32) {
+        self.animation.act(packs, motion, fade);
+    }
+
+    /// Puts the motion the character is playing `seconds` in rather than wherever wall time has
+    /// run it to, which is what a transport seeking by a cutscene's own frame numbering asks for.
+    /// Read after [`Self::stand`], since taking a clip up is what puts its clock back to nought.
+    pub fn plays_at(&self, seconds: f32) {
+        self.animation.plays_at(seconds);
+    }
+
+    /// The motion the character is standing in, by the name its own pack gives it.
+    pub fn standing(&self) -> Option<String> {
+        self.animation.standing()
     }
 
     /// Puts an expression on the character's face, which is what picking an emote that only makes
@@ -3200,6 +3443,12 @@ impl Rendered {
 
     /// The bodies to read animation from, nearest first, which the caller reads off the same tree
     /// that says where a body borrows its clothes from.
+    /// Marks this model as standing in a frame this view does not draw, which is what keeps it
+    /// from asking for the passes that light one.
+    pub fn placed(&self) {
+        self.chrome.set(Chrome::Placed);
+    }
+
     pub fn built_on(&self, lineage: Vec<String>) {
         self.animation.built_on(lineage);
     }
@@ -3498,5 +3747,42 @@ impl Rendered {
         if let Some(lod) = picked {
             self.switch(lod);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Source, compose};
+
+    /// `w5341b0001`'s `.imc` names material nought for the one variant it carries, which is the
+    /// game stating that the weapon draws no material at all: worn at that variant it contributes
+    /// no mesh, and at the base colourway its own meshes are there.
+    #[test]
+    #[ignore = "reads the real local FFXIV install"]
+    fn a_piece_whose_imc_names_no_material_contributes_no_mesh() {
+        let path = "chara/weapon/w5341/obj/body/b0001/model/w5341b0001.mdl";
+        let install = ironworks::Ironworks::new().with_resource(ironworks::sqpack::SqPack::new(
+            ironworks::sqpack::Install::at_sqpack("/home/asriel/.xlcore/ffxiv/game/sqpack"),
+        ));
+        let bytes: Vec<u8> = install.file(path).expect("the model");
+        let worn = |material| -> usize {
+            compose(&[Source {
+                path: path.to_owned(),
+                bytes: bytes.clone(),
+                variant: 1,
+                material,
+                deform: None,
+                skin: None,
+                rigid: true,
+            }])
+            .expect("a readable model")
+            .level
+            .borrow()
+            .meshes
+            .len()
+        };
+        assert_eq!(worn(Some(0)), 0, "the imc names no material");
+        assert!(worn(Some(1)) > 0, "the base colourway draws");
+        assert!(worn(None) > 0, "nothing states a colourway at all");
     }
 }

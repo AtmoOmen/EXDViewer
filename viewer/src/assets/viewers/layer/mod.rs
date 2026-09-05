@@ -8,7 +8,9 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 
 use egui::{RichText, ScrollArea, Sense, Vec2, collapsing_header::paint_default_icon, vec2};
-use ironworks::file::layer::{Colour, Instance, InstanceData, LayerGroup, Rgba, Scene, TriggerBox};
+use ironworks::file::layer::{
+    Colour, HelperKind, Instance, InstanceData, LayerGroup, Rgba, Scene, TriggerBox,
+};
 use ironworks::file::{lgb::LayerGroupFile, lvb::LevelFile, sgb::SharedGroupFile};
 
 use super::{facts, link, section};
@@ -291,7 +293,7 @@ fn listed(points: impl ExactSizeIterator<Item = String>) -> String {
 }
 
 /// The file an instance draws itself from, where its payload names one.
-fn asset(data: &InstanceData) -> Option<&str> {
+pub fn asset(data: &InstanceData) -> Option<&str> {
     let path: &str = match data {
         InstanceData::BgPart(part) => part.asset_path(),
         InstanceData::SharedGroup(group) => group.asset_path(),
@@ -302,6 +304,10 @@ fn asset(data: &InstanceData) -> Option<&str> {
         InstanceData::Decal(decal) => decal.diffuse_path(),
         InstanceData::EnvLocation(location) => location.ambient_light_asset_path(),
         InstanceData::CollisionBox(collision) => collision.collision_asset_path(),
+        InstanceData::HelperObject(helper) => helper
+            .nested()
+            .and_then(|nested| asset(nested.data()))
+            .unwrap_or_default(),
         _ => "",
     };
     (!path.is_empty()).then_some(path)
@@ -324,6 +330,10 @@ fn summary(instance: &Instance) -> String {
         InstanceData::PositionMarker(marker) => format!("{:?}", marker.kind()),
         InstanceData::SharedGroup(group) => format!("{:?}", group.initial_door_state()),
         InstanceData::Sound(sound) => format!("{:?}", sound.kind()),
+InstanceData::HelperObject(helper) => match helper.base_id() {
+            0 => format!("{:?}", helper.kind()),
+            base => format!("{:?}, 基准 {base}", helper.kind()),
+        },
         InstanceData::EventNpc(npc) => format!("基准 {}", npc.character().object().base_id()),
         InstanceData::Character(character) => format!("基准 {}", character.object().base_id()),
         InstanceData::Aetheryte(aetheryte) => format!("基准 {}", aetheryte.object().base_id()),
@@ -435,6 +445,38 @@ fn payload(instance: &Instance) -> Rows {
             rows.text("标记", format!("{:?}", marker.kind()));
             rows.text("注释", format!("{:#x}", marker.comment_en_offset()));
             rows.text("注释（日文）", format!("{:#x}", marker.comment_jp_offset()));
+        }
+        InstanceData::HelperObject(helper) => {
+            rows.text("Stands for", format!("{:?}", helper.kind()));
+            match helper.kind() {
+                HelperKind::BattleNpc => rows.row("Base", "BNpcBase", helper.base_id()),
+                _ => rows.row("Base", "ENpcBase", helper.base_id()),
+            }
+            if helper.object_id() != 0 {
+                rows.text("Object", helper.object_id().to_string());
+            }
+            if helper.kind() == HelperKind::Weapon {
+                let model = helper.weapon();
+                rows.text(
+                    "Weapon",
+                    format!(
+                        "{}, {}, {}",
+                        model.skeleton_id(),
+                        model.pattern_id(),
+                        model.image_change_id()
+                    ),
+                );
+            }
+            if helper.height() != 0 {
+                rows.text("Height", ((u32::from(helper.height()) - 1) * 25).to_string());
+            }
+            if let Some(placement) = helper.placement() {
+                rows.text("Stands at", axes(placement.transform().translation()));
+                rows.text("Placement flags", format!("{:#x}", placement.flags()));
+            }
+            if let Some(nested) = helper.nested() {
+                rows.0.extend(payload(nested).0);
+            }
         }
         InstanceData::SharedGroup(group) => {
             rows.path("组", group.asset_path());

@@ -29,7 +29,8 @@ struct Census {
     examples: BTreeMap<(&'static str, String), String>,
     /// C043 weapon/body/variant triples seen, with an owning file.
     c043: Vec<(i16, i16, i32, String)>,
-    /// C198 model/body/variant/summon_id/atch_state, with an owning file.
+    /// C198 model/body/variant/summon_id/atch_state, with an owning file. Every one of them: the
+    /// pair of bytes that tells one summon from another is what the census is read for.
     c198: Vec<(i16, i16, i32, u8, u8, String)>,
     /// C107 VFXTrigger rows seen, with an owning file.
     c107: Vec<(i32, String)>,
@@ -41,6 +42,10 @@ struct Census {
     c012_bind_id: BTreeMap<i16, usize>,
     /// C063 bind fields.
     c063_bind: BTreeMap<u8, usize>,
+    /// How many distinct `.avfx` one motion's own timeline fires, tallied over every timeline.
+    vfx_per_timeline: BTreeMap<usize, usize>,
+    /// The most any one names, with the file it is in.
+    worst_vfx: (usize, String),
 }
 
 fn kind_name(kind: &CommandKind) -> &'static str {
@@ -61,8 +66,11 @@ fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::C031(_) => "C031",
         CommandKind::C033(_) => "C033",
         CommandKind::C034(_) => "C034",
+        CommandKind::C040(_) => "C040",
         CommandKind::C042(_) => "C042",
         CommandKind::C043(_) => "C043",
+        CommandKind::C048(_) => "C048",
+        CommandKind::C049(_) => "C049",
         CommandKind::C053(_) => "C053",
         CommandKind::C055(_) => "C055",
         CommandKind::C056(_) => "C056",
@@ -78,6 +86,7 @@ fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::C084(_) => "C084",
         CommandKind::C088(_) => "C088",
         CommandKind::C089(_) => "C089",
+        CommandKind::C090(_) => "C090",
         CommandKind::C093(_) => "C093",
         CommandKind::C094(_) => "C094",
         CommandKind::C095(_) => "C095",
@@ -88,6 +97,7 @@ fn kind_name(kind: &CommandKind) -> &'static str {
         CommandKind::C110(_) => "C110",
         CommandKind::C112(_) => "C112",
         CommandKind::C113(_) => "C113",
+        CommandKind::C114(_) => "C114",
         CommandKind::C117(_) => "C117",
         CommandKind::C118(_) => "C118",
         CommandKind::C120(_) => "C120",
@@ -141,6 +151,23 @@ fn walk(census: &mut Census, path: &str, timeline: &[u8]) {
         return;
     };
     census.timelines += 1;
+    let mut fires: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for item in parsed.items() {
+        if let Item::Command(command) = item {
+            let named = match command.kind() {
+                CommandKind::C012(c) => c.path(),
+                CommandKind::C173(c) => c.path(),
+                _ => None,
+            };
+            if let Some(named) = named {
+                fires.insert(named.to_owned());
+            }
+        }
+    }
+    *census.vfx_per_timeline.entry(fires.len()).or_default() += 1;
+    if fires.len() > census.worst_vfx.0 {
+        census.worst_vfx = (fires.len(), path.to_owned());
+    }
     for item in parsed.items() {
         let Item::Command(command) = item else {
             continue;
@@ -149,8 +176,8 @@ fn walk(census: &mut Census, path: &str, timeline: &[u8]) {
         *census.kinds.entry(name).or_default() += 1;
         match command.kind() {
             CommandKind::C002(c) => note_path(census, name, c.path(), path),
-            CommandKind::C009(c) => note_path(census, name, c.path(), path),
-            CommandKind::C010(c) => note_path(census, name, c.path(), path),
+            CommandKind::C009(c) => note_path(census, name, c.motion(), path),
+            CommandKind::C010(c) => note_path(census, name, c.motion(), path),
             CommandKind::C012(c) => {
                 note_path(census, name, c.path(), path);
                 *census
@@ -176,7 +203,7 @@ fn walk(census: &mut Census, path: &str, timeline: &[u8]) {
                 }
             }
             CommandKind::C198(c) => {
-                if census.c198.len() < 40 {
+                {
                     census.c198.push((
                         c.model_id(),
                         c.body_id(),
@@ -278,8 +305,24 @@ fn main() {
     for (weapon, body, variant, file) in &census.c043 {
         println!("  w{weapon:04}b{body:04} variant {variant} in {file}");
     }
+    println!("\ndistinct .avfx one timeline fires:");
+    for (count, timelines) in &census.vfx_per_timeline {
+        println!("  {count}: {timelines}");
+    }
+    println!(
+        "  most: {} in {}",
+        census.worst_vfx.0, census.worst_vfx.1
+    );
+    println!("\nC198 (summon_id, atch_state) tallies:");
+    let mut pairs: BTreeMap<(u8, u8), usize> = BTreeMap::new();
+    for (_, _, _, summon, atch, _) in &census.c198 {
+        *pairs.entry((*summon, *atch)).or_default() += 1;
+    }
+    for ((summon, atch), count) in &pairs {
+        println!("  summon {summon} atch {atch}: {count}");
+    }
     println!("\nC198 (model_id, body_id, variant, summon_id, atch_state) samples:");
-    for (model, body, variant, summon, atch, file) in &census.c198 {
+    for (model, body, variant, summon, atch, file) in census.c198.iter().take(40) {
         println!(
             "  model {model} body {body} variant {variant} summon {summon} atch {atch} in {file}"
         );

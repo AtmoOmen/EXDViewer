@@ -7,7 +7,7 @@
 //!
 //! What each set is offered under comes from the creator's own menus, in [`menus`].
 
-mod emotes;
+pub(crate) mod emotes;
 mod gating;
 mod menus;
 mod mounts;
@@ -663,7 +663,7 @@ impl CharacterBuilder {
         if let Some(promise) = self.reading_stance.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => self.stance = Some(Rc::new(read)),
-                Ok(Err(why)) => log::warn!("character: nothing states a weapon's stance: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有任何数据能说明武器的姿势：{why}"),
                 Err(promise) => self.reading_stance = Some(promise),
             }
         }
@@ -994,7 +994,7 @@ impl CharacterBuilder {
             // Named once the pack has landed rather than when it was asked for: a class with no
             // drawn pose of its own settles into the sheathed one, and this is what says so.
             if let Some(name) = model.standing().filter(|_| !stood.told.replace(true)) {
-                log::info!("character: {} settled into {name}", stood.held);
+                log::info!("角色：{} 定格于 {name}", stood.held);
             }
             return;
         }
@@ -1007,7 +1007,7 @@ impl CharacterBuilder {
 
         let wanted = poses[0].1;
         let fade = model.standing().map_or(0.0, |from| stance.fade(&from, wanted));
-        log::info!("character: {held} asks for {wanted}, blending over {fade:.3}s");
+        log::info!("角色：{held} 请求 {wanted}，在 {fade:.3}s 内过渡");
         model.stand(&poses, fade);
 
         if stood.as_ref().is_some_and(|stood| stood.drawn != self.drawn) {
@@ -1017,7 +1017,7 @@ impl CharacterBuilder {
             };
             let packs = vec![stance.pack(self.code, &held, "resident/sub")];
             let fade = stance.fade(stance::DRAWN, over);
-            log::info!("character: {over} over it, blending over {fade:.3}s");
+            log::info!("角色：{over} 叠加其上，在 {fade:.3}s 内过渡");
             model.act(&packs, over, fade);
         }
         *stood = Some(Stood {
@@ -1054,7 +1054,7 @@ impl CharacterBuilder {
         let Some(key) = self.poses.of(self.posture).get(self.pose) else {
             return;
         };
-        log::info!("character: sitting in {key}");
+        log::info!("角色：坐入 {key}");
         model.play(&self.emote_packs(key), None);
     }
 
@@ -1122,7 +1122,7 @@ impl CharacterBuilder {
                     .zip(atch)
                     .and_then(|(tag, bytes)| weapons::other_hand(bytes, tag, &placed.1))
             {
-                log::info!("character: a second {path} hangs from {other} instead");
+                log::info!("角色：第二个 {path} 改为挂在 {other} 上");
                 placed.1 = other;
             }
             found.push(placed);
@@ -1152,7 +1152,7 @@ impl CharacterBuilder {
             .collect();
         if *self.glowed.borrow() != named {
             for path in &named {
-                log::info!("character: a drawn weapon plays {path}");
+                log::info!("角色：拔出的武器正在播放 {path}");
             }
             *self.glowed.borrow_mut() = named;
         }

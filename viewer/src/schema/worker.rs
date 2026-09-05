@@ -14,9 +14,9 @@ impl WorkerProvider {
         match worker::transact(WorkerRequest::SchemaSetup(handle)).await {
             WorkerResponse::SchemaSetup(Ok(())) => Ok(Self(())),
             WorkerResponse::SchemaSetup(Err(e)) => Err(anyhow::anyhow!(
-                "WorkerProvider: failed to setup schema folder: {e}"
+                "WorkerProvider：设置模式文件夹失败: {e}"
             )),
-            _ => Err(anyhow::anyhow!("WorkerProvider: invalid schema response")),
+            _ => Err(anyhow::anyhow!("WorkerProvider：无效的模式响应")),
         }
     }
 
@@ -24,9 +24,9 @@ impl WorkerProvider {
         match worker::transact(WorkerRequest::SchemaGet()).await {
             WorkerResponse::SchemaGet(Ok(folders)) => Ok(folders),
             WorkerResponse::SchemaGet(Err(e)) => Err(anyhow::anyhow!(
-                "WorkerProvider: failed to get schema folders: {e}"
+                "WorkerProvider：读取模式文件夹失败: {e}"
             )),
-            _ => Err(anyhow::anyhow!("WorkerProvider: invalid schema response")),
+            _ => Err(anyhow::anyhow!("WorkerProvider：无效的模式响应")),
         }
     }
 
@@ -34,9 +34,9 @@ impl WorkerProvider {
         match worker::transact(WorkerRequest::SchemaStore(handle)).await {
             WorkerResponse::SchemaStore(Ok(())) => Ok(()),
             WorkerResponse::SchemaStore(Err(e)) => Err(anyhow::anyhow!(
-                "WorkerProvider: failed to add schema folder: {e}"
+                "WorkerProvider：添加模式文件夹失败: {e}"
             )),
-            _ => Err(anyhow::anyhow!("WorkerProvider: invalid schema response")),
+            _ => Err(anyhow::anyhow!("WorkerProvider：无效的模式响应")),
         }
     }
 
@@ -44,9 +44,9 @@ impl WorkerProvider {
         match worker::transact(WorkerRequest::VerifyFolder((handle, true))).await {
             WorkerResponse::VerifyFolder(Ok(())) => Ok(()),
             WorkerResponse::VerifyFolder(Err(e)) => Err(anyhow::anyhow!(
-                "WorkerProvider: failed to verify schema folder: {e}"
+                "WorkerProvider：校验模式文件夹失败: {e}"
             )),
-            _ => Err(anyhow::anyhow!("WorkerProvider: invalid schema response")),
+            _ => Err(anyhow::anyhow!("WorkerProvider：无效的模式响应")),
         }
     }
 }
@@ -54,13 +54,13 @@ impl WorkerProvider {
 #[async_trait(?Send)]
 impl SchemaProvider for WorkerProvider {
     async fn get_schema_text(&self, name: &str) -> anyhow::Result<String> {
-        log::info!("WorkerProvider: requesting schema {name:?}");
+        log::info!("WorkerProvider：正在请求模式 {name:?}");
         if let WorkerResponse::SchemaRequestGet(result) =
             worker::transact(WorkerRequest::SchemaRequestGet(format!("{name}.yml"))).await
         {
-            result.map_err(|e| anyhow::anyhow!("WorkerProvider: failed to get schema: {e}"))
+            result.map_err(|e| anyhow::anyhow!("WorkerProvider：读取模式失败: {e}"))
         } else {
-            return Err(anyhow::anyhow!("WorkerProvider: invalid schema response"));
+            return Err(anyhow::anyhow!("WorkerProvider：无效的模式响应"));
         }
     }
 
@@ -73,15 +73,15 @@ impl SchemaProvider for WorkerProvider {
     }
 
     async fn save_schema(&self, name: &str, text: &str) -> anyhow::Result<()> {
-        log::info!("WorkerProvider: saving schema {name:?}");
+        log::info!("WorkerProvider：正在保存模式 {name:?}");
         if let WorkerResponse::SchemaRequestStore(result) = worker::transact(
             WorkerRequest::SchemaRequestStore((format!("{name}.yml"), text.to_string())),
         )
         .await
         {
-            result.map_err(|e| anyhow::anyhow!("WorkerProvider: failed to save schema: {e}"))
+            result.map_err(|e| anyhow::anyhow!("WorkerProvider：保存模式失败: {e}"))
         } else {
-            return Err(anyhow::anyhow!("WorkerProvider: invalid schema response"));
+            return Err(anyhow::anyhow!("WorkerProvider：无效的模式响应"));
         }
     }
 }

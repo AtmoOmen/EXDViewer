@@ -38,7 +38,7 @@ impl GithubApi {
         if let Some(proxy) = &self.proxy {
             match server_json(&format!("{proxy}/github/{route}")).await {
                 Ok(value) => return Ok(value),
-                Err(e) => log::warn!("Falling back to GitHub for {route}: {e}"),
+                Err(e) => log::warn!("回退到 GitHub 获取 {route}: {e}"),
             }
         }
         github_json(url, self.token.as_deref()).await

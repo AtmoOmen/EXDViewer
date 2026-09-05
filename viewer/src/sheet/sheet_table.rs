@@ -533,7 +533,7 @@ if let Some(icon_id) = self.modal_image {
         }
 
         if let Some(filter) = self.stale_filter() {
-            log::info!("Refiltering now that every referenced sheet is loaded");
+            log::info!("所有被引用的表已加载, 正在重新筛选");
             self.filter_refreshed = true;
             self.spawn_filter(filter);
         }
@@ -733,7 +733,7 @@ impl TableDelegate for SheetTable {
         let (row_id, subrow_id, row_data) = match row_data {
             Ok(row_data) => row_data,
             Err(error) => {
-                log::error!("Failed to get row data: {error:?}");
+                log::error!("获取行数据失败: {error:?}");
                 return;
             }
         };
@@ -788,7 +788,7 @@ impl TableDelegate for SheetTable {
                         match cell {
                             Ok(cell) => cell.show(ui),
                             Err(e) => {
-                                log::error!("Failed to get column {column_idx}: {e:?}");
+                                log::error!("获取列 {column_idx} 失败: {e:?}");
                                 InnerResponse::new(CellResponse::None, ui.label(""))
                             }
                         }

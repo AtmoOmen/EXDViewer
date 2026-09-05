@@ -160,7 +160,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Pieces> {
     main_hand.sort_by(|left, right| left.name.cmp(&right.name));
     off_hand.sort_by(|left, right| left.name.cmp(&right.name));
     log::info!(
-        "character: {} main hand, {} off hand weapons, {} attach points",
+        "角色：{} 把主手武器，{} 把副手武器，{} 个挂点",
         main_hand.len(),
         off_hand.len(),
         tags.len()

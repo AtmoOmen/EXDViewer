@@ -1162,7 +1162,7 @@ impl Animation {
                     true => "nothing".to_owned(),
                     false => from,
                 };
-                log::info!("mdl: {from} into {to} blends over {over:.3}s");
+                log::info!("mdl：{from} 过渡到 {to}，历时 {over:.3}s");
                 layer.priced(over);
             }
         }
@@ -1599,7 +1599,7 @@ impl Animation {
             .filter(|candidate| packs.iter().any(|pack| pack.path == *candidate))
             .collect();
         drop(held);
-        log::info!("mdl: the body lays cfxf_{name} over the face");
+        log::info!("mdl：身体在面部叠上 cfxf_{name}");
         self.face.seek(opening(candidates, &name), self.priced());
         *self.pending.borrow_mut() = Some(name.clone());
         *self.linked.borrow_mut() = Some(name);

@@ -77,6 +77,6 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Stain>> {
             metallic,
         });
     }
-    log::info!("character: {} dyes to pick from", found.len());
+    log::info!("角色：有 {} 个染料可选", found.len());
     Ok(found)
 }

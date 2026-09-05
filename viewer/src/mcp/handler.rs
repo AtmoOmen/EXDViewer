@@ -115,6 +115,17 @@ pub struct SearchCellsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct ListEmotesParams {
+    /// 名称关键词, 子串不区分大小写过滤, 默认返回全部
+    pub query: Option<String>,
+    /// 最大返回情感动作数, 默认 200
+    pub limit: Option<usize>,
+    /// 数据语言, 默认 chinese_simplified
+    pub language: Option<McpLanguage>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct QueryRowsParams {
     /// 精确表名, 不确定时使用 list_sheets.query
     pub name: String,
@@ -431,7 +442,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "识别并结构化解析资源, 支持纹理、PNG 图像、材质、字体、图标、ULD 布局、SHPK 着色器包、SHCD 着色器代码、SCD 声音容器、LGB 图层组和 SGB 共享组"
+        description = "识别并结构化解析资源, 支持纹理、PNG 图像、材质、字体、图标、ULD 布局、SHPK 着色器包、SHCD 着色器代码、SCD 声音容器、LGB 图层组、SGB 共享组、CUTB 过场动画和 TMB 时间轴"
     )]
     async fn inspect_asset(
         &self,
@@ -687,6 +698,26 @@ impl McpHandler {
                     max_rows: params.max_rows,
                     max_results: params.max_results.unwrap_or(50),
                     language: self.language(params.language),
+                },
+                Self::heavy_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        description = "列出游戏可播放的情感动作与座椅姿态: 每个动作的名称、图标、动作键、坐骑姿势、椅子与地面变体, 以及 /cpose 循环的姿势键; 数据来自 Emote 与 ActionTimeline 表"
+    )]
+    async fn list_emotes(
+        &self,
+        Parameters(params): Parameters<ListEmotesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::ListEmotes {
+                    language: self.language(params.language),
+                    query: params.query,
+                    limit: params.limit.unwrap_or(200),
                 },
                 Self::heavy_timeout(),
             )

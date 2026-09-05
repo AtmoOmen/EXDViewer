@@ -191,7 +191,7 @@ fn push(
     }
 }
 
-fn magic(item: &Item) -> String {
+pub(crate) fn magic(item: &Item) -> String {
     match item {
         Item::Header(_) => "TMDH".to_owned(),
         Item::FaceLibrary(_) => "TMPP".to_owned(),

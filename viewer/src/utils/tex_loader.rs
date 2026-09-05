@@ -88,7 +88,7 @@ pub fn decode_stack(texture: &tex::Texture, level: u8, path: &str) -> Result<Dyn
     let plain = || {
         texture
             .mip_data(level)
-            .with_context(|| format!("texture {path} has no mipmap level {level}"))
+            .with_context(|| format!("纹理 {path} 没有 mipmap 层级 {level}"))
     };
 
     let buffer = match texture.format() {
@@ -396,12 +396,12 @@ fn read_texture_bc(
     let (width, height) = texture.mip_size(level);
     let data = texture
         .mip_data(level)
-        .with_context(|| format!("texture has no mipmap level {level}"))?;
+        .with_context(|| format!("纹理没有 mipmap 层级 {level}"))?;
     let layers = usize::from(texture.layers(level));
     let stride = data.len() / layers;
     // A slice is at least one block, so this only trips on a truncated file, where chunking by zero
     // would panic rather than fail.
-    anyhow::ensure!(stride > 0, "mipmap level {level} holds no {layers} slices");
+    anyhow::ensure!(stride > 0, "mipmap 层级 {level} 没有 {layers} 个图层");
 
 let mut pixels = Vec::with_capacity(data.len());
     for slice in data.chunks_exact(stride) {

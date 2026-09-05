@@ -59,7 +59,7 @@ impl GithubSession {
             match self.client_id_promise.take().unwrap().block_and_take() {
                 Ok(id) => self.client_id = Some(id),
                 Err(e) => {
-                    log::error!("Failed to fetch OAuth client id: {e}");
+                    log::error!("获取 OAuth 客户端 ID 失败: {e}");
                     self.error = Some(e.to_string());
                 }
             }
@@ -96,12 +96,12 @@ impl GithubSession {
         {
             match self.exchange.take().unwrap().block_and_take() {
                 Ok(auth) => {
-                    log::info!("Signed in to GitHub as {}", auth.login);
+                    log::info!("GitHub 已以 {} 身份登录", auth.login);
                     self.error = None;
                     GITHUB_AUTH.set(ctx, Some(auth));
                 }
                 Err(e) => {
-                    log::error!("GitHub sign-in failed: {e}");
+                    log::error!("GitHub 登录失败: {e}");
                     self.error = Some(e.to_string());
                 }
             }
@@ -133,7 +133,7 @@ impl GithubSession {
                 ctx.open_url(egui::OpenUrl::new_tab(start.url));
             }
             Err(e) => {
-                log::error!("Failed to start GitHub sign-in: {e}");
+                log::error!("发起 GitHub 登录失败: {e}");
                 self.error = Some(e.to_string());
             }
         }

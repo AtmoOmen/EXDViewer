@@ -95,3 +95,64 @@ fn structured_link_value_embeds_nested_value() {
     assert_eq!(value["row_id"], 42);
     assert_eq!(value["value"]["kind"], "Boolean");
 }
+
+/// A `.tmb` of one actor holding one track holding one command, with the id lists in a pool past
+/// the items — the same shape the viewer's own tmb tests build.
+fn timeline() -> Vec<u8> {
+    let (actors, tracks, commands) = (116u32, 118u32, 120u32);
+    let mut bytes = Vec::new();
+    bytes.extend(b"TMLB");
+    bytes.extend(122u32.to_le_bytes());
+    bytes.extend(5u32.to_le_bytes());
+    bytes.extend(b"TMDH");
+    bytes.extend(16u32.to_le_bytes());
+    bytes.extend(0i16.to_le_bytes());
+    bytes.extend(0i16.to_le_bytes());
+    bytes.extend(100i16.to_le_bytes());
+    bytes.extend(3i16.to_le_bytes());
+    bytes.extend(b"TMAL");
+    bytes.extend(16u32.to_le_bytes());
+    bytes.extend((actors - 36).to_le_bytes());
+    bytes.extend(1u32.to_le_bytes());
+    bytes.extend(b"TMAC");
+    bytes.extend(28u32.to_le_bytes());
+    bytes.extend(1i16.to_le_bytes());
+    bytes.extend(0i16.to_le_bytes());
+    bytes.extend(0i32.to_le_bytes());
+    bytes.extend(0i32.to_le_bytes());
+    bytes.extend((tracks - 52).to_le_bytes());
+    bytes.extend(1u32.to_le_bytes());
+    bytes.extend(b"TMTR");
+    bytes.extend(24u32.to_le_bytes());
+    bytes.extend(2i16.to_le_bytes());
+    bytes.extend(0i16.to_le_bytes());
+    bytes.extend((commands - 80).to_le_bytes());
+    bytes.extend(1u32.to_le_bytes());
+    bytes.extend(0i32.to_le_bytes());
+    bytes.extend(b"C011");
+    bytes.extend(20u32.to_le_bytes());
+    bytes.extend(3i16.to_le_bytes());
+    bytes.extend(5i16.to_le_bytes());
+    bytes.extend(1i32.to_le_bytes());
+    bytes.extend(0i32.to_le_bytes());
+    bytes.extend(1u16.to_le_bytes());
+    bytes.extend(2u16.to_le_bytes());
+    bytes.extend(3u16.to_le_bytes());
+    bytes
+}
+
+#[test]
+fn inspect_structures_a_tmb_timeline() {
+    use super::assets::inspect;
+
+    let value: serde_json::Value =
+        serde_json::from_str(&inspect("cut_example.tmb", &timeline(), 100).unwrap()).unwrap();
+
+    assert_eq!(value["format"]["viewer"], "时间轴");
+    assert_eq!(value["details"]["items"], 5);
+    assert_eq!(value["details"]["duration"], 100);
+    let kinds = value["details"]["kinds"].as_array().unwrap();
+    assert_eq!(kinds.len(), 5);
+    assert!(kinds.iter().any(|kind| kind["magic"] == "C011" && kind["count"] == 1));
+    assert_eq!(value["details"]["kinds_truncated"], false);
+}

@@ -115,6 +115,11 @@ pub enum McpRequest {
         max_results: usize,
         language: Language,
     },
+    ListEmotes {
+        language: Language,
+        query: Option<String>,
+        limit: usize,
+    },
     QueryRows {
         name: String,
         filter: Option<String>,
@@ -181,6 +186,7 @@ impl McpRequest {
             Self::GetSheetSchema { .. } => "get_sheet_schema",
             Self::GetSchemaRaw { .. } => "get_schema_raw",
             Self::SearchCells { .. } => "search_cells",
+            Self::ListEmotes { .. } => "list_emotes",
             Self::QueryRows { .. } => "query_rows",
             Self::GetRow { .. } => "get_row",
             Self::ValidateSchema { .. } => "validate_schema",
@@ -1267,6 +1273,60 @@ async fn process_search_cells(backend: &Backend, options: SearchCellsOptions<'_>
     )
 }
 
+async fn process_list_emotes(
+    backend: &Backend,
+    language: Language,
+    query: Option<&str>,
+    limit: usize,
+) -> McpResponse {
+    use crate::character::emotes::{self, Posture};
+
+    let result = async {
+        let (emotes, poses) = emotes::read(backend, language).await?;
+        let query = query.map(str::to_lowercase).filter(|query| !query.is_empty());
+        let mut items = Vec::new();
+        for emote in emotes {
+            if let Some(query) = &query
+                && !emote.name.to_lowercase().contains(query)
+            {
+                continue;
+            }
+            let (start, standing) = emote.keys();
+            items.push(serde_json::json!({
+                "name": emote.name,
+                "icon": emote.icon,
+                "start": start,
+                "standing": standing,
+                "mounted": emote.mounted(),
+                "chair": emote.seated(Posture::Chair),
+                "ground": emote.seated(Posture::Ground),
+                "expression": emote.expression()
+            }));
+            if items.len() >= limit {
+                break;
+            }
+        }
+        let poses = serde_json::json!({
+            "chair": poses.of(Posture::Chair),
+            "ground": poses.of(Posture::Ground)
+        });
+        Ok::<_, anyhow::Error>(
+            serde_json::json!({
+                "language": format!("{language:?}"),
+                "count": items.len(),
+                "emotes": items,
+                "poses": poses
+            })
+            .to_string(),
+        )
+    }
+    .await;
+    match result {
+        Ok(text) => McpResponse::Success(text),
+        Err(why) => McpResponse::Error(format!("{why:#}")),
+    }
+}
+
 struct ResolveLinkOptions<'a> {
     name: &'a str,
     row_id: u32,
@@ -1597,6 +1657,11 @@ async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
             )
             .await
         }
+        McpRequest::ListEmotes {
+            language,
+            query,
+            limit,
+        } => process_list_emotes(backend, language, query.as_deref(), limit).await,
         McpRequest::QueryRows {
             name,
             filter,

@@ -723,6 +723,97 @@ fn inspect_lgb(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Val
     }))
 }
 
+fn inspect_cutb(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Value> {
+    use ironworks::file::cutb::{Cutscene, Node};
+    use ironworks::file::tmb::{CommandKind, Item};
+
+    let file = Cutscene::read(Cursor::new(bytes.to_vec()))?;
+    let mut nodes = Vec::new();
+    let mut resources = Vec::new();
+    let mut timelines = Vec::new();
+    let mut shots = 0usize;
+    let mut level = String::new();
+    let mut origin = String::new();
+    let mut sheet = String::new();
+    for (index, node) in file.nodes().iter().enumerate() {
+        match node {
+            Node::Resources(list) => resources.extend(
+                list.iter()
+                    .take(max_items)
+                    .map(|resource| {
+                        serde_json::json!({
+                            "flag": resource.unknown_1(),
+                            "path": resource.path()
+                        })
+                    }),
+            ),
+            Node::Sheet(named) => sheet = named.clone(),
+            Node::Scene(scene) => {
+                level = scene.level().to_owned();
+                let [x, y, z] = scene.origin();
+                origin = format!("{x:.2}, {y:.2}, {z:.2}");
+            }
+            Node::Timeline(timeline) => {
+                shots += timeline
+                    .items()
+                    .iter()
+                    .filter(|item| {
+                        matches!(item, Item::Command(command)
+                            if matches!(command.kind(), CommandKind::C004(_)))
+                    })
+                    .count();
+                timelines.push(serde_json::json!({
+                    "node": index,
+                    "items": timeline.items().len()
+                }));
+            }
+            _ => {}
+        }
+        nodes.push(serde_json::json!({
+            "magic": crate::assets::viewers::cutb::magic(node),
+            "holds": crate::assets::viewers::cutb::holds(node)
+        }));
+    }
+    Ok(serde_json::json!({
+        "nodes": nodes,
+        "resources": resources,
+        "resources_truncated": resources.len() >= max_items,
+        "timelines": timelines,
+        "shots": shots,
+        "level": level,
+        "origin": origin,
+        "sheet": sheet
+    }))
+}
+
+fn inspect_tmb(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Value> {
+    use ironworks::file::tmb::{Item, Timeline};
+
+    let timeline = Timeline::read(Cursor::new(bytes.to_vec()))?;
+    let mut duration = None;
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for item in timeline.items() {
+        if let Item::Header(header) = item {
+            duration = Some(header.duration());
+        }
+        let magic = crate::assets::viewers::tmb::magic(item);
+        match counts.iter_mut().find(|(at, _)| *at == magic) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((magic, 1)),
+        }
+    }
+    Ok(serde_json::json!({
+        "items": timeline.items().len(),
+        "duration": duration,
+        "kinds": counts
+            .iter()
+            .take(max_items)
+            .map(|(magic, count)| serde_json::json!({"magic": magic, "count": count}))
+            .collect::<Vec<_>>(),
+        "kinds_truncated": counts.len() >= max_items
+    }))
+}
+
 pub fn inspect(path: &str, bytes: &[u8], max_items: usize) -> anyhow::Result<String> {
     let max_items = max_items.min(MAX_ITEMS);
     let format = magic::sniff(bytes);
@@ -740,6 +831,8 @@ pub fn inspect(path: &str, bytes: &[u8], max_items: usize) -> anyhow::Result<Str
         Some(crate::assets::viewers::Viewer::Scd) => inspect_scd(bytes, max_items),
         Some(crate::assets::viewers::Viewer::Lgb) => inspect_lgb(bytes, max_items),
         Some(crate::assets::viewers::Viewer::Sgb) => inspect_sgb(bytes, max_items),
+        Some(crate::assets::viewers::Viewer::Cutb) => inspect_cutb(bytes, max_items),
+        Some(crate::assets::viewers::Viewer::Tmb) => inspect_tmb(bytes, max_items),
         Some(crate::assets::viewers::Viewer::Text) => Ok(serde_json::json!({
             "text": String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES)]),
             "truncated": bytes.len() > MAX_BYTES

@@ -607,7 +607,7 @@ fn sounds_of(timeline: &Timeline, offset: f32, held: &mut Vec<sound::Cue>) {
             at: offset + f32::from(command.time()),
             paths: vec![path.to_owned()],
             entry,
-            label: "effect".to_owned(),
+            label: "音效".to_owned(),
             holds: None,
         });
     }
@@ -945,7 +945,7 @@ pub fn stands_for(participant: &Instance) -> String {
         HelperKind::EventNpc | HelperKind::BattleNpc => {
             format!("{:?} {}", helper.kind(), helper.base_id())
         }
-        HelperKind::Weapon => format!("Weapon {}", helper.weapon().pattern_id()),
+        HelperKind::Weapon => format!("武器 {}", helper.weapon().pattern_id()),
         kind => helper
             .nested()
             .and_then(|nested| layer::asset(nested.data()))
@@ -1148,7 +1148,7 @@ async fn read_lines(backend: Backend, sheet: String, language: Language) -> anyh
     let opened = backend.excel().get_sheet(&sheet, language).await?;
     let columns = SheetColumnDefinition::from_sheet(&opened);
     let [key, text, ..] = columns.as_slice() else {
-        anyhow::bail!("{sheet} is not a two column text sheet");
+        anyhow::bail!("{sheet} 不是双列文本表");
     };
     let mut held = BTreeMap::new();
     for row_id in opened.get_row_ids() {
@@ -1363,7 +1363,7 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
     for held in &firing {
         if state.burst.insert(held.id) {
             log::info!(
-                "cutb: {:#x} fires {} at frame {:.0}",
+                "cutb: {:#x} 触发 {}，第 {:.0} 帧",
                 held.id >> 32,
                 held.path,
                 state.time
@@ -1504,10 +1504,10 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
         // yet is not a change to report.
         if state.shown.insert(*participant, shown).unwrap_or(true) != shown {
             log::info!(
-                "cutb: {participant:#x} is {}",
+                "cutb: {participant:#x} {}",
                 match shown {
-                    true => "drawn",
-                    false => "out of frame",
+                    true => "在画面中",
+                    false => "移出画面",
                 }
             );
         }
@@ -1522,7 +1522,7 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             && let Some((_, fade, _)) = fading
         {
             log::info!(
-                "cutb: {participant:#x} fades {:.2} to {:.2} over {:.0}f",
+                "cutb: {participant:#x} 透明度从 {:.2} 渐变到 {:.2}，历时 {:.0} 帧",
                 fade.from,
                 fade.to,
                 fade.over
@@ -1538,7 +1538,7 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
             {
                 state.bodies.insert(*participant, at);
                 log::info!(
-                    "cutb: {participant:#x} plays {} from {:.2}s out of {pack}",
+                    "cutb: {participant:#x} 播放 {}，自 {:.2} 秒处，来自 {pack}",
                     held.motion,
                     held.from
                 );
@@ -1555,7 +1555,7 @@ fn perform(parts: &BTreeMap<u32, Part>, state: &mut State) {
                     && let Some(pack) = state.cast.holding(*participant, &held.motion)
                 {
                     state.overs.insert(*participant, at);
-                    log::info!("cutb: {participant:#x} lays {} over it", held.motion);
+                    log::info!("cutb: {participant:#x} 在其上叠加 {}", held.motion);
                     model.act(&[pack], &held.motion, 0.0);
                 }
             }
@@ -1594,7 +1594,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
         false => ui.available_height(),
     };
 
-    ui.label(RichText::new("Shots").strong());
+    ui.label(RichText::new("镜头").strong());
     ScrollArea::vertical()
         .id_salt("cutb_shot_list")
         .max_height(height)
@@ -1620,7 +1620,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
         });
     if split {
         ui.add_space(4.0);
-        ui.label(RichText::new("Lines").strong());
+        ui.label(RichText::new("字幕").strong());
         ScrollArea::vertical()
             .id_salt("cutb_line_list")
             .auto_shrink(false)
@@ -1633,7 +1633,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State, language: Language)
                             .filter(|text| !text.is_empty())
                             .unwrap_or_else(|| subtitle.key.clone());
                         let label =
-                            format!("{:.0}f · {} · {said}", subtitle.at, subtitle.speaker);
+                            format!("{:.0} 帧 · {} · {said}", subtitle.at, subtitle.speaker);
                         if ui
                             .add(Button::selectable(speaking == Some(at), label))
                             .on_hover_text(&subtitle.key)
@@ -1687,7 +1687,7 @@ fn under(state: &State, duration: f32) -> Option<sound::Cue> {
         at: 0.0,
         paths: vec![track.path.clone()],
         entry: 0,
-        label: "music".to_owned(),
+        label: "音乐".to_owned(),
         holds: Some(duration.max(1.0)),
     })
 }
@@ -1705,10 +1705,10 @@ fn listen(state: &mut State) {
 /// The music row: a toggle, whatever the cutscene's own quest names, and which of it to play.
 fn music_ui(ui: &mut egui::Ui, state: &mut State) {
     if ui
-        .checkbox(&mut state.music, "Music")
+        .checkbox(&mut state.music, "音乐")
         .on_hover_text(
-            "Play the music the quest naming this cutscene states. Nothing in the file itself \
-             says what a cutscene plays under, so this is quest-wide rather than per-cutscene.",
+            "播放指定此过场动画的任务所记载的音乐。文件本身并未说明过场动画播放时衬着什么音乐，\
+             因此这是任务级而非单个过场动画级的。",
         )
         .clicked()
     {
@@ -1719,16 +1719,16 @@ fn music_ui(ui: &mut egui::Ui, state: &mut State) {
     }
     match &state.tracks {
         Tracks::Idle | Tracks::Loading(_) => {
-            ui.label(RichText::new("reading the quest\u{2026}").weak());
+            ui.label(RichText::new("正在读取任务\u{2026}").weak());
         }
         Tracks::Failed(why) => {
-            ui.label(RichText::new(format!("music: {why}")).weak());
+            ui.label(RichText::new(format!("音乐：{why}")).weak());
         }
         Tracks::Ready(found) if found.tracks.is_empty() => {
             ui.label(
                 RichText::new(match found.quests {
-                    0 => "no quest names this cutscene".to_owned(),
-                    quests => format!("{quests} quests name it, none with music"),
+                    0 => "没有任务指定此过场动画".to_owned(),
+                    quests => format!("{quests} 个任务指定了它，但都没有音乐"),
                 })
                 .weak(),
             );
@@ -1740,7 +1740,7 @@ fn music_ui(ui: &mut egui::Ui, state: &mut State) {
                 .show_ui(ui, |ui| {
                     for (at, track) in found.tracks.iter().enumerate() {
                         ui.selectable_value(&mut picked, at, label_of(track))
-                            .on_hover_text(format!("{} \u{b7} quest {}", track.path, track.quest));
+                            .on_hover_text(format!("{} \u{b7} 任务 {}", track.path, track.quest));
                     }
                 });
             if picked != state.track {
@@ -1748,7 +1748,7 @@ fn music_ui(ui: &mut egui::Ui, state: &mut State) {
                 state.stage.silence();
             }
             if state.stage.sounding_under() {
-                ui.label(RichText::new("under").weak());
+                ui.label(RichText::new("衬底播放中").weak());
             }
         }
     }
@@ -1760,7 +1760,7 @@ fn label_of(track: &music::Track) -> String {
     let leaf = track.path.rsplit('/').next().unwrap_or(&track.path);
     match track.scripted {
         true => format!("{} \u{b7} {leaf}", track.instruction),
-        false => format!("{} \u{b7} {leaf} (elsewhere in the quest)", track.instruction),
+        false => format!("{} \u{b7} {leaf}（任务中别处）", track.instruction),
     }
 }
 
@@ -1798,17 +1798,16 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
     // the transport's own buttons off the row they sit on.
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut state.framed, "16:9").on_hover_text(
-            "Frame the shot as sixteen by nine, which is the aspect its focal length is turned \
-             into a field of view against",
+            "以 16:9 取景，焦距正依据这一宽高比换算成视场角",
         );
-        ui.checkbox(&mut state.subtitles, "Lines").on_hover_text(
-            "Put the cutscene's own subtitles over the frame, out of the sheet its CTIS node names",
+        ui.checkbox(&mut state.subtitles, "字幕").on_hover_text(
+            "把过场动画自身的字幕叠在画面上，内容来自其 CTIS 节点所指的表",
         );
         if ui
-            .checkbox(&mut state.effects, "Sound")
+            .checkbox(&mut state.effects, "声音")
             .on_hover_text(
-                "Play the sounds the cutscene's own C063 commands file, and the voice line each \
-                 subtitle key names. Cues fire while it plays; a pause or a seek stops them.",
+                "播放过场动画自身 C063 指令所记载的声音，以及每条字幕键所指的语音。\
+                 cue 在播放过程中触发；暂停或跳转会使其停止。",
             )
             .clicked()
         {
@@ -1826,26 +1825,26 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
             let (read, wanted) = state.stage.read();
             ui.label(
                 RichText::new(format!(
-                    "{read}/{wanted} read, {} sounding",
+                    "已读取 {read}/{wanted}，{} 个正在播放",
                     state.stage.playing()
                 ))
                 .weak(),
             )
             .on_hover_text(format!(
-                "Sound files read of the ones {} cues ask for",
+                "{} 个 cue 所请求的声音文件中，已读取的数量",
                 state.cues.len()
             ));
             if state.stage.missing() > 0 {
-                ui.label(RichText::new(format!("{} missing", state.stage.missing())).weak())
-                    .on_hover_text("Cues naming a file the install does not hold");
+                ui.label(RichText::new(format!("{} 个缺失", state.stage.missing())).weak())
+                    .on_hover_text("cue 指向了当前安装中没有的文件");
             }
         }
         if let Some(why) = state.stage.error() {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("sound: {why}"));
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("声音：{why}"));
         }
         music_ui(ui, state);
         if let Lines::Failed(why) = &state.lines {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("lines: {why}"));
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("字幕：{why}"));
         }
         ui.label(
             RichText::new(match pose {
@@ -1859,21 +1858,20 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
         );
         let (built, wanted) = state.cast.built();
         if wanted > 0 {
-            ui.label(RichText::new(format!("{built}/{wanted} standing")).weak())
+            ui.label(RichText::new(format!("{built}/{wanted} 已就位")).weak())
                 .on_hover_text(
-                    "Characters built out of the rows their participants name, against how many \
-                     rows the cast holds",
+                    "按参与者指定的行构建出的角色，对照演员阵容所持有的行数",
                 );
         }
         if !state.cast.loaded() {
-            ui.label(RichText::new("reading the motion packs\u{2026}").weak())
+            ui.label(RichText::new("正在读取动作包\u{2026}").weak())
                 .on_hover_text(
-                    "A cutscene names the motions it plays rather than filing them, so nothing \
-                     acts until the packs it loads have been read",
+                    "过场动画只指名要播放的动作而不归档文件，所以在它加载的动作包被读取完成前，\
+                     不会有任何动作",
                 );
         }
         if let Some(why) = state.cast.failure() {
-            ui.colored_label(egui::Color32::LIGHT_RED, format!("cast: {why}"));
+            ui.colored_label(egui::Color32::LIGHT_RED, format!("演员：{why}"));
         }
     });
 }

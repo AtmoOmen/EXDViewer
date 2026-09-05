@@ -46,7 +46,7 @@ pub struct Rendered {
     play: play::Tab,
 }
 
-fn magic(node: &Node) -> String {
+pub(crate) fn magic(node: &Node) -> String {
     match node {
         Node::Resources(_) => "CTRL".to_owned(),
         Node::Sheet(_) => "CTIS".to_owned(),
@@ -59,7 +59,7 @@ fn magic(node: &Node) -> String {
     }
 }
 
-fn holds(node: &Node) -> String {
+pub(crate) fn holds(node: &Node) -> String {
     match node {
         Node::Resources(list) => format!("{} 个文件", list.len()),
         Node::Sheet(sheet) => format!("工作表 {sheet}"),

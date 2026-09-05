@@ -478,7 +478,7 @@ impl<'a> Cell<'a> {
         match self.draw(ui) {
             Ok(resp) => resp,
             Err(err) => {
-                log::error!("Failed to draw cell: {err:?}");
+                log::error!("绘制单元格失败: {err:?}");
                 let resp = ui
                     .colored_label(Color32::LIGHT_RED, "⚠")
                     .on_hover_text(err.to_string());

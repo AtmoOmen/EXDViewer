@@ -66,9 +66,10 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | `check_asset_paths` | 批量检查资源路径是否存在 |
 | `read_asset` | 按路径分页读取资源原始字节和格式识别结果 |
 | `read_asset_by_hash` | 按仓库、分类和索引哈希分页读取未命名资源 |
-| `inspect_asset` | 按路径结构化解析纹理、PNG、材质、字体、图标、ULD、SHPK、SHCD、SCD、LGB 和 SGB |
+| `inspect_asset` | 按路径结构化解析纹理、PNG、材质、字体、图标、ULD、SHPK、SHCD、SCD、LGB、SGB、CUTB 过场动画和 TMB 时间轴 |
 | `inspect_asset_by_hash` | 结构化解析未命名哈希资源 |
 | `decode_texture` | 将 TEX 纹理解码为尺寸受限的 PNG 图像内容 |
+| `list_emotes` | 列出游戏可播放的情感动作与座椅姿态（名称、图标、动作键、坐骑姿势、椅子与地面变体及 /cpose 姿势键） |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
 | `get_sheet_info` | 获取表元数据（列数、子行、语言） |
 | `get_sheet_schema` | 获取完整结构化模式定义，包括链接目标、条件和嵌套字段 |

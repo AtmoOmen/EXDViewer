@@ -93,6 +93,6 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Mount>> {
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));
-    log::info!("character: {} mounts to ride", found.len());
+    log::info!("角色：有 {} 个坐骑可骑乘", found.len());
     Ok(found)
 }

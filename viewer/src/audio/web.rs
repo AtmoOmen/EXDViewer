@@ -99,7 +99,7 @@ impl Player {
                 Some(anchor)
             }
             Err(error) => {
-                log::warn!("audio-focus token unavailable, OS controls limited: {error}");
+                log::warn!("audio-focus 令牌不可用, 操作系统媒体控制受限: {error}");
                 None
             }
         };
@@ -701,7 +701,7 @@ impl<K> Drop for Mixer<K> {
     /// of character views hits the browser's per-page limit and the next one fails to construct.
     fn drop(&mut self) {
         if let Err(error) = self.context.close() {
-            log::warn!("audio: context did not close: {error:?}");
+            log::warn!("audio: 上下文未关闭: {error:?}");
         }
     }
 }

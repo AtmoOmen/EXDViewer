@@ -34,7 +34,7 @@ const STORE_SCHEMA: &str = "schema_folders";
 impl SqpackWorker {
     async fn get_db() -> Result<Database<String>, String> {
         let factory = indexed_db::Factory::get()
-            .map_err(|e| format!("Failed to get IndexedDB factory: {e}"))?;
+            .map_err(|e| format!("获取 IndexedDB 工厂失败: {e}"))?;
         factory
             .open("sqpack", 4, |evt| async move {
                 let db = evt.database();
@@ -47,7 +47,7 @@ impl SqpackWorker {
                 Ok(())
             })
             .await
-            .map_err(|e| format!("Failed to open IndexedDB database: {e}"))
+            .map_err(|e| format!("打开 IndexedDB 数据库失败: {e}"))
     }
 
     async fn get_db_folders_impl(store: &'static str) -> Result<Vec<WorkerDirectory>, String> {
@@ -56,10 +56,10 @@ impl SqpackWorker {
             .run(move |t| async move {
                 let data = t
                     .object_store(store)
-                    .map_err(|e| format!("Failed to get object store: {e}"))?
+                    .map_err(|e| format!("获取对象存储失败: {e}"))?
                     .get_all(None)
                     .await
-                    .map_err(|e| format!("Failed to get all values: {e}"))?;
+                    .map_err(|e| format!("获取全部数据失败: {e}"))?;
 
                 data.into_iter()
                     .map(|v| {
@@ -70,7 +70,7 @@ impl SqpackWorker {
                     .collect::<Result<Vec<_>, _>>()
             })
             .await
-            .map_err(|e| format!("Failed to get folders: {e}"))
+            .map_err(|e| format!("获取文件夹失败: {e}"))
     }
 
     async fn add_db_folder_impl(
@@ -82,14 +82,14 @@ impl SqpackWorker {
             .rw()
             .run(move |t| async move {
                 t.object_store(store)
-                    .map_err(|e| format!("Failed to get object store: {e}"))?
+                    .map_err(|e| format!("获取对象存储失败: {e}"))?
                     .put_kv(&JsString::from(handle.name()), &handle)
                     .await
-                    .map_err(|e| format!("Failed to put folder: {} {e}", handle.name()))?;
+                    .map_err(|e| format!("保存文件夹失败: {} {e}", handle.name()))?;
                 Ok(())
             })
             .await
-            .map_err(|e| format!("Failed to add folder: {e}"))
+            .map_err(|e| format!("添加文件夹失败: {e}"))
     }
 }
 

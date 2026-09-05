@@ -55,7 +55,7 @@ fn smoke_config(mut args: std::iter::Skip<std::env::Args>) -> viewer::smoke::Con
 // When compiling natively:
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
-let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1);
     if args.next().as_deref() == Some("--smoke") {
         let config = smoke_config(args);
         let (logger, counters) = viewer::smoke::CountingLogger::new(

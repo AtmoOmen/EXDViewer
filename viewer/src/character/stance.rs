@@ -122,7 +122,7 @@ impl Stance {
             }
         }
         log::info!(
-            "character: {} weapon classes, {} blend groups, {} blends, {} packs filed",
+            "角色：{} 个武器类型，{} 个混合组，{} 套混合，{} 个动作包",
             classes.len(),
             groups.len(),
             blends.len(),

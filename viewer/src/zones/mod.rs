@@ -247,7 +247,7 @@ impl ZoneBrowser {
                     self.rows_stale = true;
                 }
                 Err(error) => {
-                    log::warn!("zones: PlaceName unavailable, using internal names: {error}")
+                    log::warn!("zones: PlaceName 不可用, 改用内部名称: {error}")
                 }
             }
             self.names_load = NamesLoad::Done;

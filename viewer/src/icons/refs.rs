@@ -331,7 +331,7 @@ pub async fn walk(
     });
 
     log::info!(
-        "icons/walk: {} uses over {} sheets",
+        "icons/walk: {} 用了超过 {} 张表",
         flat.len(),
         sheets.len()
     );

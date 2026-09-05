@@ -2107,7 +2107,7 @@ if self.primary_cjk == Some(wanted) {
                     self.cjk.insert(font, Arc::new(FontData::from_owned(bytes)));
                     changed = true;
                 }
-                Err(error) => log::error!("Failed to fetch font {}: {error}", font.asset_file()),
+                Err(error) => log::error!("获取字体 {} 失败: {error}", font.asset_file()),
             }
         }
 

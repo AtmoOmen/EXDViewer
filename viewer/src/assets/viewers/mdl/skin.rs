@@ -3031,74 +3031,91 @@ mod tests {
                 .parse_skeleton()
                 .expect("a readable tagfile")
         };
-        // The face this measures is the one the creator's own default wears. `c0101f0005_fac.mdl`
-        // ships no animation of its own; `.est` is what says which skeleton poses it, and that is
-        // where its expressions are filed.
+        // A face model ships no animation of its own; `.est` is what says which skeleton poses it,
+        // and that is where its expressions are filed. The two rows are the creator's own default
+        // and a Rava Viera, which resolve to different skeletons.
         let est: Vec<u8> = install
             .file("chara/xls/charadb/faceSkeletonTemplate.est")
             .expect("the face template");
         let template = ExtraSkeletonTemplate::read(Cursor::new(est)).expect("a readable est");
-        assert_eq!(template.skeleton(101, 5), Some(6));
 
-        let body = parsed("chara/human/c0101/skeleton/base/b0001/skl_c0101b0001.sklb");
-        let face = parsed("chara/human/c0101/skeleton/face/f0006/skl_c0101f0006.sklb");
-        let base = Rig::new(body.bones(), body.parent_indices(), body.reference_pose());
-        let merged = base.merged(
-            "f0006",
-            face.bones(),
-            face.parent_indices(),
-            face.reference_pose(),
-        );
-        let alone = Rig::new(face.bones(), face.parent_indices(), face.reference_pose());
+        for (code, chosen, set, widest) in [(101u16, 5u16, 6u16, 12.0f32), (1801, 1, 2, 32.0)] {
+            assert_eq!(template.skeleton(code, chosen), Some(set));
+            let scope = format!("f{set:04}");
 
-        let pack = AnimationPack::read(Cursor::new(read(
-            "chara/human/c0101/animation/f0006/nonresident/grin.pap",
-        )))
-        .expect("the pack");
-        let bindings = pack.parse_animations().expect("its motions");
-        let binding = &bindings[0];
-        assert_ne!(binding.blend_hint(), 0, "a facial pack is a pack of deltas");
-
-        let moved = |rig: &Rig, origin: Option<&str>| -> Vec<(String, f32)> {
-            let mut locals = rig.reference().to_vec();
-            rig.lay(&mut locals, binding, face.bones(), origin, 0.0, 1.0);
-            let rest = rig.world(rig.reference());
-            let posed = rig.world(&locals);
-            face.bones()
-                .iter()
-                .filter_map(|name| {
-                    let bone = rig
-                        .bone(&format!("f0006\u{0}{name}"))
-                        .or_else(|| rig.bone(name))?;
-                    let from = rest[bone].matrix().to_scale_rotation_translation().2;
-                    let to = posed[bone].matrix().to_scale_rotation_translation().2;
-                    Some((name.clone(), from.distance(to)))
-                })
-                .collect()
-        };
-
-        // Nothing the clip turns comes near opening a mouth: the widest is the lower lip at ten
-        // degrees, and no bone leaves its rest by more than the two centimetres asserted below.
-        let mut turned = 0.0f32;
-        {
-            let mut locals = alone.reference().to_vec();
-            alone.lay(&mut locals, binding, face.bones(), None, 0.0, 1.0);
-            for (at, local) in locals.iter().enumerate() {
-                let from = Quat::from_array(alone.reference()[at].rotation);
-                turned = turned.max(from.angle_between(Quat::from_array(local.rotation)));
-            }
-        }
-        assert!(turned.to_degrees() < 12.0, "{} deg", turned.to_degrees());
-
-        let held = moved(&alone, None);
-        let over = moved(&merged, Some("f0006"));
-        assert_eq!(held.len(), face.bones().len());
-        for ((name, one), (_, two)) in held.iter().zip(&over) {
-            assert!(
-                (one - two).abs() < 1e-4,
-                "{name} moves {one} on its own skeleton and {two} merged"
+            let body =
+                parsed(&format!("chara/human/c{code:04}/skeleton/base/b0001/skl_c{code:04}b0001.sklb"));
+            let face = parsed(&format!(
+                "chara/human/c{code:04}/skeleton/face/{scope}/skl_c{code:04}{scope}.sklb"
+            ));
+            let base = Rig::new(body.bones(), body.parent_indices(), body.reference_pose());
+            let merged = base.merged(
+                &scope,
+                face.bones(),
+                face.parent_indices(),
+                face.reference_pose(),
             );
-            assert!(*one < 0.02, "{name} moves {one} m, which is not a face");
+            let alone = Rig::new(face.bones(), face.parent_indices(), face.reference_pose());
+
+            let pack = AnimationPack::read(Cursor::new(read(&format!(
+                "chara/human/c{code:04}/animation/{scope}/nonresident/grin.pap"
+            ))))
+            .expect("the pack");
+            let bindings = pack.parse_animations().expect("its motions");
+            let binding = &bindings[0];
+            assert_ne!(binding.blend_hint(), 0, "a facial pack is a pack of deltas");
+
+            let moved = |rig: &Rig, origin: Option<&str>| -> Vec<(String, f32)> {
+                let mut locals = rig.reference().to_vec();
+                rig.lay(&mut locals, binding, face.bones(), origin, 0.0, 1.0);
+                let rest = rig.world(rig.reference());
+                let posed = rig.world(&locals);
+                face.bones()
+                    .iter()
+                    .filter_map(|name| {
+                        let bone = rig
+                            .bone(&format!("{scope}\u{0}{name}"))
+                            .or_else(|| rig.bone(name))?;
+                        let from = rest[bone].matrix().to_scale_rotation_translation().2;
+                        let to = posed[bone].matrix().to_scale_rotation_translation().2;
+                        Some((name.clone(), from.distance(to)))
+                    })
+                    .collect()
+            };
+
+            // A grin widens the lips and leaves the jaw shut. The widest lip is three times
+            // further round on the Viera face than on the Midlander one, so the ceiling is stated
+            // per face; the jaw holds on both, which is what tells a grin from a laugh.
+            let (mut turned, mut jaw) = (0.0f32, 0.0f32);
+            {
+                let mut locals = alone.reference().to_vec();
+                alone.lay(&mut locals, binding, face.bones(), None, 0.0, 1.0);
+                for (at, local) in locals.iter().enumerate() {
+                    let from = Quat::from_array(alone.reference()[at].rotation);
+                    let by = from.angle_between(Quat::from_array(local.rotation));
+                    turned = turned.max(by);
+                    if face.bones()[at].ends_with("ago") {
+                        jaw = jaw.max(by);
+                    }
+                }
+            }
+            assert!(
+                turned.to_degrees() < widest,
+                "c{code:04} turns {} deg, over the {widest} its lips state",
+                turned.to_degrees()
+            );
+            assert!(jaw.to_degrees() < 0.1, "c{code:04} opens its jaw {} deg", jaw.to_degrees());
+
+            let held = moved(&alone, None);
+            let over = moved(&merged, Some(&scope));
+            assert_eq!(held.len(), face.bones().len());
+            for ((name, one), (_, two)) in held.iter().zip(&over) {
+                assert!(
+                    (one - two).abs() < 1e-4,
+                    "{name} moves {one} on its own skeleton and {two} merged"
+                );
+                assert!(*one < 0.02, "c{code:04} {name} moves {one} m, which is not a face");
+            }
         }
     }
 }

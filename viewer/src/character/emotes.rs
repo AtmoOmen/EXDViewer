@@ -11,6 +11,8 @@
 //! the 300 emotes the sheet names state one for at least one of those slots, and every one of them
 //! is filed under `Stance` 1 where the standing motion is filed under 0.
 
+use std::collections::HashSet;
+
 use anyhow::Result;
 use ironworks::excel::Language;
 
@@ -72,6 +74,16 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Emote>> {
     let emotes = excel.get_sheet("Emote", language).await?;
     let timelines = excel.get_sheet("ActionTimeline", language).await?;
 
+    // An emote that can be aimed at somebody ships twice, as two rows of each sheet, and the game
+    // picks between them on whether a target exists. Nothing here ever has one, so the pair
+    // collapses to the untargeted half.
+    let mut keys = HashSet::new();
+    for id in timelines.get_row_ids() {
+        if let Some(key) = key(&timelines, id) {
+            keys.insert(key);
+        }
+    }
+
     let mut found = Vec::new();
     for id in emotes.get_row_ids() {
         let Ok(row) = emotes.get_row(id) else {
@@ -86,7 +98,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Emote>> {
         }
         let slot = |at| {
             let timeline = row.read::<u16>(at).ok().filter(|timeline| *timeline > 0)?;
-            key(&timelines, u32::from(timeline))
+            Some(untargeted(&keys, key(&timelines, u32::from(timeline))?))
         };
         let (standing, start) = (slot(STANDING), slot(START));
         if standing.is_none() && start.is_none() {
@@ -101,8 +113,24 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Emote>> {
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));
+    found.dedup_by(|left, right| {
+        left.name == right.name
+            && left.standing == right.standing
+            && left.start == right.start
+            && left.mounted == right.mounted
+    });
     log::info!("character: {} emotes to play", found.len());
     Ok(found)
+}
+
+/// The half of a targeted emote the game plays with nothing aimed at: it names its own motions, so
+/// the heart a `Dote` throws stays unthrown rather than flying at a target that is not there.
+fn untargeted(keys: &HashSet<String>, key: String) -> String {
+    let alone = format!("{key}_no_target");
+    match keys.contains(&alone) {
+        true => alone,
+        false => key,
+    }
 }
 
 fn key(timelines: &impl ExcelSheet, id: u32) -> Option<String> {
@@ -113,7 +141,29 @@ fn key(timelines: &impl ExcelSheet, id: u32) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::Emote;
+    use std::collections::HashSet;
+
+    use super::{Emote, untargeted};
+
+    /// `Dote` and `All Saints' Charm` each ship a second row naming a motion of their own, and that
+    /// is the one to play; `Chuckle` ships no such thing and keeps the key it states.
+    #[test]
+    fn a_targeted_emote_falls_to_the_half_that_needs_no_target() {
+        let keys: HashSet<String> = ["emote_sp/sp04", "emote_sp/sp04_no_target", "emote/laugh"]
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect();
+        assert_eq!(
+            untargeted(&keys, "emote_sp/sp04".to_owned()),
+            "emote_sp/sp04_no_target"
+        );
+        assert_eq!(untargeted(&keys, "emote/laugh".to_owned()), "emote/laugh");
+        // The untargeted half names no half of its own, so it is a fixed point.
+        assert_eq!(
+            untargeted(&keys, "emote_sp/sp04_no_target".to_owned()),
+            "emote_sp/sp04_no_target"
+        );
+    }
 
     fn emote(standing: Option<&str>, start: Option<&str>) -> Emote {
         Emote {

@@ -246,6 +246,9 @@ struct Stood {
     told: Cell<bool>,
 }
 
+/// The emotes the game names and the poses each seat cycles, which are read together.
+type Played = (Vec<emotes::Emote>, emotes::Poses);
+
 /// What a picked set is made of, and what to call it.
 pub(super) struct Set {
     id: u16,
@@ -320,7 +323,11 @@ pub struct CharacterBuilder {
     npcs_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The emotes the game names, and which of them is being played.
     emotes: Vec<emotes::Emote>,
-    reading_emotes: Option<TrackedPromise<Result<Vec<emotes::Emote>>>>,
+    reading_emotes: Option<TrackedPromise<Result<Played>>>,
+    /// The poses each seat cycles through, and where in one the body currently stands.
+    poses: emotes::Poses,
+    posture: emotes::Posture,
+    pose: usize,
     emote: Option<usize>,
     emote_search: String,
     emotes_matched: RefCell<(Option<String>, Vec<usize>)>,
@@ -441,6 +448,9 @@ impl Default for CharacterBuilder {
             npcs_matched: Default::default(),
             emotes: Vec::new(),
             reading_emotes: None,
+            poses: emotes::Poses::default(),
+            posture: emotes::Posture::default(),
+            pose: 0,
             emote: None,
             emote_search: String::new(),
             emotes_matched: Default::default(),
@@ -503,6 +513,9 @@ impl CharacterBuilder {
         self.npc = None;
         self.npcs_matched.take();
         self.emotes.clear();
+        self.poses = emotes::Poses::default();
+        self.posture = emotes::Posture::default();
+        self.pose = 0;
         self.reading_emotes = None;
         self.emote = None;
         self.emotes_matched.take();
@@ -664,7 +677,9 @@ impl CharacterBuilder {
         if let Some(promise) = self.reading_emotes.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => {
+                    let (read, poses) = read;
                     self.emotes = read;
+                    self.poses = poses;
                     self.emotes_matched.take();
                 }
                 Ok(Err(why)) => log::warn!("character: no emotes to play: {why}"),
@@ -965,6 +980,11 @@ impl CharacterBuilder {
         let Some(stance) = &self.stance else {
             return;
         };
+        // A body that has sat down holds the pose its seat names until it stands back up, which is
+        // what forgets this and asks for the idle again.
+        if self.posture != emotes::Posture::Standing {
+            return;
+        }
         let held = self.directory();
         let mut stood = self.stood_in.borrow_mut();
         if let Some(stood) = stood
@@ -1021,6 +1041,23 @@ impl CharacterBuilder {
     /// the weapons in hand put it in, which is the only place a battle emote is filed at all, and
     /// then under the one every body shares. Both go through the table saying which body really
     /// holds a pack, since a class that ships none of its own reads another's.
+    /// The pack the body holds its seat's current pose out of, which is what an emote played
+    /// sitting down settles back into.
+    fn pose_pack(&self) -> Option<String> {
+        let key = self.poses.of(self.posture).get(self.pose)?;
+        Some(self.stance.as_ref()?.pack(self.code, stance::COMMON, key))
+    }
+
+    /// Sits the body in the pose its seat and place in that seat's own cycle name, which is what
+    /// picking a seat or stepping through it is.
+    fn sit(&self, model: &mdl::Rendered) {
+        let Some(key) = self.poses.of(self.posture).get(self.pose) else {
+            return;
+        };
+        log::info!("character: sitting in {key}");
+        model.play(&self.emote_packs(key), None);
+    }
+
     fn emote_packs(&self, key: &str) -> Vec<String> {
         let Some(stance) = &self.stance else {
             return Vec::new();
@@ -2075,6 +2112,59 @@ impl CharacterBuilder {
 
     /// Which of a mount's own seats the character rides in, for one seating more than one. Seat
     /// zero is the one the mount's skeleton names first, whatever the game calls it in its own UI.
+    /// Where the body sits and which of that seat's own poses it holds, which is what `/cpose`
+    /// steps through. A rider reads none of this: a mount states the seat it holds one in.
+    fn posture_ui(&self, ui: &mut egui::Ui) -> Option<Pick> {
+        if self.mount.is_some() {
+            return None;
+        }
+        let mut picked = None;
+        ui.add_space(8.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Posture").strong());
+            for held in emotes::Posture::ALL {
+                if held != emotes::Posture::Standing && self.poses.of(held).is_empty() {
+                    continue;
+                }
+                if ui
+                    .selectable_label(self.posture == held, held.name())
+                    .clicked()
+                {
+                    picked = Some(Pick::Posture(held));
+                }
+            }
+        });
+        let poses = self.poses.of(self.posture);
+        if poses.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new("Pose").strong());
+                for at in 0..poses.len() {
+                    if ui
+                        .selectable_label(self.pose == at, (at + 1).to_string())
+                        .clicked()
+                    {
+                        picked = Some(Pick::Pose(at));
+                    }
+                }
+            });
+        }
+        picked
+    }
+
+    /// Takes the body into or out of a seat. Sitting plays the pose it settles into; standing back
+    /// up forgets what it was standing in, so the idle its weapons state names is asked for again.
+    fn seated_changed(&self) {
+        let Some(Ok(model)) = &self.model else {
+            return;
+        };
+        match self.posture {
+            emotes::Posture::Standing => {
+                self.stood_in.borrow_mut().take();
+            }
+            _ => self.sit(model),
+        }
+    }
+
     fn seat_ui(&self, ui: &mut egui::Ui, extra_seats: u8) -> Option<Pick> {
         let mut picked = None;
         ui.horizontal_wrapped(|ui| {
@@ -2403,6 +2493,8 @@ impl CharacterBuilder {
                         .inspect(|made| picked = Some(*made));
                     self.emotes_ui(ui, backend, icons)
                         .inspect(|emote| picked = Some(*emote));
+                    self.posture_ui(ui)
+                        .inspect(|posture| picked = Some(*posture));
                     self.mounts_ui(ui, backend, icons)
                         .inspect(|mount| picked = Some(*mount));
                     self.npcs_ui(ui).inspect(|npc| picked = Some(*npc));
@@ -2453,13 +2545,19 @@ impl CharacterBuilder {
             Some(Pick::Emote(emote)) => {
                 self.emote = Some(emote);
                 if let (Some(Ok(model)), Some(emote)) = (&self.model, self.emotes.get(emote)) {
-                    let seated = self.mount.is_some().then(|| emote.mounted()).flatten();
-                    match (emote.expression(), seated) {
-                        (Some(name), _) => model.express(name),
+                    let mounted = self.mount.is_some().then(|| emote.mounted()).flatten();
+                    let seated = emote.seated(self.posture);
+                    match (emote.expression(), mounted, seated) {
+                        (Some(name), _, _) => model.express(name),
                         // A rider keeps the pose the mount holds it in, so the emote it plays is
                         // the partial the sheet names for that rather than the whole-body one.
-                        (None, Some(key)) => model.play_over(&self.emote_packs(key)),
-                        (None, None) => {
+                        (None, Some(key), _) => model.play_over(&self.emote_packs(key)),
+                        // A body already sat down states a whole motion of its own, and settles
+                        // back into the pose it was sitting in rather than standing up.
+                        (None, None, Some(key)) => {
+                            model.play(&self.emote_packs(key), self.pose_pack().as_deref())
+                        }
+                        (None, None, None) => {
                             let (start, settles) = emote.keys();
                             let packs = start.map(|key| self.emote_packs(key)).unwrap_or_default();
                             let settles = settles.and_then(|key| {
@@ -2470,9 +2568,21 @@ impl CharacterBuilder {
                     }
                 }
             }
+            Some(Pick::Posture(posture)) => {
+                self.posture = posture;
+                self.pose = 0;
+                self.seated_changed();
+            }
+            Some(Pick::Pose(pose)) => {
+                self.pose = pose;
+                self.seated_changed();
+            }
             Some(Pick::Mount(mount)) => {
                 self.mount = mount;
                 self.mount_seat = 0;
+                // Nothing sits down on a mount: it states the seat it holds a rider in.
+                self.posture = emotes::Posture::Standing;
+                self.pose = 0;
             }
             Some(Pick::Seat(seat)) => self.mount_seat = seat,
             Some(Pick::Weapon(weapon)) => self.main_hand = weapon,
@@ -2507,6 +2617,9 @@ enum Pick {
     /// The same, where what a menu holds is the number the file tree files the choice under.
     Choice(u32, u16),
     Emote(usize),
+    /// Where the body sits, and which of that seat's own poses it holds.
+    Posture(emotes::Posture),
+    Pose(usize),
     /// A mount to seat the character on, or none to stand it on the ground again.
     Mount(Option<usize>),
     /// Which of the mount's own seats to ride in.

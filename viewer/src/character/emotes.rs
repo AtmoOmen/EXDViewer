@@ -25,9 +25,39 @@ const NAME: u32 = 0;
 const ICON: u32 = 4;
 const STANDING: u32 = 16;
 const START: u32 = 18;
-/// The slot an emote played while mounted reads, which is the third of the four seated ones.
+/// The slots a body whose lower half is already committed reads: sat on a chair, sat on the
+/// ground, and the partial a rider plays.
+const CHAIR: u32 = 20;
+const GROUND: u32 = 22;
 const MOUNTED: u32 = 24;
 const KEY: u32 = 0;
+
+/// The motion the emote that sits a body down starts with. Matching the key rather than the
+/// emote's own name keeps this off whichever language the sheet was read in.
+const CHAIR_START: &str = "_chair_start";
+const GROUND_START: &str = "_ground_start";
+
+/// What a body's lower half is committed to, which decides both the pose it holds and which of an
+/// emote's own slots it plays. A rider is not one of these: a mount states its own seat.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Posture {
+    #[default]
+    Standing,
+    Chair,
+    Ground,
+}
+
+impl Posture {
+    pub const ALL: [Self; 3] = [Self::Standing, Self::Chair, Self::Ground];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Standing => "Standing",
+            Self::Chair => "Sitting",
+            Self::Ground => "On the ground",
+        }
+    }
+}
 
 /// One emote the creator's own list would show.
 pub struct Emote {
@@ -39,6 +69,10 @@ pub struct Emote {
     start: Option<String>,
     /// The partial the same emote is played as while mounted, where it names one.
     mounted: Option<String>,
+    /// The whole-body variants for a seat, which replace the standing motion rather than laying
+    /// over it: the body is already sat down and the emote states how it looks that way.
+    chair: Option<String>,
+    ground: Option<String>,
 }
 
 impl Emote {
@@ -59,6 +93,16 @@ impl Emote {
         self.mounted.as_deref()
     }
 
+    /// The key this emote plays from in a seat, where it names one. Nothing is laid over here: a
+    /// seated variant is a whole motion of a body that is already sat down.
+    pub fn seated(&self, at: Posture) -> Option<&str> {
+        match at {
+            Posture::Standing => None,
+            Posture::Chair => self.chair.as_deref(),
+            Posture::Ground => self.ground.as_deref(),
+        }
+    }
+
     /// The expression this emote is, for the ones that only make a face. Those are filed under the
     /// face skeleton a character wears rather than under its body, and the last segment of the key
     /// is what names one there.
@@ -68,8 +112,37 @@ impl Emote {
     }
 }
 
-/// Every emote the game both names and animates, in name order.
-pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Emote>> {
+/// The poses `/cpose` cycles a seat through: the one the body settles into as it sits down, which
+/// the emote that sits it down states, followed by the alternates the sheet numbers.
+#[derive(Default, Clone)]
+pub struct Poses {
+    chair: Vec<String>,
+    ground: Vec<String>,
+}
+
+impl Poses {
+    pub fn of(&self, at: Posture) -> &[String] {
+        match at {
+            Posture::Standing => &[],
+            Posture::Chair => &self.chair,
+            Posture::Ground => &self.ground,
+        }
+    }
+}
+
+/// The keys one seat's alternates are filed under, in the order they number themselves.
+fn cycled(keys: &HashSet<String>, prefix: &str) -> Vec<String> {
+    let mut found: Vec<String> = keys
+        .iter()
+        .filter(|key| key.starts_with(prefix) && key.ends_with("_loop"))
+        .cloned()
+        .collect();
+    found.sort();
+    found
+}
+
+/// Every emote the game both names and animates, in name order, and the poses each seat cycles.
+pub async fn read(backend: &Backend, language: Language) -> Result<(Vec<Emote>, Poses)> {
     let excel = backend.excel();
     let emotes = excel.get_sheet("Emote", language).await?;
     let timelines = excel.get_sheet("ActionTimeline", language).await?;
@@ -110,17 +183,42 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Emote>> {
             standing,
             start,
             mounted: slot(MOUNTED),
+            chair: slot(CHAIR),
+            ground: slot(GROUND),
         });
     }
+    // The pose a seat settles into is the one its own sitting emote holds; the motion that emote
+    // starts with is what says which seat it is, in whatever language the sheet was read in.
+    let mut poses = Poses::default();
+    for held in &found {
+        let (Some(start), Some(pose)) = (held.start.as_deref(), held.standing.clone()) else {
+            continue;
+        };
+        match (start.ends_with(CHAIR_START), start.ends_with(GROUND_START)) {
+            (true, _) if poses.chair.is_empty() => poses.chair.push(pose),
+            (_, true) if poses.ground.is_empty() => poses.ground.push(pose),
+            _ => {}
+        }
+    }
+    poses.chair.extend(cycled(&keys, "emote/j_pose"));
+    poses.ground.extend(cycled(&keys, "emote/s_pose"));
+    log::info!(
+        "character: {} poses to sit in and {} to sit on the ground in",
+        poses.chair.len(),
+        poses.ground.len()
+    );
+
     found.sort_by(|left, right| left.name.cmp(&right.name));
     found.dedup_by(|left, right| {
         left.name == right.name
             && left.standing == right.standing
             && left.start == right.start
             && left.mounted == right.mounted
+            && left.chair == right.chair
+            && left.ground == right.ground
     });
     log::info!("character: {} emotes to play", found.len());
-    Ok(found)
+    Ok((found, poses))
 }
 
 /// The half of a targeted emote the game plays with nothing aimed at: it names its own motions, so
@@ -143,7 +241,7 @@ fn key(timelines: &impl ExcelSheet, id: u32) -> Option<String> {
 mod tests {
     use std::collections::HashSet;
 
-    use super::{Emote, untargeted};
+    use super::{Emote, Posture, cycled, untargeted};
 
     /// `Dote` and `All Saints' Charm` each ship a second row naming a motion of their own, and that
     /// is the one to play; `Chuckle` ships no such thing and keeps the key it states.
@@ -172,7 +270,51 @@ mod tests {
             standing: standing.map(ToOwned::to_owned),
             start: start.map(ToOwned::to_owned),
             mounted: None,
+            chair: None,
+            ground: None,
         }
+    }
+
+    /// A seat reads the slot it is filed under and nothing else: standing reads none of them, so a
+    /// body on its feet plays the whole-body motion rather than a variant.
+    #[test]
+    fn a_seat_reads_only_its_own_slot() {
+        let mut clap = emote(Some("emote/clap"), None);
+        clap.chair = Some("emote/j_clap".to_owned());
+        clap.ground = Some("emote/s_clap".to_owned());
+        assert_eq!(clap.seated(Posture::Standing), None);
+        assert_eq!(clap.seated(Posture::Chair), Some("emote/j_clap"));
+        assert_eq!(clap.seated(Posture::Ground), Some("emote/s_clap"));
+
+        // 120-odd emotes name one seat and not the other, and an unnamed one is nothing to play.
+        let sit_ups = emote(Some("emote/loop_emot09_loop"), None);
+        assert_eq!(sit_ups.seated(Posture::Chair), None);
+    }
+
+    /// The alternates a seat cycles come out of the sheet's own keys, in the order they number
+    /// themselves, and nothing else in the sheet is one of them.
+    #[test]
+    fn a_seat_cycles_the_keys_that_number_themselves() {
+        let keys: HashSet<String> = [
+            "emote/j_pose03_loop",
+            "emote/j_pose01_loop",
+            "emote/j_pose02_loop",
+            "emote/j_pose02_start",
+            "emote/s_pose01_loop",
+            "emote/clap",
+        ]
+        .into_iter()
+        .map(ToOwned::to_owned)
+        .collect();
+        assert_eq!(
+            cycled(&keys, "emote/j_pose"),
+            [
+                "emote/j_pose01_loop",
+                "emote/j_pose02_loop",
+                "emote/j_pose03_loop"
+            ]
+        );
+        assert_eq!(cycled(&keys, "emote/s_pose"), ["emote/s_pose01_loop"]);
     }
 
     /// A pose held forever states the motion that plays it in apart from the pose itself, and the

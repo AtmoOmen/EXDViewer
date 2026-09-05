@@ -210,6 +210,53 @@ impl<K: Keyable, const TEMP: bool> DefaultedKey<K, TEMP> {
     }
 }
 
+/// Persist through a `String` so changes to `K` cannot change egui's persistence key.
+pub struct StableDKey<K: Keyable> {
+    id: &'static str,
+    default: K,
+}
+
+impl<K: Keyable> StableDKey<K> {
+    const fn new(name: &'static str, default: K) -> Self {
+        Self { id: name, default }
+    }
+
+    pub fn try_get(&self, ctx: &egui::Context) -> Option<K> {
+        ctx.data_mut(|data| {
+            data.get_persisted::<String>(self.id.into())
+                .and_then(|value| serde_json::from_str(&value).ok())
+        })
+    }
+
+    pub fn get(&self, ctx: &egui::Context) -> K {
+        self.try_get(ctx).unwrap_or_else(|| {
+            let value = self.default.clone();
+            self.set(ctx, value.clone());
+            value
+        })
+    }
+
+    pub fn set(&self, ctx: &egui::Context, value: K) {
+        match serde_json::to_string(&value) {
+            Ok(serialized) => ctx.data_mut(|data| {
+                data.insert_persisted(self.id.into(), serialized);
+            }),
+            Err(error) => log::error!("无法保存设置 {}: {error}", self.id),
+        }
+    }
+
+    pub fn use_with<T>(&self, ctx: &egui::Context, func: impl FnOnce(&mut K) -> T) -> T {
+        let mut value = self.get(ctx);
+        let result = func(&mut value);
+        self.set(ctx, value);
+        result
+    }
+
+    pub fn remove(&self, ctx: &egui::Context) {
+        ctx.data_mut(|data| data.remove::<String>(self.id.into()));
+    }
+}
+
 pub type Key<K> = BaseKey<K, false>;
 pub type FKey<K, P = ()> = FuncKey<K, false, P>;
 pub type DKey<K> = DefaultedKey<K, false>;
@@ -228,7 +275,8 @@ pub const TEXT_WRAP_WIDTH: DKey<Option<NonZero<u16>>> =
     DKey::new("text-wrap-width", NonZero::new(600));
 pub const TEXT_MAX_LINES: DKey<Option<NonZero<u8>>> = DKey::new("text-max-lines", NonZero::new(5));
 pub const TEXT_USE_SCROLL: DKey<bool> = DKey::new("text-use-scroll", false);
-pub const BACKEND_CONFIG: DKey<Option<BackendConfig>> = DKey::new("backend-config", None);
+pub const BACKEND_CONFIG: StableDKey<Option<BackendConfig>> =
+    StableDKey::new("backend-config", None);
 /// The signed-in GitHub account. Kept so a session survives a reload; a revoked token simply fails
 /// its next call and is cleared by signing out.
 pub const GITHUB_AUTH: DKey<Option<GithubAuth>> = DKey::new("github-auth", None);
@@ -420,7 +468,135 @@ pub enum SchemaLocation {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct BackendConfig {
+    #[serde(default = "default_api_url")]
     pub api_url: String,
     pub location: InstallLocation,
     pub schema: SchemaLocation,
+}
+
+fn default_api_url() -> String {
+    crate::DEFAULT_API_URL.to_owned()
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename = "Memory")]
+struct LegacyMemory {
+    #[serde(default)]
+    data: LegacyData,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct LegacyData(Vec<(u64, LegacyElement)>);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyElement {
+    type_id: LegacyTypeId,
+    ron: String,
+    generation: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct LegacyTypeId(u64);
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename = "Memory")]
+struct PersistedMemory {
+    options: Box<ron::value::RawValue>,
+    data: LegacyData,
+    to_global: Box<ron::value::RawValue>,
+    areas: Box<ron::value::RawValue>,
+}
+
+#[derive(Deserialize)]
+struct LegacyBackendConfig {
+    location: LegacyInstallLocation,
+    schema: SchemaLocation,
+}
+
+#[derive(Deserialize)]
+enum LegacyInstallLocation {
+    #[cfg(not(target_arch = "wasm32"))]
+    Sqpack(String),
+    #[cfg(target_arch = "wasm32")]
+    Worker(String),
+    Web(String, Region, Option<GameVersion>),
+}
+
+impl LegacyBackendConfig {
+    fn into_current(self) -> BackendConfig {
+        let (api_url, location) = match self.location {
+            #[cfg(not(target_arch = "wasm32"))]
+            LegacyInstallLocation::Sqpack(path) => {
+                (default_api_url(), InstallLocation::Sqpack(path))
+            }
+            #[cfg(target_arch = "wasm32")]
+            LegacyInstallLocation::Worker(name) => {
+                (default_api_url(), InstallLocation::Worker(name))
+            }
+            LegacyInstallLocation::Web(api_url, region, version) => {
+                (api_url, InstallLocation::Web(region, version))
+            }
+        };
+        BackendConfig {
+            api_url,
+            location,
+            schema: self.schema,
+        }
+    }
+}
+
+/// Move configurations written with egui's type-dependent key to `StableDKey`.
+pub fn migrate_backend_config(ctx: &egui::Context) {
+    if BACKEND_CONFIG
+        .try_get(ctx)
+        .is_some_and(|config| config.is_some())
+    {
+        return;
+    }
+
+    let Some(memory) = ctx.memory(|memory| ron::to_string(memory).ok()) else {
+        return;
+    };
+    let config = read_legacy_backend_config(&memory);
+
+    if let Some(config) = config {
+        if let Some(memory) = clean_legacy_backend_config(&memory)
+            && let Ok(memory) = ron::from_str::<egui::Memory>(&memory)
+        {
+            ctx.memory_mut(|current| *current = memory);
+        }
+        BACKEND_CONFIG.set(ctx, Some(config));
+    }
+}
+
+fn read_legacy_backend_config(memory: &str) -> Option<BackendConfig> {
+    let memory = ron::from_str::<LegacyMemory>(memory).ok()?;
+    let id = egui::Id::new("backend-config").value();
+    memory.data.0.into_iter().find_map(|(raw, element)| {
+        if raw ^ id != element.type_id.0 {
+            return None;
+        }
+        if let Ok(Some(config)) = ron::from_str::<Option<BackendConfig>>(&element.ron) {
+            return Some(config);
+        }
+        ron::from_str::<Option<LegacyBackendConfig>>(&element.ron)
+            .ok()
+            .flatten()
+            .map(LegacyBackendConfig::into_current)
+    })
+}
+
+fn clean_legacy_backend_config(memory: &str) -> Option<String> {
+    let mut memory = ron::from_str::<PersistedMemory>(memory).ok()?;
+    let id = egui::Id::new("backend-config").value();
+    let before = memory.data.0.len();
+    memory.data.0.retain(|(raw, element)| {
+        let is_backend_key = raw ^ id == element.type_id.0;
+        let is_legacy_value = ron::from_str::<Option<BackendConfig>>(&element.ron).is_ok()
+            || ron::from_str::<Option<LegacyBackendConfig>>(&element.ron).is_ok();
+        !(is_backend_key && is_legacy_value)
+    });
+    (memory.data.0.len() != before)
+        .then(|| ron::to_string(&memory).ok())
+        .flatten()
 }

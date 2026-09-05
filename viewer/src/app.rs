@@ -46,6 +46,7 @@ use crate::{
     },
     schema::{provider::SchemaProvider, web::WebProvider},
     settings::{
+        self,
         ALWAYS_HIRES, BACKEND_CONFIG, BackendConfig, CODE_SYNTAX_THEME, COLOR_THEME,
         CURRENT_SHEET_LANGUAGES, DISPLAY_FIELD_SHOWN, EVALUATE_STRINGS, FILTER_GUIDE_VISIBLE,
         GithubSchemaBranch, InstallLocation, LANGUAGE, LOGGER_SHOWN, MISC_SHEETS_SHOWN,
@@ -1992,6 +1993,7 @@ let filter_error = table.get_filter_error();
 impl App {
     #[must_use]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        settings::migrate_backend_config(&cc.egui_ctx);
         install_image_loaders(&cc.egui_ctx);
         install_tex_loader(&cc.egui_ctx);
         Self::apply_fonts(&cc.egui_ctx, None, &HashMap::new());

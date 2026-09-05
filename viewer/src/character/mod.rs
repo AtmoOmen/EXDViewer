@@ -2487,14 +2487,16 @@ impl CharacterBuilder {
                             self.slot_ui(ui, backend, icons, listing, slot);
                         }
                     }
+                    // Beside the weapon's own sheathed and drawn, since both say what the body is
+                    // doing rather than what it is wearing, and neither wants to sit under a list.
+                    self.posture_ui(ui)
+                        .inspect(|posture| picked = Some(*posture));
                     self.weapons_ui(ui, backend, icons)
                         .inspect(|pick| picked = Some(*pick));
                     self.appearance(ui, backend, icons)
                         .inspect(|made| picked = Some(*made));
                     self.emotes_ui(ui, backend, icons)
                         .inspect(|emote| picked = Some(*emote));
-                    self.posture_ui(ui)
-                        .inspect(|posture| picked = Some(*posture));
                     self.mounts_ui(ui, backend, icons)
                         .inspect(|mount| picked = Some(*mount));
                     self.npcs_ui(ui).inspect(|npc| picked = Some(*npc));

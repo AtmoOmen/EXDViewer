@@ -190,7 +190,7 @@ impl Detail {
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             let quest = index.quest(node);
             ui.label(
-                RichText::new(format!("{} · row {}", quest.id, quest.row_id))
+                RichText::new(format!("{} · 行 {}", quest.id, quest.row_id))
                     .weak()
                     .small(),
             );
@@ -202,7 +202,7 @@ impl Detail {
 
     fn body(&mut self, ui: &mut egui::Ui, index: &Index, node: u32) -> Option<Action> {
         let Some(row) = index.row(node) else {
-            ui.colored_label(Color32::RED, "The quest's row went away");
+            ui.colored_label(Color32::RED, "任务所在行已不存在");
             return None;
         };
         let mut action = fields(
@@ -212,7 +212,7 @@ impl Detail {
             IDENTITY.iter().map(|name| (*name).to_string()),
         );
 
-        action = action.or(section(ui, "Requirements", false, |ui| {
+        action = action.or(section(ui, "前置条件", false, |ui| {
             let mut action = requirements::ui(ui, index, row);
             action = action.or(fields(
                 ui,
@@ -222,10 +222,10 @@ impl Detail {
             ));
             action
         }));
-        action = action.or(section(ui, "Progression", false, |ui| {
+        action = action.or(section(ui, "流程", false, |ui| {
             fields(ui, index, row, FLOW.iter().map(|n| (*n).to_string()))
         }));
-        action = action.or(section(ui, "Rewards", true, |ui| {
+        action = action.or(section(ui, "奖励", true, |ui| {
             let mut action = match &self.catalog {
                 Load::Ready(catalog) => rewards::ui(ui, index, row, catalog),
                 Load::Failed(error) => {
@@ -257,16 +257,16 @@ impl Detail {
         let prereqs = index.graph.prereqs(node);
         if !prereqs.is_empty() {
             let any = index.quest(node).join == 2 && prereqs.len() > 1;
-            action = action.or(section(ui, "Requires", true, |ui| {
+            action = action.or(section(ui, "前置任务", true, |ui| {
                 if any {
-                    ui.label(RichText::new("Any one of these will do.").weak().small());
+                    ui.label(RichText::new("任意一条即可。").weak().small());
                 }
                 quest_list(ui, index, prereqs)
             }));
         }
         let dependents = index.graph.dependents(node);
         if !dependents.is_empty() {
-            action = action.or(section(ui, "Unlocks", true, |ui| {
+            action = action.or(section(ui, "解锁任务", true, |ui| {
                 quest_list(ui, index, dependents)
             }));
         }
@@ -277,9 +277,9 @@ impl Detail {
             .filter_map(|row_id| index.node_of(*row_id))
             .collect();
         if !locks.is_empty() {
-            action = action.or(section(ui, "Alternatives", true, |ui| {
+            action = action.or(section(ui, "互斥任务", true, |ui| {
                 ui.label(
-                    RichText::new("Taking one of these puts the others out of reach.")
+                    RichText::new("选择其中一条后，其余将无法获得。")
                         .weak()
                         .small(),
                 );
@@ -292,9 +292,9 @@ impl Detail {
     fn files(&self, ui: &mut egui::Ui) -> Option<Action> {
         let title = match &self.links {
             Load::Ready(links) => {
-                format!("Files ({})", 1 + links.music.len() + links.cutscenes.len())
+                format!("文件 ({})", 1 + links.music.len() + links.cutscenes.len())
             }
-            _ => "Files".to_string(),
+            _ => "文件".to_string(),
         };
         section(ui, &title, true, |ui| match &self.links {
             Load::Idle | Load::Loading(_) => {
@@ -317,8 +317,8 @@ impl Detail {
 
     fn dialogue(&self, ui: &mut egui::Ui) -> Option<Action> {
         let title = match &self.dialogue {
-            Load::Ready(dialogue) => format!("Dialogue ({})", dialogue.lines.len()),
-            _ => "Dialogue".to_string(),
+            Load::Ready(dialogue) => format!("对白 ({})", dialogue.lines.len()),
+            _ => "对白".to_string(),
         };
         section(ui, &title, false, |ui| {
             match &self.dialogue {
@@ -492,7 +492,7 @@ async fn dialogue(
     let columns = SheetColumnDefinition::from_sheet(&sheet);
     let (key, body) = match columns.as_slice() {
         [key, body, ..] => (key, body),
-        _ => return Err(anyhow!("{name} is not a two column text sheet")),
+        _ => return Err(anyhow!("{name} 不是两列文本表")),
     };
 
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
@@ -513,9 +513,9 @@ async fn dialogue(
         }
         let key = String::from_utf8_lossy(key.as_bytes()).into_owned();
         let speaker = match derive::line_of(&key, &id_upper) {
-            derive::Line::Journal => "Journal".to_string(),
-            derive::Line::Objective => "Objectives".to_string(),
-            derive::Line::System => "System".to_string(),
+            derive::Line::Journal => "日志".to_string(),
+            derive::Line::Objective => "目标".to_string(),
+            derive::Line::System => "系统".to_string(),
             derive::Line::Speaker(speaker) => speaker.to_string(),
         };
         let at = lines.len();

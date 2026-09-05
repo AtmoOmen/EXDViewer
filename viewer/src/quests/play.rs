@@ -82,8 +82,8 @@ fn dwell(step: &Step, hold: f32) -> f32 {
 
 fn arm_label(arm: &Arm) -> String {
     match &arm.condition {
-        Some(condition) => format!("if {condition}"),
-        None => "else".to_owned(),
+        Some(condition) => format!("如果 {condition}"),
+        None => "否则".to_owned(),
     }
 }
 
@@ -110,7 +110,7 @@ impl Player {
             Load::Idle | Load::Loading(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Reading the script…");
+                    ui.label("正在读取脚本…");
                 });
                 return None;
             }
@@ -122,7 +122,7 @@ impl Player {
         };
         if script.scenes.is_empty() {
             ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("This script declares no scenes").weak());
+                ui.label(RichText::new("此脚本未声明任何场景").weak());
             });
             return None;
         }
@@ -202,15 +202,15 @@ impl Player {
                 ui.with_layout(Layout::top_down_justified(Align::Min), |ui| {
                     for (at, scene) in script.scenes.iter().enumerate() {
                         let (lines, cutscenes) = (scene.lines(), scene.cutscenes());
-                        let mut label = format!("Scene {}", scene.number);
+                        let mut label = format!("场景 {}", scene.number);
                         if lines > 0 {
-                            label.push_str(&format!(" · {lines} lines"));
+                            label.push_str(&format!(" · {lines} 行"));
                         }
                         if cutscenes > 0 {
-                            label.push_str(&format!(" · {cutscenes} cut"));
+                            label.push_str(&format!(" · {cutscenes} 段过场"));
                         }
                         if scene.steps.is_empty() {
-                            label.push_str(" · empty");
+                            label.push_str(" · 空");
                         }
                         if ui
                             .add(Button::selectable(at == self.scene, label))
@@ -246,7 +246,7 @@ impl Player {
         }
 
         ui.horizontal_wrapped(|ui| {
-            if ui.button("⏮").on_hover_text("Back to the start").clicked() {
+            if ui.button("⏮").on_hover_text("回到开头").clicked() {
                 self.rewind();
             }
             if ui
@@ -258,7 +258,7 @@ impl Player {
             }
             if ui
                 .add_enabled(self.step + 1 < count, Button::new("⏭"))
-                .on_hover_text("Next step")
+                .on_hover_text("下一步")
                 .clicked()
             {
                 self.step += 1;
@@ -267,15 +267,15 @@ impl Player {
             }
             ui.label(
                 RichText::new(match count {
-                    0 => "no steps".to_owned(),
-                    count => format!("step {} of {count}", self.step + 1),
+                    0 => "无步骤".to_owned(),
+                    count => format!("第 {} 步，共 {count} 步", self.step + 1),
                 })
                 .weak(),
             );
 
             if ui
                 .toggle_value(&mut self.orders, "👁")
-                .on_hover_text("Show the orders a scene gives around its dialogue")
+                .on_hover_text("显示场景在对话前后给出的指令")
                 .changed()
             {
                 self.rewind();
@@ -285,11 +285,11 @@ impl Player {
             ui.add(
                 egui::Slider::new(&mut self.hold, 0.5..=10.0)
                     .suffix(" s")
-                    .text("line"),
+                    .text("台词"),
             )
             .on_hover_text(
-                "How long a line holds. Nothing in the files states one: in game a line waits \
-                 for the player.",
+                "一行台词停留的时长。文件中没有规定该值：游戏中台词会等待 \
+                 玩家。",
             );
         });
     }
@@ -353,34 +353,34 @@ impl Player {
                         });
                         if !last {
                             ui.label(RichText::new("↩").weak().small())
-                                .on_hover_text("The box carries on into the next line");
+                                .on_hover_text("对话框延续到下一行");
                         }
                     }
                     None => {
                         ui.label(RichText::new(keys.join(", ")).weak().monospace())
-                            .on_hover_text("No row in the quest's text sheet carries this key");
+                            .on_hover_text("任务文本表中没有承载此键值的行");
                     }
                 }
                 None
             }
             Step::Wait(frames) => {
-                ui.label(RichText::new(format!("wait {frames} frames")).weak())
+                ui.label(RichText::new(format!("等待 {frames} 帧")).weak())
                     .on_hover_text(format!(
-                        "Played at {TICKS} a second, the rate an animation pack states for a \
-                         timeline. The script states none."
+                        "以每秒 {TICKS} 帧播放，即动画包为时间轴声明的速率。脚本未声明 \
+                         任何速率。"
                     ));
                 None
             }
             Step::Cutscene(param) => {
-                ui.label(RichText::new("cutscene").strong());
+                ui.label(RichText::new("过场").strong());
                 asset(ui, detail, param)
             }
             Step::Bgm(param) => {
-                ui.label(RichText::new("music").strong());
+                ui.label(RichText::new("音乐").strong());
                 asset(ui, detail, param)
             }
             Step::Fade { out } => {
-                ui.label(RichText::new(if *out { "fade out" } else { "fade in" }).weak());
+                ui.label(RichText::new(if *out { "淡出" } else { "淡入" }).weak());
                 None
             }
             Step::Branch { id, arms } => {
@@ -388,7 +388,7 @@ impl Player {
                 for (at, arm) in arms.iter().enumerate() {
                     if ui
                         .add(Button::selectable(at == taken, arm_label(arm)))
-                        .on_hover_text("Play this arm")
+                        .on_hover_text("播放此段")
                         .clicked()
                     {
                         self.pick_arm(*id, at);
@@ -416,7 +416,7 @@ fn resolve_line<'a>(detail: &'a Detail, keys: &[String]) -> Option<&'a Line> {
 fn asset(ui: &mut egui::Ui, detail: &Detail, param: &str) -> Option<Action> {
     let Some(path) = detail.links().and_then(|links| links.asset(param)) else {
         ui.label(RichText::new(param).weak().monospace())
-            .on_hover_text("No script parameter of this quest names a file for this");
+            .on_hover_text("此任务没有脚本参数为其指定文件");
         return None;
     };
     let clicked = super::detail::path_link(ui, path);

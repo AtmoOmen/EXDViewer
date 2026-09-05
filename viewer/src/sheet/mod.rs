@@ -77,7 +77,7 @@ fn string_label_wrapped(ui: &mut egui::Ui, value: &SeStr) -> Response {
     let text = match text {
         Ok(v) => v,
         Err(e) => {
-            log::error!("Failed to format string: {e:?}");
+            log::error!("格式化字符串失败: {e:?}");
             let resp = ui
                 .with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add(

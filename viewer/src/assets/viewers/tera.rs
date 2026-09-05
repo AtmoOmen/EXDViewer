@@ -10,14 +10,14 @@ use super::{Preview, facts, line, link, section, table};
 /// The plate table's columns, each with the width its cells are padded to. The model is a link
 /// rather than a padded cell, so it sits at the end.
 const COLUMNS: [(&str, usize); 4] = [
-    ("Plate", 5),
-    ("Cell", 10),
-    ("Center X, Z", 20),
-    ("Model", 8),
+    ("板块", 5),
+    ("单元格", 10),
+    ("中心 X, Z", 20),
+    ("模型", 8),
 ];
 
 /// The texture slots [`tera::Terrain::sampler_bias`] carries a bit for, lowest first.
-const SLOTS: [&str; 3] = ["color", "normal", "specular"];
+const SLOTS: [&str; 3] = ["颜色", "法线", "高光"];
 
 /// Height the plate map is given before the table takes what is left.
 const MAP_HEIGHT: f32 = 260.0;
@@ -59,15 +59,15 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .filter_map(|(bit, slot)| (bias & (1 << bit) != 0).then_some(*slot))
         .collect::<Vec<_>>();
     let identity = vec![
-        ("Version", format!("{:#010x}", file.version())),
-        ("Plates", rows.len().to_string()),
-        ("Plate size", file.plate_size().to_string()),
-        ("Clip distance", format!("{:.1}", file.clip_distance())),
-        ("Edge bias", format!("{:.3}", file.edge_bias())),
+        ("版本", format!("{:#010x}", file.version())),
+        ("板块数", rows.len().to_string()),
+        ("板块大小", file.plate_size().to_string()),
+        ("裁剪距离", format!("{:.1}", file.clip_distance())),
+        ("边缘偏移", format!("{:.3}", file.edge_bias())),
         (
-            "Alternate mip bias",
+            "备用 mip 偏移",
             match slots.is_empty() {
-                true => "none".to_owned(),
+                true => "无".to_owned(),
                 false => slots.join(", "),
             },
         ),
@@ -81,7 +81,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         ))
     });
 
-    log::info!("assets/tera: {path} {} plates", rows.len());
+    log::info!("assets/tera: {path} {} 个板块", rows.len());
 
     Ok(Preview::Tera(Box::new(Rendered {
         identity,
@@ -153,7 +153,7 @@ fn map(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     if let Some(index) = hovered {
         let row = &file.rows[index];
         response.on_hover_text(format!(
-            "Plate {index}\ncell {}, {}\ncenter {:.1}, {:.1}\n{}",
+            "板块 {index}\n单元格 {}, {}\n中心 {:.1}, {:.1}\n{}",
             row.cell.0,
             row.cell.1,
             row.center.0,
@@ -168,11 +168,11 @@ fn map(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
 }
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
-    section(ui, "Layout");
+    section(ui, "布局");
     let mut follow = map(ui, file);
     ui.add_space(8.0);
     ui.separator();
-    section(ui, "Plates");
+    section(ui, "板块");
     table(ui, &COLUMNS, file.rows.len(), |ui, index| {
         let row = &file.rows[index];
         let cells = [

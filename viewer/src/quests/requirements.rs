@@ -22,7 +22,7 @@ pub fn ui(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>) -> Option<Action>
     action = action.or(mount_row(ui, index, row));
 
     if read(index, row, "IsHouseRequired") != 0 {
-        ui.label("Requires a house");
+        ui.label("需要房屋");
     }
     action
 }
@@ -72,7 +72,7 @@ fn company_row(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>) -> Option<Ac
             && let Some(at) = index.column("GrandCompany")
             && let Ok(cell) = index.table.cell_by_offset(row, at)
         {
-            ui.label("in");
+            ui.label("位于");
             if let Some(new_action) = link_action(cell.show(ui).inner) {
                 action = Some(new_action);
             }
@@ -110,7 +110,7 @@ fn beast_row(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>) -> Option<Acti
     // 0xFFFF means no cap: see `blank()`'s comment on the same field.
     if cap != 0 && cap != 0xFFFF {
         ui.label(
-            RichText::new(format!("required reputation capped at {cap}"))
+            RichText::new(format!("所需声望上限为 {cap}"))
                 .weak()
                 .small(),
         );

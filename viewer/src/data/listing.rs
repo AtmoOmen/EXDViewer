@@ -22,7 +22,7 @@ impl Listing {
         // and reveal the wrong files rather than fail.
         if paths.list_id() != presence.list_id() {
             bail!(
-                "This version's file map was built against path list {:016x}, but the list is {:016x}.",
+                "此版本的文件映射基于路径列表 {:016x} 构建，但当前列表为 {:016x}。",
                 presence.list_id(),
                 paths.list_id(),
             );

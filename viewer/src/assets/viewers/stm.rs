@@ -61,20 +61,20 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .first()
         .zip(templates.templates().last());
     let identity = vec![
-        ("Version", format!("{:#06x}", templates.version())),
-        ("Templates", templates.templates().len().to_string()),
+        ("版本", format!("{:#06x}", templates.version())),
+        ("模板", templates.templates().len().to_string()),
         (
-            "Keys",
+            "键",
             keys.map_or_else(
-                || "none".to_owned(),
-                |(first, last)| format!("{} to {}", first.key(), last.key()),
+                || "无".to_owned(),
+                |(first, last)| format!("{} 至 {}", first.key(), last.key()),
             ),
         ),
-        ("Stains", stm::Template::STAINS.to_string()),
+        ("染色", stm::Template::STAINS.to_string()),
     ];
 
     log::info!(
-        "assets/stm: {path} version {:#06x}, {} templates",
+        "assets/stm: {path} 版本 {:#06x}，{} 个模板",
         templates.version(),
         templates.templates().len()
     );
@@ -94,12 +94,12 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, deps: &mut Deps, backend: &Backend
     let templates = file.templates.templates();
     let Some(last) = templates.len().checked_sub(1) else {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("This file carries no templates").weak());
+            ui.label(RichText::new("此文件不含任何模板").weak());
         });
         return;
     };
 
-    section(ui, "Templates");
+    section(ui, "模板");
     let mut picked = ui
         .data(|data| data.get_temp::<usize>(file.picked))
         .unwrap_or(0)
@@ -118,9 +118,9 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, deps: &mut Deps, backend: &Backend
 
     ui.add_space(8.0);
     ui.separator();
-    section(ui, "Stains");
+    section(ui, "染色");
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-        let mut names = vec!["#", "Dye", "Diffuse", "Specular", "Emissive"];
+        let mut names = vec!["#", "染色名", "漫反射", "镜面反射", "自发光"];
         names.extend(file.scalars.iter().map(|(name, _)| *name));
         egui::Grid::new("stm_stains")
             .num_columns(names.len())

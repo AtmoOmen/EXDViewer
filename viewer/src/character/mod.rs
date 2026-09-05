@@ -608,14 +608,14 @@ impl CharacterBuilder {
                     self.npcs = read;
                     self.npcs_matched.take();
                 }
-                Ok(Err(why)) => log::warn!("character: no characters to stand in: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有角色可登场：{why}"),
                 Err(promise) => self.reading_npcs = Some(promise),
             }
         }
         if let Some(promise) = self.reading_worn.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => self.worn_over = Some(read),
-                Ok(Err(why)) => log::warn!("character: nothing gates what is worn: {why}"),
+                Ok(Err(why)) => log::warn!("角色：缺少着装遮盖数据：{why}"),
                 Err(promise) => self.reading_worn = Some(promise),
             }
         }
@@ -625,7 +625,7 @@ impl CharacterBuilder {
                     self.emotes = read;
                     self.emotes_matched.take();
                 }
-                Ok(Err(why)) => log::warn!("character: no emotes to play: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可播放的情感动作：{why}"),
                 Err(promise) => self.reading_emotes = Some(promise),
             }
         }
@@ -635,28 +635,28 @@ impl CharacterBuilder {
                     self.mounts = read;
                     self.mounts_matched.take();
                 }
-                Ok(Err(why)) => log::warn!("character: no mounts to stand on: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可乘坐的坐骑：{why}"),
                 Err(promise) => self.reading_mounts = Some(promise),
             }
         }
         if let Some(promise) = self.reading_made.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => self.made = Some(read),
-                Ok(Err(why)) => log::warn!("character: no colours to pick from: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可选的颜色：{why}"),
                 Err(promise) => self.reading_made = Some(promise),
             }
         }
         if let Some(promise) = self.reading_dyes.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => self.dyes = read,
-                Ok(Err(why)) => log::warn!("character: no dyes to pick from: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可选的染料：{why}"),
                 Err(promise) => self.reading_dyes = Some(promise),
             }
         }
         if let Some(promise) = self.reading_dye_templates.take() {
             match promise.try_take() {
                 Ok(Ok(read)) => self.dye_templates = Some(Rc::new(read)),
-                Ok(Err(why)) => log::warn!("character: no staining templates to dye with: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可用的染色模板：{why}"),
                 Err(promise) => self.reading_dye_templates = Some(promise),
             }
         }
@@ -699,7 +699,7 @@ impl CharacterBuilder {
                         weapons::read(&backend, language).await
                     }));
                 }
-                Ok(Err(why)) => log::warn!("character: nothing to pick equipment from: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可选的装备：{why}"),
                 Err(promise) => self.reading_pieces = Some(promise),
             }
         }
@@ -711,7 +711,7 @@ impl CharacterBuilder {
                     self.main_matched.take();
                     self.off_matched.take();
                 }
-                Ok(Err(why)) => log::warn!("character: nothing to pick a weapon from: {why}"),
+                Ok(Err(why)) => log::warn!("角色：没有可选的武器：{why}"),
                 Err(promise) => self.reading_weapons = Some(promise),
             }
         }
@@ -719,13 +719,13 @@ impl CharacterBuilder {
             match promise.try_take() {
                 Ok(Ok((code, bytes))) => {
                     log::info!(
-                        "character: attach points landed for c{code:04}, {} bytes",
+                        "角色：c{code:04} 的挂点已载入，共 {} 字节",
                         bytes.len()
                     );
                     self.atch = Some((code, Rc::new(bytes)));
                 }
                 Ok(Err(why)) => {
-                    log::warn!("character: nothing says where a weapon attaches: {why}");
+                    log::warn!("角色：未获取到武器挂点信息：{why}");
                 }
                 Err(promise) => self.reading_atch = Some(promise),
             }
@@ -961,7 +961,7 @@ impl CharacterBuilder {
         let Some(placement) = placed else {
             let bone = weapons::fallback_bone(main);
             if log {
-                log::info!("character: {path} hangs from {bone} at no named offset, {stance}");
+                log::info!("角色：{path} 挂在 {bone} 上，无命名偏移，{stance}");
             }
             return (path, bone.to_owned(), Mat4::IDENTITY);
         };
@@ -977,7 +977,7 @@ impl CharacterBuilder {
         );
         if log {
             log::info!(
-                "character: {path} hangs from {} at offset {:?} scale {}, {stance}",
+                "角色：{path} 挂在 {} 上，偏移 {:?}，缩放 {}，{stance}",
                 placement.bone,
                 placement.offset,
                 placement.scale
@@ -1493,7 +1493,7 @@ impl CharacterBuilder {
         if ui.add(button).clicked() {
             self.picking = (!open).then_some(slot);
             if let Some(slot) = self.picking {
-                log::info!("character: picking {}", slot.name());
+                log::info!("角色：正在选择 {}", slot.name());
             }
         }
         if visored {
@@ -1579,10 +1579,10 @@ impl CharacterBuilder {
                         );
                         let response = match (held, suits) {
                             (false, _) => {
-                                response.on_disabled_hover_text("This body has no model of it")
+                                response.on_disabled_hover_text("该身体没有此装备的模型")
                             }
                             (_, false) => response
-                                .on_hover_text("The game does not offer this to this race and gender"),
+                                .on_hover_text("该种族与性别无法使用此选项"),
                             _ => response,
                         };
                         icon_context_menu(
@@ -1602,7 +1602,7 @@ impl CharacterBuilder {
         }
         if let Some(index) = picked {
             log::info!(
-                "character: chose {} for {}",
+                "角色：为 {} 选择了 {}",
                 self.creator.pieces[at][index].name,
                 slot.name()
             );
@@ -1631,7 +1631,7 @@ impl CharacterBuilder {
             ui.visuals().widgets.inactive.fg_stroke,
             egui::StrokeKind::Inside,
         );
-        let response = response.on_hover_text(dye.map_or("No dye", |dye| dye.name.as_str()));
+        let response = response.on_hover_text(dye.map_or("无染色", |dye| dye.name.as_str()));
         let open = self.dyeing == Some((slot, channel));
         if response.clicked() {
             self.dyeing = (!open).then_some((slot, channel));
@@ -1674,7 +1674,7 @@ impl CharacterBuilder {
                                         picked = Some(hit);
                                     }
                                 };
-                            cell(ui, Color32::TRANSPARENT, false, "No dye", None);
+                            cell(ui, Color32::TRANSPARENT, false, "无染色", None);
                             for dye in &self.dyes {
                                 cell(ui, dye.color, dye.metallic, &dye.name, Some(dye.id));
                             }
@@ -1776,7 +1776,7 @@ impl CharacterBuilder {
                     };
                     if menu.customize == LIP_COLOR {
                         let mut on = self.ticked(LIPSTICK);
-                        if ui.checkbox(&mut on, "Lipstick").changed() {
+                        if ui.checkbox(&mut on, "口红").changed() {
                             picked = Some(Pick::Made(LIPSTICK, u32::from(on)));
                         }
                     }
@@ -1794,7 +1794,7 @@ impl CharacterBuilder {
                         if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
                             half = current / HALF;
                             ui.horizontal(|ui| {
-                                for (at, name) in [(0, "Dark"), (1, "Light")] {
+                                for (at, name) in [(0, "深色"), (1, "浅色")] {
                                     if ui.selectable_label(half == at, name).clicked() {
                                         picked = Some(Pick::Made(
                                             menu.customize,
@@ -1814,8 +1814,8 @@ impl CharacterBuilder {
                     // A second colour the creator only offers once its own box is ticked: a strand
                     // is mixed between two hair colours, and an eye takes one each.
                     let paired = match menu.customize {
-                        HAIR_COLOR => Some((HIGHLIGHTS, HIGHLIGHT_COLOR, "Highlights", &palettes.highlights)),
-                        EYE_COLOR => Some((ODD_EYES, LEFT_EYE_COLOR, "Odd eyes", &palettes.eyes)),
+                        HAIR_COLOR => Some((HIGHLIGHTS, HIGHLIGHT_COLOR, "高光", &palettes.highlights)),
+                        EYE_COLOR => Some((ODD_EYES, LEFT_EYE_COLOR, "异色瞳", &palettes.eyes)),
                         _ => None,
                     };
                     if let Some((box_of, color, name, second)) = paired {
@@ -1856,7 +1856,7 @@ impl CharacterBuilder {
     fn npcs_ui(&mut self, ui: &mut egui::Ui) -> Option<Pick> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Stand in for").strong());
+            ui.label(RichText::new("登场角色").strong());
             if self.reading_npcs.is_some() {
                 ui.spinner();
             }
@@ -1919,7 +1919,7 @@ impl CharacterBuilder {
     ) -> Option<Pick> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Emote").strong());
+            ui.label(RichText::new("情感动作").strong());
             if self.reading_emotes.is_some() {
                 ui.spinner();
             }
@@ -1957,7 +1957,7 @@ impl CharacterBuilder {
     ) -> Option<Pick> {
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Mount").strong());
+            ui.label(RichText::new("坐骑").strong());
             if self.reading_mounts.is_some() {
                 ui.spinner();
             }
@@ -1996,7 +1996,7 @@ impl CharacterBuilder {
     fn seat_ui(&self, ui: &mut egui::Ui, extra_seats: u8) -> Option<Pick> {
         let mut picked = None;
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Seat").strong());
+            ui.label(RichText::new("座位").strong());
             for seat in 0..=usize::from(extra_seats) {
                 if ui
                     .selectable_label(self.mount_seat == seat, (seat + 1).to_string())
@@ -2058,13 +2058,13 @@ impl CharacterBuilder {
         let mut picked = None;
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Weapon").strong());
+            ui.label(RichText::new("武器").strong());
             if self.reading_weapons.is_some() {
                 ui.spinner();
             }
         });
         ui.horizontal_wrapped(|ui| {
-            for (drawn, name) in [(false, "Sheathed"), (true, "Drawn")] {
+            for (drawn, name) in [(false, "收起"), (true, "拔出")] {
                 if ui.selectable_label(self.drawn == drawn, name).clicked() {
                     picked = Some(Pick::Stance(drawn));
                 }
@@ -2100,7 +2100,7 @@ impl CharacterBuilder {
             .is_some_and(|piece| piece.covers_off_hand);
         if !covers_off_hand {
             ui.add_space(4.0);
-            ui.label("Off hand");
+            ui.label("副手");
             ui.add(
                 TextEdit::singleline(&mut self.off_search)
                     .hint_text("搜索")
@@ -2310,7 +2310,7 @@ impl CharacterBuilder {
                             self.slot_ui(ui, backend, icons, listing, slot);
                         }
                         ui.add_space(8.0);
-                        ui.label(RichText::new("Accessories").strong());
+                        ui.label(RichText::new("饰品").strong());
                         for slot in Slot::ADORNMENT {
                             self.slot_ui(ui, backend, icons, listing, slot);
                         }
@@ -2744,7 +2744,7 @@ fn chip(
     selected: bool,
 ) -> bool {
     let Some(icon) = choice.icon else {
-        return numbered(ui, choice, selected, "No icon");
+        return numbered(ui, choice, selected, "无图标");
     };
     let path = get_icon_path(backend.icons(), icon, false, Language::None);
     let excel = backend.excel().clone();
@@ -2781,7 +2781,7 @@ fn chip(
         }
         // An icon that has not landed yet is not one the creator never named, and saying so would
         // have every chip claim it has no icon for as long as the icons take to arrive.
-        ManagedIcon::Failed(_) => numbered(ui, choice, selected, "No icon"),
+        ManagedIcon::Failed(_) => numbered(ui, choice, selected, "无图标"),
         _ => numbered(ui, choice, selected, "加载中"),
     }
 }

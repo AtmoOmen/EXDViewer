@@ -50,12 +50,12 @@ impl Fields {
         let sheet = backend.excel().get_sheet(name, language).await?;
         let text = backend.schema().get_schema_text(name).await?;
         let schema = Schema::from_str(&text)?
-            .map_err(|errors| anyhow!("{name} schema is invalid: {}", errors.len()))?;
+            .map_err(|errors| anyhow!("{name} 模式无效：{} 处错误", errors.len()))?;
         let (named, _) = SchemaColumn::from_schema(&schema)?;
         let columns = SheetColumnDefinition::from_sheet(&sheet);
         if named.len() != columns.len() {
             bail!(
-                "{name} schema names {} columns, the sheet has {}",
+                "{name} 模式声明 {} 列，而表中为 {} 列",
                 named.len(),
                 columns.len()
             );
@@ -77,7 +77,7 @@ impl Fields {
         self.by_name
             .get(name)
             .copied()
-            .ok_or_else(|| anyhow!("{} has no column {name}", self.sheet.name()))
+            .ok_or_else(|| anyhow!("{} 没有名为 {name} 的列", self.sheet.name()))
     }
 
     pub fn at(&self, name: &str) -> Result<&SheetColumnDefinition> {

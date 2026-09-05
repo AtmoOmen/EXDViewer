@@ -29,7 +29,7 @@ macro_rules! commands {
                 ),)*
                 CommandKind::Unknown { magic, body } => (
                     String::from_utf8_lossy(magic).into_owned(),
-                    format!("{} bytes unread", body.len()),
+                    format!("{} 个字节未读", body.len()),
                 ),
             }
         }
@@ -124,7 +124,7 @@ impl Items {
                     Some(step) => {
                         ui.label(
                             RichText::new(format!(
-                                "operation {:#04x}  value {:#010x}  {}",
+                                "操作 {:#04x}  值 {:#010x}  {}",
                                 step.operation(),
                                 step.value(),
                                 step.float()
@@ -226,29 +226,29 @@ fn path(item: &Item) -> Option<&str> {
 fn body(item: &Item) -> String {
     match item {
         Item::Header(header) => format!(
-            "duration {}, unknown {}, {}",
+            "时长 {}, 未知 {}, {}",
             header.duration(),
             header.unknown_1(),
             header.unknown_3()
         ),
         Item::FaceLibrary(_) => String::new(),
-        Item::ActorList(list) => format!("{} actors", list.actors().len()),
+        Item::ActorList(list) => format!("{} 个演员", list.actors().len()),
         Item::Actor(actor) => format!(
-            "{} tracks, ability delay {}, participant {:#x}",
+            "{} 个轨道, 技能延迟 {}, 参与者 {:#x}",
             actor.tracks().len(),
             actor.ability_delay(),
             actor.participant()
         ),
-        Item::Track(track) => format!("{} commands", track.commands().len()),
+        Item::Track(track) => format!("{} 个命令", track.commands().len()),
         Item::Curves(curves) => format!(
-            "{} curves over {} targets, end {}, unknown {}",
+            "{} 条曲线覆盖 {} 个目标, 结束 {}, 未知 {}",
             curves.curves().len(),
             curves.targets(),
             curves.end(),
             curves.unknown_b()
         ),
         Item::Command(command) => described(command.kind()).1,
-        Item::Unknown(unknown) => format!("{} bytes unread", unknown.body().len()),
+        Item::Unknown(unknown) => format!("{} 个字节未读", unknown.body().len()),
     }
 }
 
@@ -263,7 +263,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let timeline = Timeline::read(Cursor::new(bytes.to_vec()))?;
     let items = Items::new(&timeline);
 
-    log::info!("assets/tmb: {path} {} items", timeline.items().len());
+    log::info!("assets/tmb: {path} {} 个条目", timeline.items().len());
 
     Ok(Preview::Tmb(Box::new(Rendered {
         identity: identity(&timeline),
@@ -275,12 +275,12 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 /// What the timeline holds, for the details panel. The same rows sit under a `.pap`'s animations.
 pub fn identity(timeline: &Timeline) -> Vec<(&'static str, String)> {
     let items = timeline.items();
-    let mut identity = vec![("Items", items.len().to_string())];
+    let mut identity = vec![("条目", items.len().to_string())];
     if let Some(duration) = items.iter().find_map(|item| match item {
         Item::Header(header) => Some(header.duration()),
         _ => None,
     }) {
-        identity.push(("Duration", duration.to_string()));
+        identity.push(("时长", duration.to_string()));
     }
 
     let mut counts: Vec<(String, usize)> = Vec::new();
@@ -292,7 +292,7 @@ pub fn identity(timeline: &Timeline) -> Vec<(&'static str, String)> {
         }
     }
     identity.push((
-        "Kinds",
+        "种类",
         counts
             .iter()
             .map(|(magic, count)| format!("{magic} {count}"))
@@ -304,7 +304,7 @@ pub fn identity(timeline: &Timeline) -> Vec<(&'static str, String)> {
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     let mut follow = None;
-    section(ui, "Items");
+    section(ui, "条目");
     ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         follow = file.items.ui(ui, &file.timeline);
@@ -385,7 +385,7 @@ mod tests {
         assert_eq!(read.items().len(), 5);
         assert_eq!(
             super::identity(&read)[1],
-            ("Duration", "100".to_owned()),
+            ("时长", "100".to_owned()),
             "the header's duration"
         );
         assert_eq!(

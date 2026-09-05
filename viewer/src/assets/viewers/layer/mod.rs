@@ -86,7 +86,7 @@ fn files(scene: &Scene) -> Vec<(&'static str, String)> {
     files.push(("天空可见性", scene.sky_visibility_path().clone()));
     files.push(("光照剔除", scene.light_culling_path().clone()));
     for environment in scene.environments() {
-        files.push(("Environment", environment.asset_path().clone()));
+        files.push(("环境", environment.asset_path().clone()));
         files.push(("环境声音", environment.sound_asset_path().clone()));
     }
     files.retain(|(_, path)| !path.is_empty());
@@ -238,8 +238,8 @@ fn span(values: [f32; 2]) -> String {
 
 fn on(value: bool) -> &'static str {
     match value {
-        true => "yes",
-        false => "no",
+        true => "是",
+        false => "否",
     }
 }
 
@@ -276,16 +276,16 @@ fn extent(scale: [f32; 3]) -> String {
 }
 
 fn trigger(rows: &mut Rows, trigger: TriggerBox, scale: [f32; 3]) {
-    rows.text("Shape", format!("{:?}  {}", trigger.shape(), extent(scale)));
-    rows.text("Priority", trigger.priority().to_string());
-    rows.text("Enabled", on(trigger.enabled()));
+    rows.text("形状", format!("{:?}  {}", trigger.shape(), extent(scale)));
+    rows.text("优先级", trigger.priority().to_string());
+    rows.text("启用", on(trigger.enabled()));
 }
 
 fn listed(points: impl ExactSizeIterator<Item = String>) -> String {
     let count = points.len();
     let mut listed = points.take(LISTED).collect::<Vec<_>>().join("\n");
     if count > LISTED {
-        listed.push_str(&format!("\n… {} more", count - LISTED));
+        listed.push_str(&format!("\n… 其余 {} 项", count - LISTED));
     }
     listed
 }
@@ -314,28 +314,28 @@ fn summary(instance: &Instance) -> String {
         InstanceData::None => String::new(),
         InstanceData::BgPart(part) => match part.visible() {
             true => format!("{:?}", part.collision()),
-            false => format!("{:?}, hidden", part.collision()),
+            false => format!("{:?}, 隐藏", part.collision()),
         },
-        InstanceData::Light(light) => format!("{:?}, range {:.1}", light.kind(), light.range()),
+        InstanceData::Light(light) => format!("{:?}, 范围 {:.1}", light.kind(), light.range()),
         InstanceData::Vfx(vfx) => match vfx.auto_play() {
-            true => "auto play".to_owned(),
+            true => "自动播放".to_owned(),
             false => String::new(),
         },
         InstanceData::PositionMarker(marker) => format!("{:?}", marker.kind()),
         InstanceData::SharedGroup(group) => format!("{:?}", group.initial_door_state()),
         InstanceData::Sound(sound) => format!("{:?}", sound.kind()),
-        InstanceData::EventNpc(npc) => format!("base {}", npc.character().object().base_id()),
-        InstanceData::Character(character) => format!("base {}", character.object().base_id()),
-        InstanceData::Aetheryte(aetheryte) => format!("base {}", aetheryte.object().base_id()),
+        InstanceData::EventNpc(npc) => format!("基准 {}", npc.character().object().base_id()),
+        InstanceData::Character(character) => format!("基准 {}", character.object().base_id()),
+        InstanceData::Aetheryte(aetheryte) => format!("基准 {}", aetheryte.object().base_id()),
         InstanceData::EnvSpace(space) => format!("{:?}", space.shape()),
-        InstanceData::Treasure(treasure) => format!("base {}", treasure.object().base_id()),
-        InstanceData::Weapon(weapon) => format!("model {}", weapon.model().pattern_id()),
+        InstanceData::Treasure(treasure) => format!("基准 {}", treasure.object().base_id()),
+        InstanceData::Weapon(weapon) => format!("模型 {}", weapon.model().pattern_id()),
         InstanceData::PopRange(pop) => {
-            format!("{:?}, {} positions", pop.kind(), pop.positions().len())
+            format!("{:?}, {} 个位置", pop.kind(), pop.positions().len())
         }
-        InstanceData::ExitRange(exit) => format!("{:?}, zone {}", exit.kind(), exit.zone_id()),
-        InstanceData::MapRange(range) => format!("map {}", range.map()),
-        InstanceData::EventObject(object) => format!("base {}", object.object().base_id()),
+        InstanceData::ExitRange(exit) => format!("{:?}, 区域 {}", exit.kind(), exit.zone_id()),
+        InstanceData::MapRange(range) => format!("地图 {}", range.map()),
+        InstanceData::EventObject(object) => format!("基准 {}", object.object().base_id()),
         InstanceData::EnvLocation(_) => String::new(),
         InstanceData::EventRange(box_)
         | InstanceData::DoorRange(box_)
@@ -345,7 +345,7 @@ fn summary(instance: &Instance) -> String {
             format!("{:?}  {}", collision.trigger().shape(), extent(scale))
         }
         InstanceData::LineVfx(line) => format!("{:?}", line.style()),
-        InstanceData::ClientPath(path) => format!("{} points", path.control_points().len()),
+        InstanceData::ClientPath(path) => format!("{} 个点", path.control_points().len()),
         InstanceData::TargetMarker(marker) => format!("{:?}", marker.kind()),
         InstanceData::ChairMarker(chair) => format!("{:?}", chair.kind()),
         InstanceData::PrefetchRange(range) => {
@@ -356,7 +356,7 @@ fn summary(instance: &Instance) -> String {
         }
         InstanceData::Decal(_) => String::new(),
         InstanceData::CullingBox(_) => extent(scale),
-        InstanceData::Unknown(bytes) => format!("{} bytes unread", bytes.len()),
+        InstanceData::Unknown(bytes) => format!("{} 字节未读取", bytes.len()),
     }
 }
 
@@ -375,9 +375,9 @@ fn payload(instance: &Instance) -> Rows {
     match instance.data() {
         InstanceData::None => {}
         InstanceData::BgPart(part) => {
-            rows.path("Model", part.asset_path());
-            rows.path("Collision", part.collision_asset_path());
-            rows.text("Collision mode", format!("{:?}", part.collision()));
+            rows.path("模型", part.asset_path());
+            rows.path("碰撞体", part.collision_asset_path());
+            rows.text("碰撞模式", format!("{:?}", part.collision()));
             if part.collision_material_mask() != 0 {
                 rows.text(
                     "碰撞遮罩",
@@ -385,9 +385,9 @@ fn payload(instance: &Instance) -> Rows {
                 );
             }
             if part.collision_material_id() != 0 {
-                rows.text("Collision material", surface(part.collision_material_id()));
+                rows.text("碰撞材质", surface(part.collision_material_id()));
             }
-            rows.text("Visible", on(part.visible()));
+            rows.text("可见", on(part.visible()));
             rows.text(
                 "世界阴影",
                 format!("{:?}", part.world_light_shadow_mode()),
@@ -396,79 +396,79 @@ fn payload(instance: &Instance) -> Rows {
                 "物体阴影",
                 format!("{:?}", part.object_light_shadow_mode()),
             );
-            rows.text("Fade out", format!("{:.1}", part.fade_out_distance()));
+            rows.text("淡出距离", format!("{:.1}", part.fade_out_distance()));
             rows.text(
-                "Bounding sphere",
+                "包围球",
                 format!("{:.1}", part.bounding_sphere_size()),
             );
         }
         InstanceData::Light(light) => {
-            rows.text("Light", format!("{:?}", light.kind()));
-            rows.text("Point light", format!("{:?}", light.point_light_kind()));
-            rows.text("Range", format!("{:.2}", light.range()));
-            rows.text("Attenuation", format!("{:.3}", light.attenuation()));
+            rows.text("灯光类型", format!("{:?}", light.kind()));
+            rows.text("点光源类型", format!("{:?}", light.point_light_kind()));
+            rows.text("范围", format!("{:.2}", light.range()));
+            rows.text("衰减", format!("{:.3}", light.attenuation()));
             rows.text(
-                "Cone coefficient",
+                "锥体系数",
                 format!("{:.3}", light.attenuation_cone_coefficient()),
             );
-            rows.text("Spot angle", format!("{:.3}", light.spot_angle()));
-            rows.text("Color", color(light.colour()));
-            rows.path("Texture", light.texture_path());
-            rows.text("Specular", on(light.specular_highlights()));
-            rows.text("Scenery shadows", on(light.bg_part_shadows()));
-            rows.text("Character shadows", on(light.character_shadows()));
+            rows.text("聚光角度", format!("{:.3}", light.spot_angle()));
+            rows.text("颜色", color(light.colour()));
+            rows.path("纹理", light.texture_path());
+            rows.text("高光", on(light.specular_highlights()));
+            rows.text("场景阴影", on(light.bg_part_shadows()));
+            rows.text("角色阴影", on(light.character_shadows()));
         }
         InstanceData::Vfx(vfx) => {
-            rows.path("Effect", vfx.asset_path());
-            rows.text("Color", rgba(vfx.colour()));
+            rows.path("特效", vfx.asset_path());
+            rows.text("颜色", rgba(vfx.colour()));
             rows.text(
-                "Soft particle fade",
+                "柔和粒子淡出",
                 format!("{:.2}", vfx.soft_particle_fade_range()),
             );
-            rows.text("Auto play", on(vfx.auto_play()));
-            rows.text("No far clip", on(vfx.no_far_clip()));
-            rows.text("Fade near", span(vfx.fade_near()));
-            rows.text("Fade far", span(vfx.fade_far()));
-            rows.text("Z correct", format!("{:.3}", vfx.z_correct()));
+            rows.text("自动播放", on(vfx.auto_play()));
+            rows.text("无远裁剪", on(vfx.no_far_clip()));
+            rows.text("近端淡出", span(vfx.fade_near()));
+            rows.text("远端淡出", span(vfx.fade_far()));
+            rows.text("Z 校正", format!("{:.3}", vfx.z_correct()));
         }
         InstanceData::PositionMarker(marker) => {
-            rows.text("Marker", format!("{:?}", marker.kind()));
-            rows.text("Comment", format!("{:#x}", marker.comment_en_offset()));
-            rows.text("Comment (JP)", format!("{:#x}", marker.comment_jp_offset()));
+            rows.text("标记", format!("{:?}", marker.kind()));
+            rows.text("注释", format!("{:#x}", marker.comment_en_offset()));
+            rows.text("注释（日文）", format!("{:#x}", marker.comment_jp_offset()));
         }
         InstanceData::SharedGroup(group) => {
-            rows.path("Group", group.asset_path());
-            rows.text("Door", format!("{:?}", group.initial_door_state()));
-            rows.text("Rotation", format!("{:?}", group.initial_rotation_state()));
+            rows.path("组", group.asset_path());
+            rows.text("门", format!("{:?}", group.initial_door_state()));
+            rows.text("旋转", format!("{:?}", group.initial_rotation_state()));
             rows.text(
-                "Transform",
+                "变换",
                 format!("{:?}", group.initial_transform_state()),
             );
-            rows.text("Color", format!("{:?}", group.initial_colour_state()));
+            rows.text("颜色", format!("{:?}", group.initial_colour_state()));
             rows.text(
-                "Random timeline",
+                "随机时间轴",
                 format!(
-                    "auto play {}, loop {}",
+                    "自动播放 {}，循环 {}",
                     on(group.random_timeline_auto_play()),
                     on(group.random_timeline_loop_playback())
                 ),
             );
             rows.text(
-                "Collision without event object",
+                "无事件对象碰撞",
                 on(group.collision_controllable_without_event_object()),
             );
             if group.bound_client_path_instance_id() != 0 {
                 rows.text(
-                    "Bound path",
+                    "绑定路径",
                     group.bound_client_path_instance_id().to_string(),
                 );
             }
             let path = group.move_path();
-            rows.text("Move path", format!("{:?}", path.mode()));
+            rows.text("移动路径", format!("{:?}", path.mode()));
             rows.text(
-                "Move timing",
+                "移动时机",
                 format!(
-                    "{} over {}, accelerate {}, decelerate {}",
+                    "{}，时长 {}，加速 {}，减速 {}",
                     on(path.auto_play()),
                     path.time(),
                     path.accelerate_time(),
@@ -476,129 +476,129 @@ fn payload(instance: &Instance) -> Rows {
                 ),
             );
             rows.text(
-                "Move rotation",
+                "移动旋转",
                 format!(
-                    "{:?}, loop {}, reverse {}",
+                    "{:?}，循环 {}，反向 {}",
                     path.rotation(),
                     on(path.loop_playback()),
                     on(path.reverse())
                 ),
             );
-            rows.text("Swing vertical", span(path.vertical_swing_range()));
-            rows.text("Swing horizontal", span(path.horizontal_swing_range()));
-            rows.text("Swing speed", span(path.swing_move_speed_range()));
-            rows.text("Swing rotation", span(path.swing_rotation()));
+            rows.text("垂直摆动", span(path.vertical_swing_range()));
+            rows.text("水平摆动", span(path.horizontal_swing_range()));
+            rows.text("摆动速度", span(path.swing_move_speed_range()));
+            rows.text("摆动旋转", span(path.swing_rotation()));
             rows.text(
-                "Swing rotation speed",
+                "摆动旋转速度",
                 span(path.swing_rotation_speed_range()),
             );
             if !group.overrides().is_empty() {
                 rows.text(
-                    "Overrides",
-                    format!("{} bytes unread", group.overrides().len()),
+                    "覆盖项",
+                    format!("{} 字节未读取", group.overrides().len()),
                 );
             }
         }
         InstanceData::Sound(sound) => {
-            rows.path("Sound", sound.asset_path());
-            rows.text("Emitter", format!("{:?}", sound.kind()));
-            rows.text("Auto play", on(sound.auto_play()));
-            rows.text("No far clip", on(sound.no_far_clip()));
-            rows.text("Point selection", sound.point_selection().to_string());
+            rows.path("声音", sound.asset_path());
+            rows.text("发射器", format!("{:?}", sound.kind()));
+            rows.text("自动播放", on(sound.auto_play()));
+            rows.text("无远裁剪", on(sound.no_far_clip()));
+            rows.text("点选择", sound.point_selection().to_string());
             if !sound.binary().is_empty() {
-                rows.text("Geometry", format!("{} bytes unread", sound.binary().len()));
+                rows.text("几何数据", format!("{} 字节未读取", sound.binary().len()));
             }
         }
         InstanceData::EventNpc(npc) => {
-            rows.row("Base", RESIDENT, npc.character().object().base_id());
-            rows.text("Character", format!("{:?}", npc.character().unknown()));
-            rows.text("Unknown", format!("{:?}", npc.unknown()));
+            rows.row("基准", RESIDENT, npc.character().object().base_id());
+            rows.text("角色", format!("{:?}", npc.character().unknown()));
+            rows.text("未知", format!("{:?}", npc.unknown()));
         }
         InstanceData::Character(character) => {
-            rows.text("Base", character.object().base_id().to_string());
-            rows.text("Unknown", format!("{:?}", character.unknown()));
+            rows.text("基准", character.object().base_id().to_string());
+            rows.text("未知", format!("{:?}", character.unknown()));
         }
         InstanceData::Aetheryte(aetheryte) => {
-            rows.text("Base", aetheryte.object().base_id().to_string());
-            rows.text("Bound instance", aetheryte.bound_instance_id().to_string());
-            rows.text("Unknown", aetheryte.unknown().to_string());
+            rows.text("基准", aetheryte.object().base_id().to_string());
+            rows.text("绑定实例", aetheryte.bound_instance_id().to_string());
+            rows.text("未知", aetheryte.unknown().to_string());
         }
         InstanceData::EnvSpace(space) => {
-            rows.path("Environment", space.asset_path());
-            rows.path("Sound", space.sound_asset_path());
-            rows.text("Shape", format!("{:?}  {}", space.shape(), extent(scale)));
-            rows.text("Bound instance", space.bound_instance_id().to_string());
-            rows.text("Env map shooting point", on(space.env_map_shooting_point()));
-            rows.text("Priority", space.priority().to_string());
-            rows.text("Effective range", format!("{:.2}", space.effective_range()));
-            rows.text("Interpolation", space.interpolation_time().to_string());
-            rows.text("Reverb", format!("{:.2}", space.reverb()));
-            rows.text("Filter", format!("{:.2}", space.filter()));
+            rows.path("环境", space.asset_path());
+            rows.path("声音", space.sound_asset_path());
+            rows.text("形状", format!("{:?}  {}", space.shape(), extent(scale)));
+            rows.text("绑定实例", space.bound_instance_id().to_string());
+            rows.text("环境贴图拍摄点", on(space.env_map_shooting_point()));
+            rows.text("优先级", space.priority().to_string());
+            rows.text("有效范围", format!("{:.2}", space.effective_range()));
+            rows.text("插值", space.interpolation_time().to_string());
+            rows.text("混响", format!("{:.2}", space.reverb()));
+            rows.text("滤波器", format!("{:.2}", space.filter()));
         }
         InstanceData::Treasure(treasure) => {
-            rows.text("Base", treasure.object().base_id().to_string());
+            rows.text("基准", treasure.object().base_id().to_string());
         }
         InstanceData::Weapon(weapon) => {
             let model = weapon.model();
-            rows.text("Skeleton", model.skeleton_id().to_string());
-            rows.text("Pattern", model.pattern_id().to_string());
-            rows.text("Image change", model.image_change_id().to_string());
-            rows.text("Staining", model.staining_id().to_string());
-            rows.text("Visible", on(weapon.visible()));
+            rows.text("骨架", model.skeleton_id().to_string());
+            rows.text("图案", model.pattern_id().to_string());
+            rows.text("贴图替换", model.image_change_id().to_string());
+            rows.text("染色", model.staining_id().to_string());
+            rows.text("可见", on(weapon.visible()));
         }
         InstanceData::PopRange(pop) => {
-            rows.text("Pop", format!("{:?}", pop.kind()));
+            rows.text("刷新类型", format!("{:?}", pop.kind()));
             rows.text(
-                "Inner radius ratio",
+                "内半径比例",
                 format!("{:.3}", pop.inner_radius_ratio()),
             );
-            rows.text("Radius", extent(scale));
+            rows.text("半径", extent(scale));
             if !pop.positions().is_empty() {
                 rows.text(
-                    "Positions",
+                    "位置",
                     listed(pop.positions().iter().map(|point| axes(*point))),
                 );
             }
         }
         InstanceData::ExitRange(exit) => {
             trigger(&mut rows, exit.trigger(), scale);
-            rows.text("Exit", format!("{:?}", exit.kind()));
-            rows.text("Zone", exit.zone_id().to_string());
-            rows.text("Territory type", exit.territory_type_id().to_string());
-            rows.text("Index", exit.index().to_string());
+            rows.text("出口", format!("{:?}", exit.kind()));
+            rows.text("区域", exit.zone_id().to_string());
+            rows.text("区域类型", exit.territory_type_id().to_string());
+            rows.text("索引", exit.index().to_string());
             rows.text(
-                "Destination instance",
+                "目标实例",
                 exit.destination_instance_id().to_string(),
             );
-            rows.text("Return instance", exit.return_instance_id().to_string());
+            rows.text("返回实例", exit.return_instance_id().to_string());
             rows.text(
-                "Running direction",
+                "奔跑方向",
                 format!("{:.3}", exit.player_running_direction()),
             );
         }
         InstanceData::MapRange(range) => {
             trigger(&mut rows, range.trigger(), scale);
-            rows.row("Map", MAP, range.map());
-            rows.row("Place name", PLACE, range.place_name_block());
-            rows.row("Place name spot", PLACE, range.place_name_spot());
-            rows.text("Weather", range.weather().to_string());
-            rows.asset("Music", MUSIC, range.bgm());
-            rows.text("Housing block", range.housing_block_id().to_string());
-            rows.text("Discovery", range.discovery_id().to_string());
+            rows.row("地图", MAP, range.map());
+            rows.row("地名", PLACE, range.place_name_block());
+            rows.row("地名牌", PLACE, range.place_name_spot());
+            rows.text("天气", range.weather().to_string());
+            rows.asset("音乐", MUSIC, range.bgm());
+            rows.text("房屋地块", range.housing_block_id().to_string());
+            rows.text("发现点", range.discovery_id().to_string());
             let switches = [
-                ("map", range.map_enabled()),
-                ("place name", range.place_name_enabled()),
-                ("discovery", range.discovery_enabled()),
-                ("music", range.bgm_enabled()),
-                ("music on entry only", range.bgm_play_zone_in_only()),
-                ("weather", range.weather_enabled()),
-                ("rest bonus", range.rest_bonus_enabled()),
-                ("rest bonus effective", range.rest_bonus_effective()),
-                ("lift", range.lift_enabled()),
-                ("housing", range.housing_enabled()),
-                ("log flying height error", range.log_flying_height_max_err()),
-                ("mounts off", range.mounts_and_ornaments_disabled()),
-                ("lalafell only", range.lalafell_only()),
+                ("地图", range.map_enabled()),
+                ("地名", range.place_name_enabled()),
+                ("发现点", range.discovery_enabled()),
+                ("音乐", range.bgm_enabled()),
+                ("仅进入时播放音乐", range.bgm_play_zone_in_only()),
+                ("天气", range.weather_enabled()),
+                ("休息奖励", range.rest_bonus_enabled()),
+                ("休息奖励生效", range.rest_bonus_effective()),
+                ("升降台", range.lift_enabled()),
+                ("房屋", range.housing_enabled()),
+                ("记录飞行高度误差", range.log_flying_height_max_err()),
+                ("禁用坐骑", range.mounts_and_ornaments_disabled()),
+                ("仅拉拉菲尔", range.lalafell_only()),
             ];
             let on = switches
                 .iter()
@@ -606,52 +606,52 @@ fn payload(instance: &Instance) -> Rows {
                 .map(|(name, _)| *name)
                 .collect::<Vec<_>>();
             rows.text(
-                "Applies",
+                "已启用",
                 match on.is_empty() {
-                    true => "nothing".to_owned(),
+                    true => "无".to_owned(),
                     false => on.join(", "),
                 },
             );
         }
         InstanceData::EventObject(object) => {
-            rows.row("Base", OBJECT, object.object().base_id());
-            rows.text("Bound instance", object.bound_instance_id().to_string());
-            rows.text("Unknown", object.unknown().to_string());
+            rows.row("基准", OBJECT, object.object().base_id());
+            rows.text("绑定实例", object.bound_instance_id().to_string());
+            rows.text("未知", object.unknown().to_string());
         }
         InstanceData::EnvLocation(location) => {
-            rows.path("Ambient light", location.ambient_light_asset_path());
-            rows.path("Env map", location.env_map_asset_path());
+            rows.path("环境光", location.ambient_light_asset_path());
+            rows.path("环境贴图", location.env_map_asset_path());
         }
         InstanceData::EventRange(box_)
         | InstanceData::DoorRange(box_)
         | InstanceData::ClickableRange(box_) => trigger(&mut rows, *box_, scale),
         InstanceData::QuestMarker(marker) => {
-            rows.text("Unknown", format!("{:?}", marker.unknown()));
+            rows.text("未知", format!("{:?}", marker.unknown()));
         }
         InstanceData::CollisionBox(collision) => {
             trigger(&mut rows, collision.trigger(), scale);
-            rows.path("Collision", collision.collision_asset_path());
+            rows.path("碰撞体", collision.collision_asset_path());
             rows.text(
                 "碰撞遮罩",
                 format!("{:#018x}", collision.collision_material_mask()),
             );
             rows.text(
-                "Collision material",
+                "碰撞材质",
                 surface(collision.collision_material_id()),
             );
         }
-        InstanceData::LineVfx(line) => rows.text("Style", format!("{:?}", line.style())),
+        InstanceData::LineVfx(line) => rows.text("样式", format!("{:?}", line.style())),
         InstanceData::ClientPath(path) => {
-            rows.text("Points", path.control_points().len().to_string());
+            rows.text("点数", path.control_points().len().to_string());
             rows.text(
-                "Control points",
+                "控制点",
                 listed(path.control_points().iter().map(|point| {
                     format!(
                         "{}  id {}{}",
                         axes(point.position()),
                         point.id(),
                         match point.select() {
-                            true => ", select",
+                            true => "，已选",
                             false => "",
                         }
                     )
@@ -659,18 +659,18 @@ fn payload(instance: &Instance) -> Rows {
             );
         }
         InstanceData::TargetMarker(marker) => {
-            rows.text("Anchor", format!("{:?}", marker.kind()));
+            rows.text("锚点", format!("{:?}", marker.kind()));
             rows.text(
-                "Nameplate offset",
+                "名牌偏移",
                 format!("{:.3}", marker.nameplate_offset_y()),
             );
         }
         InstanceData::ChairMarker(chair) => {
-            rows.text("Seat", format!("{:?}", chair.kind()));
+            rows.text("座位", format!("{:?}", chair.kind()));
             let sides = [
-                ("left", chair.left()),
-                ("right", chair.right()),
-                ("back", chair.back()),
+                ("左", chair.left()),
+                ("右", chair.right()),
+                ("后", chair.back()),
             ];
             let taken = sides
                 .iter()
@@ -678,36 +678,36 @@ fn payload(instance: &Instance) -> Rows {
                 .map(|(name, _)| *name)
                 .collect::<Vec<_>>();
             rows.text(
-                "Sides",
+                "座位方向",
                 match taken.is_empty() {
-                    true => "none".to_owned(),
+                    true => "无".to_owned(),
                     false => taken.join(", "),
                 },
             );
         }
         InstanceData::PrefetchRange(range) => {
             trigger(&mut rows, range.trigger(), scale);
-            rows.text("Bound instance", range.bound_instance_id().to_string());
+            rows.text("绑定实例", range.bound_instance_id().to_string());
         }
         InstanceData::FateRange(range) => {
             trigger(&mut rows, range.trigger(), scale);
             rows.text(
-                "Fate layout label",
+                "FATE 布局标签",
                 range.fate_layout_label_id().to_string(),
             );
         }
         InstanceData::Decal(decal) => {
-            rows.path("Diffuse", decal.diffuse_path());
-            rows.path("Normal", decal.normal_path());
-            rows.path("Specular", decal.specular_path());
+            rows.path("漫反射", decal.diffuse_path());
+            rows.path("法线", decal.normal_path());
+            rows.path("高光", decal.specular_path());
         }
         InstanceData::CullingBox(box_) => {
-            rows.text("Volume", extent(scale));
-            rows.text("Unknown", box_.unknown().to_string());
+            rows.text("体积", extent(scale));
+            rows.text("未知", box_.unknown().to_string());
         }
         InstanceData::Unknown(bytes) => rows.text(
-            "Payload",
-            format!("{:?} unread, {} bytes", instance.kind(), bytes.len()),
+            "载荷",
+            format!("{:?} 未读取，{} 字节", instance.kind(), bytes.len()),
         ),
     }
     rows
@@ -754,12 +754,12 @@ fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Sourc
         // A level or shared group can name its layer groups by path instead of embedding them, so
         // the file itself has no layer or instance count to give until those are read.
         (true, Some(scene)) => identity.push((
-            "Layer groups",
-            format!("{} named, none embedded", scene.layer_group_paths().len()),
+            "图层组",
+            format!("命名 {} 个，未嵌入", scene.layer_group_paths().len()),
         )),
         _ => {
             identity.push((
-                "Layers",
+                "图层",
                 source
                     .groups()
                     .iter()
@@ -767,11 +767,11 @@ fn rendered(path: &str, mut identity: Vec<(&'static str, String)>, source: Sourc
                     .sum::<usize>()
                     .to_string(),
             ));
-            identity.push(("Instances", instances.to_string()));
+            identity.push(("实例", instances.to_string()));
         }
     }
 
-    log::info!("assets/layer: {path} {instances} instances");
+    log::info!("assets/layer: {path}，{instances} 个实例");
 
     Rendered {
         path: path.to_owned(),
@@ -807,20 +807,20 @@ pub fn ui(
 ) -> Option<String> {
     ui.horizontal(|ui| {
         if ui
-            .selectable_label(file.view.get() == View::Tree, "Tree")
+            .selectable_label(file.view.get() == View::Tree, "树状")
             .clicked()
         {
             file.view.set(View::Tree);
         }
         if file.scene_enabled.get()
             && ui
-                .selectable_label(file.view.get() == View::Scene, "Scene")
+                .selectable_label(file.view.get() == View::Scene, "场景")
                 .clicked()
         {
             file.view.set(View::Scene);
         }
         if ui
-            .selectable_label(file.view.get() == View::Sounds, "Sounds")
+            .selectable_label(file.view.get() == View::Sounds, "声音")
             .clicked()
         {
             file.view.set(View::Sounds);
@@ -851,7 +851,7 @@ pub fn ui(
 
     let mut follow = None;
     if !file.files.is_empty() {
-        section(ui, "Files");
+        section(ui, "文件");
         egui::Grid::new("layer_files")
             .num_columns(2)
             .striped(true)
@@ -870,7 +870,7 @@ pub fn ui(
     }
 
     if !file.header.is_empty() {
-        section(ui, "Scene header");
+        section(ui, "场景头");
         egui::Grid::new("layer_header")
             .num_columns(4)
             .striped(true)
@@ -906,13 +906,13 @@ pub fn ui(
     }
 
     if !file.filters.is_empty() {
-        section(ui, "Used by");
+        section(ui, "使用于");
         egui::Grid::new("layer_filters")
             .num_columns(3)
             .striped(true)
             .show(ui, |ui| {
                 for &(territory, duty) in &file.filters {
-                    ui.label(RichText::new(format!("Territory {territory}")).weak());
+                    ui.label(RichText::new(format!("区域 {territory}")).weak());
                     let named = deps.text(ui.ctx(), backend, TERRITORY, u32::from(territory));
                     ui.label(RichText::new(named.unwrap_or_default()).monospace());
                     if duty > 0 {
@@ -920,7 +920,7 @@ pub fn ui(
                         let named = deps.text_at(ui.ctx(), backend, DUTY, 1, u32::from(duty));
                         ui.label(
                             RichText::new(named.map_or_else(
-                                || format!("duty {duty}"),
+                                || format!("副本 {duty}"),
                                 |name| format!("{name} ({duty})"),
                             ))
                             .monospace(),
@@ -956,7 +956,7 @@ pub fn ui(
         shown.push((index, expanded));
     }
 
-    section(ui, "Layers");
+    section(ui, "图层");
     let picked = file.selected(ui);
     let mut selected = picked;
     let mut toggled = None;
@@ -1070,7 +1070,7 @@ impl Rendered {
                         true => group.id().to_string(),
                         false => group.name().clone(),
                     },
-                    detail: format!("{} layers", group.layers().len()),
+                    detail: format!("{} 个图层", group.layers().len()),
                     asset: None,
                 }
             }
@@ -1078,19 +1078,19 @@ impl Rendered {
                 let layer = &groups[group].layers()[layer];
                 Line {
                     label: layer.name().clone(),
-                    detail: format!("{} instances", layer.instances().len()),
+                    detail: format!("{} 个实例", layer.instances().len()),
                     asset: None,
                 }
             }
             At::Instance(group, layer, instance) => {
                 let instance = &groups[group].layers()[layer].instances()[instance];
                 let transform = instance.transform();
-                let mut detail = format!("at {}", axes(transform.translation()));
+                let mut detail = format!("位于 {}", axes(transform.translation()));
                 if transform.rotation() != [0.0; 3] {
-                    detail.push_str(&format!("  rotation {}", axes(transform.rotation())));
+                    detail.push_str(&format!("  旋转 {}", axes(transform.rotation())));
                 }
                 if transform.scale() != [1.0; 3] {
-                    detail.push_str(&format!("  scale {}", axes(transform.scale())));
+                    detail.push_str(&format!("  缩放 {}", axes(transform.scale())));
                 }
                 let summary = summary(instance);
                 if !summary.is_empty() {
@@ -1123,19 +1123,19 @@ impl Rendered {
         match at {
             At::Group(group) => {
                 let group = &groups[group];
-                rows.text("Group", group.id().to_string());
-                rows.text("Layers", group.layers().len().to_string());
+                rows.text("组", group.id().to_string());
+                rows.text("图层", group.layers().len().to_string());
             }
             At::Layer(group, layer) => {
                 let layer = &groups[group].layers()[layer];
-                rows.text("Layer", layer.id().to_string());
-                rows.text("Instances", layer.instances().len().to_string());
-                rows.text("Visible", on(layer.visible()));
+                rows.text("图层", layer.id().to_string());
+                rows.text("实例", layer.instances().len().to_string());
+                rows.text("可见", on(layer.visible()));
                 if layer.festival_id() != 0 {
                     rows.text(
-                        "Festival",
+                        "庆典",
                         format!(
-                            "{} phase {}",
+                            "{} 阶段 {}",
                             layer.festival_id(),
                             layer.festival_phase_id()
                         ),
@@ -1145,10 +1145,10 @@ impl Rendered {
             At::Instance(..) => {
                 let instance = self.instance(at).expect("an instance row");
                 let transform = instance.transform();
-                rows.text("Instance", instance.id().to_string());
-                rows.text("Position", axes(transform.translation()));
-                rows.text("Rotation", axes(transform.rotation()));
-                rows.text("Scale", axes(transform.scale()));
+                rows.text("实例", instance.id().to_string());
+                rows.text("位置", axes(transform.translation()));
+                rows.text("旋转", axes(transform.rotation()));
+                rows.text("缩放", axes(transform.scale()));
                 rows.0.extend(payload(instance).0);
             }
         }
@@ -1227,7 +1227,7 @@ impl Rendered {
             }
             ui.add_space(8.0);
             ui.separator();
-            ui.label(RichText::new("Instance kinds").weak());
+            ui.label(RichText::new("实例类型").weak());
             ui.add_space(4.0);
             egui::Grid::new("layer_kinds")
                 .num_columns(2)

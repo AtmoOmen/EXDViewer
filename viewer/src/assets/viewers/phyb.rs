@@ -25,11 +25,11 @@ fn axes(values: [f32; 3]) -> String {
 fn flags(simulator: &Simulator) -> String {
     let flags = simulator.flags();
     let listed = [
-        (flags.simulating(), "simulating"),
-        (flags.collisions_handled(), "collisions"),
-        (flags.continuous_collisions(), "continuous"),
-        (flags.using_ground_plane(), "ground plane"),
-        (flags.fixed_length(), "fixed length"),
+        (flags.simulating(), "模拟中"),
+        (flags.collisions_handled(), "碰撞"),
+        (flags.continuous_collisions(), "连续"),
+        (flags.using_ground_plane(), "地面平面"),
+        (flags.fixed_length(), "固定长度"),
     ]
     .iter()
     .filter(|(set, _)| *set)
@@ -68,7 +68,7 @@ fn rows(
 fn shapes(collision: &Collision) -> Vec<Vec<String>> {
     let capsules = collision.capsules().iter().map(|shape| {
         vec![
-            "capsule".to_owned(),
+            "胶囊体".to_owned(),
             named(shape.name()),
             format!("{}, {}", named(shape.start_bone()), named(shape.end_bone())),
             format!(
@@ -76,12 +76,12 @@ fn shapes(collision: &Collision) -> Vec<Vec<String>> {
                 axes(shape.start_offset()),
                 axes(shape.end_offset())
             ),
-            format!("radius {:.3}", shape.radius()),
+            format!("半径 {:.3}", shape.radius()),
         ]
     });
     let ellipsoids = collision.ellipsoids().iter().map(|shape| {
         vec![
-            "ellipsoid".to_owned(),
+            "椭球体".to_owned(),
             named(shape.name()),
             named(shape.bone()),
             shape
@@ -90,43 +90,43 @@ fn shapes(collision: &Collision) -> Vec<Vec<String>> {
                 .map(|offset| axes(*offset))
                 .collect::<Vec<_>>()
                 .join(" / "),
-            format!("radius {:.3}", shape.radius()),
+            format!("半径 {:.3}", shape.radius()),
         ]
     });
     let normals = collision.normal_planes().iter().map(|shape| {
         vec![
-            "plane".to_owned(),
+            "平面".to_owned(),
             named(shape.name()),
             named(shape.bone()),
             format!(
-                "{}, normal {}",
+                "{}, 法线 {}",
                 axes(shape.bone_offset()),
                 axes(shape.normal())
             ),
-            format!("thickness {:.3}", shape.thickness()),
+            format!("厚度 {:.3}", shape.thickness()),
         ]
     });
     let three_point = collision.three_point_planes().iter().map(|shape| {
         vec![
-            "3-point plane".to_owned(),
+            "三点平面".to_owned(),
             named(shape.name()),
             named(shape.bone()),
             format!(
-                "{}, unknown {} / {}",
+                "{}, 未知 {} / {}",
                 axes(shape.bone_offset()),
                 axes(shape.unknown_b()),
                 axes(shape.unknown_c())
             ),
-            format!("thickness {:.3}", shape.thickness()),
+            format!("厚度 {:.3}", shape.thickness()),
         ]
     });
     let spheres = collision.spheres().iter().map(|shape| {
         vec![
-            "sphere".to_owned(),
+            "球体".to_owned(),
             named(shape.name()),
             named(shape.bone()),
             axes(shape.bone_offset()),
-            format!("thickness {:.3}", shape.thickness()),
+            format!("厚度 {:.3}", shape.thickness()),
         ]
     });
 
@@ -142,15 +142,15 @@ fn chain_ui(ui: &mut egui::Ui, simulator: usize, index: usize, chain: &Chain) {
     heading(
         ui,
         &format!(
-            "Chain {index}: {:?}, {} nodes",
+            "链 {index}：{:?}，{} 个节点",
             chain.chain_type(),
             chain.nodes().len()
         ),
     );
     ui.label(
         RichText::new(format!(
-            "dampening {:.3}, max speed {:.3}, friction {:.3}, collision dampening {:.3}, \
-             repulsion {:.3}, end {}",
+            "阻尼 {:.3}，最大速度 {:.3}，摩擦 {:.3}，碰撞阻尼 {:.3}，\
+             斥力 {:.3}，末端 {}",
             chain.dampening(),
             chain.max_speed(),
             chain.friction(),
@@ -166,7 +166,7 @@ fn chain_ui(ui: &mut egui::Ui, simulator: usize, index: usize, chain: &Chain) {
         rows(
             ui,
             ("phyb_chain_collisions", simulator, index),
-            &["Shape", "Side"],
+            &["形状", "侧面"],
             &chain
                 .collisions()
                 .iter()
@@ -184,15 +184,15 @@ fn chain_ui(ui: &mut egui::Ui, simulator: usize, index: usize, chain: &Chain) {
         ui,
         ("phyb_nodes", simulator, index),
         &[
-            "Bone",
-            "Radius",
-            "Attract",
-            "Wind",
-            "Gravity",
-            "Cone",
-            "Axis offset",
-            "Plane normal",
-            "Collision",
+            "骨骼",
+            "半径",
+            "吸引",
+            "风",
+            "重力",
+            "锥角",
+            "轴偏移",
+            "平面法线",
+            "碰撞",
         ],
         &chain
             .nodes()
@@ -221,10 +221,10 @@ fn chain_ui(ui: &mut egui::Ui, simulator: usize, index: usize, chain: &Chain) {
 fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     ui.add_space(8.0);
     ui.separator();
-    section(ui, &format!("Simulator {index}"));
+    section(ui, &format!("模拟器 {index}"));
     ui.label(
         RichText::new(format!(
-            "gravity {}, wind {}, constraint loop {}, collision loop {}, group {}, {}",
+            "重力 {}，风 {}，约束循环 {}，碰撞循环 {}，组 {}，{}",
             axes(simulator.gravity()),
             axes(simulator.wind()),
             simulator.constraint_loop(),
@@ -237,15 +237,15 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     );
 
     for (kind, objects) in [
-        ("Collision objects", simulator.collision_objects()),
-        ("Connector collision", simulator.collision_connectors()),
+        ("碰撞对象", simulator.collision_objects()),
+        ("连接器碰撞", simulator.collision_connectors()),
     ] {
         if !objects.is_empty() {
             heading(ui, kind);
             rows(
                 ui,
                 ("phyb_collision", index, kind),
-                &["Shape", "Side"],
+                &["形状", "侧面"],
                 &objects
                     .iter()
                     .map(|collision| {
@@ -264,17 +264,17 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     }
 
     if !simulator.connectors().is_empty() {
-        heading(ui, "Connectors");
+        heading(ui, "连接器");
         rows(
             ui,
             ("phyb_connectors", index),
             &[
-                "Chains",
-                "Nodes",
-                "Radius",
-                "Friction",
-                "Dampening",
-                "Repulsion",
+                "链",
+                "节点",
+                "半径",
+                "摩擦",
+                "阻尼",
+                "斥力",
             ],
             &simulator
                 .connectors()
@@ -294,11 +294,11 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     }
 
     if !simulator.attracts().is_empty() {
-        heading(ui, "Attracts");
+        heading(ui, "吸引点");
         rows(
             ui,
             ("phyb_attracts", index),
-            &["Bone", "Offset", "Chain", "Node", "Stiffness"],
+            &["骨骼", "偏移", "链", "节点", "刚度"],
             &simulator
                 .attracts()
                 .iter()
@@ -316,11 +316,11 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     }
 
     if !simulator.pins().is_empty() {
-        heading(ui, "Pins");
+        heading(ui, "固定点");
         rows(
             ui,
             ("phyb_pins", index),
-            &["Bone", "Offset", "Chain", "Node"],
+            &["骨骼", "偏移", "链", "节点"],
             &simulator
                 .pins()
                 .iter()
@@ -337,11 +337,11 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     }
 
     if !simulator.springs().is_empty() {
-        heading(ui, "Springs");
+        heading(ui, "弹簧");
         rows(
             ui,
             ("phyb_springs", index),
-            &["Chains", "Nodes", "Stretch", "Compress"],
+            &["链", "节点", "拉伸", "压缩"],
             &simulator
                 .springs()
                 .iter()
@@ -358,11 +358,11 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
     }
 
     if !simulator.post_alignments().is_empty() {
-        heading(ui, "Post alignments");
+        heading(ui, "姿态对齐");
         rows(
             ui,
             ("phyb_alignments", index),
-            &["Shape", "Chain", "Node"],
+            &["形状", "链", "节点"],
             &simulator
                 .post_alignments()
                 .iter()
@@ -402,23 +402,23 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .sum::<usize>();
 
     let mut identity = vec![
-        ("Version", format!("{:#010x}", file.version())),
+        ("版本", format!("{:#010x}", file.version())),
         (
-            "Data type",
+            "数据类型",
             file.data_type()
-                .map_or_else(|| "none".to_owned(), |kind| kind.to_string()),
+                .map_or_else(|| "无".to_owned(), |kind| kind.to_string()),
         ),
-        ("Collision shapes", shapes.len().to_string()),
-        ("Simulators", file.simulators().len().to_string()),
-        ("Chains", chains.to_string()),
-        ("Nodes", nodes.to_string()),
+        ("碰撞形状", shapes.len().to_string()),
+        ("模拟器", file.simulators().len().to_string()),
+        ("链", chains.to_string()),
+        ("节点", nodes.to_string()),
     ];
     if let Some(extended) = file.extended() {
-        identity.push(("Extended physics", Bytes(extended.len()).to_string()));
+        identity.push(("扩展物理", Bytes(extended.len()).to_string()));
     }
 
     log::info!(
-        "assets/phyb: {path} {} shapes, {} simulators, {chains} chains",
+        "assets/phyb: {path} {} 个形状，{} 个模拟器，{chains} 条链",
         shapes.len(),
         file.simulators().len()
     );
@@ -434,11 +434,11 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
     ScrollArea::both().auto_shrink(false).show(ui, |ui| {
         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         if !file.shapes.is_empty() {
-            section(ui, "Collision");
+            section(ui, "碰撞");
             rows(
                 ui,
                 "phyb_shapes",
-                &["Kind", "Name", "Bone", "Offset", "Size"],
+                &["类型", "名称", "骨骼", "偏移", "尺寸"],
                 &file.shapes,
             );
         }

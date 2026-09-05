@@ -68,13 +68,13 @@ impl ExcelPage {
     fn get_range(&self, offset: u32, size: u32) -> anyhow::Result<&[u8]> {
         self.data
             .get((offset - self.data_offset) as usize..(offset - self.data_offset + size) as usize)
-            .ok_or_else(|| anyhow::anyhow!("Couldn't seek to offset {offset} in row"))
+            .ok_or_else(|| anyhow::anyhow!("无法在行中定位到偏移 {offset}"))
     }
 
     fn get_slice(&self, offset: u32) -> anyhow::Result<&[u8]> {
         self.data
             .get((offset - self.data_offset) as usize..)
-            .ok_or_else(|| anyhow::anyhow!("Couldn't seek to offset {offset} in row"))
+            .ok_or_else(|| anyhow::anyhow!("无法在行中定位到偏移 {offset}"))
     }
 
     fn get_cursor(&self, offset: u32) -> anyhow::Result<Cursor<&[u8]>> {
@@ -88,7 +88,7 @@ impl ExcelPage {
         let data_len = data_slice
             .iter()
             .position(|p| *p == 0)
-            .ok_or_else(|| anyhow::anyhow!("Couldn't find null terminator for string"))?;
+            .ok_or_else(|| anyhow::anyhow!("找不到字符串的结尾空字符"))?;
         let string_slice = &data_slice[..data_len];
         Ok(string_slice.into())
     }

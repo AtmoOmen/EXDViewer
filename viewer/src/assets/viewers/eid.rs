@@ -9,7 +9,7 @@ use super::{Preview, facts, line, link, section, table};
 use crate::utils::file_name;
 
 /// The bind point table's columns, each with the width its cells are padded to.
-const COLUMNS: [(&str, usize); 4] = [("Bone", 22), ("ID", 4), ("Position", 26), ("Rotation", 26)];
+const COLUMNS: [(&str, usize); 4] = [("骨骼", 22), ("ID", 4), ("位置", 26), ("旋转", 26)];
 
 /// One bind point.
 struct Row {
@@ -55,21 +55,21 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .collect::<Vec<_>>();
 
     let identity = vec![
-        ("Version", tag(file.version1())),
-        ("Version 2", tag(file.version2())),
+        ("版本", tag(file.version1())),
+        ("版本 2", tag(file.version2())),
         (
-            "Rotation",
+            "旋转",
             match file.radians() {
-                true => "radians".to_owned(),
-                false => "degrees".to_owned(),
+                true => "弧度".to_owned(),
+                false => "度".to_owned(),
             },
         ),
-        ("Points", rows.len().to_string()),
-        ("Unknown", format!("{:#010x}", file.unknown())),
+        ("点数", rows.len().to_string()),
+        ("未知", format!("{:#010x}", file.unknown())),
     ];
 
     let name = file_name(path);
-    log::info!("assets/eid: {path} {} bind points", rows.len());
+    log::info!("assets/eid: {path} {} 个绑定点", rows.len());
 
     Ok(Preview::Eid(Box::new(Rendered {
         identity,
@@ -85,7 +85,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     let mut follow = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Skeleton").weak());
+        ui.label(RichText::new("骨骼").weak());
         if link(ui, file_name(&file.skeleton), &file.skeleton) {
             follow = Some(file.skeleton.clone());
         }

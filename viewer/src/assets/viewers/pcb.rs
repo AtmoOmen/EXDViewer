@@ -118,13 +118,13 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, backend: &Backend) -> Option<Strin
     let follow = None;
     ui.horizontal(|ui| {
         if ui
-            .selectable_label(!file.show_scene.get(), "Table")
+            .selectable_label(!file.show_scene.get(), "表格")
             .clicked()
         {
             file.show_scene.set(false);
         }
         if ui
-            .selectable_label(file.show_scene.get(), "Scene")
+            .selectable_label(file.show_scene.get(), "场景")
             .clicked()
         {
             file.show_scene.set(true);
@@ -164,7 +164,7 @@ impl Rendered {
             facts(ui, "pcb_identity", &self.identity);
             ui.add_space(8.0);
             ui.separator();
-            ui.label(RichText::new("Surfaces").weak());
+            ui.label(RichText::new("表面").weak());
             ui.add_space(4.0);
             legend(ui, &self.materials.borrow(), self.entries.is_empty());
         });
@@ -209,16 +209,16 @@ fn render_mesh(path: &str, mesh: pcb::Mesh) -> Rendered {
     collect_materials(root, &mut materials);
 
     let identity = vec![
-        ("Version", mesh.version().to_string()),
-        ("Nodes", nodes.to_string()),
-        ("Leaves", leaves.to_string()),
-        ("Vertices", vertices.to_string()),
-        ("Triangles", primitives.to_string()),
+        ("版本", mesh.version().to_string()),
+        ("节点", nodes.to_string()),
+        ("叶节点", leaves.to_string()),
+        ("顶点", vertices.to_string()),
+        ("三角形", primitives.to_string()),
         ("根最小", axes(root.bounds().min())),
         ("根最大", axes(root.bounds().max())),
     ];
 
-    log::info!("assets/pcb: {path} {nodes} nodes, {primitives} triangles");
+    log::info!("assets/pcb: {path} {nodes} 个节点，{primitives} 个三角形");
 
     let scene = MeshScene::new((geometry.bounds.0, geometry.bounds.1), 0);
     scene.queue(Arc::new(geometry));
@@ -230,16 +230,16 @@ fn render_mesh(path: &str, mesh: pcb::Mesh) -> Rendered {
         scene: RefCell::new(scene),
         loader: RefCell::new(None),
         show_bounds: Cell::new(false),
-        section: "Nodes",
+        section: "节点",
         columns: vec![
-            ("Depth", 5),
-            ("Path", 12),
-            ("Vertices", 9),
-            ("Primitives", 10),
-            ("Children", 8),
-            ("Surfaces", 16),
-            ("Min", 26),
-            ("Max", 26),
+            ("深度", 5),
+            ("路径", 12),
+            ("顶点", 9),
+            ("图元", 10),
+            ("子节点", 8),
+            ("表面", 16),
+            ("最小", 26),
+            ("最大", 26),
         ],
         rows,
         entries: Vec::new(),
@@ -260,12 +260,12 @@ fn render_list(path: &str, list: pcb::MeshList) -> Rendered {
         })
         .collect::<Vec<_>>();
     let identity = vec![
-        ("Entries", list.entries().len().to_string()),
-        ("Min", axes(list.bounds().min())),
-        ("Max", axes(list.bounds().max())),
+        ("条目", list.entries().len().to_string()),
+        ("最小", axes(list.bounds().min())),
+        ("最大", axes(list.bounds().max())),
     ];
 
-    log::info!("assets/pcb: {path} {} entries", list.entries().len());
+    log::info!("assets/pcb: {path} {} 个条目", list.entries().len());
 
     let scene = MeshScene::new(
         (list.bounds().min(), list.bounds().max()),
@@ -279,8 +279,8 @@ fn render_list(path: &str, list: pcb::MeshList) -> Rendered {
         scene: RefCell::new(scene),
         loader: RefCell::new(None),
         show_bounds: Cell::new(false),
-        section: "Meshes",
-        columns: vec![("Mesh", 12), ("Min", 26), ("Max", 26)],
+        section: "网格",
+        columns: vec![("网格", 12), ("最小", 26), ("最大", 26)],
         rows,
         entries: list.entries().to_vec(),
         materials: RefCell::new(Materials::new()),
@@ -302,7 +302,7 @@ fn collect_node(
     rows.push(vec![
         depth.to_string(),
         if path.is_empty() {
-            "root".to_owned()
+            "根".to_owned()
         } else {
             path.iter()
                 .map(usize::to_string)
@@ -373,8 +373,8 @@ fn legend(ui: &mut egui::Ui, materials: &Materials, whole: bool) {
                 let [red, green, blue] = paint(surface).unwrap_or(UNPAINTED);
                 chip(ui, Color32::from_rgb(red, green, blue))
                     .on_hover_text(match paint(surface) {
-                        Some(_) => "the colour the game's own swatch paints this",
-                        None => "no swatch paints this",
+                        Some(_) => "游戏自身色板为其涂上的颜色",
+                        None => "没有色板为其涂色",
                     });
                 ui.label(match pcb::surface(u64::from(surface)) {
                     Some(name) => RichText::new(name),
@@ -572,7 +572,7 @@ impl Loader {
 fn decode_mesh(bytes: Vec<u8>) -> Result<(gpu::Geometry, Materials)> {
     let mesh = match pcb::Collision::read(Cursor::new(bytes))? {
         pcb::Collision::Mesh(mesh) => mesh,
-        pcb::Collision::List(_) => anyhow::bail!("a list can't name another list"),
+        pcb::Collision::List(_) => anyhow::bail!("列表不能引用另一个列表"),
     };
     let mut geometry = gpu::Geometry::new();
     collect_geometry(mesh.root(), &mut geometry);

@@ -10,13 +10,13 @@ use super::{Preview, facts, line, section, table};
 
 /// The placement table's columns, each with the width its cells are padded to.
 const COLUMNS: [(&str, usize); 7] = [
-    ("Point", 5),
-    ("Acc", 3),
-    ("State", 5),
-    ("Bone", 16),
-    ("Scale", 6),
-    ("Offset", 24),
-    ("Rotation", 24),
+    ("附着点", 5),
+    ("饰品", 3),
+    ("状态", 5),
+    ("骨骼", 16),
+    ("缩放", 6),
+    ("偏移", 24),
+    ("旋转", 24),
 ];
 
 /// A file declaring no states has only its points to show, which
@@ -90,10 +90,10 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .collect::<Vec<_>>();
 
     let identity = vec![
-        ("Points", file.tags().len().to_string()),
-        ("States", file.state_count().to_string()),
+        ("附着点数", file.tags().len().to_string()),
+        ("状态数", file.state_count().to_string()),
         (
-            "Accessories",
+            "饰品数",
             (0..file.tags().len())
                 .filter(|point| file.accessory(*point))
                 .count()
@@ -102,7 +102,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     ];
 
     log::info!(
-        "assets/atch: {path} {} points, {} states",
+        "assets/atch: {path} {} 个附着点, {} 个状态",
         file.tags().len(),
         file.state_count()
     );
@@ -118,13 +118,13 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 }
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
-    section(ui, "Placements");
+    section(ui, "放置");
     table(ui, file.columns, file.rows.len(), |ui, index| {
         let row = &file.rows[index];
         let mut cells = vec![
             row.point.clone(),
             match row.accessory {
-                true => "yes".to_owned(),
+                true => "是".to_owned(),
                 false => String::new(),
             },
         ];

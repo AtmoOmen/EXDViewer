@@ -61,7 +61,7 @@ pub fn export_choices(bytes: &[u8]) -> Vec<export::Choice<'_>> {
         export::Choice::bytes("作为 BMP", "cursor.bmp", move || {
             crate::utils::tex_loader::write(pixels(bytes)?, image::ImageFormat::Bmp)
         })
-        .filter("BMP image", &["bmp"]),
+        .filter("BMP 图像", &["bmp"]),
     ]
 }
 

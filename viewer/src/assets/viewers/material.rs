@@ -176,7 +176,7 @@ identity.push(("颜色集", format!("{} (#{})", set.name(), set.index()), None))
     };
 
     log::info!(
-        "assets/mtrl: {path} shader {}, {} samplers, {} color rows",
+        "assets/mtrl: {path} 着色器 {}，{} 个采样器，{} 行颜色",
         material.shader(),
         material.samplers().len(),
         rows.len()

@@ -13,10 +13,10 @@ use ironworks::file::{File, pbd};
 use super::{Preview, chara, facts, heading, line, section, table};
 
 const BONES: [(&str, usize); 4] = [
-    ("Bone", 24),
-    ("Translation", 26),
-    ("Rotation", 34),
-    ("Scale", 26),
+    ("骨骼", 24),
+    ("平移", 26),
+    ("旋转", 34),
+    ("缩放", 26),
 ];
 
 /// One deformer, flattened out of the tree the file stores it in.
@@ -68,7 +68,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         ("骨骼", bones.to_string()),
     ];
 
-    log::info!("assets/pbd: {path} {} deformers", deformers.len());
+    log::info!("assets/pbd: {path} {} 个变形器", deformers.len());
 
     Ok(Preview::Pbd(Box::new(Rendered {
         identity,
@@ -103,14 +103,14 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
 
     if deformer.bones.is_empty() {
         ui.label(
-            RichText::new("This deformer carries no bones; it is the body the rest derive from.")
+            RichText::new("此变形器没有骨骼，是其余部分派生的基体。")
                 .weak(),
         );
         return;
     }
 
     // The rows run wider than the info panel, so the bones are drawn here rather than beside it.
-    heading(ui, &format!("{} bones", deformer.bones.len()));
+    heading(ui, &format!("{} 个骨骼", deformer.bones.len()));
     table(ui, &BONES, deformer.bones.len(), |ui, index| {
         let (name, matrix) = &deformer.bones[index];
         let row = |values: [f32; 4], count: usize| {
@@ -139,16 +139,16 @@ impl Rendered {
             if let Some(deformer) = self.deformers.get(picked) {
                 heading(ui, "已选中");
                 let rows = vec![
-                    ("Code", format!("c{:04}", deformer.id)),
+                    ("代码", format!("c{:04}", deformer.id)),
                     (
-                        "Body",
-                        chara::name(deformer.id).unwrap_or_else(|| "unnamed".to_owned()),
+                        "身体",
+                        chara::name(deformer.id).unwrap_or_else(|| "未命名".to_owned()),
                     ),
                     (
-                        "Derives from",
+                        "派生自",
                         deformer
                             .parent
-                            .map_or_else(|| "nothing".to_owned(), chara::described),
+                            .map_or_else(|| "无".to_owned(), chara::described),
                     ),
                     ("骨骼", deformer.bones.len().to_string()),
                     ("缩放", format!("{:.5}", deformer.scale)),

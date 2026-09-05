@@ -315,7 +315,7 @@ impl MusicPlayer {
                     self.songs = songs;
                     self.rows_stale = true;
                 }
-                Err(error) => log::warn!("BGM song list unavailable, using file names: {error}"),
+                Err(error) => log::warn!("BGM 歌曲列表不可用，改用文件名: {error}"),
             }
             self.songs_load = Songs::Done;
         }
@@ -381,14 +381,14 @@ impl MusicPlayer {
             Stage::Downloading(promise) => match promise.block_and_take() {
                 Ok((container, file_size)) => {
                     let Some(info) = stream_info(&container, file_size) else {
-                        log::error!("no audio streams in {path}");
+                        log::error!("{path} 中没有音频流");
                         return;
                     };
                     let decode = TrackedPromise::spawn_local(async move {
                         let entry = container
                             .entries()
                             .first()
-                            .ok_or_else(|| anyhow!("no audio streams"))?;
+                            .ok_or_else(|| anyhow!("没有音频流"))?;
                         let stream: Arc<[u8]> = Arc::from(entry.data().as_slice());
                         Ok((audio::decode(entry)?, stream))
                     });
@@ -399,11 +399,11 @@ impl MusicPlayer {
                         stage: Stage::Decoding(info, decode),
                     });
                 }
-                Err(error) => log::error!("BGM download failed: {error}"),
+                Err(error) => log::error!("BGM 下载失败: {error}"),
             },
             Stage::Decoding(info, promise) => match promise.block_and_take() {
                 Ok((decoded, stream)) => self.start(row_id, name, path, info, decoded, stream),
-                Err(error) => log::error!("BGM decode failed: {error}"),
+                Err(error) => log::error!("BGM 解码失败: {error}"),
             },
         }
     }
@@ -477,7 +477,7 @@ impl MusicPlayer {
         let player = self.player.as_mut().unwrap();
         player.set_volume(self.volume);
         if let Err(error) = player.play(decoded, announce) {
-            log::error!("BGM playback failed: {error}");
+            log::error!("BGM 播放失败: {error}");
             return;
         }
         player.set_metadata(&name);
@@ -489,7 +489,7 @@ impl MusicPlayer {
             match Player::new() {
                 Ok(player) => self.player = Some(player),
                 Err(error) => {
-                    log::error!("audio init failed: {error}");
+                    log::error!("音频初始化失败: {error}");
                     return false;
                 }
             }
@@ -1010,8 +1010,8 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::MsAdpcm => "MS ADPCM",
         Codec::Atrac9 => "ATRAC9",
         Codec::Pcm => "PCM",
-        Codec::Empty => "Empty",
-        Codec::Unknown(_) => "Unknown",
+        Codec::Empty => "空",
+        Codec::Unknown(_) => "未知",
     }
 }
 

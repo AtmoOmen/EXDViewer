@@ -71,8 +71,8 @@ impl Curve {
     /// What the curve's row says beside its tag.
     pub fn summary(&self) -> String {
         let keys = match self.keys.len() {
-            1 => "1 key".to_owned(),
-            count => format!("{count} keys"),
+            1 => "1 个关键帧".to_owned(),
+            count => format!("{count} 个关键帧"),
         };
         match self.span() {
             Some((start, end)) if end > start => format!("{keys}  {start}..{end}"),

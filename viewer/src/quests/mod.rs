@@ -187,7 +187,7 @@ impl QuestBrowser {
     }
 
     pub fn open_palette(&mut self) {
-        self.palette = Some(Palette::new("Find Quest…", "Filter", self.query.clone()));
+        self.palette = Some(Palette::new("查找任务…", "筛选", self.query.clone()));
     }
 
     pub fn ui(
@@ -380,7 +380,7 @@ impl QuestBrowser {
                 if self.index.is_none() {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Loading quests…");
+                        ui.label("正在加载任务…");
                     });
                     return;
                 }
@@ -401,8 +401,8 @@ impl QuestBrowser {
             for (view, glyph, hover) in [
                 (View::Journal, "📖", "任务日志"),
                 (View::Chains, "🕸", "前置链"),
-                (View::Cutscenes, "▶", "Every cutscene that ships"),
-                (View::Play, "📝", "Play the selected quest's scenes"),
+                (View::Cutscenes, "▶", "随包附带的全部过场动画"),
+                (View::Play, "📝", "播放所选任务的场景"),
             ] {
                 if ui
                     .add(Button::selectable(self.view == view, glyph))
@@ -458,15 +458,15 @@ impl QuestBrowser {
         };
         match self.view {
             View::Journal => format!(
-                "{} of {} quests",
-                self.matched.iter().filter(|hit| **hit).count(),
-                index.quests.len()
+                "{} 个任务中的 {} 个",
+                index.quests.len(),
+                self.matched.iter().filter(|hit| **hit).count()
             ),
             View::Cutscenes => match &self.cutscenes {
                 Load::Ready(held) => format!(
-                    "{} of {} cutscenes · {} unclaimed",
-                    self.shelf.len(),
+                    "{} 个过场动画中的 {} 个 · {} 个无归属",
                     held.entries.len(),
+                    self.shelf.len(),
                     held.entries.len() - held.owned
                 ),
                 _ => String::new(),
@@ -474,9 +474,9 @@ impl QuestBrowser {
             View::Play => match self.detail.script() {
                 Load::Ready(script) => {
                     let mut held =
-                        format!("{} scenes · {} branches", script.scenes.len(), script.branches);
+                        format!("{} 个场景 · {} 个分支", script.scenes.len(), script.branches);
                     if script.disassembled > 0 {
-                        held.push_str(&format!(" · {} unread", script.disassembled));
+                        held.push_str(&format!(" · {} 个未解读", script.disassembled));
                     }
                     held
                 }
@@ -488,7 +488,7 @@ impl QuestBrowser {
                     .and_then(|row_id| index.node_of(row_id))
                     .map_or(0, |node| index.graph.component(node));
                 format!(
-                    "chain {} of {} · {} quests · {} steps",
+                    "第 {} 条链，共 {} 条 · {} 个任务 · {} 步",
                     component + 1,
                     index.graph.component_count(),
                     index.graph.component_nodes(component).len(),
@@ -513,7 +513,7 @@ impl QuestBrowser {
             Load::Idle | Load::Loading(_) => {
                 ui.horizontal(|ui| {
                     ui.spinner();
-                    ui.label("Reading every cutscene…");
+                    ui.label("正在读取全部过场动画…");
                 });
                 return None;
             }
@@ -565,7 +565,7 @@ impl QuestBrowser {
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if entry.owners.is_empty() {
-                                ui.label(RichText::new("no known owner").weak().small());
+                                ui.label(RichText::new("未知归属").weak().small());
                                 return;
                             }
                             let shown = entry.owners.len().min(3);
@@ -734,7 +734,7 @@ impl QuestBrowser {
                 }
                 let title = node
                     .zip(self.index.as_ref())
-                    .map_or("Quest", |(node, index)| index.quest(node).name.as_str());
+                    .map_or("任务", |(node, index)| index.quest(node).name.as_str());
                 Panel::top("quest_info_header").show(ui, |ui| {
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {

@@ -137,12 +137,12 @@ impl Rig {
             .max()
             .unwrap_or(0);
         let columns = vec![
-            ("Bone", widest + 2),
-            ("Index", 6),
-            ("Parent", 7),
-            ("Translation", 26),
-            ("Rotation", 34),
-            ("Scale", 26),
+            ("骨骼", widest + 2),
+            ("索引", 6),
+            ("父级", 7),
+            ("平移", 26),
+            ("旋转", 34),
+            ("缩放", 26),
         ];
 
         let mut rig = Self {

@@ -11,23 +11,23 @@ use super::{Preview, facts, line, section, table};
 /// Where a part sits in its set. Equipment and accessories share the positions, and the file does
 /// not say which of the two it holds, so both readings are named.
 const PARTS: [&str; 5] = [
-    "head/ears",
-    "body/neck",
-    "hands/wrists",
-    "legs/ring R",
-    "feet/ring L",
+    "头部/耳朵",
+    "身体/脖子",
+    "手部/手腕",
+    "腿部/戒指（右）",
+    "脚部/戒指（左）",
 ];
 
 /// The entry table's columns, each with the width its cells are padded to.
 const COLUMNS: [(&str, usize); 8] = [
-    ("Variant", 7),
-    ("Part", 12),
-    ("Material", 8),
-    ("Decal", 5),
-    ("VFX", 3),
-    ("Sound", 5),
-    ("Anim", 4),
-    ("Attributes", 10),
+    ("变体", 7),
+    ("部件", 12),
+    ("材质", 8),
+    ("贴花", 5),
+    ("特效", 3),
+    ("声音", 5),
+    ("动画", 4),
+    ("属性", 10),
 ];
 
 /// A file with one part names no slot: the part index is all it has, and it is always zero.
@@ -95,14 +95,14 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     // Variant 0 is the default, which the header does not count.
     let variants = u32::from(file.variant_count()) + 1;
     let identity = vec![
-        ("Variants", variants.to_string()),
-        ("Parts", parts.len().to_string()),
-        ("Part mask", format!("{:#014b}", file.part_mask())),
-        ("Entries", rows.len().to_string()),
+        ("变体数", variants.to_string()),
+        ("部件数", parts.len().to_string()),
+        ("部件遮罩", format!("{:#014b}", file.part_mask())),
+        ("条目", rows.len().to_string()),
     ];
 
     log::info!(
-        "assets/imc: {path} {variants} variants, {} parts, {} entries",
+        "assets/imc: {path} {variants} 个变体, {} 个部件, {} 个条目",
         parts.len(),
         rows.len()
     );
@@ -119,7 +119,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
         true => &COLUMNS,
         false => &SINGLE,
     };
-    section(ui, "Entries");
+    section(ui, "条目");
     table(ui, columns, file.rows.len(), |ui, index| {
         let row = &file.rows[index];
         let mut cells = vec![row.variant.to_string()];

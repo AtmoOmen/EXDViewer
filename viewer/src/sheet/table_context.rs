@@ -334,7 +334,7 @@ impl TableContext {
         filter: &CompiledFilterInput,
     ) -> anyhow::Result<(bool, bool)> {
         if filter.is_empty() {
-            bail!("No filter to match against");
+            bail!("没有可供匹配的筛选条件");
         }
 
         let cell_grabber = self.get_cell_grabber(row_id, subrow_id, row);
@@ -353,7 +353,7 @@ impl TableContext {
         filter: &CompiledFilterInput,
     ) -> anyhow::Result<(Option<NonZeroU32>, bool)> {
         if filter.is_empty() {
-            bail!("No filter to match against");
+            bail!("没有可供匹配的筛选条件");
         }
 
         let cell_grabber = self.get_cell_grabber(row_id, subrow_id, row);

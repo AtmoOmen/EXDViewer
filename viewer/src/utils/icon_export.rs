@@ -26,14 +26,14 @@ pub async fn resolve_icon_pixels(
         return match ctx.try_load_image(&uri, egui::SizeHint::Scale(1.0.into())) {
             Ok(egui::load::ImagePoll::Ready { image }) => Ok(color_image_to_rgba(&image)),
             Ok(egui::load::ImagePoll::Pending { .. }) => {
-                anyhow::bail!("icon is still loading")
+                anyhow::bail!("图标仍在加载中")
             }
             Err(error) => Err(anyhow::anyhow!("{error}")),
         };
     }
     match excel.get_icon(path).await? {
         Either::Right(image) => Ok(image),
-        Either::Left(_) => anyhow::bail!("expected a decoded icon, got a URL"),
+        Either::Left(_) => anyhow::bail!("期望得到已解码的图标，却得到了 URL"),
     }
 }
 
@@ -64,7 +64,7 @@ pub fn spawn_icon_copy(
                 [image.width() as usize, image.height() as usize],
                 image.as_raw(),
             )),
-            Err(error) => log::error!("Failed to resolve icon {icon_id} for export: {error}"),
+            Err(error) => log::error!("解析图标 {icon_id} 以导出时失败: {error}"),
         }
     })
 }
@@ -79,26 +79,26 @@ fn icon_png_choice(
 ) -> export::Choice<'static> {
     let file_name = format!("icon_{icon_id:06}.png");
     let ctx = ctx.clone();
-    export::Choice::new("Export PNG…", file_name, move || {
+    export::Choice::new("导出 PNG…", file_name, move || {
         Box::pin(async move {
             let image = resolve_icon_pixels(&ctx, excel, &path, source).await?;
             crate::utils::tex_loader::write(image, image::ImageFormat::Png)
         })
     })
-    .title("Export Icon")
-    .filter("PNG image", &["png"])
+    .title("导出图标")
+    .filter("PNG 图像", &["png"])
 }
 
 /// The file exactly as sqpack stores it, undecoded.
 fn icon_raw_choice(files: Rc<dyn FileProvider>, icon_id: u32, path: String) -> export::Choice<'static> {
     let file_name = format!("icon_{icon_id:06}.tex");
     export::Choice::new(
-        "Export Raw (.tex)…",
+        "导出原始文件 (.tex)…",
         file_name,
         move || Box::pin(async move { files.read(&path).await }),
     )
-    .title("Export Icon")
-    .filter("Texture", &["tex"])
+    .title("导出图标")
+    .filter("纹理", &["tex"])
 }
 
 /// Every way an icon can be exported: its resolved pixels as a PNG once it has decoded, and the raw
@@ -134,7 +134,7 @@ pub fn icon_context_menu(
 ) {
     response.context_menu(|ui| {
         if ui
-            .add_enabled(source.is_some(), egui::Button::new("Copy Image"))
+            .add_enabled(source.is_some(), egui::Button::new("复制图像"))
             .clicked()
             && let Some(source) = source.clone()
         {
@@ -147,7 +147,7 @@ pub fn icon_context_menu(
             ));
             ui.close();
         }
-        if ui.button("Copy Icon Id").clicked() {
+        if ui.button("复制图标 ID").clicked() {
             ui.ctx().copy_text(icon_id.to_string());
             ui.close();
         }
@@ -158,7 +158,7 @@ pub fn icon_context_menu(
         }
         ui.separator();
         if ui
-            .button(format!("Open “{icon_id:06}” in Icons"))
+            .button(format!("在图标页打开“{icon_id:06}”"))
             .clicked()
         {
             icons.request_open(icon_id);

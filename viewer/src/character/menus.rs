@@ -374,7 +374,7 @@ pub async fn pieces(backend: &Backend, language: Language) -> Result<[Vec<Piece>
         pieces.sort_by(|left, right| left.name.cmp(&right.name));
     }
     log::info!(
-        "character: {} pieces to wear",
+        "角色：可穿戴 {} 件",
         found.iter().map(Vec::len).sum::<usize>()
     );
     Ok(found)
@@ -495,7 +495,7 @@ fn menus(row: &ExcelRow<'_>, lobby: &impl ExcelSheet) -> Vec<Menu> {
             .filter_map(|param| row.read::<i32>(at + PARAMS + param * 4).ok())
             .collect();
         found.push(Menu {
-            name: text(lobby, named).unwrap_or_else(|| format!("Customize {customize}")),
+            name: text(lobby, named).unwrap_or_else(|| format!("自定义 {customize}")),
             customize: customize.max(0) as u32,
             kind,
             count: u32::from(count),

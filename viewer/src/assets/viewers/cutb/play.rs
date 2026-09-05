@@ -376,7 +376,7 @@ impl Tab {
 pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) -> Option<String> {
     if tab.level.is_empty() {
         ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("This cutscene names no level").weak());
+            ui.label(RichText::new("此过场动画未指定关卡").weak());
         });
         return None;
     }
@@ -415,11 +415,11 @@ pub fn ui(ui: &mut egui::Ui, tab: &Tab, cutscene: &Cutscene, backend: &Backend) 
         Fetch::Idle | Fetch::Loading(_) => {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Reading the level…");
+                ui.label("正在读取关卡…");
             });
         }
         Fetch::Failed(error) => {
-            ui.colored_label(egui::Color32::RED, error.clone());
+            ui.colored_label(egui::Color32::RED, format!("无法读取关卡：{error}"));
         }
         Fetch::Ready(scene) => {
             if let Some(pose) = pose {
@@ -442,7 +442,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
                 for shot in tab.player.shots() {
                     let current = active == Some(shot.start);
                     let label = format!(
-                        "{} · node {} · {:.0}f",
+                        "{} · 节点 {} · {:.0} 帧",
                         shot.name.as_deref().unwrap_or("-"),
                         shot.node,
                         shot.duration,
@@ -453,7 +453,7 @@ fn shots_ui(ui: &mut egui::Ui, tab: &Tab, state: &mut State) {
                     }
                 }
                 if tab.player.shots().is_empty() {
-                    ui.label(RichText::new("This cutscene's timelines hold no camera").weak());
+                    ui.label(RichText::new("此过场动画的时间轴中没有摄像机").weak());
                 }
             });
         });
@@ -471,7 +471,7 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
     }
 
     ui.horizontal_wrapped(|ui| {
-        if ui.button("⏮").on_hover_text("Back to the start").clicked() {
+        if ui.button("⏮").on_hover_text("回到开头").clicked() {
             state.time = 0.0;
             state.playing = false;
         }
@@ -482,18 +482,17 @@ fn transport(ui: &mut egui::Ui, tab: &Tab, state: &mut State, pose: Option<&Pose
             state.playing = !state.playing;
         }
         ui.spacing_mut().slider_width = 200.0;
-        ui.add(egui::Slider::new(&mut state.time, 0.0..=duration.max(1.0)).text("frame"));
+        ui.add(egui::Slider::new(&mut state.time, 0.0..=duration.max(1.0)).text("帧"));
         ui.add(egui::Slider::new(&mut state.fps, 5.0..=60.0).text("fps")).on_hover_text(
-            "How fast to play the cutscene's own frames. No file states a rate for one; this is a \
-             starting guess.",
+            "过场动画自身帧的播放速度。没有文件为过场动画声明帧率；此为初始猜测值。",
         );
         ui.label(
             RichText::new(match pose {
                 Some(pose) => format!(
-                    "eye {:.1}, {:.1}, {:.1} · {:.1}\u{b0}",
+                    "视点 {:.1}, {:.1}, {:.1} · {:.1}\u{b0}",
                     pose.position.x, pose.position.y, pose.position.z, pose.fov_degrees
                 ),
-                None => "no shot active yet".to_owned(),
+                None => "尚无镜头生效".to_owned(),
             })
             .weak(),
         );

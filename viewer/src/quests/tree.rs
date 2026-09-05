@@ -78,7 +78,7 @@ impl Outline {
             order.extend_from_slice(uncategorized);
             groups.push(Group {
                 depth: 0,
-                label: "Uncategorized".to_string(),
+                label: "未分类".to_string(),
                 quests: start..order.len() as u32,
                 leaf: true,
             });
@@ -236,7 +236,7 @@ mod tests {
                 "Sidequests (4)",
                 "Weapon Enhancement (3)",
                 "Housing (1)",
-                "Uncategorized (1)",
+                "未分类 (1)",
                 "q4@1"
             ]
         );

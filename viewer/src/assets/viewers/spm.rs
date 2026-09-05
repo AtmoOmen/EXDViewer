@@ -42,7 +42,7 @@ pub struct Rendered {
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let file = spm::ShaderParameters::read(Cursor::new(bytes.to_vec()))?;
 
-    let mut columns = vec![("Parameter".to_owned(), NAME), ("Type".to_owned(), 8)];
+    let mut columns = vec![("参数".to_owned(), NAME), ("类型".to_owned(), 8)];
     columns.extend((0..file.rows().len()).map(|profile| (profile.to_string(), COLUMN)));
     let widths = borrowed(&columns);
 
@@ -65,15 +65,15 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let table = file
         .rows()
         .first()
-        .map_or_else(|| "none".to_owned(), |row| named(row.table()));
+        .map_or_else(|| "无".to_owned(), |row| named(row.table()));
     let identity = vec![
-        ("Table", table),
-        ("Parameters", file.columns().len().to_string()),
-        ("Profiles", file.rows().len().to_string()),
+        ("表格", table),
+        ("参数数", file.columns().len().to_string()),
+        ("配置数", file.rows().len().to_string()),
     ];
 
     log::info!(
-        "assets/spm: {path} {} parameters over {} profiles",
+        "assets/spm: {path} {} 个参数, {} 个配置",
         file.columns().len(),
         file.rows().len()
     );

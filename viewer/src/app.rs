@@ -902,7 +902,7 @@ ui.menu_button("跳转", |ui| {
     fn draw_account_menu(&mut self, ui: &mut egui::Ui) {
         let ctx = &ui.ctx().clone();
         if let Some(login) = GithubSession::login(ctx) {
-            ui.label(RichText::new(format!("Signed in as {login}")).weak());
+            ui.label(RichText::new(format!("已登录为 {login}")).weak());
             if ui.button("退出登录").clicked() {
                 GithubSession::sign_out(ctx);
                 ui.close();
@@ -919,10 +919,10 @@ ui.menu_button("跳转", |ui| {
         }
 
         self.github.prepare();
-        let label = format!("{}  Sign in with GitHub", egui::special_emojis::GITHUB);
+        let label = format!("{}  使用 GitHub 登录", egui::special_emojis::GITHUB);
         if ui
             .add_enabled(self.github.ready(), Button::new(label))
-            .on_hover_text("Raises GitHub's API rate limit and lets you open schema pull requests")
+            .on_hover_text("提升 GitHub API 速率限制，并可打开表定义的拉取请求")
             .clicked()
         {
             self.github.begin_login(ctx);
@@ -1014,7 +1014,7 @@ ui.menu_button("跳转", |ui| {
                     ui.horizontal(|ui| {
                         ui.with_layout(Layout::right_to_left(egui::Align::Min), |ui| {
                             CollapsibleSidePanel::draw_arrow(ui, "sheet_list", Side::Left);
-                            ui.vertical_centered_justified(|ui| ui.heading("Sheets"));
+                            ui.vertical_centered_justified(|ui| ui.heading("数据表"));
                         });
                     });
                     ui.add_space(4.0);
@@ -1022,7 +1022,7 @@ ui.menu_button("跳转", |ui| {
                         let mut sheets_filter = SHEETS_FILTER.get(ctx);
                         let resp = ui
                             .add_enabled(!sheets_filter.is_empty(), Button::new("↩"))
-                            .on_hover_text("Clear");
+                            .on_hover_text("清除");
                         if resp.clicked() {
                             sheets_filter.clear();
                             SHEETS_FILTER.set(ctx, sheets_filter.clone());
@@ -1168,7 +1168,7 @@ ui.menu_button("跳转", |ui| {
                                     sheet.as_str(),
                                 )
                                 .ui(ui)
-                                .on_hover_text(format!("{sheet}\nId: {id}"));
+                                .on_hover_text(format!("{sheet}\nID: {id}"));
                                 nav.mark(ui, range.start + at, resp.rect);
                                 if resp.clicked() {
                                     opened = Some(sheet.clone());

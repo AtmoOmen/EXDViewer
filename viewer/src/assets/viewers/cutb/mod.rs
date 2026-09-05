@@ -17,8 +17,8 @@ use ironworks::file::tmb::{CommandKind, Item};
 use super::{Preview, facts, line, link, section, table, tmb as timeline};
 use crate::backend::Backend;
 
-const NODES: [(&str, usize); 3] = [("Node", 6), ("Kind", 6), ("Holds", 60)];
-const RESOURCES: [(&str, usize); 2] = [("Flag", 6), ("File", 8)];
+const NODES: [(&str, usize); 3] = [("节点", 6), ("类型", 6), ("内容", 60)];
+const RESOURCES: [(&str, usize); 2] = [("标记", 6), ("文件", 8)];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -59,11 +59,11 @@ fn magic(node: &Node) -> String {
 
 fn holds(node: &Node) -> String {
     match node {
-        Node::Resources(list) => format!("{} files", list.len()),
-        Node::Sheet(sheet) => format!("sheet {sheet}"),
-        Node::Scene(scene) => format!("{}, {} entries", scene.level(), scene.entries().len()),
+        Node::Resources(list) => format!("{} 个文件", list.len()),
+        Node::Sheet(sheet) => format!("工作表 {sheet}"),
+        Node::Scene(scene) => format!("{}, {} 个条目", scene.level(), scene.entries().len()),
         Node::Participants(participants) => format!(
-            "{} participants, {} bytes unread",
+            "{} 个参与者, {} 字节未读",
             participants.len(),
             participants
                 .iter()
@@ -71,7 +71,7 @@ fn holds(node: &Node) -> String {
                 .sum::<usize>()
         ),
         Node::Groups(groups) => format!(
-            "{} groups, {} records",
+            "{} 个分组, {} 条记录",
             groups.len(),
             groups
                 .iter()
@@ -79,15 +79,15 @@ fn holds(node: &Node) -> String {
                 .sum::<usize>()
         ),
         Node::Tracks(tracks) => format!(
-            "{} runs, {} values",
+            "{} 条轨迹, {} 个值",
             tracks.len(),
             tracks
                 .iter()
                 .map(|track| track.values().len())
                 .sum::<usize>()
         ),
-        Node::Timeline(timeline) => format!("{} items", timeline.items().len()),
-        Node::Unknown(unknown) => format!("{} bytes unread", unknown.body().len()),
+        Node::Timeline(timeline) => format!("{} 个条目", timeline.items().len()),
+        Node::Unknown(unknown) => format!("{} 字节未读", unknown.body().len()),
     }
 }
 
@@ -140,18 +140,18 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 
     let play = play::Tab::new(level.clone(), &file);
     let identity = vec![
-        ("Nodes", nodes.len().to_string()),
-        ("Level", level),
-        ("Origin", origin),
-        ("Sheet", sheet),
-        ("Shots", shots.to_string()),
+        ("节点", nodes.len().to_string()),
+        ("关卡", level),
+        ("原点", origin),
+        ("工作表", sheet),
+        ("镜头", shots.to_string()),
         ("文件", resources.len().to_string()),
-        ("Timelines", timelines.len().to_string()),
-        ("Items", items.to_string()),
+        ("时间轴", timelines.len().to_string()),
+        ("条目", items.to_string()),
     ];
 
     log::info!(
-        "assets/cutb: {path} {} nodes, {} files, {} timelines",
+        "assets/cutb: {path} {} 个节点, {} 个文件, {} 个时间轴",
         nodes.len(),
         resources.len(),
         timelines.len()
@@ -174,9 +174,9 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, backend: &Backend) -> Option<Strin
     ui.horizontal(|ui| {
         for (tab, label) in [
             (Tab::Files, "文件"),
-            (Tab::Timelines, "Timelines"),
-            (Tab::Nodes, "Nodes"),
-            (Tab::Play, "Play"),
+            (Tab::Timelines, "时间轴"),
+            (Tab::Nodes, "节点"),
+            (Tab::Play, "播放"),
         ] {
             if ui.selectable_label(file.tab.get() == tab, label).clicked() {
                 file.tab.set(tab);
@@ -187,7 +187,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, backend: &Backend) -> Option<Strin
 
     match file.tab.get() {
         Tab::Nodes => {
-            section(ui, "Nodes");
+            section(ui, "节点");
             table(ui, &NODES, file.nodes.len(), |ui, index| {
                 let (magic, holds) = &file.nodes[index];
                 let cells = [index.to_string(), magic.clone(), holds.clone()];
@@ -227,7 +227,7 @@ impl Rendered {
     /// row by row rather than virtualised.
     fn timelines_ui(&self, ui: &mut egui::Ui) -> Option<String> {
         if self.timelines.is_empty() {
-            ui.label(RichText::new("This cutscene holds no timelines").weak());
+            ui.label(RichText::new("此过场动画没有任何时间轴").weak());
             return None;
         }
         let shown = self.shown.get().min(self.timelines.len() - 1);
@@ -238,7 +238,7 @@ impl Rendered {
                 ui.horizontal(|ui| {
                     for (index, (node, _)) in self.timelines.iter().enumerate() {
                         if ui
-                            .selectable_label(index == shown, format!("Node {node}"))
+                            .selectable_label(index == shown, format!("节点 {node}"))
                             .clicked()
                         {
                             self.shown.set(index);

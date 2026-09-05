@@ -14,7 +14,7 @@ use ironworks::file::eqp::{EquipmentParameter, Set};
 
 use super::{Preview, facts, line, section, table};
 
-const COLUMNS: [(&str, usize); 3] = [("Set", 6), ("Slot", 6), ("Flags", 8)];
+const COLUMNS: [(&str, usize); 3] = [("套装", 6), ("槽位", 6), ("标志", 8)];
 
 macro_rules! flags {
     ($slot:expr, $($flag:ident)*) => {{
@@ -32,7 +32,7 @@ macro_rules! flags {
 fn slots(set: &Set) -> Vec<(&'static str, String)> {
     [
         (
-            "body",
+            "身体",
             flags!(
                 set.body(),
                 enabled hide_waist hide_thighs hide_gloves_small hide_glove_cuffs
@@ -41,14 +41,14 @@ fn slots(set: &Set) -> Vec<(&'static str, String)> {
             ),
         ),
         (
-            "legs",
+            "腿部",
             flags!(
                 set.legs(),
                 enabled hide_knee_pads hide_boots_small hide_boots_medium show_feet show_tail
             ),
         ),
         (
-            "hands",
+            "手部",
             flags!(
                 set.hands(),
                 enabled hide_elbow hide_forearm over_sleeve show_bracelets show_ring_left
@@ -56,11 +56,11 @@ fn slots(set: &Set) -> Vec<(&'static str, String)> {
             ),
         ),
         (
-            "feet",
+            "脚部",
             flags!(set.feet(), enabled hide_knee hide_calf hide_ankle),
         ),
         (
-            "head",
+            "头部",
             flags!(
                 set.head(),
                 enabled hide_scalp hide_hair show_hair_override hide_neck show_necklace
@@ -118,11 +118,11 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     }
 
     let identity = vec![
-        ("Sets", sets.to_string()),
-        ("Entries", rows.len().to_string()),
+        ("套装数", sets.to_string()),
+        ("条目", rows.len().to_string()),
     ];
 
-    log::info!("assets/eqp: {path} {sets} sets");
+    log::info!("assets/eqp: {path} {sets} 个套装");
 
     Ok(Preview::Eqp(Box::new(Rendered { identity, rows })))
 }

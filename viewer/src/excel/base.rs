@@ -154,7 +154,7 @@ impl ExcelProvider for CachedProvider {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             return Err(anyhow::anyhow!(
-                                "Sheet {} has no data for {requested} (available: {available})",
+                                "表 {} 没有 {requested} 的数据（可用：{available}）",
                                 header.name(),
                             )
                             .into());
@@ -191,7 +191,7 @@ impl BaseHeader {
             .filter_map(|l| match Language::try_from(*l) {
                 Ok(lang) => Some(lang),
                 Err(e) => {
-                    log::error!("Unknown language: {}", e.number);
+                    log::error!("未知语言: {}", e.number);
                     None
                 }
             })
@@ -264,7 +264,7 @@ impl BaseSheet {
     ) -> Result<Self> {
         if !header.languages().contains(&language) {
             return Err(anyhow::anyhow!(
-                "Language {:?} not found in sheet {}",
+                "语言 {:?} 在表 {} 中不存在",
                 language,
                 header.name()
             ));
@@ -387,7 +387,7 @@ impl ExcelSheet for BaseSheet {
     fn get_row_id_at(&self, index: u32) -> Result<u32> {
         if index >= self.row_count() {
             return Err(anyhow::anyhow!(
-                "Row index {} out of bounds for sheet {}",
+                "行索引 {} 超出表 {} 的范围",
                 index,
                 self.name()
             ));
@@ -399,18 +399,18 @@ impl ExcelSheet for BaseSheet {
             .unwrap_or_else(|i| i - 1);
         let (start_idx, id_range) = self.imp.row_id_lookup.get(range_idx).ok_or_else(|| {
             anyhow::anyhow!(
-                "Range index {} out of bounds for sheet {}",
+                "区间索引 {} 超出表 {} 的范围",
                 range_idx,
                 self.name()
             )
         })?;
         if !(*start_idx..start_idx + (id_range.end - id_range.start)).contains(&index) {
             return Err(anyhow::anyhow!(
-                "Row index {} out of bounds for range {}..{} in sheet {}",
+                "行索引 {} 超出表 {} 的区间 {}..{} 范围",
                 index,
+                self.name(),
                 id_range.start,
-                id_range.end,
-                self.name()
+                id_range.end
             ));
         }
         Ok(id_range.start + (index - *start_idx))
@@ -421,20 +421,20 @@ impl ExcelSheet for BaseSheet {
             .imp
             .row_lookup
             .get(row_id)
-            .ok_or_else(|| anyhow::anyhow!("Row ID {} not found in sheet {}", row_id, self.name()))?
+            .ok_or_else(|| anyhow::anyhow!("行 ID {} 在表 {} 中不存在", row_id, self.name()))?
             .subrow_count)
     }
 
     fn get_subrow(&self, row_id: u32, subrow_id: u16) -> Result<ExcelRow<'_>> {
         let location = self.imp.row_lookup.get(row_id).ok_or_else(|| {
-            anyhow::anyhow!("Row ID {} not found in sheet {}", row_id, self.name())
+            anyhow::anyhow!("行 ID {} 在表 {} 中不存在", row_id, self.name())
         })?;
         if location.subrow_count <= subrow_id {
             return Err(anyhow::anyhow!(
-                "Subrow ID {} out of bounds for row {} in sheet {}",
+                "子行 ID {} 超出表 {} 中行 {} 的范围",
                 subrow_id,
-                row_id,
-                self.name()
+                self.name(),
+                row_id
             ));
         }
         let page = &self.imp.pages[location.page_idx as usize];

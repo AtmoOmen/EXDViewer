@@ -84,7 +84,7 @@ fn model(kind: ModelType, id: u16) -> String {
 
 fn model_type(kind: ModelType) -> String {
     match kind {
-        ModelType::Unknown(value) => format!("Unknown ({value})"),
+        ModelType::Unknown(value) => format!("未知（{value}）"),
         named => format!("{named:?}"),
     }
 }
@@ -157,7 +157,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 
     let motions = match file.havok().len() > NO_HAVOK {
         true => file.parse_animations().map_err(|e| e.to_string()),
-        false => Err("this pack carries no motions of its own".to_owned()),
+        false => Err("此动画包未携带自身动作".to_owned()),
     };
 
     let identity = vec![
@@ -177,7 +177,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     ];
 
     log::info!(
-        "assets/pap: {path} {} animations, {} bytes of havok",
+        "assets/pap: {path} {} 个动画，{} 字节的 Havok 数据",
         animations.len(),
         file.havok().len()
     );
@@ -211,12 +211,12 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, backend: &Backend) -> Option<Strin
                 heading(ui, &animation.name);
                 ui.label(
                     RichText::new(format!(
-                        "type {}, havok motion {}, {}, {} items",
+                        "类型 {}，Havok 动作 {}，{}，{} 项",
                         animation.kind,
                         animation.havok_index,
                         match animation.face {
-                            true => "face",
-                            false => "body",
+                            true => "面部",
+                            false => "身体",
                         },
                         animation.timeline.items().len()
                     ))
@@ -235,7 +235,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, backend: &Backend) -> Option<Strin
         Ok(motions) => motions,
         Err(e) => {
             ui.centered_and_justified(|ui| {
-                ui.colored_label(Color32::RED, format!("No motions to play: {e}"));
+                ui.colored_label(Color32::RED, format!("没有可播放的动作：{e}"));
             });
             return follow;
         }
@@ -309,10 +309,10 @@ impl Rendered {
 
         ui.horizontal(|ui| {
             let running = self.play.running.get();
-            if ui.button(if running { "Pause" } else { "Play" }).clicked() {
+            if ui.button(if running { "暂停" } else { "播放" }).clicked() {
                 self.play.running.set(!running);
             }
-            if ui.button("Restart").clicked() {
+            if ui.button("重新播放").clicked() {
                 time = 0.0;
             }
             ui.add(
@@ -322,7 +322,7 @@ impl Rendered {
             );
             ui.label(
                 RichText::new(format!(
-                    "{} frames, {} tracks, blend {}",
+                    "{} 帧，{} 条轨道，混合 {}",
                     binding.motion().frames(),
                     binding.bones().len(),
                     binding.blend_hint()
@@ -343,7 +343,7 @@ impl Rendered {
         follow: &mut Option<String>,
     ) {
         let Some(code) = &self.model else {
-            ui.label(RichText::new("This pack names no model to find a skeleton by").weak());
+            ui.label(RichText::new("此动画包未指定模型，无法据此查找骨骼").weak());
             return;
         };
         let candidates = skeleton_paths(code, binding.skeleton());
@@ -373,7 +373,7 @@ impl Rendered {
             match rigs.get(path) {
                 Some(Loading::Ready(loaded)) => {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("Skeleton").weak());
+                        ui.label(RichText::new("骨骼").weak());
                         if link(ui, file_name(path), path) {
                             *follow = Some(path.clone());
                         }
@@ -383,7 +383,7 @@ impl Rendered {
                             && !path.contains("/skeleton/face/")
                         {
                             ui.label(
-                                RichText::new("(a face motion, with no face skeleton to draw on)")
+                                RichText::new("（面部动作，没有可展示的面部骨骼）")
                                     .weak(),
                             );
                         }
@@ -405,7 +405,7 @@ impl Rendered {
                 Some(Loading::Failed(e)) => {
                     if index + 1 == candidates.len() {
                         ui.centered_and_justified(|ui| {
-                            ui.colored_label(Color32::RED, format!("No skeleton at {path}: {e}"));
+                            ui.colored_label(Color32::RED, format!("路径 {path} 处没有骨骼：{e}"));
                         });
                         return;
                     }
@@ -413,14 +413,14 @@ impl Rendered {
                 _ => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(RichText::new(format!("Loading {path}")).weak());
+                        ui.label(RichText::new(format!("正在加载 {path}")).weak());
                     });
                     ui.ctx().request_repaint();
                     return;
                 }
             }
         }
-        ui.label(RichText::new("This motion names no skeleton to draw it on").weak());
+        ui.label(RichText::new("此动作未指定用于展示的骨骼").weak());
     }
 }
 

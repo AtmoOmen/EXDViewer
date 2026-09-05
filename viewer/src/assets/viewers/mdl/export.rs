@@ -75,7 +75,7 @@ struct Skeleton {
 /// Touches no network; a material this reads has already had to finish loading to be drawn at all.
 pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
     if rendered.animation.rides().is_some() {
-        bail!("exporting a mounted character is not supported");
+        bail!("不支持导出骑乘状态下的角色");
     }
 
     let level = rendered.level.borrow();
@@ -91,11 +91,11 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
             // load: draw that one piece untextured instead.
             Some(Some(Slot::Failed(why))) => {
                 log::warn!(
-                    "assets/mdl: export: material {path} failed to load: {why}, exporting untextured"
+                    "assets/mdl: export: 材质 {path} 加载失败：{why}，将以无纹理导出"
                 );
                 materials.push(placeholder_material(path));
             }
-            _ => bail!("material {path} has not finished loading yet"),
+            _ => bail!("材质 {path} 尚未加载完成"),
         }
     }
 
@@ -104,10 +104,10 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
             let (names, parents, rest_inverse) = rendered
                 .animation
                 .rig()
-                .context("the skeleton has not finished loading yet")?;
+                .context("骨骼尚未加载完成")?;
             let pose = rendered.animation.pose(&[], &[], false);
             if pose.world.len() != names.len() {
-                bail!("the skeleton has not finished loading yet");
+                bail!("骨骼尚未加载完成");
             }
             Some(Skeleton {
                 names,
@@ -175,7 +175,7 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
             }
 
             let Some(level_mesh) = level.meshes.get(level_index) else {
-                bail!("mesh accounting drifted out of sync with the model's own level");
+                bail!("网格计数与模型自身层级失去同步");
             };
             if !level_mesh.base.is_empty() {
                 let mut patched = level_mesh.base.clone();
@@ -202,7 +202,7 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
             for part in &level_mesh.parts {
                 if part.shown.get() {
                     let Some(run) = indices.get(part.range.clone()) else {
-                        bail!("a submesh names indices past the end of its own mesh");
+                        bail!("子网格的索引超出其自身网格末尾");
                     };
                     kept.extend_from_slice(run);
                 }
@@ -221,7 +221,7 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
                     Some(at) => *at,
                     None => {
                         let Some(vertex) = vertices.get(usize::from(old)) else {
-                            bail!("an index names none of its mesh's own vertices");
+                            bail!("索引未指向其网格自身的任何顶点");
                         };
                         compact.push(*vertex);
                         let at = (compact.len() - 1) as u32;
@@ -247,10 +247,10 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
         }
     }
     if level_index != level.meshes.len() {
-        bail!("walked {level_index} meshes but the model's own level built {}", level.meshes.len());
+        bail!("遍历了 {level_index} 个网格，但模型自身层级构建了 {}", level.meshes.len());
     }
     if wanted > 0 {
-        log::info!("assets/mdl: export: {missing} of {wanted} bone influences are named by no skeleton");
+        log::info!("assets/mdl: export: {wanted} 个骨骼影响中有 {missing} 个未被任何骨骼命名");
     }
 
     Ok(Scene {
@@ -1066,7 +1066,7 @@ fn tex_png(image: &RgbaImage) -> Vec<u8> {
 }
 
 fn write_glb(document: &Value, bin: &[u8]) -> Result<Vec<u8>> {
-    let mut json_chunk = serde_json::to_vec(document).context("failed to serialize the glTF document")?;
+    let mut json_chunk = serde_json::to_vec(document).context("glTF 文档序列化失败")?;
     while !json_chunk.len().is_multiple_of(4) {
         json_chunk.push(b' ');
     }
@@ -1295,10 +1295,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        rendered.animation.rig().expect("the skeleton never landed");
+        rendered.animation.rig().expect("骨骼始终未加载完成");
         assert!(
             rendered.slots.borrow().iter().all(|slot| matches!(slot, Some(super::Slot::Ready(_)))),
-            "not every material finished loading"
+            "并非所有材质都已加载完成"
         );
 
         rendered.animation.shaped(glam::Vec3::new(1.0, 1.6, 1.0));
@@ -1399,10 +1399,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        rendered.animation.rig().expect("the skeleton never landed");
+        rendered.animation.rig().expect("骨骼始终未加载完成");
         assert!(
             rendered.slots.borrow().iter().all(|slot| matches!(slot, Some(super::Slot::Ready(_)))),
-            "not every material finished loading"
+            "并非所有材质都已加载完成"
         );
 
         let scene = gather(&rendered).expect("gather");

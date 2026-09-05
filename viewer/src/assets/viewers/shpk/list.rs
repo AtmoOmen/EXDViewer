@@ -42,13 +42,13 @@ pub(super) fn mergeable(package: &Rendered, stage: usize, pass: usize) -> Result
             })
             .count()),
         (None, Some(_)) => {
-            Err("Pick one shader stage to merge this pass into a single source.".to_owned())
+            Err("先选择一个着色器阶段，再将该通道合并为单一源码。".to_owned())
         }
         (Some(_), None) => {
-            Err("Pick one pass to merge this stage into a single source.".to_owned())
+            Err("先选择一个渲染通道，再将该阶段合并为单一源码。".to_owned())
         }
         (None, None) => {
-            Err("Pick one shader stage and one pass to merge them into a single source.".to_owned())
+            Err("先选择一个着色器阶段和一个渲染通道，再合并为单一源码。".to_owned())
         }
     }
 }
@@ -77,8 +77,8 @@ pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8]) {
         let held = mergeable(package, stage, pass);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let label = match held {
-                Ok(count) => format!("Merge {count} shaders"),
-                Err(_) => "Merge shaders".to_owned(),
+                Ok(count) => format!("合并 {count} 个着色器"),
+                Err(_) => "合并着色器".to_owned(),
             };
             let button = egui::Button::new(label).selected(whole && held.is_ok());
             let asked = ui

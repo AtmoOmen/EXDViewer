@@ -257,13 +257,13 @@ pub async fn walk(
     let bundled = match bundle {
         Some((api, location)) => WebProvider::fetch_github_schemas(&api, &location)
             .await
-            .inspect_err(|error| log::warn!("icons/walk: reading schemas one at a time: {error}"))
+            .inspect_err(|error| log::warn!("icons/walk: 逐张读取表定义失败: {error}"))
             .ok(),
         None => None,
     };
 
     if let Some(bundled) = bundled {
-        log::info!("icons/walk: {} schemas in one request", bundled.len());
+        log::info!("icons/walk: 一次请求中读取了 {} 张表定义", bundled.len());
         let mut at = Instant::now();
         for (done, name) in names.iter().enumerate() {
             if let Some(text) = bundled.get(name) {

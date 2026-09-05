@@ -12,7 +12,7 @@ use ironworks::file::{File, dic};
 use super::{Preview, facts, line, section, table};
 use crate::utils::FuzzyMatcher;
 
-const COLUMNS: [(&str, usize); 2] = [("List", 7), ("Word", 0)];
+const COLUMNS: [(&str, usize); 2] = [("列表", 7), ("词语", 0)];
 
 /// A dictionary, decoded and ready to draw.
 pub struct Rendered {
@@ -86,7 +86,9 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
                 .desired_width(240.0),
         );
         let matched = file.matched(&query);
-        ui.label(RichText::new(format!("{} of {}", matched.len(), file.rows.len())).weak());
+        ui.label(
+            RichText::new(format!("{} / {} 个词语", matched.len(), file.rows.len())).weak(),
+        );
     });
     ui.data_mut(|data| data.insert_temp(file.query, query.clone()));
     ui.add_space(4.0);

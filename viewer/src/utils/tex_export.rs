@@ -83,7 +83,7 @@ fn dds_body(texture: &tex::Texture) -> Result<Vec<u8>> {
     let mip = |level: u8| {
         texture
             .mip_data(level)
-            .with_context(|| format!("missing mipmap level {level}"))
+            .with_context(|| format!("缺少 mipmap 层级 {level}"))
     };
 
     if !matches!(texture.kind(), TextureKind::Cube | TextureKind::D2Array) {
@@ -103,15 +103,15 @@ fn dds_body(texture: &tex::Texture) -> Result<Vec<u8>> {
             let stride = data.len() / layers_at_level;
             ensure!(
                 stride > 0,
-                "mipmap level {level} holds no {layers_at_level} layers"
+                "mipmap 层级 {level} 没有 {layers_at_level} 个图层"
             );
             let start = usize::from(layer)
                 .checked_mul(stride)
-                .context("layer offset overflows")?;
-            let end = start.checked_add(stride).context("layer span overflows")?;
+                .context("图层偏移溢出")?;
+            let end = start.checked_add(stride).context("图层跨度溢出")?;
             body.extend_from_slice(
                 data.get(start..end)
-                    .context("layer slice runs past its mipmap level")?,
+                    .context("图层切片超出其 mipmap 层级")?,
             );
         }
     }
@@ -123,7 +123,7 @@ fn dds_body(texture: &tex::Texture) -> Result<Vec<u8>> {
 /// decoding and re-encoding them.
 pub fn dds(texture: &tex::Texture) -> Result<Vec<u8>> {
     let format = dxgi_format(texture.format())
-        .with_context(|| format!("no DDS mapping for {:?}", texture.format()))?;
+        .with_context(|| format!("没有与 {:?} 对应的 DDS 映射", texture.format()))?;
     let kind = texture.kind();
     let mut file = Dds::new_dxgi(NewDxgiParams {
         height: u32::from(texture.height()),
@@ -145,19 +145,19 @@ pub fn dds(texture: &tex::Texture) -> Result<Vec<u8>> {
         },
         alpha_mode: AlphaMode::Straight,
     })
-    .map_err(|error| anyhow::anyhow!("dds header: {error}"))?;
+    .map_err(|error| anyhow::anyhow!("dds 头部错误: {error}"))?;
 
     let body = dds_body(texture)?;
     ensure!(
         body.len() == file.data.len(),
-        "assembled {} bytes of pixel data, dds header expects {}",
+        "拼装了 {} 字节像素数据，dds 头部期望 {}",
         body.len(),
         file.data.len()
     );
     file.data = body;
 
     let mut bytes = Cursor::new(Vec::new());
-    file.write(&mut bytes).context("writing dds")?;
+    file.write(&mut bytes).context("写入 dds")?;
     Ok(bytes.into_inner())
 }
 
@@ -210,7 +210,7 @@ pub fn png(texture: &tex::Texture, level: u8, path: &str) -> Result<Option<Packa
         let (width, height) = texture.mip_size(level);
         let data = texture
             .mip_data(level)
-            .with_context(|| format!("texture has no mipmap level {level}"))?;
+            .with_context(|| format!("纹理没有 mipmap 层级 {level}"))?;
         let image =
             tex_loader::read_unorm16_precise(width, height, data, usize::from(format.components()))?;
         return Ok(Some(PackagedImages::Single(tex_loader::write(

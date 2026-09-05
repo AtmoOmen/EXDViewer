@@ -24,24 +24,24 @@ const THUMBNAIL: f32 = 64.0;
 /// this many is shown thinned rather than in full.
 const DRAWN: usize = 60_000;
 
-const GRIDS: [(&str, usize); 4] = [("Detail", 7), ("Cell", 12), ("Center", 26), ("Radius", 10)];
+const GRIDS: [(&str, usize); 4] = [("细节", 7), ("单元格", 12), ("中心", 26), ("半径", 10)];
 
 const PLACEMENTS: [(&str, usize); 7] = [
-    ("Chunk", 6),
-    ("Layer", 9),
-    ("Position", 26),
-    ("Rotation", 34),
-    ("Scale", 16),
-    ("Wind", 7),
-    ("Profile", 8),
+    ("区块", 6),
+    ("图层", 9),
+    ("位置", 26),
+    ("旋转", 34),
+    ("缩放", 16),
+    ("风相位", 7),
+    ("配置", 8),
 ];
 
 /// What a chunk's count slot holds: the leading few are procedural grass, the rest name a model
 /// the zone's `.gzd` lists, and the last is unused.
 fn layer(slot: usize) -> String {
     match slot.checked_sub(ggd::Chunk::AUTO_LAYERS) {
-        Some(model) => format!("Model {model}"),
-        None => format!("Auto {slot}"),
+        Some(model) => format!("模型 {model}"),
+        None => format!("自动 {slot}"),
     }
 }
 
@@ -93,25 +93,25 @@ pub fn zone(path: &str, bytes: &[u8]) -> Result<Preview> {
         .map_or("", |(head, _)| head)
         .to_owned();
     let identity = vec![
-        ("Version", format!("{:#010x}", file.version())),
-        ("Grids", rows.len().to_string()),
+        ("版本", format!("{:#010x}", file.version())),
+        ("网格", rows.len().to_string()),
         (
-            "Per detail",
+            "各细节层级",
             details
                 .map(|detail| file.grids(detail).len().to_string())
                 .join(" / "),
         ),
-        ("Model slots", file.model_slot_capacity().to_string()),
+        ("模型槽位", file.model_slot_capacity().to_string()),
         (
-            "Layer values",
+            "图层值",
             file.auto_layer_values().map_or_else(
-                || "none".to_owned(),
+                || "无".to_owned(),
                 |values| values.map(|value| format!("{value:.2}")).join(", "),
             ),
         ),
     ];
 
-    log::info!("assets/grass: {path} {} grids", rows.len());
+    log::info!("assets/grass: {path} {} 个网格", rows.len());
 
     Ok(Preview::GrassZone(Box::new(Zone {
         identity,
@@ -147,20 +147,20 @@ pub fn grid(path: &str, bytes: &[u8]) -> Result<Preview> {
         .collect::<Vec<_>>();
 
     let identity = vec![
-        ("Version", format!("{:#010x}", file.version())),
-        ("Chunks", file.chunks().len().to_string()),
-        ("Placements", rows.len().to_string()),
-        ("World origin", axes(file.world_origin())),
+        ("版本", format!("{:#010x}", file.version())),
+        ("区块", file.chunks().len().to_string()),
+        ("放置", rows.len().to_string()),
+        ("世界原点", axes(file.world_origin())),
         (
-            "Alignment",
+            "对齐",
             file.alignment_bend_weight().map_or_else(
-                || "none".to_owned(),
+                || "无".to_owned(),
                 |weights| weights.map(|it| it.to_string()).join(", "),
             ),
         ),
     ];
 
-    log::info!("assets/grass: {path} {} placements", rows.len());
+    log::info!("assets/grass: {path} {} 个放置", rows.len());
 
     let step = rows.len().div_ceil(DRAWN).max(1);
     Ok(Preview::GrassGrid(Box::new(Grid {
@@ -226,7 +226,7 @@ pub fn zone_ui(
     }
 
     if !file.color_maps.is_empty() {
-        section(ui, "Color maps");
+        section(ui, "颜色贴图");
         ui.horizontal_wrapped(|ui| {
             for path in &file.color_maps {
                 ui.vertical(|ui| {
@@ -241,7 +241,7 @@ pub fn zone_ui(
     }
 
     if !file.models.is_empty() {
-        section(ui, "Models");
+        section(ui, "模型");
         for path in &file.models {
             if link(ui, file_name(path), path) {
                 follow = Some(path.clone());
@@ -250,7 +250,7 @@ pub fn zone_ui(
         ui.add_space(4.0);
     }
 
-    section(ui, "Grids");
+    section(ui, "网格");
     let mut picked = None;
     table(ui, &GRIDS, file.rows.len(), |ui, index| {
         let (detail, at) = file.rows[index];
@@ -275,7 +275,7 @@ pub fn zone_ui(
 
 pub fn grid_ui(ui: &mut egui::Ui, file: &Grid) {
     ui.horizontal(|ui| {
-        for (scene, label) in [(false, "Table"), (true, "Scene")] {
+        for (scene, label) in [(false, "表格"), (true, "场景")] {
             if ui
                 .selectable_label(file.placed.get() == scene, label)
                 .clicked()
@@ -284,7 +284,7 @@ pub fn grid_ui(ui: &mut egui::Ui, file: &Grid) {
             }
         }
         if file.placed.get() && file.dropped > 0 {
-            ui.label(RichText::new(format!("{} thinned out", file.dropped)).weak());
+            ui.label(RichText::new(format!("已精简 {} 个放置", file.dropped)).weak());
         }
     });
     ui.add_space(4.0);
@@ -295,7 +295,7 @@ pub fn grid_ui(ui: &mut egui::Ui, file: &Grid) {
         return;
     }
 
-    section(ui, "Placements");
+    section(ui, "放置");
     table(ui, &PLACEMENTS, file.rows.len(), |ui, index| {
         let (chunk, at, slot) = file.rows[index];
         let placement = file.file.chunks()[chunk].placements()[at];
@@ -377,7 +377,7 @@ impl Grid {
     pub fn details_ui(&self, ui: &mut egui::Ui) {
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             facts(ui, "ggd_identity", &self.identity);
-            heading(ui, "Chunks");
+            heading(ui, "区块");
             let rows = self
                 .file
                 .chunks()
@@ -386,7 +386,7 @@ impl Grid {
                 .map(|(index, chunk)| {
                     (
                         index.to_string(),
-                        format!("{} placements", chunk.placements().len()),
+                        format!("{} 个放置", chunk.placements().len()),
                     )
                 })
                 .collect::<Vec<_>>();

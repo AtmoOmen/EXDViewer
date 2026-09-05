@@ -131,10 +131,10 @@ impl<T: File> Held<T> {
 
     fn state(&self) -> &'static str {
         match self {
-            Self::Ready(_) => "read",
-            Self::Failed => "could not be read",
-            Self::Idle => "none",
-            _ => "loading",
+            Self::Ready(_) => "已读取",
+            Self::Failed => "无法读取",
+            Self::Idle => "无",
+            _ => "加载中",
         }
     }
 }
@@ -715,12 +715,12 @@ impl Ambient {
         backend: &Backend,
     ) -> bool {
         let mut changed = false;
-        section(ui, "Environment");
+        section(ui, "环境");
         if self.environments.len() > 1 {
-            ui.label(RichText::new("Environment").weak());
+            ui.label(RichText::new("环境").weak());
             egui::ComboBox::from_id_salt("scene_environment")
                 .truncate()
-                .selected_text(format!("{} of {}", self.at + 1, self.environments.len()))
+                .selected_text(format!("{} / {}", self.at + 1, self.environments.len()))
                 .show_ui(ui, |ui| {
                     for at in 0..self.environments.len() {
                         changed |= ui
@@ -733,7 +733,7 @@ impl Ambient {
         let hours = self.time / 3600.0;
         ui.label(
             RichText::new(format!(
-                "Time of day  {:02}:{:02}",
+                "时刻  {:02}:{:02}",
                 hours as u32,
                 (hours.fract() * 60.0) as u32
             ))
@@ -745,7 +745,7 @@ impl Ambient {
 
         ui.label(
             RichText::new(format!(
-                "Day {}  {}",
+                "日期 {}  {}",
                 self.day.round() as u32,
                 program::moon_phase_name(self.day)
             ))
@@ -762,7 +762,7 @@ impl Ambient {
                 Some(name) => format!("{id}  {name}"),
                 None => id.to_string(),
             };
-            ui.label(RichText::new("Weather").weak());
+            ui.label(RichText::new("天气").weak());
             let selected = weathers
                 .get(self.weather)
                 .map_or_else(String::new, |id| named(ui, *id));
@@ -779,7 +779,7 @@ impl Ambient {
 
         if self.moonlight().w > 0.0 {
             ui.label(
-                RichText::new(format!("Moon  {:.3} deg across", self.moon.atan().to_degrees() * 2.0))
+                RichText::new(format!("月亮直径 {:.3} 度", self.moon.atan().to_degrees() * 2.0))
                     .weak(),
             );
             changed |= ui
@@ -791,12 +791,12 @@ impl Ambient {
         let env = self.environments.get(self.at);
         let files = [
             (
-                "Ambient",
-                self.locations.get(self.at).map_or("none", Held::state),
+                "环境光",
+                self.locations.get(self.at).map_or("无", Held::state),
                 env.and_then(|held| held.amb.clone()),
             ),
             (
-                "Weather",
+                "天气",
                 self.weather_file.state(),
                 env.map(|held| held.envb.clone()),
             ),
@@ -806,53 +806,53 @@ impl Ambient {
         if held.stated {
             let spell = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
             rows.extend([
-                ("Sunlight", spell(held.sunlight)),
-                ("Moonlight", spell(held.moonlight)),
-                ("Key light", spell(held.sunlight + held.moonlight)),
-                ("Key direction", spell(self.light().0)),
-                ("Sun tilt", format!("{:.0} deg", self.tilt)),
-                ("Shadow reach", format!("{:.0}", self.reach)),
+                ("阳光", spell(held.sunlight)),
+                ("月光", spell(held.moonlight)),
+                ("主光", spell(held.sunlight + held.moonlight)),
+                ("主光方向", spell(self.light().0)),
+                ("太阳倾角", format!("{:.0} 度", self.tilt)),
+                ("阴影范围", format!("{:.0}", self.reach)),
                 (
-                    "Sky",
+                    "天空",
                     match self.sky() {
                         Some(id) => format!("{id:03}"),
-                        None => "none".to_owned(),
+                        None => "无".to_owned(),
                     },
                 ),
                 (
-                    "Extra ambient",
-                    format!("{} at {:.3}", spell(held.extra.truncate()), held.extra.w),
+                    "附加环境光",
+                    format!("{}，权重 {:.3}", spell(held.extra.truncate()), held.extra.w),
                 ),
-                ("Ambient track", self.track.to_string()),
-                ("Ambient light scale", format!("{:.3}", held.scale)),
-                ("Saturation", format!("{:.3}", held.saturation)),
-                ("Attenuation", format!("{:.3}", held.attenuation)),
-                ("Depth fade", spell(Vec3::new(0.0, 1.0, held.floor))),
+                ("环境光轨道", self.track.to_string()),
+                ("环境光强度", format!("{:.3}", held.scale)),
+                ("饱和度", format!("{:.3}", held.saturation)),
+                ("衰减", format!("{:.3}", held.attenuation)),
+                ("深度淡出", spell(Vec3::new(0.0, 1.0, held.floor))),
             ]);
         }
         rows.extend([
             (
-                "Ambient volumes",
-                format!("{} of {} placed", self.volumes().len(), self.spaces.len()),
+                "环境体积",
+                format!("已放置 {} / {}", self.volumes().len(), self.spaces.len()),
             ),
-            ("Sky harmonic scale", format!("{SKY_SCALE:.3}")),
+            ("天空谐波强度", format!("{SKY_SCALE:.3}")),
             (
-                "Reflection",
+                "反射",
                 format!(
                     "{:.3}, {:.3}, {:.3}",
                     REFLECTION.x, REFLECTION.y, REFLECTION.z
                 ),
             ),
-            ("Reflection capture", format!("{CAPTURE:.0}")),
+            ("反射捕获", format!("{CAPTURE:.0}")),
         ]);
         // What the frame is exposed and read back through, which moves with the weather and the hour
         // the same way the light above it does. A zone that states none of this is left alone.
         if let Some(held) = self.exposure(0.0) {
             rows.extend([
-                ("Exposure range", format!("{:.3} to {:.3}", held.min, held.max)),
-                ("Exposure key", format!("{:.3}", held.key)),
-                ("Adaptation rate", format!("{:.3}/s", held.rate)),
-                ("Tone curve", format!("{:.3} at {:.3}", held.strength, held.shoulder)),
+                ("曝光范围", format!("{:.3} 至 {:.3}", held.min, held.max)),
+                ("曝光基准", format!("{:.3}", held.key)),
+                ("适应速度", format!("{:.3}/秒", held.rate)),
+                ("色调曲线", format!("{:.3}，肩点 {:.3}", held.strength, held.shoulder)),
             ]);
         }
         // The clouds, whose two textures the weather names by id and whose colors it states beside
@@ -860,55 +860,55 @@ impl Ambient {
         if let Some(held) = self.clouds() {
             let named = |id: Option<u16>| match id {
                 Some(id) => format!("{id:03}"),
-                None => "none".to_owned(),
+                None => "无".to_owned(),
             };
             let spell = |held: Vec3| format!("{:.3}, {:.3}, {:.3}", held.x, held.y, held.z);
             rows.extend([
                 (
-                    "Clouds",
-                    format!("band {}  sheet {}", named(held.band), named(held.sheet)),
+                    "云层",
+                    format!("云带 {}  云层 {}", named(held.band), named(held.sheet)),
                 ),
-                ("Cloud lit", spell(held.scene.diffuse)),
-                ("Cloud shaded", spell(held.scene.ambient)),
-                ("Cloud reach", format!("{:.3}", held.scene.reach)),
+                ("云受光", spell(held.scene.diffuse)),
+                ("云阴影", spell(held.scene.ambient)),
+                ("云范围", format!("{:.3}", held.scene.reach)),
             ]);
         }
         // The same for the fog, whose every number is the weather's own.
         if let Some(held) = self.fog() {
             rows.extend([
                 (
-                    "Fog color",
+                    "雾颜色",
                     format!(
-                        "{:.3}, {:.3}, {:.3} at {:.3}",
+                        "{:.3}, {:.3}, {:.3}，上限 {:.3}",
                         held.color.x, held.color.y, held.color.z, held.cap
                     ),
                 ),
-                ("Fog start", format!("{:.0} to {:.0}", held.start, held.far())),
-                ("Fog fade", format!("{:.0}", held.fade)),
+                ("雾起点", format!("{:.0} 至 {:.0}", held.start, held.far())),
+                ("雾淡出", format!("{:.0}", held.fade)),
                 (
-                    "Haze",
+                    "薄雾",
                     match held.haze > 0.0 {
-                        true => format!("from {:.0}, leaving {:.3}", held.near, held.clear),
-                        false => "off".to_owned(),
+                        true => format!("自 {:.0} 起，留存 {:.3}", held.near, held.clear),
+                        false => "关闭".to_owned(),
                     },
                 ),
             ]);
             rows.extend(held.layers.iter().enumerate().map(|(at, layer)| {
                 (
                     match at {
-                        0 => "Haze layer",
-                        _ => "Haze layer 2",
+                        0 => "薄雾层",
+                        _ => "薄雾层 2",
                     },
                     format!(
-                        "{:.5} thick at {:.0}, thinning {:.5}",
+                        "浓度 {:.5}，高度 {:.0}，衰减 {:.5}",
                         layer.y, layer.z, layer.x
                     ),
                 )
             }));
             rows.push((
-                "Haze glow",
+                "薄雾辉光",
                 format!(
-                    "{:.3}, {:.3}, {:.3} at {:.2} to the {:.0} from {:.0}",
+                    "{:.3}, {:.3}, {:.3}，强度 {:.2}，指数 {:.0}，起点 {:.0}",
                     held.glow.x,
                     held.glow.y,
                     held.glow.z,

@@ -26,9 +26,9 @@ pub enum FilterInputType {
 impl Display for FilterInputType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            FilterInputType::Equals => "Equals",
-            FilterInputType::Contains => "Contains",
-            FilterInputType::Complex => "Complex",
+            FilterInputType::Equals => "等于",
+            FilterInputType::Contains => "包含",
+            FilterInputType::Complex => "复杂筛选",
         })
     }
 }
@@ -123,7 +123,7 @@ impl CompiledFilterInput {
         cache: &FilterCache,
     ) -> anyhow::Result<bool> {
         let Some(filter) = &self.filter else {
-            bail!("No filter to match against");
+            bail!("没有可供匹配的筛选条件");
         };
 
         let cell_grabber = |key: u32| {
@@ -200,7 +200,7 @@ impl CompiledFilterInput {
         cache: &FilterCache,
     ) -> anyhow::Result<Option<NonZeroU32>> {
         let Some(filter) = &self.filter else {
-            bail!("No filter to match against");
+            bail!("没有可供匹配的筛选条件");
         };
 
         let cell_grabber = |key: u32| {

@@ -23,10 +23,10 @@ pub fn links_here(sheets: &SheetLink) -> bool {
 /// `IconRange` further widens each into a block of alternate icons the client picks from at
 /// runtime (not decodable from this sheet alone, per a manual check of the actual pixels).
 const SLOTS: [(&str, &str); 4] = [
-    ("NpcIconAvailable", "NPC available"),
-    ("MapIconAvailable", "Map available"),
-    ("NpcIconInvalid", "NPC unavailable"),
-    ("MapIconInvalid", "Map unavailable"),
+    ("NpcIconAvailable", "NPC 可用"),
+    ("MapIconAvailable", "地图可用"),
+    ("NpcIconInvalid", "NPC 不可用"),
+    ("MapIconInvalid", "地图不可用"),
 ];
 
 pub enum Resolved {
@@ -169,7 +169,7 @@ fn thumb(
         );
         ui.label(RichText::new(label).weak().small())
             .on_hover_text(format!(
-                "Id: {icon_id}\nPath: {path}\nIconRange: {range} (additional variants not shown)"
+                "ID: {icon_id}\n路径: {path}\nIconRange: {range}（其他变体未显示）"
             ));
         clicked.then_some(icon_id)
     })

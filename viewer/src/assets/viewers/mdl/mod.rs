@@ -555,7 +555,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 /// rest hang off: its path is what names the skeleton they are all posed on. A character is drawn
 /// the way the game draws it, standing in its idle rather than in the pose its files hold.
 pub fn compose(parts: &[Source]) -> Result<Rendered> {
-    parts.first().context("a model of no files")?;
+    parts.first().context("没有文件的模型")?;
     let pieces = parts.iter().map(Piece::new).collect::<Result<Vec<_>>>()?;
     let drawn = drawn_levels(&pieces);
     let level = level_of(&pieces, 0, 0)?;
@@ -669,15 +669,15 @@ pub(super) fn draws(mesh: &ironworks::file::mdl::Mesh) -> bool {
 /// What a mesh a drawing pass leaves out is for.
 fn kind_name(kind: MeshKind) -> &'static str {
     match kind {
-        MeshKind::Water => "water",
-        MeshKind::Shadow => "shadow",
-        MeshKind::Terrain => "terrain shadow",
-        MeshKind::VerticalFog => "vertical fog",
-        MeshKind::LightShaft => "light shaft",
-        MeshKind::Glass => "glass",
-        MeshKind::MaterialChange => "material change",
-        MeshKind::CrestChange => "crest change",
-        MeshKind::Standard => "standard",
+        MeshKind::Water => "水面",
+        MeshKind::Shadow => "阴影",
+        MeshKind::Terrain => "地形阴影",
+        MeshKind::VerticalFog => "垂直雾",
+        MeshKind::LightShaft => "光束",
+        MeshKind::Glass => "玻璃",
+        MeshKind::MaterialChange => "材质变化",
+        MeshKind::CrestChange => "徽章变化",
+        MeshKind::Standard => "标准",
     }
 }
 
@@ -908,7 +908,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
     if meshes.is_empty()
         && let Some((_, why)) = unreadable.first()
     {
-        anyhow::bail!("no mesh of this model could be read: {why}");
+        anyhow::bail!("此模型的网格均无法读取：{why}");
     }
     if meshes.is_empty() {
         low = Vec3::NEG_ONE;
@@ -957,7 +957,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
     }
 
     log::info!(
-        "assets/mdl: {} {} meshes, {vertices} vertices, {} materials, {} unreadable",
+        "assets/mdl: {} {} 个网格，{vertices} 个顶点，{} 个材质，{} 个无法读取",
         sources
             .iter()
             .map(|(worn, _)| crate::utils::file_name(worn.path))
@@ -1012,16 +1012,16 @@ pub(super) fn build(
     let bones = held(VertexAttributeKind::BlendIndices as u8, 0);
 
     let Some(positions) = positions.map(|held| &held.values) else {
-        return Err("mesh declares no vertex positions".into());
+        return Err("网格未声明顶点位置".into());
     };
     let count = match positions {
         VertexValues::Vector3(values) => values.len(),
         VertexValues::Vector4(values) => values.len(),
-        _ => return Err("vertex positions are not a vector".into()),
+        _ => return Err("顶点位置不是向量".into()),
     };
     if let Some(index) = indices.iter().find(|index| usize::from(**index) >= count) {
         return Err(format!(
-            "index {index} names none of the mesh's {count} vertices"
+            "索引 {index} 未指向该网格的 {count} 个顶点中的任何一个"
         ));
     }
 
@@ -1225,19 +1225,19 @@ pub enum Chrome {
 /// What the debug row offers, in the order it offers it.
 const VIEWS: [(gpu::Debug, &str); 9] = [
     (gpu::Debug::Normals, "法线"),
-    (gpu::Debug::Geometry, "Geometric"),
+    (gpu::Debug::Geometry, "几何"),
     (gpu::Debug::Tangents, "切线"),
     (gpu::Debug::Bitangents, "副切线"),
     (gpu::Debug::Handedness, "手性"),
     (gpu::Debug::Uv, "UV"),
-    (gpu::Debug::Color, "Vertex color"),
-    (gpu::Debug::Alpha, "Vertex alpha"),
+    (gpu::Debug::Color, "顶点色"),
+    (gpu::Debug::Alpha, "顶点 Alpha"),
     (gpu::Debug::Meshes, "网格"),
 ];
 
 pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
     if let Some(why) = model.level.borrow().gpu.lock().unwrap().take_shader_failure() {
-        log::error!("assets/mdl: game shaders: {why}");
+        log::error!("assets/mdl: 游戏着色器：{why}");
         model.fail_shading(why);
     }
     ui.horizontal_wrapped(|ui| {
@@ -1247,8 +1247,8 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         let shaded = model.shaded.get();
         if inspecting
             && ui
-                .selectable_label(shaded, "Game shaders")
-                .on_hover_text("Draw with the package the material names, into its own G-buffer")
+                .selectable_label(shaded, "游戏着色器")
+                .on_hover_text("使用材质所命名的着色器包进行绘制，写入其自身专属的 G-buffer")
                 .clicked()
         {
             let now = !shaded;
@@ -1286,7 +1286,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         if level.skinned {
             let skeleton = model.skeleton.get();
             if ui
-                .selectable_label(skeleton, "Skeleton")
+                .selectable_label(skeleton, "骨骼")
                 .on_hover_text("在上面绘制其姿势所用的骨架")
                 .clicked()
             {
@@ -1295,8 +1295,8 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         }
         let grid = model.grid.get();
         if ui
-            .selectable_label(grid, "Grid")
-            .on_hover_text("Rule a floor at the origin, at the model's own scale")
+            .selectable_label(grid, "网格")
+            .on_hover_text("在原点按模型自身比例绘制网格地面")
             .clicked()
         {
             model.grid.set(!grid);
@@ -1304,7 +1304,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         if shaded {
             let settings = model.settings.get();
             if ui
-                .selectable_label(settings, "Graphics")
+                .selectable_label(settings, "图形设置")
                 .on_hover_text("复合之后的通道使用的设置")
                 .clicked()
             {
@@ -1318,7 +1318,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         if arrived < wanted {
             ui.add(egui::Spinner::new().size(14.0));
             ui.label(RichText::new(format!("{arrived}/{wanted}")).weak())
-                .on_hover_text("Materials, shader packages and textures still on their way");
+                .on_hover_text("材质、着色器包与纹理仍在加载中");
         }
         let ready = arrived >= wanted;
         let busy = model.export.borrow().is_some();
@@ -1335,14 +1335,14 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         }
         if !level.unreadable.is_empty() {
             ui.label(
-                RichText::new(format!("⚠ {} unreadable meshes", level.unreadable.len()))
+                RichText::new(format!("⚠ {} 个无法读取的网格", level.unreadable.len()))
                     .color(Color32::LIGHT_RED),
             )
             .on_hover_text(
                 level
                     .unreadable
                     .iter()
-                    .map(|(index, why)| format!("mesh {index}: {why}"))
+                    .map(|(index, why)| format!("网格 {index}：{why}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
             );
@@ -1353,11 +1353,11 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
         let failure = model.shade_failure.borrow().clone();
         if let Some(why) = failure {
             ui.label(
-                RichText::new("⚠ game shaders would not build, showing the plain pass")
+                RichText::new("⚠ 游戏着色器构建失败，改为显示普通通道")
                     .color(Color32::LIGHT_RED),
             )
             .on_hover_text(why.as_str());
-            if ui.button("Retry").clicked() {
+            if ui.button("重试").clicked() {
                 model.shade_failure.borrow_mut().take();
                 model.shaded.set(true);
             }
@@ -1366,7 +1366,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
 
     if let Some(why) = model.level.borrow().gpu.lock().unwrap().failure() {
         ui.centered_and_justified(|ui| {
-            ui.colored_label(Color32::RED, format!("Could not build the shader: {why}"));
+            ui.colored_label(Color32::RED, format!("无法构建着色器：{why}"));
         });
         return;
     }
@@ -1391,9 +1391,9 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
 fn settings(ui: &mut egui::Ui, model: &Rendered) {
     let mut look = model.look.get();
     ui.horizontal_wrapped(|ui| {
-        ui.label("Textures").on_hover_text(
-            "Which mipmap of a model's own textures is decoded. The file arrives whole whatever \
-             this says, so only memory and decoding time follow it",
+        ui.label("纹理").on_hover_text(
+            "模型自身纹理解码时选用的 mipmap 层级。无论此处如何选择，文件都会完整载入，\
+             受影响的只有内存占用与解码时间",
         );
         egui::ComboBox::from_id_salt("mdl-detail")
             .selected_text(label(look.detail))
@@ -1402,58 +1402,57 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
                     ui.selectable_value(&mut look.detail, detail, what);
                 }
             });
-        ui.checkbox(&mut look.antialias, "Antialias")
-            .on_hover_text("Smooth the frame's edges with the game's own FXAA");
+        ui.checkbox(&mut look.antialias, "抗锯齿")
+            .on_hover_text("使用游戏自带的 FXAA 平滑画面边缘");
         ui.add_enabled_ui(look.antialias, |ui| {
-            ui.label(format!("Subpixel {}", program::FXAA_SUBPIX))
+            ui.label(format!("子像素 {}", program::FXAA_SUBPIX))
                 .on_hover_text(
-                    "How much of FXAA's own subpixel aliasing removal reaches the frame, off the \
-                     game's own upload",
+                    "FXAA 的子像素锯齿消除有多少作用于画面，\
+                     取自游戏自身上传的参数",
                 );
-            ui.label(format!("Edge {}", program::FXAA_EDGE))
+            ui.label(format!("边缘 {}", program::FXAA_EDGE))
                 .on_hover_text(
-                    "How much local contrast counts as an edge, likewise, over a floor the pass \
-                     carries itself",
+                    "局部对比度达到多少即视为边缘，\
+                     同样取自通道自身携带的参数",
                 );
         });
     });
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut look.bloom, "Bloom").on_hover_text(
-            "Spread the bright end of the frame with the game's own glare chain. Nothing in it is \
-             the viewer's to choose: the taps come out of the passes' own weights and the two \
-             beside this off the frames the game drew",
+        ui.checkbox(&mut look.bloom, "泛光").on_hover_text(
+            "使用游戏自身的泛光链扩散画面亮部。其中没有查看器可自行选择的项：采样点来自通道\
+             自身的权重，而旁边的这两项取自游戏绘制的画面",
         );
         ui.add_enabled_ui(look.bloom, |ui| {
-            ui.label(format!("Threshold {:.5}", program::GLARE_THRESHOLD))
-                .on_hover_text("What a pixel's glare has to average before any of it spreads");
-            ui.label(format!("Veil {}", program::GLARE_VEIL))
-                .on_hover_text("How dim a pixel has to be for the merge to pull it toward a grey");
+            ui.label(format!("阈值 {:.5}", program::GLARE_THRESHOLD))
+                .on_hover_text("像素的泛光需要达到多少平均值才会开始扩散");
+            ui.label(format!("面纱 {}", program::GLARE_VEIL))
+                .on_hover_text("合并时像素要暗到何种程度才会被拉向灰色");
         });
     });
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut look.vignette, "Vignette").on_hover_text(
-            "Darken the frame's corners with the game's own pass. The ellipse it spreads over \
-             follows the frame's own shape, but the two below are choices: no file states either",
+        ui.checkbox(&mut look.vignette, "暗角").on_hover_text(
+            "使用游戏自身的通道压暗画面四角。其扩散的椭圆遵循画面自身的形状，但下方两项是\
+             用户的选择：没有文件规定它们",
         );
         ui.add_enabled_ui(look.vignette, |ui| {
-            ui.add(egui::Slider::new(&mut look.onset, 0.0..=1.0).text("Onset"))
+            ui.add(egui::Slider::new(&mut look.onset, 0.0..=1.0).text("起始"))
                 .on_hover_text(
-                    "How far out the darkening starts, as a squared distance with a corner at one",
+                    "压暗从多远处开始，以平方距离计，四角为 1",
                 );
-            ui.add(egui::Slider::new(&mut look.darkening, 0.0..=2.0).text("Darkening"))
-                .on_hover_text("How steeply it deepens past that");
+            ui.add(egui::Slider::new(&mut look.darkening, 0.0..=2.0).text("加深"))
+                .on_hover_text("超过该距离后压暗逐渐加深的陡峭程度");
         });
     });
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut look.reflect, "Reflection").on_hover_text(
-            "Reflect the frame off itself with the game's own chain, which is what a metal \
-             surface answers with where nothing captured an environment for it",
+        ui.checkbox(&mut look.reflect, "反射").on_hover_text(
+            "使用游戏自身的反射链将画面反射到自身，这是金属表面在没有为其捕捉环境贴图时\
+             的响应方式",
         );
         ui.add_enabled_ui(look.reflect, |ui| {
             ui.add(
                 Label::new(
                     RichText::new(format!(
-                        "{}-{} units  x{}  rough<{}  {} levels",
+                        "{}-{} 单位  x{} 粗糙度<{}  {} 级",
                         program::REFLECTION_FADE[0],
                         program::REFLECTION_FADE[1],
                         program::REFLECTION_POWER,
@@ -1465,16 +1464,15 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
                 .wrap(),
             )
             .on_hover_text(
-                "What the chain runs with, read whole off a frame the game drew: how far a \
-                 reflection reaches and where it starts fading, what a pixel's reflectance is \
-                 scaled by, how rough a surface may be and still be marched, and how many levels \
-                 the blur takes the answer down",
+                "通道运行所用的参数，整体取自游戏绘制的一帧：反射延伸多远、从何处开始衰减，\
+                 像素反射率乘以多少倍，表面粗糙度达到多少仍会被步进采样，以及模糊将结果\
+                 逐级下采样的层数",
             );
         });
     });
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut look.occlude, "Occlusion")
-            .on_hover_text("Shade the creases with the game's own HDAO");
+        ui.checkbox(&mut look.occlude, "环境光遮蔽")
+            .on_hover_text("使用游戏自身的 HDAO 为褶皱处添加阴影");
         ui.add_enabled_ui(look.occlude, |ui| {
             egui::ComboBox::from_id_salt("mdl-occluder")
                 .selected_text(program::OCCLUDERS[look.quality])
@@ -1486,7 +1484,7 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
             ui.add(
                 Label::new(
                     RichText::new(format!(
-                        "{} texels  accept {}  reject {}  {}-{} units  bias {}  x{}  ^{}",
+                        "{} 纹素  接受 {}  拒绝 {}  {}-{} 单位  偏移 {}  x{}  ^{}",
                         program::OCCLUSION_SPREAD,
                         program::OCCLUSION_ACCEPT,
                         program::OCCLUSION_REJECT,
@@ -1501,11 +1499,10 @@ fn settings(ui: &mut egui::Ui, model: &Rendered) {
                 .wrap(),
             )
             .on_hover_text(
-                "What the pass runs with, read whole off the game's own upload: how far the taps \
-                 spread, how steeply a valley has to fall to count against the depth it stands at, \
-                 the fall past which two samples are no longer one surface, the distances under \
-                 and past which a pixel is left alone, how far a sample is pushed along its own \
-                 normal, what the taps add up to is scaled by, and the exponent it is raised to",
+                "通道运行所用的参数，整体取自游戏自身的上传数据：采样点扩散多远；谷底需要\
+                 多陡才能相对其所在深度算作遮蔽；落差超过多少后两个采样不再属于同一表面；\
+                 像素在哪些距离以内与之外保持不受影响；采样沿自身法线被推移多远；采样累计\
+                 结果乘以的系数；以及最终施予的指数",
             );
         });
     });
@@ -1979,7 +1976,7 @@ impl Rendered {
                     continue;
                 }
                 if self.resident.get() >= TEXTURE_BUDGET {
-                    log::warn!("assets/mdl: {path}: past this model's texture budget");
+                    log::warn!("assets/mdl: {path}: 超出此模型的纹理预算");
                     textures.insert(path.clone(), Texture::Absent);
                     continue;
                 }
@@ -2440,7 +2437,7 @@ impl Rendered {
             [only] => crate::utils::file_name(&only.path).to_owned(),
             _ => "models.zip".to_owned(),
         };
-        let raw = Choice::new("Raw file", raw_name, move || {
+        let raw = Choice::new("原始文件", raw_name, move || {
             let paths: Vec<String> = self.pieces.iter().map(|piece| piece.path.clone()).collect();
             Box::pin(async move {
                 if let [only] = paths.as_slice() {
@@ -2468,14 +2465,14 @@ impl Rendered {
             })
         })
         .hover(
-            "Write the geometry, materials and posed skeleton as a self-contained .glb. Textures \
-             are baked from this viewer's own preview shading, not the game shaders' G-buffer, so \
-             a shaded render and the export will not match exactly",
+            "将几何体、材质与已摆好姿势的骨骼导出为自包含的 .glb 文件。纹理从本查看器自身\
+             的预览着色烘焙而来，而非游戏着色器的 G-buffer，因此着色渲染与导出的结果不会\
+             完全一致",
         )
         .unless(
             ready,
             format!(
-                "waiting on {waiting} materials, shader packages and textures to finish loading"
+                "正在等待 {waiting} 个材质、着色器包与纹理解码完成"
             ),
         );
 
@@ -2494,9 +2491,9 @@ impl Rendered {
             .map(|buffer| buffer.names.iter().cloned().enumerate().collect())
             .unwrap_or_default();
         if !held.is_empty() && self.lighting.borrow().is_some() {
-            held.push((gpu::LIT, "Lit".to_owned()));
+            held.push((gpu::LIT, "光照".to_owned()));
             if self.look.get().reflect {
-                held.push((deferred::REFLECTED, "Reflection".to_owned()));
+                held.push((deferred::REFLECTED, "反射".to_owned()));
             }
         }
         held
@@ -2698,7 +2695,7 @@ impl Rendered {
     }
 
     /// Turns shading back off the moment it fails to build, so the model still draws with the plain
-    /// pass instead of going blank. Keeps the first reason; flipping "Game shaders" back on is what
+    /// pass instead of going blank. Keeps the first reason; flipping "游戏着色器" back on is what
     /// clears it for a fresh attempt.
     fn fail_shading(&self, why: String) {
         self.shade_failure.borrow_mut().get_or_insert(why);
@@ -2913,7 +2910,7 @@ impl Rendered {
                         .map(|resolve| (Arc::new(first), Arc::new(resolve)))
                         .inspect_err(|why| {
                             log::warn!(
-                                "assets/mdl: {}: no semi-transparent resolve: {why}",
+                                "assets/mdl: {}: 无半透明解析：{why}",
                                 material.package()
                             )
                         })
@@ -2940,7 +2937,7 @@ impl Rendered {
                                 })
                                 .inspect_err(|why| {
                                     log::warn!(
-                                        "assets/mdl: {}: no semi-transparent pass: {why}",
+                                        "assets/mdl: {}: 无半透明通道：{why}",
                                         material.package()
                                     )
                                 })
@@ -2968,12 +2965,12 @@ impl Rendered {
                 && passes.resolve.is_none()
                 && passes.sheer.is_none()
             {
-                true => Err("this material's keys reach no pass that draws it".into()),
+                true => Err("此材质的键未匹配到任何可绘制它的通道".into()),
                 false => Ok(passes),
             };
             if let Err(why) = &held {
                 let why = format!(
-                    "material {index} ({}) attachments={attachments}: {why}",
+                    "材质 {index}（{}）attachments={attachments}：{why}",
                     material.package()
                 );
                 log::warn!("assets/mdl: {why}");
@@ -3082,7 +3079,7 @@ impl Rendered {
                 self.rebuild(level);
             }
             Err(why) => log::error!(
-                "assets/mdl: {}: detail level {lod}: {why}",
+                "assets/mdl: {}: 细节等级 {lod}：{why}",
                 paths.join(" + ")
             ),
         }
@@ -3211,7 +3208,7 @@ impl Rendered {
     /// The camera, the rig and the motion it is playing all stay where they are; the rig is rebuilt
     /// only where the body under the clothes changed.
     pub fn redress(&mut self, parts: &[Source]) -> Result<()> {
-        parts.first().context("a model of no files")?;
+        parts.first().context("没有文件的模型")?;
         // Whatever is still being worn is kept as it stands, imc and all, so a change of one slot
         // reads one file rather than every file the character is drawn from.
         let mut held: BTreeMap<String, Piece> = std::mem::take(&mut self.pieces)
@@ -3331,10 +3328,10 @@ impl Rendered {
             // A file drawing at one detail level has nothing to pick between.
             if self.drawn.iter().filter(|drawn| **drawn).count() > 1 {
                 ui.add_space(8.0);
-                section(ui, "Detail");
+                section(ui, "细节");
                 let lod = self.lod.get();
                 ui.horizontal(|ui| {
-                    for (level, label) in [(0, "High"), (1, "Medium"), (2, "Low")] {
+                    for (level, label) in [(0, "高"), (1, "中"), (2, "低")] {
                         let picker = ui.add_enabled(
                             self.drawn[usize::from(level)],
                             egui::Button::selectable(lod == level, label),
@@ -3347,12 +3344,12 @@ impl Rendered {
             }
             if !level.shapes.is_empty() {
                 ui.add_space(8.0);
-                section(ui, "Shapes");
+                section(ui, "形状");
                 let enabled = self.shapes.borrow();
                 let on = |at: usize| enabled.contains(&level.shapes[at].name);
                 let hover = |at: usize| {
                     let shape = &level.shapes[at];
-                    format!("{}\n{} meshes rewritten", shape.name, shape.rewrites.len())
+                    format!("{}\n重写 {} 个网格", shape.name, shape.rewrites.len())
                 };
                 // Clicking the variant already showing is what turns its category off, so a
                 // category needs no entry of its own for having nothing applied.
@@ -3397,7 +3394,7 @@ impl Rendered {
                     continue;
                 };
                 ui.add_space(8.0);
-                section(ui, "Variant");
+                section(ui, "变体");
                 if self.pieces.len() > 1 {
                     ui.label(RichText::new(crate::utils::file_name(&piece.path)).weak());
                 }
@@ -3421,14 +3418,14 @@ impl Rendered {
             }
 
             ui.add_space(8.0);
-            section(ui, "Meshes");
+            section(ui, "网格");
             for (index, mesh) in level.meshes.iter().enumerate() {
                 ui.horizontal_wrapped(|ui| {
                     let drawn = mesh.parts.iter().any(|part| part.shown.get());
                     if ui
-                        .selectable_label(drawn, RichText::new(format!("Mesh {index}")).weak())
+                        .selectable_label(drawn, RichText::new(format!("网格 {index}")).weak())
                         .on_hover_text(format!(
-                            "{}\n{} triangles",
+                            "{}\n{} 个三角形",
                             crate::utils::file_name(&level.materials[mesh.material]),
                             mesh.triangles
                         ))
@@ -3448,7 +3445,7 @@ impl Rendered {
                 });
             }
             ui.add_space(8.0);
-            section(ui, "Materials");
+            section(ui, "材质");
             let slots = self.slots.borrow();
             for (index, path) in level.materials.iter().enumerate() {
                 if link(ui, crate::utils::file_name(path), path) {
@@ -3462,7 +3459,7 @@ impl Rendered {
                         ui.label(RichText::new(why).color(Color32::LIGHT_RED));
                     }
                     _ => {
-                        ui.label(RichText::new("loading").weak());
+                        ui.label(RichText::new("加载中").weak());
                     }
                 }
                 ui.add_space(4.0);

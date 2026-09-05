@@ -119,7 +119,7 @@ impl<T, H: History> Router<T, H> {
         };
 
         if is_new_path {
-            log::info!("Navigating to {path}");
+            log::info!("正在导航到 {path}");
             if let Some(redirect) = matched.value.start(state, ui, &path, &matched.params) {
                 if let Err(e) = self.replace(redirect) {
                     log::error!("导航失败：{e}");
@@ -134,7 +134,7 @@ impl<T, H: History> Router<T, H> {
         self.sync_title(matched.value, state, &path, &matched.params);
 
         if self.current_path() != path {
-            ui.ctx().request_discard("Navigation requested");
+            ui.ctx().request_discard("请求导航");
         }
     }
 

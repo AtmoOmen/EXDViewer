@@ -56,7 +56,7 @@ pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8], stage: usize, pas
     let merged = match &outcome {
         Ok(merged) => merged,
         Err(why) => {
-            heading(ui, "Merged pass");
+            heading(ui, "合并通道");
             ui.label(RichText::new(why).weak());
             return;
         }
@@ -78,11 +78,11 @@ pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8], stage: usize, pas
         .data(|data| data.get_temp::<bool>(reading))
         .unwrap_or(true);
     ui.horizontal(|ui| {
-        heading(ui, "Merged pass");
+        heading(ui, "合并通道");
         if ui.selectable_label(source, "HLSL").clicked() {
             source = true;
         }
-        if ui.selectable_label(!source, "Assembly").clicked() {
+        if ui.selectable_label(!source, "汇编").clicked() {
             source = false;
         }
     });
@@ -94,18 +94,18 @@ pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8], stage: usize, pas
     };
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("{} lines", lines.len() - from))
+            RichText::new(format!("{} 行", lines.len() - from))
                 .weak()
                 .small(),
         );
-        if ui.small_button("Copy").clicked() {
+        if ui.small_button("复制").clicked() {
             // What is on screen, so a fold takes the header out of the clipboard too.
             ui.ctx().copy_text(lines[from..].join("\n"));
         }
-        ui.checkbox(&mut hide, RichText::new("Hide header").small());
+        ui.checkbox(&mut hide, RichText::new("隐藏头部").small());
         ui.label(
             RichText::new(format!(
-                "{} shaders, {} key combinations, {} #if regions",
+                "{} 个着色器，{} 种条件组合，{} 个 #if 区域",
                 merged.blobs, merged.variants, merged.regions
             ))
             .weak()

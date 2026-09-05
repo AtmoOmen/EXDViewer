@@ -14,18 +14,18 @@ use ironworks::file::evp::{EquipmentVfxParameter, FLAG_COUNT};
 
 use super::{Preview, facts, line, section, table};
 
-const COLUMNS: [(&str, usize); 2] = [("Set", 6), ("Flags", 8)];
+const COLUMNS: [(&str, usize); 2] = [("套装", 6), ("标志", 8)];
 
 /// The flags a byte sets, in bit order.
 fn flags(byte: u8) -> String {
-    let listed = [(byte & 0x01 != 0, "body"), (byte & 0x02 != 0, "head")]
+    let listed = [(byte & 0x01 != 0, "身体"), (byte & 0x02 != 0, "头部")]
         .iter()
         .filter(|(set, _)| *set)
         .map(|(_, name)| *name)
         .collect::<Vec<_>>()
-        .join(" and ");
+        .join(" 和 ");
     match listed.is_empty() {
-        true => "nothing".to_owned(),
+        true => "无".to_owned(),
         false => listed,
     }
 }
@@ -53,7 +53,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
             }
             let summary = values
                 .iter()
-                .map(|(value, count)| format!("{count} {} ({value:#04x})", flags(*value)))
+                .map(|(value, count)| format!("{count} 个 {} ({value:#04x})", flags(*value)))
                 .collect::<Vec<_>>()
                 .join(", ");
             Some((*set, summary))
@@ -61,17 +61,17 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .collect::<Vec<_>>();
 
     let identity = vec![
-        ("Sets", rows.len().to_string()),
-        ("Flags per set", FLAG_COUNT.to_string()),
+        ("套装数", rows.len().to_string()),
+        ("每套标志数", FLAG_COUNT.to_string()),
     ];
 
-    log::info!("assets/evp: {path} {} sets", rows.len());
+    log::info!("assets/evp: {path} {} 个套装", rows.len());
 
     Ok(Preview::Evp(Box::new(Rendered { identity, rows })))
 }
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
-    section(ui, "Sets");
+    section(ui, "套装");
     table(ui, &COLUMNS, file.rows.len(), |ui, index| {
         let (set, summary) = &file.rows[index];
         let cells = [set.to_string(), summary.clone()];

@@ -211,7 +211,7 @@ fn item_row(
     let mut action = None;
     let resolved = name_icon(&catalog.item, item_id);
     let icon_id = resolved.as_ref().map_or(0, |(_, icon_id)| *icon_id);
-    let name = resolved.map_or_else(|| format!("Item #{item_id}"), |(name, _)| name);
+    let name = resolved.map_or_else(|| format!("物品 #{item_id}"), |(name, _)| name);
     ui.horizontal(|ui| {
         // Gil's own coin glyph is already in the font, so showing it costs nothing an icon fetch
         // would: no spinner, no texture.
@@ -235,7 +235,7 @@ fn item_row(
         }
         if hq {
             ui.label(RichText::new(glyph::HIGH_QUALITY.to_string()).size(16.0))
-                .on_hover_text("High Quality");
+                .on_hover_text("高品质");
         }
     });
     action
@@ -299,7 +299,7 @@ pub fn ui(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>, catalog: &Catalog
                     action = action.or(item_row(ui, index, catalog, item_id, u32::from(count), 0, false));
                     if min != max {
                         ui.label(
-                            RichText::new(format!("{min}-{max} depending on beast tribe rank"))
+                            RichText::new(format!("根据蛮族声望等级为 {min}-{max}"))
                                 .weak()
                                 .small(),
                         );
@@ -314,7 +314,7 @@ pub fn ui(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>, catalog: &Catalog
         .filter(|slot| read(index, row, &format!("OptionalItemReward[{slot}]")) != 0)
         .collect();
     if !optional.is_empty() {
-        ui.label(RichText::new("Choose one").weak().small());
+        ui.label(RichText::new("选择其一").weak().small());
         for slot in optional {
             let item = read(index, row, &format!("OptionalItemReward[{slot}]"));
             let count = read(index, row, &format!("OptionalItemCountReward[{slot}]")).max(1);
@@ -328,7 +328,7 @@ pub fn ui(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>, catalog: &Catalog
         .filter(|slot| read(index, row, &format!("ItemCatalyst[{slot}]")) != 0)
         .collect();
     if !catalysts.is_empty() {
-        ui.label(RichText::new("Catalyst").weak().small());
+        ui.label(RichText::new("催化剂").weak().small());
         for slot in catalysts {
             let item = read(index, row, &format!("ItemCatalyst[{slot}]"));
             let count = read(index, row, &format!("ItemCountCatalyst[{slot}]")).max(1);
@@ -381,12 +381,12 @@ pub fn ui(ui: &mut egui::Ui, index: &Index, row: ExcelRow<'_>, catalog: &Catalog
 
     let reputation = read(index, row, "ReputationReward");
     if reputation != 0 {
-        ui.label(format!("+{reputation} reputation"));
+        ui.label(format!("声望 +{reputation}"));
     }
 
     let exp_factor = read(index, row, "ExpFactor");
     if exp_factor != 0 {
-        ui.label(format!("Experience ×{:.2}", exp_factor as f64 / 100.0))
+        ui.label(format!("经验 ×{:.2}", exp_factor as f64 / 100.0))
             .on_hover_text(format!("ExpFactor {exp_factor}"));
     }
 

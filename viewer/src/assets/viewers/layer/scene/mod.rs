@@ -1647,7 +1647,7 @@ impl Scene {
         };
         let directory = path.trim_end_matches("terrain.tera");
         self.layers.push(Layer {
-            name: "terrain".to_owned(),
+            name: "地形".to_owned(),
             origin: Some(path.to_owned()),
             visible: true,
             festival: 0,
@@ -1736,7 +1736,7 @@ impl Scene {
             })
             .collect();
         self.layers.push(Layer {
-            name: "grass".to_owned(),
+            name: "草地".to_owned(),
             origin: Some(path.to_owned()),
             visible: true,
             festival: 0,
@@ -1771,7 +1771,7 @@ impl Scene {
         let file = match ggd::GrassGrid::read(Cursor::new(bytes)) {
             Ok(file) => file,
             Err(why) => {
-                log::error!("assets/layer: grass grid {grid}: {why}");
+                log::error!("assets/layer: 草地网格 {grid}: {why}");
                 return;
             }
         };
@@ -3477,7 +3477,7 @@ impl Scene {
                 .and_then(|result| {
                     result
                         .inspect_err(|why| {
-                            log::warn!("assets/layer: {name}: no semi-transparent pass: {why}")
+                            log::warn!("assets/layer: {name}: 没有半透明通道：{why}")
                         })
                         .ok()
                 });
@@ -3502,7 +3502,7 @@ impl Scene {
                     0,
                     attachments,
                 )
-                .inspect_err(|why| log::warn!("assets/layer: {name}: no shadow pass: {why}"))
+                .inspect_err(|why| log::warn!("assets/layer: {name}: 没有阴影通道：{why}"))
                 .ok()
             });
             // What it answers into the lit frame with, which only a blending surface has.
@@ -4139,7 +4139,7 @@ impl Scene {
         };
         ui.add_space(8.0);
         ui.separator();
-        section(ui, "Selected");
+        section(ui, "选中");
         ui.add_space(4.0);
 
         let path = &self.models[placement.model].path;
@@ -4175,31 +4175,31 @@ impl Scene {
         ui.scope(|ui| {
             ui.set_max_width(ui.available_width().min(DETAILS_ROW_WIDTH));
             facts(ui, "scene_selected", &[
-                ("Layer", self.layers[placement.layer].name.clone()),
-                ("Position", place(held.w_axis.truncate())),
-                ("Rotation", match angles {
+                ("图层", self.layers[placement.layer].name.clone()),
+                ("位置", place(held.w_axis.truncate())),
+                ("旋转", match angles {
                     Some(held) => place(held),
-                    None => "flat".to_owned(),
+                    None => "扁平".to_owned(),
                 }),
-                ("Scale", place(scale)),
-                ("Size", format!("{:.3}", placement.radius)),
-                ("Fade", match placement.fade {
+                ("缩放", place(scale)),
+                ("尺寸", format!("{:.3}", placement.radius)),
+                ("淡出", match placement.fade {
                     held if held > 0.0 => format!("{held:.1}"),
-                    _ => "never".to_owned(),
+                    _ => "从不".to_owned(),
                 }),
-                ("Motion", match &placement.driven {
-                    Some(held) => format!("{} driven", held.chain.len()),
-                    None => "still".to_owned(),
+                ("运动", match &placement.driven {
+                    Some(held) => format!("{} 个驱动", held.chain.len()),
+                    None => "静止".to_owned(),
                 }),
                 (
-                    "Sky",
+                    "天空",
                     format!(
                         "{:.3}",
                         reached(&self.visibility, placement.key).copied().unwrap_or(1.0)
                     ),
                 ),
                 (
-                    "Key",
+                    "键",
                     format!("{group:08x} {:02x}{:02x}{:02x}{:02x}", id[0], id[1], id[2], id[3]),
                 ),
             ]);
@@ -4388,7 +4388,7 @@ impl Scene {
         if let Some(id) = held.weather
             && !self.ambient.stand_in_weather(id)
         {
-            log::warn!("assets/layer: this zone states no weather {id}");
+            log::warn!("assets/layer: 此区域未声明天气 {id}");
         }
         // Counts as fitted, so `poll`'s first-placements auto-frame does not undo this once the
         // zone's own content streams in.
@@ -4438,16 +4438,16 @@ impl Scene {
                     self.preset = Some(held);
                     changed = true;
                 }
-                Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
+                Err(why) => log::warn!("assets/layer: 这不是 TitleEdit 预设：{why}"),
             }
         }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-            section(ui, "View");
+            section(ui, "视图");
             // Pasted rather than picked, since a file dialog is the one way in that nothing outside
             // the window can drive: a headless run positions the camera through here.
             let pasted = ui.add(
                 egui::TextEdit::singleline(&mut self.pasted)
-                    .hint_text("paste a TitleEdit preset")
+                    .hint_text("粘贴一个 TitleEdit 预设")
                     .desired_width(f32::INFINITY),
             );
             let mut load =
@@ -4455,17 +4455,17 @@ impl Scene {
             // Wrapped rather than run on: four buttons in one row is wider than the panel's own
             // minimum, and a row that can't shrink pins the whole panel at its own width.
             ui.horizontal_wrapped(|ui| {
-                if ui.button("Import preset").clicked() {
+                if ui.button("导入预设").clicked() {
                     self.picking = Some(TrackedPromise::spawn_local(async {
                         let held = rfd::AsyncFileDialog::new()
-                            .set_title("Import a TitleEdit preset")
-                            .add_filter("TitleEdit preset", &["json"])
+                            .set_title("导入 TitleEdit 预设")
+                            .add_filter("TitleEdit 预设", &["json"])
                             .pick_file()
                             .await?;
                         Some(held.read().await)
                     }));
                 }
-                load |= ui.button("Load pasted").clicked();
+                load |= ui.button("加载粘贴内容").clicked();
                 if load {
                     match preset::Preset::read(self.pasted.as_bytes()) {
                         Ok(held) => {
@@ -4480,7 +4480,7 @@ impl Scene {
                             self.preset = Some(held);
                             changed = true;
                         }
-                        Err(why) => log::warn!("assets/layer: this is no TitleEdit preset: {why}"),
+                        Err(why) => log::warn!("assets/layer: 这不是 TitleEdit 预设：{why}"),
                     }
                 }
                 let held = preset::Preset::of(
@@ -4494,10 +4494,10 @@ impl Scene {
                 let file_name = format!("TE_{}.json", held.name);
                 let choices = match held.write() {
                     Ok(text) => vec![
-                        export::Choice::bytes("Export preset", file_name, move || {
+                        export::Choice::bytes("导出预设", file_name, move || {
                             Ok(text.into_bytes())
                         })
-                        .title("Export a TitleEdit preset")
+                        .title("导出 TitleEdit 预设")
                         .filter("JSON", &["json"]),
                     ],
                     Err(why) => {
@@ -4506,13 +4506,13 @@ impl Scene {
                     }
                 };
                 let promise =
-                    export::menu(ui, "Export preset", None, self.saving.is_some(), choices, egui::Vec2::ZERO);
+                    export::menu(ui, "导出预设", None, self.saving.is_some(), choices, egui::Vec2::ZERO);
                 if promise.is_some() {
                     self.saving = promise;
                 }
                 // The same shape the plugin hands over its own clipboard, so a paste elsewhere
                 // reads it back.
-                if ui.button("Copy preset").clicked() {
+                if ui.button("复制预设").clicked() {
                     match held.share() {
                         Ok(text) => ui.ctx().copy_text(text),
                         Err(why) => log::error!("assets/layer: {why}"),
@@ -4520,11 +4520,11 @@ impl Scene {
                 }
             });
             if let Some(held) = &self.preset {
-                ui.label(RichText::new(format!("Preset  {}", held.name)).weak());
+                ui.label(RichText::new(format!("预设  {}", held.name)).weak());
                 ui.add_space(4.0);
             }
             ui.horizontal(|ui| {
-                if ui.button("Fit").clicked() {
+                if ui.button("适配").clicked() {
                     refit = true;
                 }
                 ui.label(
@@ -4537,13 +4537,13 @@ impl Scene {
                 );
             });
             ui.add_space(4.0);
-            ui.label(RichText::new("Load distance").weak());
+            ui.label(RichText::new("加载距离").weak());
             changed |= ui
                 .add(egui::Slider::new(&mut self.load, NEAREST..=FURTHEST).logarithmic(true))
                 .changed();
-            ui.label(RichText::new("Speed").weak());
+            ui.label(RichText::new("速度").weak());
             ui.add(egui::Slider::new(&mut self.speed, 0.1..=20.0).logarithmic(true));
-            ui.label(RichText::new("Field of view").weak());
+            ui.label(RichText::new("视野").weak());
             match self.driving {
                 // Derived from the shot's own focal length while a cutscene drives the camera,
                 // so it is a label rather than a slider here.
@@ -4556,33 +4556,31 @@ impl Scene {
                         .changed();
                 }
             }
-            ui.checkbox(&mut self.look.vignette, "Vignette").on_hover_text(
-                "Darken the frame's corners with the game's own pass. The ellipse it spreads over \
-                 follows the frame's own shape, but the two below are choices: no file states \
-                 either",
+            ui.checkbox(&mut self.look.vignette, "暗角").on_hover_text(
+                "用游戏自带的通道压暗画面四角。暗角椭圆随画面自身的形状展开，\
+                 但下面两项是自定义选择：没有任何文件给出定义",
             );
             ui.add_enabled_ui(self.look.vignette, |ui| {
-                ui.label(RichText::new("Onset").weak());
+                ui.label(RichText::new("起始").weak());
                 ui.add(egui::Slider::new(&mut self.look.onset, 0.0..=1.0))
                     .on_hover_text(
-                        "How far out the darkening starts, as a squared distance with a corner at \
-                         one",
+                        "暗角从多远处开始，以平方距离计，角落处为 1",
                     );
-                ui.label(RichText::new("Darkening").weak());
+                ui.label(RichText::new("加深").weak());
                 ui.add(egui::Slider::new(&mut self.look.darkening, 0.0..=2.0))
-                    .on_hover_text("How steeply it deepens past that");
+                    .on_hover_text("超过该值后加深的陡峭程度");
             });
             ui.add_space(8.0);
             ui.separator();
             let mut sound_on = self.sound.enabled();
-            if ui.checkbox(&mut sound_on, "Play in-zone sound").changed() {
+            if ui.checkbox(&mut sound_on, "播放区域内的声音").changed() {
                 match sound_on {
                     true => self.sound.enable(),
                     false => self.sound.disable(),
                 }
             }
             ui.add_enabled_ui(sound_on, |ui| {
-                ui.label(RichText::new("Sound volume").weak());
+                ui.label(RichText::new("音量").weak());
                 let mut volume = self.sound.volume();
                 if ui.add(egui::Slider::new(&mut volume, 0.0..=1.0)).changed() {
                     self.sound.set_volume(volume);
@@ -4590,7 +4588,7 @@ impl Scene {
             });
             ui.label(
                 RichText::new(format!(
-                    "{} placed, {} playing",
+                    "已放置 {} 个，播放中 {} 个",
                     self.sound.placed(),
                     self.sound.playing()
                 ))
@@ -4614,27 +4612,27 @@ impl Scene {
                     ui,
                     "scene_counts",
                     &[
-                        ("Placed", self.placements.len().to_string()),
-                        ("Drawn", drawn.to_string()),
-                        ("Waiting on a model", self.absent.to_string()),
-                        ("Models", format!("{ready} of {}", self.models.len())),
-                        ("Groups to read", self.waiting.len().to_string()),
+                        ("已放置", self.placements.len().to_string()),
+                        ("已绘制", drawn.to_string()),
+                        ("等待模型", self.absent.to_string()),
+                        ("模型", format!("{ready} / {}", self.models.len())),
+                        ("待读取的组", self.waiting.len().to_string()),
                         (
-                            "Materials",
+                            "材质",
                             format!(
-                                "{} of {}",
+                                "{} / {}",
                                 self.translated.keys().filter(|(_, waving)| !waving).count(),
                                 self.materials.len()
                             ),
                         ),
                         (
-                            "Lights",
-                            format!("{} of {}", self.lamps().len(), self.lights.len()),
+                            "灯光",
+                            format!("{} / {}", self.lamps().len(), self.lights.len()),
                         ),
                         (
-                            "Effects",
+                            "特效",
                             format!(
-                                "{} of {}",
+                                "{} / {}",
                                 self.effect_files
                                     .iter()
                                     .filter(|effect| matches!(effect.state, EffectState::Ready(..)))
@@ -4642,35 +4640,31 @@ impl Scene {
                                 self.effect_files.len()
                             ),
                         ),
-                        ("Wind", {
+                        ("风", {
                             let count = self.models.iter().filter(|model| model.waving).count();
-                            let plural = match count {
-                                1 => "",
-                                _ => "s",
-                            };
                             match self.ambient.wind() {
                                 Some(held) => format!(
-                                    "clock {:.1}s, reach {:.2} at {:.0} deg, {count} model{plural}",
+                                    "时钟 {:.1} 秒，范围 {:.2}，朝向 {:.0} 度，模型 {count} 个",
                                     self.clock / TICKS,
                                     held.reach,
                                     held.heading.x.atan2(held.heading.z).to_degrees(),
                                 ),
-                                None => format!("no wind set stated, {count} model{plural}"),
+                                None => format!("未声明风集，模型 {count} 个"),
                             }
                         }),
                         (
-                            "Exposure",
+                            "曝光",
                             match self.exposure.is_some() {
                                 true => {
                                     let held = self.renderer.lock().unwrap();
                                     format!(
-                                        "{:.3} from a frame measuring {:.3}, written at {:.3}",
+                                        "适配 {:.3}，帧测得 {:.3}，写入 {:.3}",
                                         held.exposed(),
                                         held.measured(),
                                         program::encode(held.exposed())
                                     )
                                 }
-                                false => "not run".to_owned(),
+                                false => "未运行".to_owned(),
                             },
                         ),
                         // Which of the passes past the lighting ran. A weather that names no clouds
@@ -4681,14 +4675,14 @@ impl Scene {
                         // full sky, so a file that matches nothing looks exactly like no file at all.
                         // A zone with no grass of its own and a grass file that would not read look the
                         // same from the outside, and so does a grid nothing has asked for yet.
-                        ("Grass", match &self.grass {
-                            Grass::Wanted(_) => "waiting on the zone's own file".to_owned(),
-                            Grass::Fetching(_, _) => "reading the zone's own file".to_owned(),
-                            Grass::Done => "none".to_owned(),
+                        ("草地", match &self.grass {
+                            Grass::Wanted(_) => "等待区域的草地文件".to_owned(),
+                            Grass::Fetching(_, _) => "正在读取区域的草地文件".to_owned(),
+                            Grass::Done => "无".to_owned(),
                             Grass::Placing(held) => {
                                 let read = held.grids.iter().filter(|grid| grid.taken).count();
                                 format!(
-                                    "{read} of {} grids, {} models, {} placed, {} of {} blades drawn",
+                                    "网格 {read} / {}，模型 {}，已放置 {}，草叶 {} / {}",
                                     held.grids.len(),
                                     held.models.len(),
                                     self.layers.get(held.layer).map_or(0, |held| held.placements),
@@ -4698,9 +4692,9 @@ impl Scene {
                             }
                         }),
                         (
-                            "Sky visibility",
+                            "天空可见性",
                             format!(
-                                "{} of {} placed",
+                                "已放置 {} / {}",
                                 self.placements
                                     .iter()
                                     .filter(|held| reached(&self.visibility, held.key).is_some())
@@ -4708,7 +4702,7 @@ impl Scene {
                                 self.placements.len()
                             ),
                         ),
-                        ("Blended materials", {
+                        ("混合材质", {
                             let mut tally: BTreeMap<String, (usize, usize, usize)> = BTreeMap::new();
                             for (at, (_, slot)) in self.materials.iter().enumerate() {
                                 let Slot::Ready(material) = slot else { continue };
@@ -4725,20 +4719,20 @@ impl Scene {
                                 }
                             }
                             match tally.is_empty() {
-                                true => "none named".to_owned(),
+                                true => "未命名任何".to_owned(),
                                 false => tally
                                     .iter()
                                     .map(|(name, (all, wet, dry))| {
-                                        format!("{name} {all}: {wet} blended, {dry} opaque")
+                                        format!("{name} {all}：混合 {wet}，不透明 {dry}")
                                     })
                                     .collect::<Vec<_>>()
                                     .join("\n"),
                             }
                         }),
                         (
-                            "Blended surfaces",
+                            "混合表面",
                             format!(
-                                "{} of {} translated",
+                                "已翻译 {} / {}",
                                 self.translated
                                     .iter()
                                     .filter(|((_, waving), held)| !waving && held.resolve.is_some())
@@ -4747,7 +4741,7 @@ impl Scene {
                             ),
                         ),
                         (
-                            "Shadow pass",
+                            "阴影通道",
                             match (
                                 self.packages.get(program::SHADOW),
                                 self.lighting.as_ref().map(|held| held.shadow.is_some()),
@@ -4759,23 +4753,23 @@ impl Scene {
                                         })
                                         .collect();
                                     format!(
-                                        "translated, {} splits reaching {} (the game draws 5)",
+                                        "已翻译，{} 个分层到达 {}（游戏绘制 5 个）",
                                         program::SPLITS,
                                         reaches.join(", ")
                                     )
                                 }
-                                (Some(Package::Ready(_)), _) => "arrived, not translated".to_owned(),
-                                (Some(Package::Failed), _) => "failed".to_owned(),
-                                (Some(Package::Fetching(_)), _) => "fetching".to_owned(),
-                                (Some(Package::Wanted), _) => "wanted".to_owned(),
-                                (None, _) => "never asked for".to_owned(),
+                                (Some(Package::Ready(_)), _) => "已到达，未翻译".to_owned(),
+                                (Some(Package::Failed), _) => "失败".to_owned(),
+                                (Some(Package::Fetching(_)), _) => "获取中".to_owned(),
+                                (Some(Package::Wanted), _) => "待获取".to_owned(),
+                                (None, _) => "从未请求".to_owned(),
                             },
                         ),
-                        ("Passes", self.passes()),
+                        ("通道", self.passes()),
                         (
-                            "Textures",
+                            "纹理",
                             format!(
-                                "{}, {}, {} with slices",
+                                "{}, {}, {} 带切片",
                                 self.textures.len(),
                                 crate::assets::Bytes(self.resident),
                                 self.stacked
@@ -4796,15 +4790,15 @@ impl Scene {
 
             ui.add_space(8.0);
             ui.separator();
-            section(ui, "Layers");
+            section(ui, "图层");
             ui.horizontal(|ui| {
-                if ui.button("All").clicked() {
+                if ui.button("全部").clicked() {
                     for layer in &mut self.layers {
                         layer.shown = true;
                     }
                     changed = true;
                 }
-                if ui.button("None").clicked() {
+                if ui.button("无").clicked() {
                     for layer in &mut self.layers {
                         layer.shown = false;
                     }
@@ -4818,13 +4812,13 @@ impl Scene {
             for layer in &mut self.layers {
                 let mut label = format!("{} ({})", layer.name, layer.placements);
                 if layer.festival != 0 {
-                    label.push_str(&format!("  festival {}", layer.festival));
+                    label.push_str(&format!("  庆典 {}", layer.festival));
                 }
                 let mut hover = label.clone();
                 hover.push('\n');
                 hover.push_str(match layer.visible {
-                    true => "drawn by default",
-                    false => "hidden by default",
+                    true => "默认绘制",
+                    false => "默认隐藏",
                 });
                 if let Some(origin) = &layer.origin {
                     hover.push('\n');
@@ -4848,7 +4842,7 @@ impl Scene {
 pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, backend: &Backend) {
     if let Some(why) = scene.renderer.lock().unwrap().failure() {
         ui.centered_and_justified(|ui| {
-            ui.colored_label(Color32::RED, format!("Could not build the shader: {why}"));
+            ui.colored_label(Color32::RED, format!("无法构建着色器：{why}"));
         });
         return;
     }

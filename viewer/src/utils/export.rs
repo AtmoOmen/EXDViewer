@@ -104,8 +104,8 @@ impl<'a> Choice<'a> {
     /// A file's own bytes, unchanged. Cloned only once this is picked, not while the menu merely
     /// carries the choice around.
     pub fn raw(bytes: &'a [u8], file_name: impl Into<String>) -> Self {
-        Self::bytes("Raw file", file_name, move || Ok(bytes.to_vec()))
-            .hover("The file exactly as it is stored")
+        Self::bytes("原始文件", file_name, move || Ok(bytes.to_vec()))
+            .hover("文件保持原样存储的内容")
     }
 
     pub fn hover(mut self, text: impl Into<String>) -> Self {
@@ -239,7 +239,7 @@ fn start(choice: Choice<'_>, ctx: egui::Context, error_id: egui::Id) -> TrackedP
         let (file_name, data) = match future.await {
             Ok(named) => named,
             Err(error) => {
-                log::error!("Failed to export {dialog_title}: {error:?}");
+                log::error!("导出 {dialog_title} 失败: {error:?}");
                 ctx.memory_mut(|memory| memory.data.insert_temp(error_id, error.to_string()));
                 ctx.request_repaint();
                 return;
@@ -255,11 +255,11 @@ fn start(choice: Choice<'_>, ctx: egui::Context, error_id: egui::Id) -> TrackedP
         if let Some(file) = dialog.save_file().await {
             match file.write(&data).await {
                 Ok(()) => {
-                    log::info!("Exported {file_name} successfully");
+                    log::info!("{file_name} 导出成功");
                     ctx.memory_mut(|memory| memory.data.remove_temp::<String>(error_id));
                 }
                 Err(error) => {
-                    log::error!("Failed to write {file_name}: {error}");
+                    log::error!("写入 {file_name} 失败: {error}");
                     ctx.memory_mut(|memory| memory.data.insert_temp(error_id, error.to_string()));
                 }
             }

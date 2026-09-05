@@ -84,7 +84,7 @@ pub fn ui(
             let response = ui
                 .interact(rect, ui.id().with(*node), Sense::click())
                 .on_hover_text(format!(
-                    "{}\n{} · step {}",
+                    "{}\n{} · 步骤 {}",
                     quest.name,
                     quest.id,
                     graph.rank(*node) + 1

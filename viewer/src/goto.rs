@@ -100,7 +100,7 @@ impl Palette {
                         .show(|ui| {
                             ui.set_min_width(ui.available_width());
                             if items.is_empty() {
-                                ui.label(RichText::new("No matches").weak());
+                                ui.label(RichText::new("无匹配项").weak());
                             }
                             for (i, (_, label)) in items.iter().enumerate() {
                                 let mut selected = self.index == i;

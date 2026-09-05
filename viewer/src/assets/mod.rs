@@ -134,7 +134,7 @@ fn build_index(list: Rc<Listing>) -> Result<Loaded, String> {
     let tree_took = at.elapsed();
 
     log::info!(
-        "assets/build: live dirs {} ({} kept), unnamed {} ({} placed in named dirs, {} in {} hash dirs), tree {} ({} nodes, {} roots)",
+        "assets/build: 实时目录 {}（保留 {}），未命名 {}（{} 个放入命名目录，{} 个在 {} 个哈希目录），树 {}（{} 个节点，{} 个根）",
         Millis(live_took),
         live.len(),
         Millis(unnamed_took),
@@ -146,7 +146,7 @@ fn build_index(list: Rc<Listing>) -> Result<Loaded, String> {
         roots.len(),
     );
     log::info!(
-        "assets/total: {} to first frame, {} resident",
+        "assets/total: 到首帧 {}，常驻 {}",
         Millis(live_took + unnamed_took + tree_took),
         Bytes(paths.resident_bytes()),
     );
@@ -525,12 +525,12 @@ impl Loaded {
         let offset = match self.list.paths().name_offset(dir) {
             Ok(offset) => offset,
             Err(e) => {
-                log::error!("No offset for directory {dir}: {e}");
+                log::error!("目录 {dir} 没有偏移：{e}");
                 return Vec::new();
             }
         };
         let names = self.list.paths().names(dir).unwrap_or_else(|e| {
-            log::error!("Failed to decode directory {dir}: {e}");
+            log::error!("解码目录 {dir} 失败：{e}");
             Vec::new()
         });
         // The list is global, so anything this version does not ship is dropped here.
@@ -572,9 +572,9 @@ impl SearchMode {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Fuzzy => "Fuzzy",
-            Self::Strict => "Contains",
-            Self::Regex => "Regex",
+            Self::Fuzzy => "模糊",
+            Self::Strict => "包含",
+            Self::Regex => "正则",
         }
     }
 }
@@ -1139,7 +1139,7 @@ impl AssetBrowser {
                             }
                         })
                         .response
-                        .on_hover_text(format!("Search mode: {}", mode.label()));
+                        .on_hover_text(format!("搜索模式：{}", mode.label()));
                         let picked = parse_query(&self.search).suffix;
                         ui.menu_button("📄", |ui| {
                             ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
@@ -1161,7 +1161,7 @@ impl AssetBrowser {
                             });
                         })
                         .response
-                        .on_hover_text("Filter by extension");
+                        .on_hover_text("按扩展名筛选");
                         restart |= ui
                             .add_sized(
                                 Vec2::new(ui.available_width(), 0.0),
@@ -1170,8 +1170,7 @@ impl AssetBrowser {
                                     .hint_text("搜索路径"),
                             )
                             .on_hover_text(
-                                "ext:stm for one extension, or include a / to match a fuzzy query \
-                             against the path itself",
+                                "ext:stm 筛选单一扩展名；或输入含 / 的路径，按路径本身进行模糊匹配",
                             )
                             .changed();
                     });
@@ -1354,9 +1353,7 @@ impl AssetBrowser {
                     let selected = self.selected.as_deref() == Some(path.as_str());
                     if Button::selectable(selected, path.as_str())
                         .ui(ui)
-                        .on_hover_text(
-                            "Read this path from the install, whether or not the list names it",
-                        )
+                        .on_hover_text("从安装数据中读取该路径，无论路径列表是否收录该文件")
                         .clicked()
                     {
                         clicked = Some(path);
@@ -1724,7 +1721,7 @@ impl AssetBrowser {
                                                 .unwrap_or_else(|| {
                                                     crate::utils::file_name(&lvb).to_owned()
                                                 });
-                                            format!("Open “{name}” in Zones")
+                                            format!("在场景页签中打开“{name}”")
                                         }
                                     };
                                     if ui.button(label).clicked() {
@@ -1946,7 +1943,7 @@ impl AssetBrowser {
                     None => files.read_stream(&wanted).await?,
                 };
                 log::info!(
-                    "assets/read: {wanted} {} in {}",
+                    "assets/read: {wanted} {}，用时 {}",
                     Bytes(bytes.len()),
                     Millis(at.elapsed())
                 );
@@ -1976,7 +1973,7 @@ impl AssetBrowser {
             let at = Instant::now();
             let preview = Preview::decode(ui.ctx(), path, bytes, viewer, self.mip, self.channels);
             log::info!(
-                "assets/preview: {} in {}",
+                "assets/preview: {}，用时 {}",
                 viewer.label(),
                 Millis(at.elapsed())
             );
@@ -2765,7 +2762,7 @@ fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], state: &mut Hex) {
             if ui.add_enabled(state.page > 0, Button::new("◀")).clicked() {
                 state.page -= 1;
             }
-            ui.label(format!("page {} / {pages}", state.page + 1));
+            ui.label(format!("第 {} / {} 页", state.page + 1, pages));
             if ui
                 .add_enabled(state.page + 1 < pages, Button::new("▶"))
                 .clicked()
@@ -2774,7 +2771,7 @@ fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], state: &mut Hex) {
             }
             ui.label(
                 RichText::new(format!(
-                    "from {:#010X}",
+                    "从 {:#010X} 起",
                     state.page * HEX_PAGE_ROWS * HEX_COLS
                 ))
                 .weak(),
@@ -2784,7 +2781,7 @@ fn hex_dump(ui: &mut egui::Ui, bytes: &[u8], state: &mut Hex) {
             ui.separator();
             ui.label(
                 RichText::new(format!(
-                    "{:#010X}..{:#010X} ({} bytes)",
+                    "{:#010X}..{:#010X}（{} 字节）",
                     picked.start(),
                     picked.end(),
                     picked.end() - picked.start() + 1

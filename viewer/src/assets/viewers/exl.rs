@@ -9,7 +9,7 @@ use super::{Preview, facts, line, link, section, table};
 
 /// The list's two columns, the id padded to the width its cells are drawn at. The sheet is a link
 /// rather than a padded cell, so it sits at the end.
-const COLUMNS: [(&str, usize); 2] = [("Id", 5), ("Sheet", 8)];
+const COLUMNS: [(&str, usize); 2] = [("ID", 5), ("表格", 8)];
 
 /// A sheet list, decoded and ready to draw.
 pub struct Rendered {
@@ -25,17 +25,17 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     // the game nor anyone looking a sheet up.
     rows.sort_by_cached_key(|(name, _)| name.to_lowercase());
 
-    log::info!("assets/exl: {path} {} sheets", rows.len());
+    log::info!("assets/exl: {path} {} 个表格", rows.len());
 
     Ok(Preview::Exl(Box::new(Rendered {
-        identity: vec![("Sheets", rows.len().to_string())],
+        identity: vec![("表格数", rows.len().to_string())],
         rows,
     })))
 }
 
 pub fn ui(ui: &mut egui::Ui, list: &Rendered) -> Option<String> {
     let mut follow = None;
-    section(ui, "Sheets");
+    section(ui, "表格");
     table(ui, &COLUMNS, list.rows.len(), |ui, index| {
         let (name, id) = &list.rows[index];
         let id = id.to_string();

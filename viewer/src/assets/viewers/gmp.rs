@@ -13,11 +13,11 @@ use ironworks::file::gmp::{GimmickParameter, Set};
 use super::{Preview, facts, line, section, table};
 
 const COLUMNS: [(&str, usize); 5] = [
-    ("Set", 6),
-    ("Visor", 8),
-    ("Rotation", 20),
-    ("Unknown A", 9),
-    ("Unknown B", 9),
+    ("套装", 6),
+    ("面罩", 8),
+    ("旋转", 20),
+    ("未知 A", 9),
+    ("未知 B", 9),
 ];
 
 /// Whether the file carries this set, which an omitted block reading as zero decides.
@@ -56,9 +56,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         rows.push(Row {
             set: id,
             visor: match (set.enabled(), set.animated()) {
-                (true, true) => "animated",
-                (true, false) => "on",
-                (false, _) => "off",
+                (true, true) => "动画",
+                (true, false) => "开",
+                (false, _) => "关",
             },
             rotation: set.rotation(),
             unknown_a: set.unknown_a(),
@@ -67,23 +67,23 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     }
 
     let identity = vec![
-        ("Sets", rows.len().to_string()),
+        ("套装数", rows.len().to_string()),
         (
-            "Animated",
+            "动画数",
             rows.iter()
-                .filter(|row| row.visor == "animated")
+                .filter(|row| row.visor == "动画")
                 .count()
                 .to_string(),
         ),
     ];
 
-    log::info!("assets/gmp: {path} {} sets", rows.len());
+    log::info!("assets/gmp: {path} {} 个套装", rows.len());
 
     Ok(Preview::Gmp(Box::new(Rendered { identity, rows })))
 }
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
-    section(ui, "Sets");
+    section(ui, "套装");
     table(ui, &COLUMNS, file.rows.len(), |ui, index| {
         let row = &file.rows[index];
         let cells = [

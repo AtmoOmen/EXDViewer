@@ -10,22 +10,22 @@ use crate::utils::file_name;
 
 /// The entry table's columns, each with the width its cells are padded to. The skeleton file is a
 /// link rather than a padded cell, so it sits at the end.
-const COLUMNS: [(&str, usize); 4] = [("Body", 28), ("Set", 5), ("Skeleton", 8), ("File", 8)];
+const COLUMNS: [(&str, usize); 4] = [("体型", 28), ("套装", 5), ("骨骼", 8), ("文件", 8)];
 
 /// The four templates that ship: what a set ID names in each, and the directory and letter its
 /// skeletons are filed under.
 const KINDS: [(&str, &str, &str, char); 4] = [
-    ("extra_met.est", "equipment set", "met", 'm'),
-    ("extra_top.est", "equipment set", "top", 't'),
+    ("extra_met.est", "装备套装", "met", 'm'),
+    ("extra_top.est", "装备套装", "top", 't'),
     (
         "faceskeletontemplate.est",
-        "character creation option",
+        "角色创建选项",
         "face",
         'f',
     ),
     (
         "hairskeletontemplate.est",
-        "character creation option",
+        "角色创建选项",
         "hair",
         'h',
     ),
@@ -55,12 +55,12 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let name = file_name(path).to_lowercase();
     let known = KINDS.iter().find(|(file, ..)| *file == name);
 
-    let mut identity = vec![("Entries", rows.len().to_string())];
+    let mut identity = vec![("条目", rows.len().to_string())];
     if let Some((_, names, ..)) = known {
-        identity.push(("Set names", (*names).to_owned()));
+        identity.push(("套装名", (*names).to_owned()));
     }
 
-    log::info!("assets/est: {path} {} entries", rows.len());
+    log::info!("assets/est: {path} {} 个条目", rows.len());
 
     Ok(Preview::Est(Box::new(Rendered {
         identity,
@@ -71,7 +71,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     let mut follow = None;
-    section(ui, "Entries");
+    section(ui, "条目");
     table(ui, &COLUMNS, file.rows.len(), |ui, index| {
         let (gender_race, set, id) = file.rows[index];
         let cells = [

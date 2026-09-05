@@ -19,22 +19,22 @@ use crate::utils::file_name;
 
 /// Prepended to the columns below where a file holds more than one group, since a single group has
 /// nothing to tell its rows apart from.
-const GROUP: (&str, usize) = ("Group", 5);
+const GROUP: (&str, usize) = ("分组", 5);
 
-const VISIBILITY: [(&str, usize); 3] = [("Instance", 10), ("Member", 9), ("Visibility", 10)];
+const VISIBILITY: [(&str, usize); 3] = [("实例", 10), ("成员", 9), ("可见性", 10)];
 
-const CLIP: [(&str, usize); 4] = [("Instance", 10), ("Member", 9), ("Min", 26), ("Max", 26)];
+const CLIP: [(&str, usize); 4] = [("实例", 10), ("成员", 9), ("最小", 26), ("最大", 26)];
 
-const UNDERWATER: [(&str, usize); 2] = [("Setting", 34), ("Value", 12)];
+const UNDERWATER: [(&str, usize); 2] = [("设置", 34), ("值", 12)];
 
 /// Everything one underwater group sets, in the order the format writes it.
 fn settings(group: uwb::Group) -> Vec<(String, String)> {
     let fog = |depth: &str, fog: uwb::Fog| {
         [
-            (format!("{depth} fog fade upper"), fog.vertical_fade_upper()),
-            (format!("{depth} fog fade lower"), fog.vertical_fade_lower()),
+            (format!("{depth} 雾渐隐上界"), fog.vertical_fade_upper()),
+            (format!("{depth} 雾渐隐下界"), fog.vertical_fade_lower()),
             (
-                format!("{depth} fog attenuation"),
+                format!("{depth} 雾衰减"),
                 fog.vertical_attenuation_strength(),
             ),
         ]
@@ -63,8 +63,8 @@ fn settings(group: uwb::Group) -> Vec<(String, String)> {
             "焦散渐隐范围".to_owned(),
             group.caustics_distance_fade_range(),
         ),
-        ("Caustics UV size 1".to_owned(), group.caustics_uv_size()[0]),
-        ("Caustics UV size 2".to_owned(), group.caustics_uv_size()[1]),
+        ("焦散 UV 尺寸 1".to_owned(), group.caustics_uv_size()[0]),
+        ("焦散 UV 尺寸 2".to_owned(), group.caustics_uv_size()[1]),
         (
             "焦散滚动速度".to_owned(),
             group.caustics_scroll_speed(),
@@ -79,10 +79,10 @@ fn settings(group: uwb::Group) -> Vec<(String, String)> {
     ])
     .map(|(name, value)| (name, format!("{value:.3}")));
 
-    std::iter::once(("Version".to_owned(), group.version().to_string()))
+    std::iter::once(("版本".to_owned(), group.version().to_string()))
         .chain(scalars)
         .chain(std::iter::once((
-            "Unknown".to_owned(),
+            "未知".to_owned(),
             group.unknown().to_string(),
         )))
         .collect()
@@ -238,20 +238,20 @@ fn rendered(
 
     let mut identity = Vec::new();
     if let Some(version) = source.version() {
-        identity.push(("Version", version.to_string()));
+        identity.push(("版本", version.to_string()));
     }
-    identity.push(("Groups", lengths.len().to_string()));
+    identity.push(("分组", lengths.len().to_string()));
     if let Some(instances) = source.instances() {
-        identity.push(("Entries", rows.len().to_string()));
-        identity.push(("Instances", instances.to_string()));
+        identity.push(("条目", rows.len().to_string()));
+        identity.push(("实例", instances.to_string()));
     }
     if let Some((least, mean, open)) = source.spread() {
-        identity.push(("Least visibility", format!("{least:.3}")));
-        identity.push(("Mean visibility", format!("{mean:.3}")));
-        identity.push(("Fully open", open.to_string()));
+        identity.push(("最低可见性", format!("{least:.3}")));
+        identity.push(("平均可见性", format!("{mean:.3}")));
+        identity.push(("完全开放", open.to_string()));
     }
 
-    log::info!("assets/zone: {path} {} rows", rows.len());
+    log::info!("assets/zone: {path} {} 行", rows.len());
 
     Preview::Zone(Box::new(Rendered {
         identity,
@@ -270,19 +270,19 @@ fn rendered(
 
 pub fn sky_visibility(path: &str, bytes: &[u8]) -> Result<Preview> {
     let file = svb::SkyVisibility::read(Cursor::new(bytes.to_vec()))?;
-    Ok(rendered(path, "Visibility", &VISIBILITY, Source::Sky(file)))
+    Ok(rendered(path, "可见性", &VISIBILITY, Source::Sky(file)))
 }
 
 pub fn clip_boxes(path: &str, bytes: &[u8]) -> Result<Preview> {
     let file = lcb::ClipBoxes::read(Cursor::new(bytes.to_vec()))?;
-    Ok(rendered(path, "Clip boxes", &CLIP, Source::Clip(file)))
+    Ok(rendered(path, "裁剪盒", &CLIP, Source::Clip(file)))
 }
 
 pub fn underwater(path: &str, bytes: &[u8]) -> Result<Preview> {
     let file = uwb::Underwater::read(Cursor::new(bytes.to_vec()))?;
     Ok(rendered(
         path,
-        "Values",
+        "值",
         &UNDERWATER,
         Source::Underwater(file),
     ))
@@ -291,13 +291,13 @@ pub fn underwater(path: &str, bytes: &[u8]) -> Result<Preview> {
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     let mut follow = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Level").weak());
+        ui.label(RichText::new("关卡").weak());
         if link(ui, file_name(&file.level), &file.level) {
             follow = Some(file.level.clone());
         }
         if matches!(file.source, Source::Clip(_)) {
             ui.separator();
-            for (scene, label) in [(false, "Table"), (true, "Scene")] {
+            for (scene, label) in [(false, "表格"), (true, "场景")] {
                 if ui
                     .selectable_label(file.placed.get() == scene, label)
                     .clicked()

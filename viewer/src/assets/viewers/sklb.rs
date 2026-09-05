@@ -22,7 +22,7 @@ fn bones(indices: &[i16]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     match listed.is_empty() {
-        true => "none".to_owned(),
+        true => "无".to_owned(),
         false => listed,
     }
 }
@@ -110,7 +110,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     identity.push(("骨骼", Bytes(file.skeleton().len()).to_string()));
 
     log::info!(
-        "assets/sklb: {path} {} layers, {} bytes of havok",
+        "assets/sklb: {path} {} 个动画层，{} 字节 havok 数据",
         layers.len(),
         file.skeleton().len()
     );
@@ -144,7 +144,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
             ScrollArea::both().auto_shrink(false).show(ui, |ui| {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                 for (layer, bones) in &file.layers {
-                    heading(ui, &format!("Layer {layer:#010x}"));
+                    heading(ui, &format!("图层 {layer:#010x}"));
                     ui.label(RichText::new(bones).monospace());
                 }
             });
@@ -152,7 +152,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
         }
         (_, Err(e)) => {
             ui.centered_and_justified(|ui| {
-                ui.colored_label(Color32::RED, format!("Could not read this skeleton: {e}"));
+                ui.colored_label(Color32::RED, format!("无法读取此骨骼：{e}"));
             });
             return;
         }

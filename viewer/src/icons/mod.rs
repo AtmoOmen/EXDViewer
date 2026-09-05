@@ -156,7 +156,7 @@ impl IconBrowser {
     }
 
     pub fn open_palette(&mut self) {
-        self.palette = Some(Palette::new("Find Icon…", "Id", self.lookup.clone()));
+        self.palette = Some(Palette::new("查找图标…", "ID", self.lookup.clone()));
     }
 
     pub fn ui(
@@ -384,7 +384,7 @@ impl IconBrowser {
                     select(
                         ui,
                         Category::All,
-                        format!("All icons ({})", thousands(self.all.len())),
+                        format!("全部图标 ({})", thousands(self.all.len())),
                     );
                 }
 
@@ -414,17 +414,17 @@ impl IconBrowser {
 
                         if query.is_empty() {
                             ui.add_space(8.0);
-                            ui.label(RichText::new("OTHER SETS").weak().small());
+                            ui.label(RichText::new("其他集合").weak().small());
                             select(
                                 ui,
                                 Category::Localized,
-                                format!("Language icons ({})", thousands(localized)),
+                                format!("语言图标 ({})", thousands(localized)),
                             );
                             select(
                                 ui,
                                 Category::Unreferenced,
                                 format!(
-                                    "Other icons ({})",
+                                    "其他图标 ({})",
                                     thousands(self.all.len().saturating_sub(refs.referenced()))
                                 ),
                             );
@@ -438,9 +438,9 @@ impl IconBrowser {
                             ui.label(format!(
                                 "{} {}/{}",
                                 if progress.reading_rows {
-                                    "Reading sheets…"
+                                    "正在读取表格…"
                                 } else {
-                                    "Reading schemas…"
+                                    "正在读取表定义…"
                                 },
                                 thousands(progress.done),
                                 thousands(progress.total)
@@ -455,10 +455,10 @@ impl IconBrowser {
                         ui.add_space(8.0);
                         if query.is_empty()
                             && ui
-                                .button("Load Backreferences")
+                                .button("加载反向引用")
                                 .on_hover_text(
-                                    "Reads every sheet that names an icon so each one can list \
-                                     the rows using it. Tens of megabytes.",
+                                    "读取所有引用图标的表格，每个图标即可列出使用它的行。\
+                                     数据量达数十 MB。",
                                 )
                                 .clicked()
                         {
@@ -495,9 +495,9 @@ impl IconBrowser {
                     }
                     let capped = self.shown.len().min(self.pages * PAGE);
                     ui.label(if capped < self.shown.len() {
-                        format!("{} icons, scroll for more", thousands(capped))
+                        format!("{} 个图标，滚动查看更多", thousands(capped))
                     } else {
-                        format!("{} icons", thousands(self.shown.len()))
+                        format!("{} 个图标", thousands(self.shown.len()))
                     });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if CollapsibleSidePanel::is_collapsed(ui.ctx(), "icon_info") {
@@ -505,24 +505,24 @@ impl IconBrowser {
                         }
                         if ui
                             .add_enabled(self.zoom + 1 < ZOOM_STEPS.len(), Button::new("+"))
-                            .on_hover_text("Zoom in")
+                            .on_hover_text("放大")
                             .clicked()
                         {
                             self.zoom += 1;
                         }
                         if ui
                             .add_enabled(self.zoom > 0, Button::new("−"))
-                            .on_hover_text("Zoom out")
+                            .on_hover_text("缩小")
                             .clicked()
                         {
                             self.zoom -= 1;
                         }
-                        if capped < self.shown.len() && ui.button("Load all").clicked() {
+                        if capped < self.shown.len() && ui.button("加载全部").clicked() {
                             self.pages = self.shown.len().div_ceil(PAGE);
                         }
                         ui.add_sized(
                             Vec2::new(90.0, ui.spacing().interact_size.y),
-                            TextEdit::singleline(&mut self.lookup).hint_text("Id"),
+                            TextEdit::singleline(&mut self.lookup).hint_text("ID"),
                         );
                     });
                 });
@@ -533,7 +533,7 @@ impl IconBrowser {
                 Load::Idle | Load::Loading(_) => {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Loading path list…");
+                        ui.label("正在加载路径列表…");
                     });
                 }
                 Load::Failed(error) => {
@@ -716,7 +716,7 @@ impl IconBrowser {
                 }
             };
             let response = response
-                .on_hover_text(format!("Id: {icon_id}\nPath: {path}"))
+                .on_hover_text(format!("ID: {icon_id}\n路径: {path}"))
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             let clicked = response.clicked();
             icon_context_menu(
@@ -784,7 +784,7 @@ impl IconBrowser {
                 CentralPanel::default().show(ui, |ui| {
                     let Some(icon_id) = self.selected else {
                         ui.centered_and_justified(|ui| {
-                            ui.label(RichText::new("No icon selected").weak());
+                            ui.label(RichText::new("未选择图标").weak());
                         });
                         return;
                     };
@@ -828,7 +828,7 @@ impl IconBrowser {
                         .clicked()
                 }
                 ManagedIcon::Failed(_) => {
-                    ui.colored_label(Color32::RED, "Failed to load icon");
+                    ui.colored_label(Color32::RED, "图标加载失败");
                     false
                 }
                 ManagedIcon::Loading | ManagedIcon::NotLoaded => {
@@ -872,7 +872,7 @@ impl IconBrowser {
                 ));
             }
             if ui
-                .button("Copy Id")
+                .button("复制 ID")
                 .on_hover_text("复制图标 ID 到剪贴板")
                 .clicked()
             {
@@ -896,21 +896,21 @@ impl IconBrowser {
             .icons()
             .is_some_and(|index| index.localized(icon_id))
         {
-            ui.label(RichText::new("Has a language-specific file").weak().small());
+            ui.label(RichText::new("有针对特定语言的文件").weak().small());
         }
         if backend.icons().is_some_and(|index| !index.hires(icon_id)) {
-            ui.label(RichText::new("No _hr1 file").weak().small());
+            ui.label(RichText::new("没有 _hr1 文件").weak().small());
         }
 
         ui.add_space(8.0);
         let mut followed = None;
         match self.refs() {
             None => {
-                ui.label(RichText::new("Load Backreferences to see usages").weak());
+                ui.label(RichText::new("加载反向引用以查看使用位置").weak());
             }
             Some(refs) => {
                 let uses = refs.uses(icon_id);
-                ui.label(format!("Used by {} row(s)", thousands(uses.len())));
+                ui.label(format!("被 {} 个行使用", thousands(uses.len())));
                 ui.separator();
                 let row_height = ui.text_style_height(&egui::TextStyle::Button);
                 if let Some(at) = nav.apply(uses.len()) {

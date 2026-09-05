@@ -265,7 +265,7 @@ async fn send(url: &str, paths: &[String]) -> anyhow::Result<()> {
     .await?;
     anyhow::ensure!(
         response.ok,
-        "server answered {} to {} paths",
+        "服务器对 {} 个路径返回了 {}",
         response.status,
         paths.len()
     );
@@ -289,13 +289,9 @@ pub fn indicator(ui: &mut egui::Ui, backend: Option<&Backend>) {
     }
 
     if ui
-        .button(format!(
-            "{pending} new path name{}",
-            if pending == 1 { "" } else { "s" }
-        ))
+        .button(format!("{pending} 个新路径名称",))
         .on_hover_text(
-            "File names this install carries that the community path list does not know. Click \
-             to review.",
+            "当前安装中社区路径列表不知道的文件名。点击查看。",
         )
         .clicked()
     {
@@ -311,30 +307,28 @@ pub fn draw_window(ctx: &egui::Context, backend: Option<&Backend>) {
     };
     let mut shown = REPORT_WINDOW_SHOWN.get(ctx);
     let was_shown = shown;
-    egui::Window::new("Community Path Reports")
+    egui::Window::new("社区路径报告")
         .open(&mut shown)
         .show(ctx, |ui| {
             let queued = reporter.state.borrow().queue.clone();
             if queued.is_empty() {
-                ui.label("No new file names found yet.");
+                ui.label("尚未发现新的文件名。");
                 return;
             }
 
             ui.label(format!(
-                "Found {} file name{} the community path list does not know.",
+                "社区路径列表不知道 {} 个文件名。",
                 queued.len(),
-                if queued.len() == 1 { "" } else { "s" }
             ));
 
             match REPORT_PATHS.get(ctx) {
                 None => {
                     ui.horizontal(|ui| {
                         if ui
-                            .button("Report")
+                            .button("上报")
                             .on_hover_text(
-                                "Sends these names to ResLogger2 through the XIViewer API so \
-                                 everyone's browser can show them. Nothing else about your \
-                                 session is sent.",
+                                "通过 XIViewer API 将这些文件名发送给 ResLogger2，每个人的浏览器都能 \
+                                 显示它们。除此之外不会发送与你的会话相关的任何信息。",
                             )
                             .clicked()
                         {
@@ -342,7 +336,7 @@ pub fn draw_window(ctx: &egui::Context, backend: Option<&Backend>) {
                         }
                         if ui
                             .button("不用了")
-                            .on_hover_text("Remembered; you will not be asked again.")
+                            .on_hover_text("已记住，不会再询问。")
                             .clicked()
                         {
                             REPORT_PATHS.set(ctx, Some(false));
@@ -350,10 +344,10 @@ pub fn draw_window(ctx: &egui::Context, backend: Option<&Backend>) {
                     });
                 }
                 Some(true) => {
-                    ui.label(RichText::new("Reporting is on.").weak());
+                    ui.label(RichText::new("已开启路径上报。").weak());
                 }
                 Some(false) => {
-                    ui.label(RichText::new("Reporting is off.").weak());
+                    ui.label(RichText::new("已关闭路径上报。").weak());
                 }
             }
 
@@ -362,7 +356,7 @@ pub fn draw_window(ctx: &egui::Context, backend: Option<&Backend>) {
                     ui.label(RichText::new(&path.display).monospace().color(Color32::GRAY));
                 }
                 if let Some(rest) = queued.len().checked_sub(LISTED).filter(|rest| *rest > 0) {
-                    ui.label(RichText::new(format!("and {rest} more")).italics());
+                    ui.label(RichText::new(format!("另有 {rest} 个")).italics());
                 }
             });
         });
@@ -376,10 +370,10 @@ pub fn menu_item(ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let mut enabled = REPORT_PATHS.get(&ctx) == Some(true);
     if ui
-        .checkbox(&mut enabled, "Report New Paths to ResLogger2")
+        .checkbox(&mut enabled, "向 ResLogger2 上报新路径")
         .on_hover_text(
-            "File names this install carries that the community path list does not know are sent \
-             on through the XIViewer API. Paths only; nothing identifies you.",
+            "当前安装中社区路径列表不知道的文件名会通过 XIViewer API 上报。仅路径，不含任何 \
+             可识别身份的信息。",
         )
         .changed()
     {
@@ -388,7 +382,7 @@ pub fn menu_item(ui: &mut egui::Ui) {
 
     let mut window_shown = REPORT_WINDOW_SHOWN.get(&ctx);
     if ui
-        .checkbox(&mut window_shown, "Show Path Report Window")
+        .checkbox(&mut window_shown, "显示路径报告窗口")
         .changed()
     {
         REPORT_WINDOW_SHOWN.set(&ctx, window_shown);

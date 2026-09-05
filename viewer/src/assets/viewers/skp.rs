@@ -65,11 +65,11 @@ fn named(name: skp::Name) -> String {
 /// The sections the file declares, in flag order.
 fn declared(sections: skp::Sections) -> String {
     let listed = [
-        (sections.animation(), "animation"),
-        (sections.look_at(), "look-at"),
+        (sections.animation(), "动画"),
+        (sections.look_at(), "注视"),
         (sections.ccd(), "CCD"),
-        (sections.feet(), "foot IK"),
-        (sections.slope(), "slope"),
+        (sections.feet(), "脚部 IK"),
+        (sections.slope(), "坡面"),
     ]
     .iter()
     .filter(|(declared, _)| *declared)
@@ -77,7 +77,7 @@ fn declared(sections: skp::Sections) -> String {
     .collect::<Vec<_>>()
     .join(", ");
     match listed.is_empty() {
-        true => "none".to_owned(),
+        true => "无".to_owned(),
         false => listed,
     }
 }
@@ -142,31 +142,31 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 
     let mut identity = vec![
         (
-            "Version",
+            "版本",
             file.version()
                 .number()
                 .map_or_else(|| format!("{:?}", file.version()), |tag| tag.to_string()),
         ),
-        ("Sections", declared(file.sections())),
-        ("Animation layers", layers.len().to_string()),
+        ("分区", declared(file.sections())),
+        ("动画层", layers.len().to_string()),
     ];
     if file.sections().look_at() {
-        identity.push(("Look-at parameters", params.len().to_string()));
-        identity.push(("Look-at chains", groups.len().to_string()));
+        identity.push(("注视参数", params.len().to_string()));
+        identity.push(("注视链", groups.len().to_string()));
     }
     // Neither section has a known payload, so the offset is the whole of what the file says.
     if file.sections().ccd() {
-        identity.push(("CCD offset", format!("{:#x}", file.ccd_offset())));
+        identity.push(("CCD 偏移", format!("{:#x}", file.ccd_offset())));
     }
     if file.sections().feet() {
-        identity.push(("Foot IK offset", format!("{:#x}", file.foot_offset())));
+        identity.push(("脚部 IK 偏移", format!("{:#x}", file.foot_offset())));
     }
     if let Some(slope) = &slope {
-        identity.push(("Slope points", slope.points.len().to_string()));
+        identity.push(("坡面点", slope.points.len().to_string()));
     }
 
     log::info!(
-        "assets/skp: {path} sections {}, {} layers, {} look-at chains",
+        "assets/skp: {path} 分区 {}，{} 个动画层，{} 条注视链",
         declared(file.sections()),
         layers.len(),
         groups.len()
@@ -185,7 +185,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     let mut follow = None;
     ui.horizontal(|ui| {
-        ui.label(RichText::new("Skeleton").weak());
+        ui.label(RichText::new("骨骼").weak());
         if link(ui, file_name(&file.skeleton), &file.skeleton) {
             follow = Some(file.skeleton.clone());
         }
@@ -194,9 +194,9 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
 
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         if !file.layers.is_empty() {
-            section(ui, "Animation layers");
+            section(ui, "动画层");
             for (layer, bones) in &file.layers {
-                heading(ui, &format!("Layer {layer:#010x}"));
+                heading(ui, &format!("图层 {layer:#010x}"));
                 ui.label(RichText::new(bones).monospace());
             }
         }
@@ -204,7 +204,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
         if !file.params.is_empty() {
             ui.add_space(8.0);
             ui.separator();
-            section(ui, "Look-at parameters");
+            section(ui, "注视参数");
             ScrollArea::horizontal()
                 .id_salt("skp_params_scroll")
                 .show(ui, |ui| {
@@ -217,12 +217,12 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
                                 ui,
                                 &[
                                     "#",
-                                    "Limit angles",
-                                    "Limit angle",
-                                    "Forward rotation",
-                                    "Eye position",
-                                    "Gain",
-                                    "Flags",
+                                    "限制角度",
+                                    "限制角",
+                                    "前向旋转",
+                                    "眼睛位置",
+                                    "增益",
+                                    "标志",
                                 ],
                             );
                             for param in &file.params {
@@ -252,14 +252,14 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
         if !file.groups.is_empty() {
             ui.add_space(8.0);
             ui.separator();
-            section(ui, "Look-at chains");
+            section(ui, "注视链");
             for group in &file.groups {
                 heading(ui, &group.name);
                 egui::Grid::new(("skp_chain", &group.name))
                     .num_columns(4)
                     .striped(true)
                     .show(ui, |ui| {
-                        headers(ui, &["Priority", "Parameter", "Bone", "Parent"]);
+                        headers(ui, &["优先级", "参数", "骨骼", "父骨骼"]);
                         for element in &group.elements {
                             for cell in [
                                 element.priority.to_string(),
@@ -279,15 +279,15 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
         if let Some(slope) = &file.slope {
             ui.add_space(8.0);
             ui.separator();
-            section(ui, "Slope");
+            section(ui, "坡面");
             ui.label(
                 RichText::new(format!(
-                    "Angles {:.3}, {:.3} rad",
+                    "角度 {:.3}, {:.3} rad",
                     slope.angles[0], slope.angles[1]
                 ))
                 .monospace(),
             );
-            heading(ui, "Points");
+            heading(ui, "点");
             for point in &slope.points {
                 ui.label(RichText::new(axes(*point)).monospace());
             }

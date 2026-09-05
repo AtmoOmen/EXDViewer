@@ -97,8 +97,8 @@ fn shown(value: &envs::Value) -> String {
         envs::Value::Float(value) => format!("{value:.3}"),
         envs::Value::Unsigned(value) => value.to_string(),
         envs::Value::Flag(on) => match on {
-            true => "yes".to_owned(),
-            false => "no".to_owned(),
+            true => "是".to_owned(),
+            false => "否".to_owned(),
         },
         envs::Value::Colour(colour) => described(*colour),
         envs::Value::Path(path) => path.clone(),
@@ -153,10 +153,10 @@ fn rendered(path: &str, source: Source) -> Preview {
     }
 
     let mut identity = vec![
-        ("Version", set.version().to_string()),
-        ("Weathers", set.weathers().len().to_string()),
-        ("Sets", sets.to_string()),
-        ("Keyframes", keyframes.to_string()),
+        ("版本", set.version().to_string()),
+        ("天气", set.weathers().len().to_string()),
+        ("集合", sets.to_string()),
+        ("关键帧", keyframes.to_string()),
     ];
     let options = set
         .options()
@@ -166,10 +166,10 @@ fn rendered(path: &str, source: Source) -> Preview {
         .map(|(_, name)| name)
         .collect::<Vec<_>>();
     if !options.is_empty() {
-        identity.push(("Options", options.join(", ")));
+        identity.push(("选项", options.join(", ")));
     }
 
-    log::info!("assets/zone: {path} {} weathers", set.weathers().len());
+    log::info!("assets/zone: {path} {} 个天气", set.weathers().len());
 
     Preview::Environments(Box::new(Rendered {
         identity,
@@ -219,7 +219,7 @@ pub fn ui(
         shown.push((index, expanded));
     }
 
-    section(ui, "Weathers");
+    section(ui, "天气");
     let picked = file.selected(ui);
     let mut selected = picked;
     let mut toggled = None;
@@ -340,7 +340,7 @@ impl Rendered {
                     colors: Vec::new(),
                     asset: None,
                     detail: format!(
-                        "{} sets over {:.0}s",
+                        "{} 个集合，持续 {:.0} 秒",
                         weather.sets().len(),
                         weather.length()
                     ),
@@ -349,10 +349,10 @@ impl Rendered {
             At::Set(weather, index) => {
                 let set = self.set(weather, index);
                 Line {
-                    label: set.name().unwrap_or("Unnamed").to_owned(),
+                    label: set.name().unwrap_or("未命名").to_owned(),
                     colors: Vec::new(),
                     asset: None,
-                    detail: format!("{} keyframes", set.keyframes().len()),
+                    detail: format!("{} 个关键帧", set.keyframes().len()),
                 }
             }
             At::Keyframe(weather, set, index) => {
@@ -383,11 +383,11 @@ impl Rendered {
             At::Weather(index) => {
                 let weather = self.weather(index);
                 [
-                    ("Weather", weather.id().to_string()),
-                    ("Length", format!("{:.0}s", weather.length())),
-                    ("Sets", weather.sets().len().to_string()),
-                    ("Parameter", weather.parameter().to_string()),
-                    ("Weight", format!("{:.3}", weather.weight())),
+                    ("天气", weather.id().to_string()),
+                    ("时长", format!("{:.0}s", weather.length())),
+                    ("集合", weather.sets().len().to_string()),
+                    ("参数", weather.parameter().to_string()),
+                    ("权重", format!("{:.3}", weather.weight())),
                 ]
                 .map(|(label, value)| (label.to_owned(), value))
                 .into()
@@ -395,16 +395,16 @@ impl Rendered {
             At::Set(weather, index) => {
                 let set = self.set(weather, index);
                 [
-                    ("Animates", set.name().unwrap_or("Unnamed").to_owned()),
-                    ("Kind", set.kind().to_string()),
-                    ("Keyframes", set.keyframes().len().to_string()),
+                    ("动画对象", set.name().unwrap_or("未命名").to_owned()),
+                    ("类型", set.kind().to_string()),
+                    ("关键帧", set.keyframes().len().to_string()),
                 ]
                 .map(|(label, value)| (label.to_owned(), value))
                 .into()
             }
             At::Keyframe(weather, set, index) => {
                 let keyframe = self.keyframe(weather, set, index);
-                std::iter::once(("Time".to_owned(), clock(keyframe.time())))
+                std::iter::once(("时间".to_owned(), clock(keyframe.time())))
                     .chain(scalars(keyframe).map(|(name, value)| (titled(name), shown(value))))
                     .collect()
             }
@@ -468,7 +468,7 @@ impl Rendered {
                 if !colors.is_empty() {
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.label(RichText::new("Colors").weak());
+                    ui.label(RichText::new("颜色").weak());
                     ui.add_space(4.0);
                     egui::Grid::new("envs_colors")
                         .num_columns(3)
@@ -488,7 +488,7 @@ impl Rendered {
                 if !assets.is_empty() {
                     ui.add_space(8.0);
                     ui.separator();
-                    ui.label(RichText::new("Assets").weak());
+                    ui.label(RichText::new("资源").weak());
                     ui.add_space(4.0);
                     for path in assets {
                         if link(ui, file_name(path), path) {

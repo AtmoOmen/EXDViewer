@@ -155,6 +155,6 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));
-    log::info!("character: {} named characters to stand in", found.len());
+    log::info!("角色：{} 个有名角色可登场", found.len());
     Ok(found)
 }

@@ -153,7 +153,7 @@ fn integer(blocks: &[Block], name: &str) -> Option<i32> {
 /// An index into one of the effect's lists, which is written `-1` where there is none.
 fn reference(value: Option<i32>) -> String {
     match value {
-        Some(-1) | None => "none".to_owned(),
+        Some(-1) | None => "无".to_owned(),
         Some(index) => index.to_string(),
     }
 }
@@ -161,7 +161,7 @@ fn reference(value: Option<i32>) -> String {
 /// What a row says about an entry that can be switched off.
 fn disabled(blocks: &[Block], name: &str) -> &'static str {
     match find(blocks, name).and_then(Block::bool) {
-        Some(false) => "  off",
+        Some(false) => "  关闭",
         _ => "",
     }
 }
@@ -185,7 +185,7 @@ fn payload(block: &Block, bytes: &[u8]) -> String {
         (_, [byte]) => byte.to_string(),
         (_, [a, b, c, d]) => scalar([*a, *b, *c, *d]),
         (_, []) => String::new(),
-        _ => format!("{} bytes", bytes.len()),
+        _ => format!("{} 字节", bytes.len()),
     }
 }
 
@@ -252,7 +252,7 @@ impl Build {
                 }
             }
             Payload::Keys(keys) => {
-                self.row(depth, block.name().as_str(), format!("{} keys", keys.len()));
+                self.row(depth, block.name().as_str(), format!("{} 个关键帧", keys.len()));
             }
             Payload::Bytes(bytes) => {
                 let value = payload(block, bytes);
@@ -279,34 +279,34 @@ impl Build {
         if file.properties().is_empty() {
             return;
         }
-        self.row(0, "Settings", file.properties().len().to_string());
+        self.row(0, "设置", file.properties().len().to_string());
         for block in file.properties() {
             self.block(block, 1);
         }
     }
 
     fn schedulers(&mut self, file: &Avfx) {
-        if !self.list("Schedulers", file.schedulers().len()) {
+        if !self.list("调度器", file.schedulers().len()) {
             return;
         }
         for (index, scheduler) in file.schedulers().iter().enumerate() {
             let detail = format!(
-                "{} items, {} triggers",
+                "{} 个条目, {} 个触发器",
                 scheduler.items().len(),
                 scheduler.triggers().len()
             );
-            self.row(1, format!("Scheduler {index}"), detail);
+            self.row(1, format!("调度器 {index}"), detail);
             for block in scheduler.properties() {
                 self.block(block, 2);
             }
             for (label, items) in [
                 ("Item", scheduler.items()),
-                ("Trigger", scheduler.triggers()),
+                ("触发器", scheduler.triggers()),
             ] {
                 for (index, item) in items.iter().enumerate() {
                     let blocks = item.blocks();
                     let detail = format!(
-                        "timeline {}  start {}{}",
+                        "时间轴 {}  开始 {}{}",
                         reference(integer(blocks, "TlNo")),
                         reference(integer(blocks, "StTm")),
                         disabled(blocks, "bEna")
@@ -318,29 +318,29 @@ impl Build {
     }
 
     fn timelines(&mut self, file: &Avfx) {
-        if !self.list("Timelines", file.timelines().len()) {
+        if !self.list("时间轴", file.timelines().len()) {
             return;
         }
         for (index, timeline) in file.timelines().iter().enumerate() {
             let properties = timeline.properties();
             let detail = format!(
-                "loop {}..{}  {} items",
+                "循环 {}..{}  {} 个条目",
                 reference(integer(properties, "LpSt")),
                 reference(integer(properties, "LpEd")),
                 timeline.items().len()
             );
-            self.row(1, format!("Timeline {index}"), detail).fields = vec![
+            self.row(1, format!("时间轴 {index}"), detail).fields = vec![
                 (
-                    "Loop",
+                    "循环",
                     format!(
                         "{}..{}",
                         reference(integer(properties, "LpSt")),
                         reference(integer(properties, "LpEd"))
                     ),
                 ),
-                ("Binder", reference(integer(properties, "BnNo"))),
-                ("Items", timeline.items().len().to_string()),
-                ("Clips", timeline.clips().len().to_string()),
+                ("绑定器", reference(integer(properties, "BnNo"))),
+                ("条目", timeline.items().len().to_string()),
+                ("片段", timeline.clips().len().to_string()),
             ];
             for block in properties {
                 self.block(block, 2);
@@ -348,7 +348,7 @@ impl Build {
             for (index, item) in timeline.items().iter().enumerate() {
                 let blocks = item.blocks();
                 let detail = format!(
-                    "{}..{}  emitter {}  binder {}  effector {}{}",
+                    "{}..{}  发射器 {}  绑定器 {}  效果器 {}{}",
                     reference(integer(blocks, "StTm")),
                     reference(integer(blocks, "EdTm")),
                     reference(integer(blocks, "EmNo")),
@@ -366,53 +366,53 @@ impl Build {
 
     fn clip(&mut self, index: usize, clip: &Clip) {
         let kind = format!("{:?}", clip.kind());
-        self.row(2, format!("Clip {index}"), &kind).fields = vec![
+        self.row(2, format!("片段 {index}"), &kind).fields = vec![
             ("Kind", kind.clone()),
-            ("Integers", numbers(clip.integers())),
+            ("整数", numbers(clip.integers())),
             (
-                "Floats",
+                "浮点数",
                 numbers(clip.floats().map(|value| format!("{value:.3}"))),
             ),
         ];
     }
 
     fn emitters(&mut self, file: &Avfx) {
-        if !self.list("Emitters", file.emitters().len()) {
+        if !self.list("发射器", file.emitters().len()) {
             return;
         }
         for (index, emitter) in file.emitters().iter().enumerate() {
             let properties = emitter.properties();
             let detail = format!(
-                "kind {}  life {}  {} particles, {} emitters",
+                "类型 {}  寿命 {}  {} 个粒子, {} 个发射器",
                 reference(integer(properties, "EVT")),
                 reference(integer(properties, "Life")),
                 emitter.particles().len(),
                 emitter.emitters().len()
             );
-            self.row(1, format!("Emitter {index}"), detail).fields = vec![
+            self.row(1, format!("发射器 {index}"), detail).fields = vec![
                 (
                     "Kind",
                     format!("EVT {}", reference(integer(properties, "EVT"))),
                 ),
-                ("Life", reference(integer(properties, "Life"))),
+                ("寿命", reference(integer(properties, "Life"))),
                 (
-                    "Loop",
+                    "循环",
                     format!(
                         "{}..{}",
                         reference(integer(properties, "LpSt")),
                         reference(integer(properties, "LpEd"))
                     ),
                 ),
-                ("Sound", reference(integer(properties, "SdNo"))),
-                ("Particles", emitter.particles().len().to_string()),
-                ("Emitters", emitter.emitters().len().to_string()),
+                ("声音", reference(integer(properties, "SdNo"))),
+                ("粒子", emitter.particles().len().to_string()),
+                ("发射器", emitter.emitters().len().to_string()),
             ];
             for block in properties {
                 self.block(block, 2);
             }
             for (label, items) in [
-                ("Particle", emitter.particles()),
-                ("Emitter", emitter.emitters()),
+                ("粒子", emitter.particles()),
+                ("发射器", emitter.emitters()),
             ] {
                 for (index, item) in items.iter().enumerate() {
                     let blocks = item.blocks();
@@ -430,7 +430,7 @@ impl Build {
 
     /// The three lists the file writes as one block each, which are read only by their tags.
     fn blocks(&mut self, label: &str, kind: &str, blocks: &[Block]) {
-        if !self.list(&format!("{label}s"), blocks.len()) {
+        if !self.list(label, blocks.len()) {
             return;
         }
         for (index, block) in blocks.iter().enumerate() {
@@ -441,9 +441,9 @@ impl Build {
                 "Kind",
                 format!("{kind} {}", reference(integer(inner, kind))),
             )];
-            fields.extend(life.map(|life| ("Life", life.to_string())));
+            fields.extend(life.map(|life| ("寿命", life.to_string())));
             fields.push((
-                "Loop",
+                "循环",
                 format!(
                     "{}..{}",
                     reference(integer(inner, "LpSt")),
@@ -452,8 +452,8 @@ impl Build {
             ));
 
             let detail = match life {
-                Some(life) => format!("kind {}  life {life}", reference(integer(inner, kind))),
-                None => format!("kind {}", reference(integer(inner, kind))),
+                Some(life) => format!("类型 {}  寿命 {life}", reference(integer(inner, kind))),
+                None => format!("类型 {}", reference(integer(inner, kind))),
             };
             self.row(1, format!("{label} {index}"), detail).fields = fields;
             for child in inner {
@@ -463,23 +463,23 @@ impl Build {
     }
 
     fn textures(&mut self, file: &Avfx) {
-        if !self.list("Textures", file.textures().len()) {
+        if !self.list("纹理", file.textures().len()) {
             return;
         }
         for (index, path) in file.textures().iter().enumerate() {
-            self.row(1, format!("Tex {index}"), String::new()).asset = Some(path.clone());
+            self.row(1, format!("纹理 {index}"), String::new()).asset = Some(path.clone());
         }
     }
 
     fn models(&mut self, file: &Avfx) {
-        if !self.list("Models", file.models().len()) {
+        if !self.list("模型", file.models().len()) {
             return;
         }
         for (index, model) in file.models().iter().enumerate() {
-            self.row(1, format!("Model {index}"), summary(model)).fields = vec![
-                ("Vertices", model.vertices().len().to_string()),
-                ("Triangles", model.triangles().len().to_string()),
-                ("Emit points", model.emit_vertices().len().to_string()),
+            self.row(1, format!("模型 {index}"), summary(model)).fields = vec![
+                ("顶点", model.vertices().len().to_string()),
+                ("三角形", model.triangles().len().to_string()),
+                ("发射点", model.emit_vertices().len().to_string()),
             ];
         }
     }
@@ -488,7 +488,7 @@ impl Build {
 /// A model, which the file holds whole rather than naming a `.mdl` beside it.
 fn summary(model: &Model) -> String {
     format!(
-        "{} vertices, {} triangles, {} emit points",
+        "{} 个顶点, {} 个三角形, {} 个发射点",
         model.vertices().len(),
         model.triangles().len(),
         model.emit_vertices().len()
@@ -497,28 +497,28 @@ fn summary(model: &Model) -> String {
 
 fn identity(file: &Avfx) -> Vec<(&'static str, String)> {
     vec![
-        ("Version", format!("{:#010x}", file.version())),
-        ("Schedulers", file.schedulers().len().to_string()),
-        ("Timelines", file.timelines().len().to_string()),
-        ("Emitters", file.emitters().len().to_string()),
-        ("Particles", file.particles().len().to_string()),
-        ("Effectors", file.effectors().len().to_string()),
-        ("Binders", file.binders().len().to_string()),
-        ("Textures", file.textures().len().to_string()),
-        ("Models", file.models().len().to_string()),
+        ("版本", format!("{:#010x}", file.version())),
+        ("调度器", file.schedulers().len().to_string()),
+        ("时间轴", file.timelines().len().to_string()),
+        ("发射器", file.emitters().len().to_string()),
+        ("粒子", file.particles().len().to_string()),
+        ("效果器", file.effectors().len().to_string()),
+        ("绑定器", file.binders().len().to_string()),
+        ("纹理", file.textures().len().to_string()),
+        ("模型", file.models().len().to_string()),
     ]
 }
 
 /// The effect's own settings, leaving out the ones sitting at a value that does nothing.
 fn settings(file: &Avfx) -> Vec<(&'static str, String)> {
     let mut rows: Vec<(&'static str, String)> = Vec::new();
-    rows.extend(file.draw_layer().map(|v| ("Draw layer", format!("{v:?}"))));
-    rows.extend(file.draw_order().map(|v| ("Draw order", format!("{v:?}"))));
+    rows.extend(file.draw_layer().map(|v| ("绘制层", format!("{v:?}"))));
+    rows.extend(file.draw_order().map(|v| ("绘制顺序", format!("{v:?}"))));
     rows.extend(
         file.directional_light_source()
-            .map(|v| ("Directional light", format!("{v:?}"))),
+            .map(|v| ("平行光", format!("{v:?}"))),
     );
-    for (label, source) in ["Point light 1", "Point light 2"]
+    for (label, source) in ["点光源 1", "点光源 2"]
         .into_iter()
         .zip(file.point_light_sources())
     {
@@ -526,63 +526,63 @@ fn settings(file: &Avfx) -> Vec<(&'static str, String)> {
     }
 
     if file.clip_box_enabled() == Some(true) {
-        rows.extend(file.clip_box().map(|v| ("Clip box", axes(v))));
-        rows.extend(file.clip_box_size().map(|v| ("Clip box size", axes(v))));
+        rows.extend(file.clip_box().map(|v| ("裁剪盒", axes(v))));
+        rows.extend(file.clip_box_size().map(|v| ("裁剪盒尺寸", axes(v))));
     }
     if file.clip_own_setting() == Some(true) {
         rows.extend(
             file.near_clip()
-                .map(|(from, to)| ("Near clip", format!("{from:.3} to {to:.3}"))),
+                .map(|(from, to)| ("近裁剪", format!("{from:.3} 到 {to:.3}"))),
         );
         rows.extend(
             file.far_clip()
-                .map(|(from, to)| ("Far clip", format!("{from:.3} to {to:.3}"))),
+                .map(|(from, to)| ("远裁剪", format!("{from:.3} 到 {to:.3}"))),
         );
     }
     if file.global_fog_enabled() == Some(true) {
         rows.extend(
             file.global_fog_influence()
-                .map(|v| ("Global fog", format!("{v:.3}"))),
+                .map(|v| ("全局雾", format!("{v:.3}"))),
         );
     }
 
     rows.extend(
         file.revised_position()
             .filter(|v| *v != [0.0; 3])
-            .map(|v| ("Position", axes(v))),
+            .map(|v| ("位置", axes(v))),
     );
     rows.extend(
         file.revised_rotation()
             .filter(|v| *v != [0.0; 3])
-            .map(|v| ("Rotation", axes(v))),
+            .map(|v| ("旋转", axes(v))),
     );
     rows.extend(
         file.revised_scale()
             .filter(|v| *v != [1.0; 3])
-            .map(|v| ("Scale", axes(v))),
+            .map(|v| ("缩放", axes(v))),
     );
     rows.extend(
         file.revised_colour()
             .filter(|v| *v != [1.0; 3])
-            .map(|v| ("Color", axes(v))),
+            .map(|v| ("颜色", axes(v))),
     );
 
     for (label, fade) in [
-        ("Fade X", file.fade_x()),
-        ("Fade Y", file.fade_y()),
-        ("Fade Z", file.fade_z()),
+        ("淡出 X", file.fade_x()),
+        ("淡出 Y", file.fade_y()),
+        ("淡出 Z", file.fade_z()),
     ] {
         rows.extend(
             fade.filter(|fade| fade.enabled())
-                .map(|fade| (label, format!("{:.3} to {:.3}", fade.inner(), fade.outer()))),
+                .map(|fade| (label, format!("{:.3} 到 {:.3}", fade.inner(), fade.outer()))),
         );
     }
 
     for (label, value) in [
-        ("Soft particle fade", file.soft_particle_fade_range()),
-        ("Sort key offset", file.sort_key_offset()),
-        ("Bias Z scale", file.bias_z_max_scale()),
-        ("Bias Z distance", file.bias_z_max_distance()),
+        ("软粒子淡出", file.soft_particle_fade_range()),
+        ("排序键偏移", file.sort_key_offset()),
+        ("Z 偏置缩放", file.bias_z_max_scale()),
+        ("Z 偏置距离", file.bias_z_max_distance()),
     ] {
         rows.extend(
             value
@@ -592,20 +592,20 @@ fn settings(file: &Avfx) -> Vec<(&'static str, String)> {
     }
 
     for (label, value) in [
-        ("Delay fast particle", file.is_delay_fast_particle()),
-        ("Fit ground", file.is_fit_ground()),
-        ("Transform skip", file.is_transform_skip()),
+        ("延迟快速粒子", file.is_delay_fast_particle()),
+        ("贴合地面", file.is_fit_ground()),
+        ("跳过变换", file.is_transform_skip()),
         ("隐藏时全部停止", file.is_all_stop_on_hide()),
-        ("Can be clipped out", file.can_be_clipped_out()),
-        ("Camera space", file.is_camera_space()),
-        ("Full env light", file.is_full_env_light()),
+        ("可被裁剪", file.can_be_clipped_out()),
+        ("相机空间", file.is_camera_space()),
+        ("完整环境光", file.is_full_env_light()),
     ] {
         rows.extend(value.map(|v| {
             (
                 label,
                 match v {
-                    true => "yes",
-                    false => "no",
+                    true => "是",
+                    false => "否",
                 }
                 .to_owned(),
             )
@@ -622,9 +622,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     build.schedulers(&file);
     build.timelines(&file);
     build.emitters(&file);
-    build.blocks("Particle", "PrVT", file.particles());
-    build.blocks("Effector", "EfVT", file.effectors());
-    build.blocks("Binder", "BnVr", file.binders());
+    build.blocks("粒子", "PrVT", file.particles());
+    build.blocks("效果器", "EfVT", file.effectors());
+    build.blocks("绑定器", "BnVr", file.binders());
     build.textures(&file);
     build.models(&file);
 
@@ -641,7 +641,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     };
 
     log::info!(
-        "assets/avfx: {path} {} timelines, {} emitters, {} particles, {} curves, {} frames",
+        "assets/avfx: {path} {} 个时间轴, {} 个发射器, {} 个粒子, {} 条曲线, {} 帧",
         file.timelines().len(),
         file.emitters().len(),
         file.particles().len(),
@@ -698,7 +698,7 @@ fn tree_ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
         shown.push((index, expanded));
     }
 
-    section(ui, "Effect");
+    section(ui, "效果");
     let picked = file.selected(ui);
     let mut selected = picked;
     let mut toggled = None;
@@ -813,7 +813,7 @@ impl Rendered {
                 continue;
             }
             if self.resident.get() >= TEXTURE_BUDGET {
-                log::warn!("assets/avfx: {path}: past this effect's texture budget");
+                log::warn!("assets/avfx: {path}: 超出本特效的纹理预算");
                 textures.insert(path.clone(), Texture::Absent);
                 continue;
             }
@@ -913,18 +913,18 @@ impl Rendered {
                 .selectable_label(
                     playing,
                     match playing {
-                        true => "Pause",
-                        false => "Play",
+                        true => "暂停",
+                        false => "播放",
                     },
                 )
                 .clicked()
             {
                 self.playing.set(!playing);
             }
-            if ui.button("Restart").clicked() {
+            if ui.button("重新播放").clicked() {
                 self.at.set(0.0);
             }
-            if ui.button("Reset view").clicked() {
+            if ui.button("重置视角").clicked() {
                 self.camera.set(self.home);
             }
 
@@ -947,7 +947,7 @@ impl Rendered {
 
         if let Some(why) = self.gpu.lock().unwrap().failure() {
             ui.centered_and_justified(|ui| {
-                ui.colored_label(Color32::RED, format!("Could not build the shader: {why}"));
+                ui.colored_label(Color32::RED, format!("无法构建着色器：{why}"));
             });
             return;
         }
@@ -1081,7 +1081,7 @@ impl Rendered {
     pub fn details_ui(&self, ui: &mut egui::Ui, follow: &mut Option<String>) {
         let mut rate = AVFX_FRAME_RATE.get(ui.ctx());
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Frame rate").weak());
+            ui.label(RichText::new("帧率").weak());
             if ui
                 .add(
                     egui::DragValue::new(&mut rate)
@@ -1265,7 +1265,7 @@ fn curve_ui(ui: &mut egui::Ui, curve: &Curve, position: usize, rate: f32) {
     let range = curve::plot(ui, curve, rate);
     ui.horizontal(|ui| {
         ui.label(
-            RichText::new(format!("before {:?}, after {:?}", curve.pre, curve.post))
+            RichText::new(format!("前值 {:?}, 后值 {:?}", curve.pre, curve.post))
                 .monospace()
                 .weak(),
         );
@@ -1275,7 +1275,7 @@ fn curve_ui(ui: &mut egui::Ui, curve: &Curve, position: usize, rate: f32) {
     });
     if let Some((low, high)) = range {
         ui.label(
-            RichText::new(format!("{low:.3} to {high:.3}"))
+            RichText::new(format!("{low:.3} 到 {high:.3}"))
                 .monospace()
                 .weak(),
         );
@@ -1291,8 +1291,8 @@ fn curve_ui(ui: &mut egui::Ui, curve: &Curve, position: usize, rate: f32) {
         .striped(true)
         .show(ui, |ui| {
             match curve.color {
-                true => headers(ui, &["Frame", "Time", "Kind", "", "Color"]),
-                false => headers(ui, &["Frame", "Time", "Kind", "Value"]),
+                true => headers(ui, &["帧", "时间", "Kind", "", "颜色"]),
+                false => headers(ui, &["帧", "时间", "Kind", "值"]),
             }
             for key in &curve.keys {
                 ui.label(RichText::new(key.time().to_string()).monospace());
@@ -1403,10 +1403,10 @@ mod tests {
             .iter()
             .map(|row| row.label.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(labels, ["Particles", "Particle 0", "X"]);
+        assert_eq!(labels, ["粒子", "粒子 0", "X"]);
         assert_eq!(effect.curves.len(), 1);
         assert_eq!(effect.rows[2].curve, Some(0));
-        assert_eq!(effect.rows[2].detail, "2 keys  0..10");
+        assert_eq!(effect.rows[2].detail, "2 个关键帧  0..10");
     }
 
     #[test]
@@ -1517,9 +1517,9 @@ mod tests {
             .iter()
             .find(|row| row.label == "Item 0")
             .expect("the timeline's item");
-        assert_eq!(item.detail, "0..60  emitter none  binder none  effector 2");
+        assert_eq!(item.detail, "0..60  发射器 无  绑定器 无  效果器 2");
         let timeline = &effect.rows[1];
-        assert_eq!(timeline.detail, "loop 0..none  1 items");
+        assert_eq!(timeline.detail, "循环 0..无  1 个条目");
     }
 
     #[test]
@@ -1537,7 +1537,7 @@ mod tests {
         let texture = effect
             .rows
             .iter()
-            .find(|row| row.label == "Tex 0")
+            .find(|row| row.label == "纹理 0")
             .expect("the effect's texture");
         assert_eq!(
             texture.asset.as_deref(),

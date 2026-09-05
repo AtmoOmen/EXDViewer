@@ -11,9 +11,9 @@ use super::super::{Preview, facts, line, link, section, swatch, table};
 use super::{axes, chip, clock};
 use crate::utils::file_name;
 
-const TRACK: [(&str, usize); 3] = [("Track", 5), ("Time", 9), ("Light", 24)];
+const TRACK: [(&str, usize); 3] = [("轨道", 5), ("时间", 9), ("光照", 24)];
 
-const SKY: [(&str, usize); 2] = [("Sky", 5), ("Samples", 8)];
+const SKY: [(&str, usize); 2] = [("天空", 5), ("采样", 8)];
 
 /// The constant term of second order harmonics, which is what they average to.
 const BAND: f32 = 0.282_094_8;
@@ -61,11 +61,11 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
                 })
                 .count();
             let identity = vec![
-                ("Version", location.version().to_string()),
-                ("Tracks", format!("{used} of {}", amb::TRACK_COUNT)),
-                ("Keyframes", rows.len().to_string()),
+                ("版本", location.version().to_string()),
+                ("轨道", format!("{} / {}", used, amb::TRACK_COUNT)),
+                ("关键帧", rows.len().to_string()),
                 (
-                    "Sky visibility",
+                    "天空可见性",
                     location
                         .sky_visibility()
                         .iter()
@@ -78,7 +78,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
                 "{}.tex",
                 path.rsplit_once('.').map_or(path, |(stem, _)| stem)
             );
-            (identity, Some(texture), "Tracks", &TRACK[..], rows)
+            (identity, Some(texture), "轨道", &TRACK[..], rows)
         }
         amb::Ambient::SkyLight(light) => {
             let samples = light
@@ -87,20 +87,20 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
                 .map(|sky| usize::from(sky.count()))
                 .sum::<usize>();
             let identity = vec![
-                ("Version", light.version().to_string()),
-                ("Unknown", light.unknown().to_string()),
-                ("Skies", light.skies().len().to_string()),
-                ("Samples", samples.to_string()),
+                ("版本", light.version().to_string()),
+                ("未知", light.unknown().to_string()),
+                ("天空", light.skies().len().to_string()),
+                ("采样", samples.to_string()),
             ];
-            (identity, None, "Skies", &SKY[..], Vec::new())
+            (identity, None, "天空", &SKY[..], Vec::new())
         }
     };
 
     log::info!(
         "assets/zone: {path} {}",
         match &source {
-            amb::Ambient::EnvLocation(_) => format!("{} keyframes", rows.len()),
-            amb::Ambient::SkyLight(light) => format!("{} skies", light.skies().len()),
+            amb::Ambient::EnvLocation(_) => format!("{} 个关键帧", rows.len()),
+            amb::Ambient::SkyLight(light) => format!("{} 个天空", light.skies().len()),
         }
     );
 
@@ -118,7 +118,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
     let mut follow = None;
     if let Some(texture) = &file.texture {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Texture").weak());
+            ui.label(RichText::new("纹理").weak());
             if link(ui, file_name(texture), texture) {
                 follow = Some(texture.clone());
             }
@@ -131,7 +131,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) -> Option<String> {
         amb::Ambient::EnvLocation(location) => {
             table(ui, file.columns, file.rows.len(), |ui, index| {
                 let (track, at) = file.rows[index];
-                let keyframe = location.track(track).expect("a track the rows name")[at];
+                let keyframe = location.track(track).expect("行所命名的轨道")[at];
                 let light = average(keyframe.light());
                 let cells = [track.to_string(), clock(keyframe.time()), axes(light)];
                 ui.horizontal(|ui| {

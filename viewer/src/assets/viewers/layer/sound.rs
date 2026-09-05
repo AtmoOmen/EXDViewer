@@ -119,24 +119,24 @@ impl Sounds {
         self.play = match previous {
             PlayState::Decoding(index, promise) => match promise.try_take() {
                 Ok(Ok(decoded)) => {
-                    log::info!("assets/layer/sound: decoded, playing index {index}");
+                    log::info!("assets/layer/sound: 已解码，播放索引 {index}");
                     let played = PLAYER
                         .with_borrow_mut(|player| player.as_mut().map(|p| p.play(decoded, false)));
                     match played {
                         Some(Ok(())) => PlayState::Playing(index),
                         Some(Err(error)) => {
-                            log::info!("assets/layer/sound: play failed: {error}");
+                            log::info!("assets/layer/sound: 播放失败：{error}");
                             self.error = Some(error.to_string());
                             PlayState::Idle
                         }
                         None => {
-                            log::info!("assets/layer/sound: no player");
+                            log::info!("assets/layer/sound: 无播放器");
                             PlayState::Idle
                         }
                     }
                 }
                 Ok(Err(error)) => {
-                    log::info!("assets/layer/sound: decode failed: {error}");
+                    log::info!("assets/layer/sound: 解码失败：{error}");
                     self.error = Some(error.to_string());
                     PlayState::Idle
                 }
@@ -153,7 +153,7 @@ impl Sounds {
     }
 
     fn toggle(&mut self, index: usize, backend: &Backend) {
-        log::info!("assets/layer/sound: toggle index {index}");
+        log::info!("assets/layer/sound: 切换索引 {index}");
         let already = matches!(
             &self.play,
             PlayState::Playing(playing) | PlayState::Decoding(playing, _) if *playing == index
@@ -191,7 +191,7 @@ impl Sounds {
             let entry = container
                 .entries()
                 .first()
-                .ok_or_else(|| anyhow::anyhow!("{path}: no audio streams"))?;
+                .ok_or_else(|| anyhow::anyhow!("{path}: 没有音频流"))?;
             audio::decode_data(entry.format(), entry.data())
         });
         self.play = PlayState::Decoding(index, promise);
@@ -241,8 +241,8 @@ impl Sounds {
 
 fn on(value: bool) -> &'static str {
     match value {
-        true => "yes",
-        false => "no",
+        true => "是",
+        false => "否",
     }
 }
 
@@ -276,7 +276,7 @@ pub fn ui(ui: &mut egui::Ui, sounds: &mut Sounds, backend: &Backend) -> Option<S
     }
 
     let mut follow = None;
-    section(ui, "Sounds");
+    section(ui, "声音");
     // The error, if any, is drawn inside the scroll area rather than after it: a vertical
     // `ScrollArea` with `auto_shrink(false)` claims all remaining height for itself, and anything
     // placed after it in the same `ui` is pushed past the bottom of the panel.

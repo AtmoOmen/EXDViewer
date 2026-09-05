@@ -44,12 +44,12 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let container = SoundContainer::read(Cursor::new(bytes.to_vec()))?;
 
     let identity = vec![
-        ("Sounds", container.sound_count().to_string()),
-        ("Tracks", container.track_count().to_string()),
-        ("Streams", container.entries().len().to_string()),
+        ("声音", container.sound_count().to_string()),
+        ("轨道", container.track_count().to_string()),
+        ("音频流", container.entries().len().to_string()),
     ];
 
-    log::info!("assets/scd: {path} {} streams", container.entries().len());
+    log::info!("assets/scd: {path} {} 个音频流", container.entries().len());
 
     Ok(Preview::Scd(Box::new(Rendered {
         name: crate::utils::file_name(path)
@@ -64,7 +64,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 }
 
 const COLUMNS: usize = 8;
-const HEADERS: [&str; COLUMNS] = ["", "#", "Codec", "Ch", "Rate", "Bytes", "Loop", "Markers"];
+const HEADERS: [&str; COLUMNS] = ["", "#", "编码", "声道", "采样率", "大小", "循环", "标记"];
 
 pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
     file.poll();
@@ -267,7 +267,7 @@ fn codec_name(codec: Codec) -> &'static str {
         Codec::MsAdpcm => "MS ADPCM",
         Codec::Atrac9 => "ATRAC9",
         Codec::Pcm => "PCM",
-        Codec::Empty => "Empty",
-        Codec::Unknown(_) => "Unknown",
+        Codec::Empty => "空",
+        Codec::Unknown(_) => "未知",
     }
 }

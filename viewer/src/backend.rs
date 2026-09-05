@@ -57,7 +57,7 @@ impl Backend {
                         .await?
                         .into_iter()
                         .find(|f| f.0.name() == path)
-                        .ok_or_else(|| anyhow::anyhow!("WorkerFileProvider: Entry not found"))?;
+                        .ok_or_else(|| anyhow::anyhow!("WorkerFileProvider：未找到条目"))?;
                     WorkerFileProvider::verify_folder(handle.clone()).await?;
                     let files: Rc<dyn FileProvider> =
                         Rc::new(WorkerFileProvider::new(handle).await?);
@@ -89,7 +89,7 @@ impl Backend {
                         .await?
                         .into_iter()
                         .find(|f| f.0.name() == path)
-                        .ok_or_else(|| anyhow::anyhow!("WorkerProvider: Entry not found"))?;
+                        .ok_or_else(|| anyhow::anyhow!("WorkerProvider：未找到条目"))?;
                     WorkerProvider::verify_folder(handle.clone()).await?;
                     BoxedSchemaProvider::new_worker(WorkerProvider::new(handle).await?)
                 }
@@ -211,10 +211,10 @@ pub mod worker {
                 match ret {
                     Some(Ok(())) => {}
                     Some(Err(_)) => {
-                        log::error!("worker: failed to send message");
+                        log::error!("worker: 发送消息失败");
                     }
                     None => {
-                        log::error!("worker: tx already taken");
+                        log::error!("worker: tx 已被占用");
                     }
                 }
             }))

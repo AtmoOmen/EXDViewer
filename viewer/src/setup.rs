@@ -141,7 +141,7 @@ impl SetupWindow {
                     // Outside the Location group: it feeds the path list and song metadata whatever
                     // the file source is, so it is not a property of that choice.
                     ui.horizontal(|ui| {
-                        ui.label("API:");
+                        ui.label("API：");
                         ui.add(
                             TextEdit::singleline(&mut self.api_url)
                                 .desired_width(ui.available_width()),

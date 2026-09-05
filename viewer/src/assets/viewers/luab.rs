@@ -36,16 +36,16 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         (
             "布局",
             format!(
-                "{}-bit {}-endian, {}",
+                "{} 位{}端，{}",
                 u16::from(header.size_size) * 8,
                 match header.little_endian {
-                    0 => "big",
-                    _ => "little",
+                    0 => "大",
+                    _ => "小",
                 },
                 match (header.integral, header.size_number) {
-                    (0, 8) => "double".to_owned(),
-                    (0, size) => format!("{}-bit float", u16::from(size) * 8),
-                    (_, size) => format!("{}-bit integer", u16::from(size) * 8),
+                    (0, 8) => "双精度".to_owned(),
+                    (0, size) => format!("{} 位浮点", u16::from(size) * 8),
+                    (_, size) => format!("{} 位整数", u16::from(size) * 8),
                 },
             ),
         ),
@@ -53,15 +53,15 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         (
             "函数",
             format!(
-                "{} read as source, {} left as bytecode",
+                "{} 个还原为源码，{} 个保留为字节码",
                 read.functions, read.disassembled
             ),
         ),
         (
             "调试信息",
             match main.lines().is_empty() && main.locals().is_empty() {
-                true => "stripped".to_owned(),
-                false => "kept".to_owned(),
+                true => "已剥离".to_owned(),
+                false => "已保留".to_owned(),
             },
         ),
     ];
@@ -92,7 +92,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
         ui.selectable_value(&mut source, true, "Lua");
         ui.selectable_value(&mut source, false, "字节码");
         ui.label(
-            RichText::new(format!("{} lines", lines.len()))
+            RichText::new(format!("{} 行", lines.len()))
                 .weak()
                 .small(),
         );
@@ -102,9 +102,9 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered) {
         if source {
             ui.label(
                 RichText::new(match file.commented {
-                    0 => "compiles, but not guaranteed to be perfect".to_owned(),
-                    1 => "1 function is commented bytecode below".to_owned(),
-                    held => format!("{held} functions are commented bytecode below"),
+                    0 => "可编译，但还原不保证完美".to_owned(),
+                    1 => "下方有 1 个函数以注释字节码显示".to_owned(),
+                    held => format!("下方有 {held} 个函数以注释字节码显示"),
                 })
                 .weak()
                 .small(),
@@ -141,11 +141,11 @@ pub fn export_choices(file: &Rendered) -> Vec<export::Choice<'_>> {
         export::Choice::bytes("作为 Lua", "script.lua", move || {
             Ok(file.source.join("\n").into_bytes())
         })
-        .filter("Lua source", &["lua"]),
+        .filter("Lua 源码", &["lua"]),
         export::Choice::bytes("反汇编", "script.luadis.txt", move || {
             Ok(file.assembly.join("\n").into_bytes())
         })
-        .filter("Text", &["txt"]),
+        .filter("文本", &["txt"]),
     ]
 }
 

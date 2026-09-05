@@ -14,29 +14,29 @@ use super::{Preview, chara, facts, line, section, table};
 use crate::utils::file_name;
 
 const EQUIPMENT: [(&str, usize); 6] = [
-    ("Set", 6),
-    ("Head", 9),
-    ("Body", 9),
-    ("Hands", 9),
-    ("Legs", 9),
-    ("Feet", 9),
+    ("套装", 6),
+    ("头部", 9),
+    ("身体", 9),
+    ("手部", 9),
+    ("腿部", 9),
+    ("脚部", 9),
 ];
 
 const ACCESSORY: [(&str, usize); 6] = [
-    ("Set", 6),
-    ("Ears", 9),
-    ("Neck", 9),
-    ("Wrists", 9),
-    ("Ring R", 9),
-    ("Ring L", 9),
+    ("套装", 6),
+    ("耳朵", 9),
+    ("脖子", 9),
+    ("手腕", 9),
+    ("戒指（右）", 9),
+    ("戒指（左）", 9),
 ];
 
 /// What a slot carries of its own, in the order the two bits sit in.
 fn carried(material: bool, model: bool) -> &'static str {
     match (material, model) {
-        (true, true) => "both",
-        (true, false) => "material",
-        (false, true) => "model",
+        (true, true) => "两者",
+        (true, false) => "材质",
+        (false, true) => "模型",
         (false, false) => "-",
     }
 }
@@ -78,18 +78,18 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .and_then(|code| code.split('.').next())
         .and_then(|code| code.parse().ok())
     {
-        identity.push(("Body", chara::described(code)));
+        identity.push(("体型", chara::described(code)));
     }
     identity.push((
-        "Slots",
+        "槽位",
         match accessory {
-            true => "accessory".to_owned(),
-            false => "equipment".to_owned(),
+            true => "饰品".to_owned(),
+            false => "装备".to_owned(),
         },
     ));
-    identity.push(("Sets", rows.len().to_string()));
+    identity.push(("套装数", rows.len().to_string()));
 
-    log::info!("assets/eqdp: {path} {} sets", rows.len());
+    log::info!("assets/eqdp: {path} {} 个套装", rows.len());
 
     Ok(Preview::Eqdp(Box::new(Rendered {
         identity,

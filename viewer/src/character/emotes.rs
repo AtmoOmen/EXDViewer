@@ -84,7 +84,7 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Emote>> {
         });
     }
     found.sort_by(|left, right| left.name.cmp(&right.name));
-    log::info!("character: {} emotes to play", found.len());
+    log::info!("角色：可播放 {} 个情感动作", found.len());
     Ok(found)
 }
 

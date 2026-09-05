@@ -126,10 +126,10 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     ];
     for (index, clan) in file.races().iter().enumerate() {
         blocks.push(Block {
-            clan: Some((index / 2, ["male", "female"][index % 2])),
+            clan: Some((index / 2, ["男性", "女性"][index % 2])),
             palettes: vec![
                 Palette {
-                    name: "Skin",
+                    name: "皮肤",
                     colors: clan.skin().iter().copied().map(color).collect(),
                 },
                 Palette {
@@ -149,7 +149,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
                     colors: clan.skin_interface().iter().copied().map(color).collect(),
                 },
                 Palette {
-                    name: "Hair (interface)",
+                    name: "头发（界面）",
                     colors: clan.hair_interface().iter().copied().map(color).collect(),
                 },
             ],
@@ -176,7 +176,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         ("部族", CLANS.len().to_string()),
         ("颜色块", blocks.len().to_string()),
         (
-            "Colors",
+            "颜色",
             blocks
                 .iter()
                 .flat_map(|block| &block.palettes)
@@ -186,7 +186,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         ),
     ];
 
-    log::info!("assets/cmp: {path} {} color blocks", blocks.len());
+    log::info!("assets/cmp: {path} {} 个颜色块", blocks.len());
 
     Ok(Preview::Cmp(Box::new(Rendered {
         identity,
@@ -206,7 +206,7 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, deps: &mut Deps, backend: &Backend
         for (index, block) in file.blocks.iter().enumerate() {
             let name = match &block.clan {
                 Some((clan, gender)) => format!("{} {gender}", named(ui, deps, backend, *clan)),
-                None => ["Colors", "Interface"][index].to_owned(),
+                None => ["颜色", "界面"][index].to_owned(),
             };
             if ui.selectable_label(index == picked, name).clicked() {
                 picked = index;
@@ -244,7 +244,7 @@ impl Rendered {
         // The table fills whatever is left, so it goes last and carries its own scrolling.
         table(ui, &SCALES, self.scales.len(), |ui, index| {
             let scale = &self.scales[index];
-            let range = |[low, high]: [f32; 2]| format!("{low:.2} to {high:.2}");
+            let range = |[low, high]: [f32; 2]| format!("{low:.2} 至 {high:.2}");
             let axes = |values: [f32; 3]| {
                 values
                     .iter()

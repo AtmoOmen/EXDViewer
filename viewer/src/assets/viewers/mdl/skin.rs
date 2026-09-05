@@ -1282,7 +1282,7 @@ impl Animation {
                 .flat_map(|table| table.iter())
                 .filter(|name| !skin.named.contains_key(*name))
                 .count();
-            log::info!("mdl: {missing} of {wanted} bones are named by no skeleton");
+            log::info!("mdl：{missing} 个骨骼（共 {wanted} 个）未被任何骨架命名");
         }
         let base = self.base.borrow();
         let extras = self.extras.borrow();
@@ -1432,7 +1432,7 @@ impl Animation {
                 ui.add(
                     egui::TextEdit::singleline(&mut *filter)
                         .desired_width(f32::INFINITY)
-                        .hint_text("filter"),
+                        .hint_text("筛选"),
                 );
                 let matching: Vec<&Pack> = packs
                     .iter()
@@ -1471,12 +1471,12 @@ impl Animation {
                 }
             }
             None => {
-                ui.label(RichText::new("this model's path names no skeleton").weak());
+                ui.label(RichText::new("此模型的路径未指定骨骼").weak());
             }
         }
         let mut wanted = self.body.wanted.borrow().clone();
         if ui
-            .add(egui::TextEdit::singleline(&mut wanted).hint_text("animation pack"))
+            .add(egui::TextEdit::singleline(&mut wanted).hint_text("动画包"))
             .changed()
         {
             self.body.load(&wanted, None, None);
@@ -1488,7 +1488,7 @@ impl Animation {
         }
         match self.packs.borrow().as_ref() {
             Some(Ok(packs)) => {
-                ui.label(RichText::new(format!("{} packs listed", packs.len())).weak());
+                ui.label(RichText::new(format!("已列出 {} 个动画包", packs.len())).weak());
             }
             Some(Err(why)) => {
                 ui.label(RichText::new(why.as_ref()).color(Color32::LIGHT_RED));

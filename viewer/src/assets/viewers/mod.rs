@@ -1119,22 +1119,19 @@ fn texture_export_choices<'a>(bytes: &'a [u8], path: &str, mip: u8) -> Vec<expor
             crate::utils::dds(&texture)
         })
         .hover("文件的原始像素块，包含全部渐远层级，分毫不差")
-        .filter("DDS image", &["dds"]),
+        .filter("DDS 图像", &["dds"]),
         export::Choice::named_bytes("PNG", move || {
             let texture = tex::Texture::read(std::io::Cursor::new(bytes.to_vec()))?;
             let level = mip.min(texture.mip_levels().saturating_sub(1));
             let images = crate::utils::png(&texture, level, &path)?.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "{:?} has no lossless PNG form; use DDS instead",
+                    "{:?} 没有无损 PNG 形式；请改用 DDS",
                     texture.format()
                 )
             })?;
             Ok((images.file_name("texture"), images.bytes()))
         })
-        .hover(
-            "The mip level shown now; zipped when the texture has more than one face, layer or \
-             slice",
-        ),
+        .hover("当前显示的 mip 层级；纹理含多个面、图层或切片时打包为 ZIP"),
     ]
 }
 

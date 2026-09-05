@@ -61,7 +61,7 @@ fn decode_stream_data(codec: Codec, data: &[u8], downmix: bool) -> Result<Decode
         Codec::OggVorbis => decode_stream(data, "ogg"),
         Codec::Hca => decode_hca(data),
         Codec::MsAdpcm => decode_stream(data, "wav"),
-        other => Err(anyhow!("unsupported audio codec {other:?}")),
+        other => Err(anyhow!("不支持的音频编码 {other:?}")),
     }?;
     if downmix {
         downmix_to_stereo(&mut decoded);
@@ -112,7 +112,7 @@ pub fn export_wav(entries: &[SoundEntry]) -> Result<Vec<(&'static str, Vec<u8>)>
 /// a save dialog only ever picks one file.
 pub fn package(files: Vec<(&str, Vec<u8>)>, stem: &str) -> Result<(String, Vec<u8>)> {
     match files.len() {
-        0 => anyhow::bail!("no streams to export"),
+        0 => anyhow::bail!("没有可导出的音频流"),
         1 => {
             let (ext, bytes) = files.into_iter().next().unwrap();
             Ok((format!("{stem}.{ext}"), bytes))
@@ -226,20 +226,20 @@ fn decode_stream(data: &[u8], extension: &str) -> Result<Decoded> {
 
     let track = format
         .default_track(TrackType::Audio)
-        .ok_or_else(|| anyhow!("{extension} has no default track"))?;
+        .ok_or_else(|| anyhow!("{extension} 没有默认音轨"))?;
     let params = track
         .codec_params
         .as_ref()
         .and_then(|params| params.audio())
-        .ok_or_else(|| anyhow!("{extension} track has no audio codec parameters"))?;
+        .ok_or_else(|| anyhow!("{extension} 音轨没有音频编码参数"))?;
     let channels = params
         .channels
         .as_ref()
-        .ok_or_else(|| anyhow!("{extension} track has no channel layout"))?
+        .ok_or_else(|| anyhow!("{extension} 音轨没有声道布局"))?
         .count() as u16;
     let sample_rate = params
         .sample_rate
-        .ok_or_else(|| anyhow!("{extension} track has no sample rate"))?;
+        .ok_or_else(|| anyhow!("{extension} 音轨没有采样率"))?;
     let track_id = track.id;
     let mut decoder = symphonia::default::get_codecs()
         .make_audio_decoder(params, &AudioDecoderOptions::default())?;
@@ -277,7 +277,7 @@ fn decode_hca(data: &[u8]) -> Result<Decoded> {
     let info = decoder.info().clone();
     let samples = decoder
         .decode_all()
-        .map_err(|error| anyhow!("hca decode: {error:?}"))?;
+        .map_err(|error| anyhow!("hca 解码：{error:?}"))?;
 
     let (loop_start, loop_end) = if info.loop_enabled {
         let per_block = info.samples_per_block as u32;

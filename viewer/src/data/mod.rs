@@ -91,7 +91,7 @@ pub trait FileProvider {
         bytes
             .get(span.start as usize..span.end as usize)
             .map(<[u8]>::to_vec)
-            .ok_or_else(|| anyhow::anyhow!("{path} does not reach {}", span.end))
+            .ok_or_else(|| anyhow::anyhow!("{path} 长度不足，无法读取到偏移 {}", span.end))
     }
 
     async fn get_icon(&self, path: &str) -> anyhow::Result<Either<Url, RgbaImage>>;

@@ -3083,9 +3083,8 @@ mod tests {
                     .collect()
             };
 
-            // A grin widens the lips and leaves the jaw shut. The widest lip is three times
-            // further round on the Viera face than on the Midlander one, so the ceiling is stated
-            // per face; the jaw holds on both, which is what tells a grin from a laugh.
+            // A grin widens the lips and leaves the jaw shut, which is what tells it from a laugh.
+            // How far the lips go is stated per face; the jaw holds on both.
             let (mut turned, mut jaw) = (0.0f32, 0.0f32);
             {
                 let mut locals = alone.reference().to_vec();

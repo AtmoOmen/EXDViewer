@@ -62,18 +62,14 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 |---|---|
 | `health_check` | 检查 MCP 服务状态和默认语言 |
 | `list_asset_paths` | 搜索和分页浏览资源路径，可附带未命名哈希资源 |
-| `resolve_asset_path` | 计算资源路径的 split / whole 索引哈希并检查存在性 |
 | `check_asset_paths` | 批量检查资源路径是否存在 |
 | `read_asset` | 按路径分页读取资源原始字节和格式识别结果 |
 | `read_asset_by_hash` | 按仓库、分类和索引哈希分页读取未命名资源 |
-| `inspect_asset` | 按路径结构化解析纹理、PNG、材质、字体、图标、ULD、SHPK、SHCD、SCD、LGB、SGB、CUTB 过场动画和 TMB 时间轴 |
+| `inspect_asset` | 按路径结构化解析资源并返回完整数据 |
 | `inspect_asset_by_hash` | 结构化解析未命名哈希资源 |
 | `decode_texture` | 将 TEX 纹理解码为尺寸受限的 PNG 图像内容 |
-| `list_emotes` | 列出游戏可播放的情感动作与座椅姿态（名称、图标、动作键、坐骑姿势、椅子与地面变体及 /cpose 姿势键） |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
-| `get_sheet_info` | 获取表元数据（列数、子行、语言） |
-| `get_sheet_schema` | 获取完整结构化模式定义，包括链接目标、条件和嵌套字段 |
-| `get_schema_raw` | 获取原始模式 YAML |
+| `get_sheet_schema` | 获取表的模式定义（列名、类型、描述、关系映射），可附带原始 YAML 与表元信息 |
 | `get_game_version` | 获取数据与模式来源版本信息 |
 | `validate_filter` | 检查过滤 DSL 语法 |
 | `validate_schema` | 验证模式 YAML |
@@ -82,13 +78,14 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | `search_cells` | 在限定列和行范围内搜索字符串单元格（纯文本，不支持 DSL） |
 | `query_rows` | 行级分页查询，支持复杂过滤 DSL、列选择和按请求语言读取 |
 | `get_row` | 按 ID 精确获取单行数据，支持列选择和详细原始数据模式 |
-| `get_sheet_relations` | 获取表的完整关系映射 |
 | `get_referencing_sheets` | 查询引用目标表的字段、链接和条件链接 |
 | `resolve_link` | 按 schema 解析链接列并返回目标行，支持条件链接和目标列选择 |
 | `decode_se_string` | 解码 SeString 单元格 |
 | `save_schema` | 保存模式 YAML |
 
-资源原始字节工具默认返回 4096 字节，单次最多返回 65536 字节；响应中的 `next_offset` 可直接用于读取下一段。结构化解析工具通过 `max_items` 控制字形、图标、着色器和布局集合的返回规模，默认 100，最多 500
+资源原始字节工具默认返回 4096 字节，单次最多返回 65536 字节；响应中的 `next_offset` 可直接用于读取下一段。结构化解析工具通过 `max_items` 控制集合返回规模，默认 100，最多 500，并在 `truncated` 中标记被截断的集合
+
+各格式的 `details` 均为完整解析数据：ULD 带组件与控件的节点树、动画关键帧组与标签集；TMB 带逐条 item 与全部命令字段；CUTB 带节点明细与内嵌时间轴；LGB/SGB 带图层实例的完整类型数据；字体带字距表；SHCD 带资源明细
 
 `query_rows` 与 `get_row` 默认使用 `compact` 格式，将列定义放在响应顶层，行只返回值数组。对宽表应传入 `columns`，元素可为从 0 开始的列索引或 schema 列名。只有需要 SeString 原始字节、类型细节等信息时才传入 `format: "detailed"`
 

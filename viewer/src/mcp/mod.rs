@@ -11,7 +11,7 @@ use crate::{
     backend::Backend,
     excel::{
         base::BaseSheet,
-        provider::{ExcelHeader, ExcelProvider, ExcelSheet},
+        provider::{ExcelProvider, ExcelSheet},
     },
     schema::provider::SchemaProvider,
     settings::BackendConfig,
@@ -73,9 +73,6 @@ pub enum McpRequest {
         offset: usize,
         limit: usize,
     },
-    ResolveAssetPath {
-        path: String,
-    },
     InspectAsset {
         path: String,
         max_items: usize,
@@ -97,14 +94,9 @@ pub enum McpRequest {
         offset: usize,
         limit: usize,
     },
-    GetSheetInfo {
-        name: String,
-    },
     GetSheetSchema {
         name: String,
-    },
-    GetSchemaRaw {
-        name: String,
+        include_raw: bool,
     },
     SearchCells {
         name: String,
@@ -114,11 +106,6 @@ pub enum McpRequest {
         max_rows: Option<usize>,
         max_results: usize,
         language: Language,
-    },
-    ListEmotes {
-        language: Language,
-        query: Option<String>,
-        limit: usize,
     },
     QueryRows {
         name: String,
@@ -141,9 +128,6 @@ pub enum McpRequest {
     },
     ValidateSchema {
         text: String,
-    },
-    GetSheetRelations {
-        name: String,
     },
     GetReferencingSheets {
         target_sheet: String,
@@ -177,20 +161,15 @@ impl McpRequest {
             Self::ReadAssetByHash { .. } => "read_asset_by_hash",
             Self::CheckAssetPaths { .. } => "check_asset_paths",
             Self::ListAssetPaths { .. } => "list_asset_paths",
-            Self::ResolveAssetPath { .. } => "resolve_asset_path",
             Self::InspectAsset { .. } => "inspect_asset",
             Self::InspectAssetByHash { .. } => "inspect_asset_by_hash",
             Self::DecodeTexture { .. } => "decode_texture",
             Self::ListSheets { .. } => "list_sheets",
-            Self::GetSheetInfo { .. } => "get_sheet_info",
             Self::GetSheetSchema { .. } => "get_sheet_schema",
-            Self::GetSchemaRaw { .. } => "get_schema_raw",
             Self::SearchCells { .. } => "search_cells",
-            Self::ListEmotes { .. } => "list_emotes",
             Self::QueryRows { .. } => "query_rows",
             Self::GetRow { .. } => "get_row",
             Self::ValidateSchema { .. } => "validate_schema",
-            Self::GetSheetRelations { .. } => "get_sheet_relations",
             Self::GetReferencingSheets { .. } => "get_referencing_sheets",
             Self::ResolveLink { .. } => "resolve_link",
             Self::DecodeSeString { .. } => "decode_se_string",
@@ -683,30 +662,11 @@ fn process_decompose_model_id(model_id: &str, weapon: Option<bool>) -> McpRespon
     }
 }
 
-async fn process_get_sheet_info(backend: &Backend, name: &str) -> McpResponse {
-    let excel = backend.excel();
-    match excel.get_header(name).await {
-        Ok(header) => {
-            let languages: Vec<String> = header
-                .languages()
-                .iter()
-                .map(|l| format!("{l:?}"))
-                .collect();
-            McpResponse::Success(
-                serde_json::json!({
-                    "name": header.name(),
-                    "column_count": header.columns().len(),
-                    "has_subrows": header.has_subrows(),
-                    "languages": languages
-                })
-                .to_string(),
-            )
-        }
-        Err(e) => McpResponse::Error(format!("{e}")),
-    }
-}
-
-async fn process_get_sheet_schema(backend: &Backend, name: &str) -> McpResponse {
+async fn process_get_sheet_schema(
+    backend: &Backend,
+    name: &str,
+    include_raw: bool,
+) -> McpResponse {
     match load_schema_snapshot(backend, name).await {
         Ok(snapshot) => match snapshot.parsed_schema() {
             Some(schema) => {
@@ -728,18 +688,20 @@ async fn process_get_sheet_schema(backend: &Backend, name: &str) -> McpResponse 
                         })
                     })
                     .collect::<Vec<_>>();
-                McpResponse::Success(
-                    serde_json::json!({
-                        "name": schema.name,
-                        "display_field": schema.display_field,
-                        "fields": schema.fields,
-                        "columns": columns,
-                        "relations": schema.relations,
-                        "field_count": schema.fields.len(),
-                        "column_count": columns.len()
-                    })
-                    .to_string(),
-                )
+                let mut result = serde_json::json!({
+                    "name": schema.name,
+                    "display_field": schema.display_field,
+                    "fields": schema.fields,
+                    "columns": columns,
+                    "relations": schema.relations,
+                    "references": schema_references(schema),
+                    "field_count": schema.fields.len(),
+                    "column_count": columns.len()
+                });
+                if include_raw {
+                    result["raw_yaml"] = serde_json::json!(snapshot.raw_text);
+                }
+                McpResponse::Success(result.to_string())
             }
             None => McpResponse::Success(
                 serde_json::json!({
@@ -750,15 +712,6 @@ async fn process_get_sheet_schema(backend: &Backend, name: &str) -> McpResponse 
                 .to_string(),
             ),
         },
-        Err(e) => McpResponse::Error(format!("{e}")),
-    }
-}
-
-async fn process_get_schema_raw(backend: &Backend, name: &str) -> McpResponse {
-    match load_schema_snapshot(backend, name).await {
-        Ok(snapshot) => McpResponse::Success(
-            serde_json::json!({"name": name, "yaml": snapshot.raw_text}).to_string(),
-        ),
         Err(e) => McpResponse::Error(format!("{e}")),
     }
 }
@@ -815,22 +768,6 @@ fn schema_references(schema: &ExdSchema) -> Vec<serde_json::Value> {
         );
     }
     references
-}
-
-async fn process_get_sheet_relations(backend: &Backend, name: &str) -> McpResponse {
-    match load_schema_snapshot(backend, name).await {
-        Ok(snapshot) => match snapshot.parsed_schema() {
-            Some(schema) => McpResponse::Success(
-                serde_json::json!({"name": name, "relations": schema_references(schema)})
-                    .to_string(),
-            ),
-            None => McpResponse::Error(format!(
-                "无法解析模式: {}",
-                snapshot.validation_errors().join("; ")
-            )),
-        },
-        Err(e) => McpResponse::Error(format!("{e}")),
-    }
 }
 
 async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -> McpResponse {
@@ -1273,60 +1210,6 @@ async fn process_search_cells(backend: &Backend, options: SearchCellsOptions<'_>
     )
 }
 
-async fn process_list_emotes(
-    backend: &Backend,
-    language: Language,
-    query: Option<&str>,
-    limit: usize,
-) -> McpResponse {
-    use crate::character::emotes::{self, Posture};
-
-    let result = async {
-        let (emotes, poses) = emotes::read(backend, language).await?;
-        let query = query.map(str::to_lowercase).filter(|query| !query.is_empty());
-        let mut items = Vec::new();
-        for emote in emotes {
-            if let Some(query) = &query
-                && !emote.name.to_lowercase().contains(query)
-            {
-                continue;
-            }
-            let (start, standing) = emote.keys();
-            items.push(serde_json::json!({
-                "name": emote.name,
-                "icon": emote.icon,
-                "start": start,
-                "standing": standing,
-                "mounted": emote.mounted(),
-                "chair": emote.seated(Posture::Chair),
-                "ground": emote.seated(Posture::Ground),
-                "expression": emote.expression()
-            }));
-            if items.len() >= limit {
-                break;
-            }
-        }
-        let poses = serde_json::json!({
-            "chair": poses.of(Posture::Chair),
-            "ground": poses.of(Posture::Ground)
-        });
-        Ok::<_, anyhow::Error>(
-            serde_json::json!({
-                "language": format!("{language:?}"),
-                "count": items.len(),
-                "emotes": items,
-                "poses": poses
-            })
-            .to_string(),
-        )
-    }
-    .await;
-    match result {
-        Ok(text) => McpResponse::Success(text),
-        Err(why) => McpResponse::Error(format!("{why:#}")),
-    }
-}
-
 struct ResolveLinkOptions<'a> {
     name: &'a str,
     row_id: u32,
@@ -1590,10 +1473,6 @@ async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
                 Err(error) => McpResponse::Error(format!("{error}")),
             }
         }
-        McpRequest::ResolveAssetPath { path } => match assets::resolve_path(backend, &path).await {
-            Ok(result) => McpResponse::Success(result),
-            Err(error) => McpResponse::Error(format!("{error}")),
-        },
         McpRequest::InspectAsset { path, max_items } => {
             match assets::inspect_path(backend, &path, max_items).await {
                 Ok(result) => McpResponse::Success(result),
@@ -1631,9 +1510,9 @@ async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
             offset,
             limit,
         )),
-        McpRequest::GetSheetInfo { name } => process_get_sheet_info(backend, &name).await,
-        McpRequest::GetSheetSchema { name } => process_get_sheet_schema(backend, &name).await,
-        McpRequest::GetSchemaRaw { name } => process_get_schema_raw(backend, &name).await,
+        McpRequest::GetSheetSchema { name, include_raw } => {
+            process_get_sheet_schema(backend, &name, include_raw).await
+        }
         McpRequest::SearchCells {
             name,
             query,
@@ -1657,11 +1536,6 @@ async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
             )
             .await
         }
-        McpRequest::ListEmotes {
-            language,
-            query,
-            limit,
-        } => process_list_emotes(backend, language, query.as_deref(), limit).await,
         McpRequest::QueryRows {
             name,
             filter,
@@ -1709,7 +1583,6 @@ async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
             .await
         }
         McpRequest::ValidateSchema { text } => McpResponse::Success(process_validate_schema(&text)),
-        McpRequest::GetSheetRelations { name } => process_get_sheet_relations(backend, &name).await,
         McpRequest::GetReferencingSheets { target_sheet } => {
             process_get_referencing_sheets(backend, &target_sheet).await
         }

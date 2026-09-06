@@ -54,8 +54,10 @@ pub struct ListSheetsParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SheetNameParam {
+pub struct GetSheetSchemaParams {
     pub name: String,
+    /// 是否附带原始模式 YAML, 默认 false
+    pub include_raw: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -109,17 +111,6 @@ pub struct SearchCellsParams {
     pub max_rows: Option<usize>,
     /// 最大返回单元格命中数, 默认 50
     pub max_results: Option<usize>,
-    /// 数据语言, 默认 chinese_simplified
-    pub language: Option<McpLanguage>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ListEmotesParams {
-    /// 名称关键词, 子串不区分大小写过滤, 默认返回全部
-    pub query: Option<String>,
-    /// 最大返回情感动作数, 默认 200
-    pub limit: Option<usize>,
     /// 数据语言, 默认 chinese_simplified
     pub language: Option<McpLanguage>,
 }
@@ -188,12 +179,6 @@ pub struct DecomposeModelIdParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct GetSheetInfoParams {
-    pub name: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct ReadAssetParams {
     /// 游戏资源路径, 例如 ui/icon/000000/000001.tex
     pub path: String,
@@ -234,12 +219,6 @@ pub struct ListAssetPathsParams {
     pub include_unnamed: Option<bool>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveAssetPathParams {
-    pub path: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -427,22 +406,8 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "计算资源路径对应的 split 和 whole 索引哈希, 并检查该路径是否存在")]
-    async fn resolve_asset_path(
-        &self,
-        Parameters(params): Parameters<ResolveAssetPathParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::ResolveAssetPath { path: params.path },
-                Self::medium_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
     #[tool(
-        description = "识别并结构化解析资源, 支持纹理、PNG 图像、材质、字体、图标、ULD 布局、SHPK 着色器包、SHCD 着色器代码、SCD 声音容器、LGB 图层组、SGB 共享组、CUTB 过场动画和 TMB 时间轴"
+        description = "识别并结构化解析资源, 返回各格式的完整数据"
     )]
     async fn inspect_asset(
         &self,
@@ -530,42 +495,17 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "获取指定表的元信息：列数、子行、语言列表")]
-    async fn get_sheet_info(
-        &self,
-        Parameters(params): Parameters<GetSheetInfoParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::GetSheetInfo { name: params.name },
-                Self::medium_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(description = "获取指定表的结构化模式定义（列名、类型、描述、关系映射）")]
+    #[tool(description = "获取指定表的结构化模式定义（列名、类型、描述、关系映射与表元信息）, 可附带原始 YAML")]
     async fn get_sheet_schema(
         &self,
-        Parameters(params): Parameters<SheetNameParam>,
+        Parameters(params): Parameters<GetSheetSchemaParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
-                McpRequest::GetSheetSchema { name: params.name },
-                Self::medium_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(description = "获取指定表的模式 YAML 原文")]
-    async fn get_schema_raw(
-        &self,
-        Parameters(params): Parameters<SheetNameParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::GetSchemaRaw { name: params.name },
+                McpRequest::GetSheetSchema {
+                    name: params.name,
+                    include_raw: params.include_raw.unwrap_or(false),
+                },
                 Self::medium_timeout(),
             )
             .await?;
@@ -706,26 +646,6 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "列出游戏可播放的情感动作与座椅姿态: 每个动作的名称、图标、动作键、坐骑姿势、椅子与地面变体, 以及 /cpose 循环的姿势键; 数据来自 Emote 与 ActionTimeline 表"
-    )]
-    async fn list_emotes(
-        &self,
-        Parameters(params): Parameters<ListEmotesParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::ListEmotes {
-                    language: self.language(params.language),
-                    query: params.query,
-                    limit: params.limit.unwrap_or(200),
-                },
-                Self::heavy_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(
         description = "按行或子行分页查询表数据。需要复杂筛选 DSL 时传 filter；普通关键词搜单元格请用 search_cells；已知 row_id 请用 get_row"
     )]
     async fn query_rows(
@@ -769,20 +689,6 @@ impl McpHandler {
                     language: self.language(params.language),
                 },
                 Self::heavy_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(description = "获取指定表的所有关系映射")]
-    async fn get_sheet_relations(
-        &self,
-        Parameters(params): Parameters<SheetNameParam>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::GetSheetRelations { name: params.name },
-                Self::medium_timeout(),
             )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
@@ -874,7 +780,7 @@ impl ServerHandler for McpHandler {
             .with_instructions(
                 "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表和游戏资源工具。\
                  数据表流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
-                 资源流程：list_asset_paths 搜索路径 -> resolve_asset_path 查看索引哈希 -> read_asset 分页读取字节、inspect_asset 结构化解析或 decode_texture 查看纹理；未命名资源使用对应的 by_hash 工具。\
+                 资源流程：list_asset_paths 搜索路径 -> read_asset 分页读取字节、inspect_asset 结构化解析或 decode_texture 查看纹理；未命名资源使用对应的 by_hash 工具。\
                  search_cells 只做普通文本搜索, 不接收 DSL；query_rows 处理 filter。"
                     .to_string(),
             )

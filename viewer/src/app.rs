@@ -179,6 +179,13 @@ impl CjkFont {
         }
     }
 
+    /// The faces to have in hand for a sheet language: its own, plus the one the interface is
+    /// written in. Every string this build draws is Chinese, so a Japanese or Korean face on its
+    /// own would leave a couple of hundred of them as tofu.
+    fn needed(wanted: Self) -> [Self; 2] {
+        [wanted, Self::ChineseSimplified]
+    }
+
     fn family_name(self) -> &'static str {
         match self {
             Self::Japanese => "NotoSans-JP",
@@ -2057,8 +2064,11 @@ impl App {
                 "../assets/FFXIV_Lodestone_SSF.ttf"
             ))),
         );
-        let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
-        proportional.push("FFXIV-PrivateUseIcons".to_owned());
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .push("FFXIV-PrivateUseIcons".to_owned());
 
         // The first font carrying a character draws it, and these disagree on the shape of the Han
         // characters they share, so the one matching the text on screen has to lead.
@@ -2071,10 +2081,13 @@ impl App {
             let Some(data) = loaded.get(&font) else {
                 continue;
             };
-            fonts
-                .font_data
-                .insert(font.family_name().to_owned(), data.clone());
-            proportional.push(font.family_name().to_owned());
+            let name = font.family_name().to_owned();
+            fonts.font_data.insert(name.clone(), data.clone());
+            // Both families: the monospace one has no CJK face of its own, and the tables, code
+            // views and log lines drawn with it carry as much of the game's text as the rest.
+            for family in [FontFamily::Proportional, FontFamily::Monospace] {
+                fonts.families.entry(family).or_default().push(name.clone());
+            }
         }
 
         ctx.set_fonts(fonts);
@@ -2085,12 +2098,14 @@ impl App {
         let Some(wanted) = CjkFont::wanted(ctx) else {
             return;
         };
-if self.primary_cjk == Some(wanted) {
+        if self.primary_cjk == Some(wanted) {
             return;
         }
-        self.cjk
-            .entry(wanted)
-            .or_insert_with(|| Arc::new(FontData::from_static(wanted.embedded_bytes())));
+        for font in CjkFont::needed(wanted) {
+            self.cjk
+                .entry(font)
+                .or_insert_with(|| Arc::new(FontData::from_static(font.embedded_bytes())));
+        }
         self.primary_cjk = Some(wanted);
         Self::apply_fonts(ctx, self.primary_cjk, &self.cjk);
     }
@@ -2111,16 +2126,19 @@ if self.primary_cjk == Some(wanted) {
             }
         }
 
-        if let Some(wanted) = CjkFont::wanted(ctx)
-            && self.primary_cjk != Some(wanted)
-        {
-            if self.cjk.contains_key(&wanted) {
+        if let Some(wanted) = CjkFont::wanted(ctx) {
+            if self.primary_cjk != Some(wanted) && self.cjk.contains_key(&wanted) {
                 self.primary_cjk = Some(wanted);
                 changed = true;
-            } else if self.font_promise.is_none() {
-                let file = wanted.asset_file().to_owned();
+            }
+            if self.font_promise.is_none()
+                && let Some(font) = CjkFont::needed(wanted)
+                    .into_iter()
+                    .find(|font| !self.cjk.contains_key(font))
+            {
+                let file = font.asset_file().to_owned();
                 self.font_promise = Some((
-                    wanted,
+                    font,
                     UnsendPromise::new(async move { crate::utils::fetch_url(file).await }),
                 ));
             }

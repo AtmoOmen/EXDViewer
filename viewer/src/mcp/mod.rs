@@ -1697,26 +1697,20 @@ pub fn start(config: BackendConfig) -> McpHandle {
                 .expect("Failed to build tokio runtime for MCP server");
 
             rt.block_on(async move {
-                let handler = std::sync::Arc::new(McpHandler::new(
-                    request_tx,
-                    config,
-                    Language::ChineseSimplified,
-                ));
+                let handler = McpHandler::new(request_tx, config, Language::ChineseSimplified);
                 let ct = tokio_util::sync::CancellationToken::new();
-                let mut session_manager = rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default();
-                session_manager.session_config.keep_alive = None;
 
                 let config =
                     rmcp::transport::streamable_http_server::StreamableHttpServerConfig::default()
+                        .with_stateful_mode(false)
                         .with_cancellation_token(ct.child_token());
 
                 let service =
                     rmcp::transport::streamable_http_server::StreamableHttpService::new(
-                        {
-                            let handler = handler.clone();
-                            move || Ok(handler.as_ref().clone())
-                        },
-                        std::sync::Arc::new(session_manager),
+                        move || Ok(handler.clone()),
+                        std::sync::Arc::new(
+                            rmcp::transport::streamable_http_server::session::never::NeverSessionManager::default(),
+                        ),
                         config,
                     );
 

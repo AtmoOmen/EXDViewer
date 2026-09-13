@@ -14,6 +14,7 @@
 //! the body's rather than posed apart, since each is stated as bones hanging off one the body
 //! already names.
 
+use crate::assets::viewers::skeleton::Laid;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Cursor;
@@ -46,6 +47,9 @@ const ANCHOR: &str = "n_hara";
 
 /// The pair of bones the creator's bust slider scales, which are leaves of the body's own skeleton.
 const BUST: [&str; 2] = ["j_mune_l", "j_mune_r"];
+
+/// The pair the eye-size table scales, left then right. Nothing else ever moves them.
+const EYES: [&str; 2] = ["j_f_noanim_eyesize_l", "j_f_noanim_eyesize_r"];
 
 /// The bones a visor hinges on, each turned about its own Z by one of the three angles the
 /// gimmick states for the set. A head that names none of them raises nothing.
@@ -363,6 +367,10 @@ struct Leaving {
     pack: Rc<Motions>,
     motion: usize,
     time: f32,
+    /// Whether the clip left off by playing through rather than by being cut short. One that ran
+    /// out holds its last frame under the fade; one interrupted mid-clip is still running and
+    /// wraps.
+    spent: bool,
 }
 
 /// One motion playing on the rig: the pack it comes from, which of that pack's motions, and how
@@ -413,10 +421,14 @@ impl Layer {
             true => Some(fade.unwrap_or_default()),
             false => fade,
         };
-        *self.leaving.borrow_mut() = match fade {
-            Some(0.0) => None,
-            _ => self.leaving_clip(),
-        };
+        // A change asked for while the last one is still being fetched has no clip of its own to
+        // hand over yet, and letting that clear what is already on its way out is what snapped the
+        // body back to its reference pose: keep the outgoing clip until something replaces it.
+        match (fade, self.leaving_clip()) {
+            (Some(0.0), _) => *self.leaving.borrow_mut() = None,
+            (_, Some(clip)) => *self.leaving.borrow_mut() = Some(clip),
+            (_, None) => {}
+        }
         self.fade.set(0.0);
         self.over.set(fade.unwrap_or_default());
         self.pricing.set(fade.is_none());
@@ -482,6 +494,7 @@ impl Layer {
             pack: Rc::clone(pack.as_ref().and_then(Fetch::ready)?),
             motion: self.motion.get()?,
             time: self.time.get(),
+            spent: false,
         })
     }
 
@@ -645,7 +658,20 @@ impl Layer {
         let then = self.then.borrow_mut().take();
         let settle = self.settle.get();
         match (then, settle > 0.0) {
-            (Some(then), _) => self.load(&then, None, None, Some(self.over.get())),
+            // Priced like any other change rather than at the length that brought this clip in.
+            // That length is nought wherever nothing was playing before, and handing it back here
+            // both threw the outgoing clip away and opened the incoming one to full weight before
+            // its pack had landed, so the body stood in its reference pose for a frame and then
+            // snapped into the loop.
+            (Some(then), _) => {
+                self.load(&then, None, None, None);
+                // This clip ran out rather than being cut short, so it holds where it ended: a
+                // start motion that wrapped back to its own first frame is a pose nothing asked
+                // for, blended into the loop it was meant to hand over to.
+                if let Some(held) = self.leaving.borrow_mut().as_mut() {
+                    held.spent = true;
+                }
+            }
             (None, true) => self.load("", None, None, Some(settle)),
             (None, false) => self.time.set(time - duration),
         }
@@ -677,7 +703,7 @@ impl Layer {
             // A clip being cross-faded out of is still running, so it wraps; one the layer is
             // leaving with nothing behind it holds its last frame rather than starting over
             // under the fade.
-            held.time = match self.wanted.borrow().is_empty() {
+            held.time = match held.spent || self.wanted.borrow().is_empty() {
                 true => (held.time + step).min(duration),
                 false => (held.time + step.min(duration)) % duration,
             };
@@ -970,6 +996,8 @@ pub struct Animation {
     poses: RefCell<Poses>,
     /// What the bust bones are scaled by, three axes in their own frame.
     bust: Cell<Vec3>,
+    /// What each of the two eye-size bones is scaled by, left then right.
+    eyes: Cell<[f32; 2]>,
     /// How far a raised visor has turned, one angle per bone it hinges on.
     visor: Cell<[f32; 3]>,
     running: Cell<bool>,
@@ -1028,6 +1056,7 @@ impl Animation {
             pending: RefCell::new(None),
             poses: Default::default(),
             bust: Cell::new(Vec3::ONE),
+            eyes: Cell::new([1.0; 2]),
             visor: Cell::new([0.0; 3]),
             running: Cell::new(true),
             mounted: mount.map(|mount| Box::new(Animation::new(filed_under(&mount, &models)))),
@@ -1159,7 +1188,7 @@ impl Animation {
             if let Some((from, to)) = layer.changed() {
                 let over = blend(&from, &to);
                 let from = match from.is_empty() {
-                    true => "nothing".to_owned(),
+                    true => "无".to_owned(),
                     false => from,
                 };
                 log::info!("mdl：{from} 过渡到 {to}，历时 {over:.3}s");
@@ -1333,6 +1362,10 @@ impl Animation {
 
     /// What the bust bones are scaled by, which `human.cmp` states as a pair of bounds a slider
     /// runs between.
+    pub fn eyed(&self, eyes: [f32; 2]) {
+        self.eyes.set(eyes);
+    }
+
     pub fn shaped(&self, bust: Vec3) {
         self.bust.set(bust);
     }
@@ -1459,6 +1492,12 @@ impl Animation {
     /// What the body is standing in, by the name its own pack gives the motion.
     pub fn standing(&self) -> Option<String> {
         self.body.playing().map(|(_, name, _)| name)
+    }
+
+    /// The motion laid over the body right now, by the name its own pack gives it. Drawing and
+    /// sheathing a weapon are what put one there.
+    pub fn acting(&self) -> Option<String> {
+        self.action.playing().map(|(_, name, _)| name)
     }
 
     /// Lays `motion` over whatever the body is doing for as long as it runs, out of the first of
@@ -1730,6 +1769,10 @@ impl Animation {
         let extras = self.extras.borrow();
         let mut locals = skin.rig.reference().to_vec();
         let mut lay = |path: &str, binding: &Binding, time: f32, weight: f32| {
+            // Lalafell file no drawn idle and no draw motion of their own, so both are read out of
+            // a body twice their height; taking that body's bone offsets with them is what tore
+            // the rig apart.
+            let foreign = filed_body(path).is_some_and(|body| Some(body) != self.code.as_deref());
             let ordered = self.code.as_deref().and_then(|code| ordering(code, path));
             let held = match &ordered {
                 Some(path) => extras.get(path).and_then(Option::as_ref),
@@ -1738,8 +1781,17 @@ impl Animation {
             let Some(names) = held.and_then(Fetch::ready).map(|held| &held.names) else {
                 return;
             };
-            skin.rig
-                .lay(&mut locals, binding, names, ordered.as_deref(), time, weight);
+            skin.rig.lay(
+                &mut locals,
+                binding,
+                names,
+                Laid {
+                    origin: ordered.as_deref(),
+                    time,
+                    weight,
+                    retarget: foreign,
+                },
+            );
         };
         for layer in self.layers() {
             // The incoming clip is laid over whatever is already there at the share the fade has
@@ -1783,6 +1835,15 @@ impl Animation {
         if bust != Vec3::ONE {
             for bone in BUST.iter().filter_map(|name| skin.named.get(*name)) {
                 posed[*bone] = posed[*bone].scaled(bust);
+            }
+        }
+        // No clip touches either of these - `noanim` is in both their names - so the table that
+        // states them is the only thing that ever moves them off the size the skeleton rests at.
+        for (scale, name) in self.eyes.get().into_iter().zip(EYES) {
+            if scale != 1.0
+                && let Some(bone) = skin.named.get(name)
+            {
+                posed[*bone] = posed[*bone].scaled(Vec3::splat(scale));
             }
         }
         let (center, spread) = middle(&posed, skin.anchor);
@@ -1987,6 +2048,14 @@ fn ridden(rig: Option<&str>, models: &[&str]) -> Option<String> {
 }
 
 /// The `m0911` of a model's path, which is what its skeleton and its animations are filed under.
+/// The body a pack is filed under, out of its own path, which `code` cannot answer for: an
+/// animation names its body in a directory rather than in its file name.
+fn filed_body(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("chara/human/")?;
+    let held = rest.get(..5)?;
+    (held.starts_with('c') && held[1..].bytes().all(|byte| byte.is_ascii_digit())).then_some(held)
+}
+
 pub fn code(model: &str) -> Option<String> {
     let name = file_name(model);
     let code = name.get(..5)?;
@@ -2434,6 +2503,24 @@ mod tests {
         assert_eq!(layer.opening.borrow().as_deref(), Some("cfxf_salute"));
     }
 
+    /// A clip queued behind another is priced like any other change. Handing it the length that
+    /// brought the last one in reads as "already priced", and where that length is nought the
+    /// layer opens the incoming clip to full weight before its pack has landed: the body stands in
+    /// its reference pose for a frame and then snaps into the loop.
+    #[test]
+    fn a_queued_clip_shows_nothing_until_it_is_priced() {
+        let layer = Layer::default();
+        layer.load("loop.pap", None, None, None);
+        assert!(layer.pricing.get());
+        assert_eq!(layer.share(), 0.0);
+
+        // What handing the settle a length of its own used to do.
+        let layer = Layer::default();
+        layer.load("loop.pap", None, None, Some(0.0));
+        assert!(!layer.pricing.get());
+        assert_eq!(layer.share(), 1.0);
+    }
+
     #[test]
     fn seek_with_nothing_to_try_rests() {
         let layer = Layer::default();
@@ -2547,7 +2634,41 @@ mod tests {
             pack: empty_pack(),
             motion: 0,
             time: 0.0,
+            spent: false,
         });
+    }
+
+    /// A clip that ran out holds where it ended while it fades; one cut short mid-clip is still
+    /// running and wraps. Wrapping a start motion that had just played through put its own first
+    /// frame under the fade, which is a pose nothing asked for.
+    #[test]
+    fn a_clip_that_played_through_holds_its_last_frame() {
+        for spent in [true, false] {
+            let layer = Layer::default();
+            layer.motion.set(Some(0));
+            *layer.pack.borrow_mut() = Some(Fetch::Ready(empty_pack()));
+            layer.load("b.pap", None, None, Some(4.0));
+            // The incoming pack has landed, so the fade is open and the outgoing clock runs.
+            layer.motion.set(Some(0));
+            *layer.leaving.borrow_mut() = Some(Leaving {
+                path: "a.pap".to_owned(),
+                pack: empty_pack(),
+                motion: 0,
+                time: 1.0,
+                spent,
+            });
+            // The pack names no motion, so the clip runs for one epsilon: a spent one is clamped
+            // to exactly that, where a running one is taken round it and lands short.
+            layer.fading(0.25);
+            let time = layer.leaving.borrow().as_ref().map(|held| held.time);
+            match spent {
+                true => assert_eq!(time, Some(f32::EPSILON), "a spent clip is held at its end"),
+                false => assert!(
+                    time.is_some_and(|at| at < f32::EPSILON),
+                    "a running clip wraps round its own length"
+                ),
+            }
+        }
     }
 
     #[test]
@@ -3008,6 +3129,24 @@ mod tests {
         );
     }
 
+    /// An animation names the body it is filed under in a directory, which is what says whether a
+    /// rig is wearing its own bone offsets or another body's.
+    #[test]
+    fn a_pack_states_the_body_it_is_filed_under() {
+        use super::filed_body;
+        assert_eq!(
+            filed_body("chara/human/c0701/animation/a0001/bt_swd_sld/resident/idle.pap"),
+            Some("c0701")
+        );
+        assert_eq!(
+            filed_body("chara/human/c0101/animation/a0001/bt_common/emote/clap.pap"),
+            Some("c0101")
+        );
+        // A prop or a mount is filed nowhere near a body, and answers for none.
+        assert_eq!(filed_body("chara/weapon/w1980/animation/a0001/idle.pap"), None);
+        assert_eq!(filed_body("chara/human/cabbage/animation/x.pap"), None);
+    }
+
     /// What one `cfxf_` pose is worth, off the real install, on the rig the viewer actually poses:
     /// the face skeleton merged into the body's. `grin.pap` holds a single frame of deltas, and
     /// composing it once on the merged rig moves no face bone further than it does on the face
@@ -3017,6 +3156,8 @@ mod tests {
     fn a_real_facial_pose_composes_to_what_its_own_file_states() {
         use glam::Quat;
         use ironworks::Ironworks;
+
+        use crate::assets::viewers::skeleton::Laid;
         use ironworks::file::est::ExtraSkeletonTemplate;
         use ironworks::file::pap::AnimationPack;
         use ironworks::file::sklb::SkeletonBinary;
@@ -3067,7 +3208,7 @@ mod tests {
 
             let moved = |rig: &Rig, origin: Option<&str>| -> Vec<(String, f32)> {
                 let mut locals = rig.reference().to_vec();
-                rig.lay(&mut locals, binding, face.bones(), origin, 0.0, 1.0);
+                rig.lay(&mut locals, binding, face.bones(), Laid { origin, weight: 1.0, ..Laid::default() });
                 let rest = rig.world(rig.reference());
                 let posed = rig.world(&locals);
                 face.bones()
@@ -3088,7 +3229,7 @@ mod tests {
             let (mut turned, mut jaw) = (0.0f32, 0.0f32);
             {
                 let mut locals = alone.reference().to_vec();
-                alone.lay(&mut locals, binding, face.bones(), None, 0.0, 1.0);
+                alone.lay(&mut locals, binding, face.bones(), Laid { weight: 1.0, ..Laid::default() });
                 for (at, local) in locals.iter().enumerate() {
                     let from = Quat::from_array(alone.reference()[at].rotation);
                     let by = from.angle_between(Quat::from_array(local.rotation));

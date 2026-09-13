@@ -15,13 +15,13 @@ impl Codec for PreservingCodec {
     where
         I: serde::Serialize,
     {
-        input.serialize(&SERIALIZER).expect("failed to encode")
+        input.serialize(&SERIALIZER).expect("编码失败")
     }
 
     fn decode<O>(input: wasm_bindgen::JsValue) -> O
     where
         O: for<'de> serde::Deserialize<'de>,
     {
-        serde_wasm_bindgen::from_value(input).expect("failed to decode")
+        serde_wasm_bindgen::from_value(input).expect("解码失败")
     }
 }

@@ -13,7 +13,11 @@ use image::{DynamicImage, GenericImageView, ImageFormat, Rgba, RgbaImage};
 use ironworks::file::mdl::VertexAttributeKind;
 use serde_json::{Value, json};
 
+use ironworks::file::{mtrl, stm};
+
+use super::dye;
 use super::material::{Family, Material, Role};
+use super::program;
 use super::{Rendered, Slot, Vertex, build, detail, draws};
 use crate::data::FileProvider;
 
@@ -26,6 +30,9 @@ pub(super) struct Scene {
     materials: Vec<MaterialInfo>,
     skeleton: Option<Skeleton>,
     stature: f32,
+    /// The wearer's own colours, which most character packages tint their albedo with and no
+    /// texture holds.
+    customize: program::Customize,
 }
 
 struct PieceMesh {
@@ -51,6 +58,12 @@ struct Primitive {
 
 struct MaterialInfo {
     name: String,
+    /// Whether the material states a semi-transparent pass of its own: a clip the game draws a
+    /// second, blended pass beneath, or a package that tints what stands behind it outright.
+    translucent: bool,
+    /// The package as the file names it, which per-package shading keys on: the channel a mask
+    /// means is stated by the package, not by the family.
+    package: String,
     family: Family,
     alpha_threshold: f32,
     cull: bool,
@@ -78,14 +91,47 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
         bail!("不支持导出骑乘状态下的角色");
     }
 
+    let customize = rendered.customize.get();
     let level = rendered.level.borrow();
     let enabled_shapes = rendered.shapes.borrow();
     let slots = rendered.slots.borrow();
 
+    // A material dedupes across the pieces that name it, so the stain it is dyed with is the one
+    // the first piece drawing it was given. Two pieces sharing a material and dyed apart would
+    // have to be baked twice; nothing the character tab builds does that, and this says so if it
+    // ever starts.
+    let stains = rendered.stains.borrow();
+    let templates = rendered.dye_templates.borrow();
+    let mut piece_of: HashMap<usize, usize> = HashMap::new();
+    for mesh in &level.meshes {
+        let held = *piece_of.entry(mesh.material).or_insert(mesh.piece);
+        if held != mesh.piece && stains.get(held) != stains.get(mesh.piece) {
+            log::warn!(
+                "assets/mdl: export: 材质 {} 被染色不同的部件共用，烘焙时取首个部件",
+                mesh.material
+            );
+        }
+    }
+
     let mut materials = Vec::with_capacity(level.materials.len());
     for (index, path) in level.materials.iter().enumerate() {
         match slots.get(index) {
-            Some(Some(Slot::Ready(material))) => materials.push(material_info(path, material)),
+            Some(Some(Slot::Ready(material))) => {
+                let mut info = material_info(path, material);
+                let worn = piece_of
+                    .get(&index)
+                    .and_then(|piece| stains.get(*piece))
+                    .copied()
+                    .unwrap_or_default();
+                if let Some(base) = &info.table
+                    && let Some(colors) = material.held().color_table()
+                    && let Some(templates) = templates.as_deref()
+                    && let Some(held) = dyed(base, colors, templates, worn)
+                {
+                    info.table = Some(held);
+                }
+                materials.push(info);
+            }
             // A material can legitimately be absent from the install (a stated variant with no file
             // behind it), which is not reason enough to fail an export of everything else that did
             // load: draw that one piece untextured instead.
@@ -237,6 +283,10 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
                 compact_indices,
                 material,
                 tangent_present,
+                (materials
+                    .get(material)
+                    .is_some_and(|held| held.package == "iris.shpk"))
+                .then_some(&customize),
                 mesh_skinned.then_some(&table),
                 joints.as_ref(),
                 fallback_joint,
@@ -258,6 +308,7 @@ pub(super) fn gather(rendered: &Rendered) -> Result<Scene> {
         materials,
         skeleton,
         stature: rendered.stature.get(),
+        customize,
     })
 }
 
@@ -269,9 +320,77 @@ fn piece_name(path: &str) -> String {
         .to_owned()
 }
 
+/// Where each dyed field lands in a decoded row, which is the layout `material::pack` writes and
+/// [`shade_texel`] reads: three colours of three, then the scalars beside them.
+type ColorField = (mtrl::DyeField, fn(&stm::DyePack) -> [f32; 3], usize);
+type ScalarField = (mtrl::DyeField, fn(&stm::DyePack) -> f32, usize);
+
+const COLOR_FIELDS: [ColorField; 3] = [
+    (mtrl::DyeField::Diffuse, |pack| pack.diffuse, 0),
+    (mtrl::DyeField::Specular, |pack| pack.specular, 4),
+    (mtrl::DyeField::Emissive, |pack| pack.emissive, 8),
+];
+const SCALAR_FIELDS: [ScalarField; 5] = [
+    (mtrl::DyeField::Roughness, |pack| pack.roughness, 3),
+    (mtrl::DyeField::Metalness, |pack| pack.metalness, 7),
+    (mtrl::DyeField::SheenRate, |pack| pack.sheen_rate, 11),
+    (mtrl::DyeField::SheenTint, |pack| pack.sheen_tint, 12),
+    (mtrl::DyeField::SheenAperture, |pack| pack.sheen_aperture, 13),
+];
+
+/// A row of the decoded table, in floats.
+const ROW: usize = 16;
+
+/// The base table with the wearer's stains laid over it. The renderer dyes the half-packed table
+/// its shaders sample; this is the same rule read off the same templates, applied to the decoded
+/// row the export shades from. `None` where nothing was picked or nothing in the table is dyed.
+fn dyed(
+    base: &[f32],
+    colors: &mtrl::ColorTable,
+    templates: &dye::Templates,
+    stains: [Option<u8>; 2],
+) -> Option<Vec<f32>> {
+    if stains == [None, None] {
+        return None;
+    }
+    let mut values = base.to_vec();
+    let mut any = false;
+    for index in 0..colors.rows() {
+        let Some(row) = colors.dye_row(index) else {
+            continue;
+        };
+        if row.template() == 0 {
+            continue;
+        }
+        let Some(Some(stain)) = stains.get(usize::from(row.channel())) else {
+            continue;
+        };
+        let Some(pack) = templates.pack(row.template(), *stain) else {
+            continue;
+        };
+        let Some(slice) = values.get_mut(index * ROW..(index + 1) * ROW) else {
+            continue;
+        };
+        for (field, read, at) in COLOR_FIELDS {
+            if row.dyes(field) {
+                slice[at..at + 3].copy_from_slice(&read(&pack));
+            }
+        }
+        for (field, read, at) in SCALAR_FIELDS {
+            if row.dyes(field) {
+                slice[at] = read(&pack);
+            }
+        }
+        any = true;
+    }
+    any.then_some(values)
+}
+
 fn material_info(path: &str, material: &Material) -> MaterialInfo {
     MaterialInfo {
         name: piece_name(path),
+        translucent: translucent(material.shader()),
+        package: material.shader().to_owned(),
         family: material.family(),
         alpha_threshold: material.alpha_threshold(),
         cull: material.cull(),
@@ -288,6 +407,8 @@ fn material_info(path: &str, material: &Material) -> MaterialInfo {
 fn placeholder_material(path: &str) -> MaterialInfo {
     MaterialInfo {
         name: piece_name(path),
+        translucent: false,
+        package: String::new(),
         family: Family::Character,
         alpha_threshold: 0.0,
         cull: true,
@@ -383,6 +504,9 @@ fn primitive_from(
     indices: Vec<u32>,
     material: usize,
     tangent_present: bool,
+    // The wearer's colours, where this primitive's own package picks between two of them per
+    // vertex rather than tinting every texel the same.
+    eyes: Option<&program::Customize>,
     skinning: Option<&Vec<String>>,
     joints: Option<&HashMap<&str, u32>>,
     fallback: u32,
@@ -408,7 +532,10 @@ fn primitive_from(
             tangents.push(tangent_frame(vertex).unwrap_or_else(|| safe_tangent(vertex.normal)));
         }
         uv0.push([vertex.uv[0], vertex.uv[1]]);
-        colors.push(vertex.color);
+        colors.push(match eyes {
+            Some(customize) => eye_color(vertex.color, customize),
+            None => vertex_color(vertex.color),
+        });
         if let Some((local_bones, joints)) = skinning {
             let (j0, w0, j1, w1, second) =
                 skin_vertex(vertex, local_bones, joints, fallback, missing, wanted);
@@ -435,6 +562,14 @@ fn primitive_from(
     }
 }
 
+/// What a vertex's own colour contributes to a glTF one. Only the alpha is an opacity: `model.frag`
+/// reads `v_color.a` and nothing else, so the rgb carries per-family shader inputs rather than a
+/// tint, and a consumer multiplying `COLOR_0` into the base colour would paint the surface with
+/// them. An iris is the one case that wants an actual colour there; [`eye_color`] supplies it.
+fn vertex_color(raw: [u8; 4]) -> [u8; 4] {
+    [255, 255, 255, raw[3]]
+}
+
 /// Any unit vector orthogonal to `normal`, for the rare vertex whose declared frame is degenerate.
 fn safe_tangent(normal: [f32; 3]) -> [f32; 4] {
     let normal = Vec3::from_array(normal).normalize_or(Vec3::Y);
@@ -454,6 +589,9 @@ enum BakedMaterial {
         metallic_roughness: RgbaImage,
         emissive: Option<RgbaImage>,
         normal: Option<RgbaImage>,
+        /// Whether any texel came out short of opaque, which is what tells a surface that fades
+        /// from one the alpha channel only ever cuts a hole in.
+        sheer: bool,
     },
 }
 
@@ -462,7 +600,11 @@ enum BakedMaterial {
 /// that lookup has to run once per output texel or the baseline export is grey. Lighting-only terms
 /// (sheen, the rim light, a tinted specular) have no channel in glTF's metallic-roughness model and
 /// are dropped rather than approximated.
-fn bake(material: &MaterialInfo, images: &BTreeMap<String, DynamicImage>) -> BakedMaterial {
+fn bake(
+    material: &MaterialInfo,
+    images: &BTreeMap<String, DynamicImage>,
+    customize: &program::Customize,
+) -> BakedMaterial {
     let get = |role: Role| material.textures[role as usize].as_ref().and_then(|path| images.get(path));
     let normal = get(Role::Normal);
     let index = get(Role::Index);
@@ -510,6 +652,7 @@ fn bake(material: &MaterialInfo, images: &BTreeMap<String, DynamicImage>) -> Bak
                 sample(&index_img),
                 sample(&mask_img),
                 sample(&diffuse_img),
+                customize,
             );
             base_color.put_pixel(
                 x,
@@ -545,11 +688,13 @@ fn bake(material: &MaterialInfo, images: &BTreeMap<String, DynamicImage>) -> Bak
         out
     });
 
+    let sheer = base_color.pixels().any(|texel| texel.0[3] < 255);
     BakedMaterial::Baked {
         base_color,
         metallic_roughness,
         emissive: has_emissive.then_some(emissive_img),
         normal: normal_out,
+        sheer,
     }
 }
 
@@ -561,6 +706,83 @@ struct Shaded {
     emissive: [f32; 3],
 }
 
+/// The packages that draw a genuinely see-through surface rather than one with a hole cut in it:
+/// the sheer half of a garment, and the glass that tints what stands behind it. Both state no alpha
+/// test of their own, and the character cutout floor would otherwise harden them at half.
+///
+/// Not `clip() > SHEER_CLIP`, which the renderer builds its second pass on: 94% of character
+/// materials declare a clip over that, nearly all of them at exactly 0.5, so it says a material
+/// alpha-tests rather than that it is see-through.
+fn translucent(package: &str) -> bool {
+    matches!(
+        package,
+        "charactertransparency.shpk" | "characterglass.shpk"
+    )
+}
+
+/// Which of glTF's three alpha modes a material draws under. A material stating a semi-transparent
+/// pass of its own keeps its soft edges: cutting it at a threshold instead hardens every one, which
+/// is what a translucent garment cannot afford. A threshold otherwise cuts the hole it is there to
+/// cut, and a surface that merely came out short of opaque blends.
+fn alpha_mode(translucent: bool, threshold: f32, sheer: bool) -> &'static str {
+    if translucent {
+        return "BLEND";
+    }
+    if threshold > 0.0 {
+        return "MASK";
+    }
+    match sheer {
+        true => "BLEND",
+        false => "OPAQUE",
+    }
+}
+
+/// The occlusion a package folds into its own albedo, out of the mask map. Measured per package,
+/// not per family: `iris` and `skin` fold in none at all, and a blanket rule multiplied the eyes to
+/// black by a channel that is nought across every texel of their mask.
+fn occlusion(package: &str, mask: Option<[f32; 4]>) -> f32 {
+    let Some(mask) = mask else {
+        return 1.0;
+    };
+    let squared = |channel: f32| channel * channel;
+    match package {
+        "hair.shpk" => squared(mask[3]),
+        "character.shpk" => squared(mask[2]),
+        _ => 1.0,
+    }
+}
+
+/// What the wearer's own colours tint a package's albedo with. Hair is mixed between the two hair
+/// colours by the highlight blend its mask holds; skin is tinted outright. An iris is neither: its
+/// two colours are picked between per vertex, so [`eye_color`] carries them instead.
+fn tint(package: &str, mask: Option<[f32; 4]>, customize: &program::Customize) -> [f32; 3] {
+    match package {
+        "hair.shpk" => {
+            let blend = mask.map_or(0.0, |mask| mask[2]);
+            std::array::from_fn(|i| {
+                customize.hair[i] + (customize.highlight[i] - customize.hair[i]) * blend
+            })
+        }
+        "skin.shpk" => [customize.skin[0], customize.skin[1], customize.skin[2]],
+        _ => [1.0; 3],
+    }
+}
+
+/// The colour an iris vertex carries, which is the side its own colour selects rather than a tint:
+/// `iris.shpk` computes `m_LeftColor * COLOR.x + m_RightColor * COLOR.y`, so the same sum travels
+/// as `COLOR_0` and a glTF consumer's own multiply lands the two eyes apart.
+fn eye_color(raw: [u8; 4], customize: &program::Customize) -> [u8; 4] {
+    let (left, right) = (f32::from(raw[0]) / 255.0, f32::from(raw[1]) / 255.0);
+    let mixed: [f32; 3] =
+        std::array::from_fn(|i| customize.left_eye[i] * left + customize.right_eye[i] * right);
+    [
+        to_srgb(mixed[0]),
+        to_srgb(mixed[1]),
+        to_srgb(mixed[2]),
+        raw[3],
+    ]
+}
+
 /// The static half of `model.frag`'s shading: everything but the three lights and the tone curve,
 /// which glTF's own renderer supplies. Vertex-color opacity (dye, wind) is not a texel and travels
 /// as `COLOR_0` instead, multiplying this texture's alpha the same way `v_color.a` does on screen.
@@ -570,6 +792,7 @@ fn shade_texel(
     index: Option<[u8; 4]>,
     mask: Option<[u8; 4]>,
     diffuse: Option<[u8; 4]>,
+    customize: &program::Customize,
 ) -> Shaded {
     let mut albedo = [0.72f32; 3];
     let mut roughness = 0.5f32;
@@ -611,18 +834,27 @@ fn shade_texel(
         };
     }
 
-    if let Some(mask) = mask
+    let unit_mask = mask.map(|mask| mask.map(|channel| f32::from(channel) / 255.0));
+    if let Some(mask) = unit_mask
         && material.family != Family::Background
     {
-        let mask = mask.map(|channel| f32::from(channel) / 255.0);
-        if material.family == Family::Hair {
-            let squared = mask[3] * mask[3];
-            albedo = [albedo[0] * squared, albedo[1] * squared, albedo[2] * squared];
-        }
+        let shaded = occlusion(&material.package, Some(mask));
+        albedo = [albedo[0] * shaded, albedo[1] * shaded, albedo[2] * shaded];
         if material.family != Family::Legacy {
             let bias = roughness * 2.0 - 1.0;
             roughness = mask[1] + bias * if bias < 0.0 { mask[1] } else { 1.0 - mask[1] };
         }
+    }
+
+    // The wearer's own colours, which no texture holds.
+    let tinted = tint(&material.package, unit_mask, customize);
+    albedo = [albedo[0] * tinted[0], albedo[1] * tinted[1], albedo[2] * tinted[2]];
+    // A lip is a tint laid over the face by the weight that face's own normal map states, not a
+    // colour of its own. Gated on the face rather than on `skin.shpk`, which also dresses bodies,
+    // hands and feet: the alpha was read off a face map and nothing says a body's holds the same.
+    if material.package == "skin.shpk" && material.name.contains("_fac_") {
+        let weight = sampled[3] * customize.lip[3];
+        albedo = std::array::from_fn(|i| albedo[i] + (customize.lip[i] - albedo[i]) * weight);
     }
 
     let mut opacity = 1.0f32;
@@ -1028,7 +1260,7 @@ fn material_json(info: &MaterialInfo, baked: &BakedMaterial, writer: &mut Writer
             pbr.insert("metallicFactor".into(), json!(metalness));
             pbr.insert("roughnessFactor".into(), json!(roughness));
         }
-        BakedMaterial::Baked { base_color, metallic_roughness, emissive, normal } => {
+        BakedMaterial::Baked { base_color, metallic_roughness, emissive, normal, .. } => {
             let index = writer.texture(&tex_png(base_color));
             pbr.insert("baseColorTexture".into(), json!({ "index": index }));
             pbr.insert("metallicFactor".into(), json!(1.0));
@@ -1052,9 +1284,15 @@ fn material_json(info: &MaterialInfo, baked: &BakedMaterial, writer: &mut Writer
         }
     }
     material["pbrMetallicRoughness"] = Value::Object(pbr);
-    if info.alpha_threshold > 0.0 {
-        material["alphaMode"] = json!("MASK");
-        material["alphaCutoff"] = json!(info.alpha_threshold);
+    // The flat fallback is a solid grey, so only a baked material can come out short of opaque.
+    let sheer = matches!(baked, BakedMaterial::Baked { sheer: true, .. });
+    match alpha_mode(info.translucent, info.alpha_threshold, sheer) {
+        "MASK" => {
+            material["alphaMode"] = json!("MASK");
+            material["alphaCutoff"] = json!(info.alpha_threshold);
+        }
+        "BLEND" => material["alphaMode"] = json!("BLEND"),
+        _ => {}
     }
     material["doubleSided"] = json!(!info.cull);
     material
@@ -1106,13 +1344,119 @@ pub(super) async fn finish(scene: Scene, files: &dyn FileProvider) -> Result<Vec
             Err(why) => log::warn!("assets/mdl: export: {path}: {why}"),
         }
     }
-    let baked: Vec<BakedMaterial> = scene.materials.iter().map(|material| bake(material, &images)).collect();
+    let baked: Vec<BakedMaterial> = scene
+        .materials
+        .iter()
+        .map(|material| bake(material, &images, &scene.customize))
+        .collect();
     assemble(&scene, &baked)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn coloured() -> program::Customize {
+        program::Customize {
+            skin: [0.8, 0.6, 0.5, 1.0],
+            lip: [1.0, 0.0, 0.0, 0.5],
+            hair: [0.2, 0.1, 0.0, 1.0],
+            highlight: [1.0, 1.0, 0.0, 1.0],
+            left_eye: [1.0, 0.0, 0.0, 1.0],
+            right_eye: [0.0, 1.0, 0.0, 1.0],
+            ..program::Customize::default()
+        }
+    }
+
+    /// The measured rule is stated per package: a family-wide one multiplied the eyes by a channel
+    /// that is nought across every texel of their mask, which drew them black.
+    /// The female Viera's racial top is the case: `_top_a` is `character.shpk` at a clip of 0.5 and
+    /// `_top_b` is `charactertransparency.shpk` at 0.0, and only the second is see-through.
+    /// The renderer lays a stain over the half-packed table its shaders sample; this lays the same
+    /// template over the decoded row, so the two have to name the same fields.
+    #[test]
+    fn a_stain_replaces_the_fields_its_row_names_and_nothing_else() {
+        use std::io::Cursor;
+
+        use ironworks::file::File;
+
+        // Row 0 takes its diffuse, metalness and roughness from template 1, channel 0.
+        let fields = (1 << mtrl::DyeField::Diffuse as u16)
+            | (1 << mtrl::DyeField::Metalness as u16)
+            | (1 << mtrl::DyeField::Roughness as u16);
+        let bytes = dye::test::extended_material(&[(1100, 0, fields)]);
+        let material = mtrl::Material::read(Cursor::new(bytes)).unwrap();
+        let colors = material.color_table().unwrap();
+        let templates = dye::test::templates(1100);
+
+        let base = vec![0.0f32; colors.rows() * ROW];
+        let held = dyed(&base, colors, &templates, [Some(3), None]).unwrap();
+        // The template's own values arrive through a half, so they come back rounded to one.
+        let near = |held: f32, wanted: f32| (held - wanted).abs() < 1e-3;
+        assert!(near(held[0], 0.4) && near(held[1], 1.4) && near(held[2], 2.4)); // diffuse
+        assert!(near(held[3], 0.5)); // roughness
+        assert!(near(held[7], 0.8)); // metalness
+        // Nothing the row did not name moved, and no other row was touched at all.
+        assert_eq!(&held[4..7], &[0.0; 3]);
+        assert_eq!(&held[8..ROW], &[0.0; 8]);
+        assert!(held[ROW..].iter().all(|held| *held == 0.0));
+
+        assert!(dyed(&base, colors, &templates, [None, None]).is_none());
+    }
+
+    #[test]
+    fn only_a_see_through_package_counts_as_translucent() {
+        assert!(translucent("charactertransparency.shpk"));
+        assert!(translucent("characterglass.shpk"));
+        assert!(!translucent("character.shpk"));
+        assert!(!translucent("characterlegacy.shpk"));
+    }
+
+    #[test]
+    fn a_translucent_material_blends_rather_than_being_cut_at_a_threshold() {
+        // A garment the game draws a second blended pass for states a clip; hardening it at that
+        // clip is what loses the translucency.
+        assert_eq!(alpha_mode(true, 0.5, false), "BLEND");
+        assert_eq!(alpha_mode(false, 0.5, false), "MASK");
+        assert_eq!(alpha_mode(false, 0.0, true), "BLEND");
+        assert_eq!(alpha_mode(false, 0.0, false), "OPAQUE");
+    }
+
+    #[test]
+    fn only_the_packages_that_state_an_occlusion_fold_one_in() {
+        let mask = Some([1.0, 1.0, 0.5, 0.25]);
+        assert_eq!(occlusion("hair.shpk", mask), 0.0625);
+        assert_eq!(occlusion("character.shpk", mask), 0.25);
+        assert_eq!(occlusion("iris.shpk", mask), 1.0);
+        assert_eq!(occlusion("skin.shpk", mask), 1.0);
+        assert_eq!(occlusion("character.shpk", None), 1.0);
+    }
+
+    #[test]
+    fn hair_is_mixed_between_its_two_colours_and_skin_is_tinted_outright() {
+        let held = coloured();
+        // The blend is the mask's blue: nought is all hair colour, one is all highlight.
+        assert_eq!(tint("hair.shpk", Some([0.0, 0.0, 0.0, 0.0]), &held), [0.2, 0.1, 0.0]);
+        assert_eq!(tint("hair.shpk", Some([0.0, 0.0, 1.0, 0.0]), &held), [1.0, 1.0, 0.0]);
+        assert_eq!(tint("skin.shpk", None, &held), [0.8, 0.6, 0.5]);
+        assert_eq!(tint("character.shpk", None, &held), [1.0; 3]);
+    }
+
+    #[test]
+    fn an_iris_vertex_carries_the_eye_its_own_colour_selects() {
+        let held = coloured();
+        // COLOR.x picks the left eye and COLOR.y the right, which is how one face draws two.
+        assert_eq!(eye_color([255, 0, 0, 255], &held), [255, 0, 0, 255]);
+        assert_eq!(eye_color([0, 255, 0, 128], &held), [0, 255, 0, 128]);
+    }
+
+    #[test]
+    fn a_vertex_colour_carries_its_opacity_and_tints_nothing() {
+        // An iris mesh's own colour is the side select, not a colour: exporting it as one paints
+        // one eye red and the other green.
+        assert_eq!(vertex_color([255, 0, 0, 255]), [255, 255, 255, 255]);
+        assert_eq!(vertex_color([0, 255, 0, 128]), [255, 255, 255, 128]);
+    }
 
     fn vertex(position: [f32; 3], normal: [f32; 3]) -> Vertex {
         // `Vertex`'s fields are private to `mdl` but visible to this descendant module.

@@ -460,7 +460,7 @@ impl<'a> Cell<'a> {
     pub fn size(&self, ui: &mut egui::Ui, row_location: (u32, Option<u16>)) -> f32 {
         self.size_internal(ui).unwrap_or_else(|err| {
             log::error!(
-                "Failed to size cell (row {row_location:?}, col {}): {:?}",
+                "计算单元格尺寸失败 (行 {row_location:?}, 列 {}): {:?}",
                 self.sheet_column.id,
                 err
             );
@@ -651,12 +651,12 @@ pub(crate) fn read_integer<T: num_traits::NumCast>(
     match read_scalar(row, offset, kind)? {
         CellValue::Integer(i) => T::from(i).ok_or_else(|| {
             anyhow::anyhow!(
-                "Failed to convert integer value: {} to target type: {}",
+                "无法将整数值 {} 转换为目标类型 {}",
                 i,
                 std::any::type_name::<T>()
             )
         }),
-        _ => bail!("Invalid column kind for integer: {kind:?}"),
+        _ => bail!("整数字段使用了无效的列类型: {kind:?}"),
     }
 }
 
@@ -736,8 +736,8 @@ fn draw_icon(ctx: &GlobalContext, ui: &mut egui::Ui, icon_id: u32) -> egui::Resp
     let hires = ALWAYS_HIRES.get(ui.ctx());
     let path = get_icon_path(ctx.backend().icons(), icon_id, hires, ctx.language());
     let image_source = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
-        log::debug!("Icon not found in cache: {icon_id}");
-let excel = excel.clone();
+        log::debug!("缓存中未找到图标: {icon_id}");
+        let excel = excel.clone();
         let path = path.clone();
         TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
     });
@@ -778,7 +778,7 @@ let excel = excel.clone();
             unreachable!()
         }
     };
-let resp = resp.on_hover_text(format!("ID: {icon_id}\n路径: {path}"));
+    let resp = resp.on_hover_text(format!("ID: {icon_id}\n路径: {path}"));
     icon_context_menu(
         &resp,
         icon_mgr,

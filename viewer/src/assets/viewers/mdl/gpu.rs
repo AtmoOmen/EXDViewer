@@ -15,7 +15,8 @@ use glow::HasContext;
 
 use super::deferred::{self, Layered, Linked, TARGETS, TYPES, build_pair, dwords, sampler};
 use super::grid::{Grid, Ground};
-use super::material::Family;
+use super::material::{Family, Glass};
+use super::super::avfx;
 use super::{Table, Vertex, program};
 
 pub use super::deferred::{
@@ -152,6 +153,9 @@ pub struct Surface {
     pub emissive_color: [f32; 3],
     pub normal_scale: f32,
     pub cull: bool,
+    /// Set where the material's own package states how its glass reaches the frame, which is the
+    /// one package that does.
+    pub glass: Option<Glass>,
 }
 
 /// What a mesh draws as while its material is still being fetched: bare geometry, nothing tinted
@@ -171,6 +175,7 @@ impl Default for Surface {
             diffuse_color: [1.0; 3],
             emissive_color: [0.0; 3],
             normal_scale: 1.0,
+            glass: None,
             cull: false,
         }
     }
@@ -228,6 +233,10 @@ pub struct Frame {
     pub debug: Debug,
     /// The floor to rule under the model, where the viewer asks for one.
     pub grid: Option<Ground>,
+    /// The emote's own particles, drawn into the frame the composite resolved so the character
+    /// occludes them and the chain past it spreads their glow. Taken by the pass that draws them,
+    /// which is what fills in the depth and the size only the buffers know.
+    pub effects: Mutex<Vec<(Arc<Mutex<avfx::gpu::Particles>>, avfx::gpu::Frame)>>,
 }
 
 /// Geometry waiting for a context to upload it under.
@@ -384,14 +393,14 @@ impl Model {
                 Ok(texture) => {
                     self.tables.insert(material, (texture, rows as f32));
                 }
-                Err(why) => log::error!("assets/mdl: color table: {why}"),
+                Err(why) => log::error!("assets/mdl: 颜色表：{why}"),
             }
         }
         // A zip would truncate instead, and a mesh drawn under another mesh's material shows as a
         // texturing bug rather than as the bookkeeping error it is.
         if self.meshes.len() != surfaces {
             self.failure = Some(format!(
-                "{} meshes against {surfaces} surfaces",
+                "{} 个网格对应 {surfaces} 个表面",
                 self.meshes.len(),
             ));
             return false;
@@ -598,6 +607,16 @@ impl Model {
         }
 
         self.ground(gl, painter, frame, info);
+        // This path draws straight into the buffer egui bound, so the depth the model just left is
+        // what a glow is tested against. Nothing there can be sampled back, which leaves the
+        // soft-particle variant its unbound sampler.
+        let held = info.viewport_in_pixels();
+        let size = (held.width_px.max(1), held.height_px.max(1));
+        for (particles, effect) in frame.effects.lock().unwrap().iter_mut() {
+            effect.tested = true;
+            effect.scene.size = (size.0 as f32, size.1 as f32);
+            particles.lock().unwrap().draw(gl, painter, effect);
+        }
     }
 
     /// The floor, over the model and against the depth whichever path drew it left behind. Both
@@ -635,7 +654,7 @@ impl Model {
         // dropped that query, and asking raises an error the frame is then blamed for.
         let samples = unsafe { gl.get_parameter_i32(glow::SAMPLES) };
         log::info!(
-            "assets/mdl: {} meshes on {:?}, {samples} samples",
+            "assets/mdl: {} 个网格，运行于 {:?}，{samples} 个采样",
             pending.meshes.len(),
             gl.version()
         );
@@ -797,7 +816,7 @@ impl Game {
                         Ok(program) => program,
                         Err(why) => {
                             let why = format!(
-                                "material {} depth={depth} page={page} attachments={}: {why}",
+                                "材质 {} depth={depth} page={page} attachments={}：{why}",
                                 surface.material,
                                 buffers.attachments()
                             );
@@ -832,7 +851,7 @@ impl Game {
                         self.bind(gl, painter, program, held, surface, at, mesh, buffers, scene)
                     {
                         let why = format!(
-                            "material {} depth={depth} page={page} attachments={}: {why}",
+                            "材质 {} depth={depth} page={page} attachments={}：{why}",
                             surface.material,
                             buffers.attachments()
                         );
@@ -846,6 +865,46 @@ impl Game {
             Some(why) => Err(why),
             None => Ok(()),
         }
+    }
+
+    /// The emote's own particles, over the frame the composite resolved.
+    ///
+    /// Drawn through the framebuffer standing on the copy of the depth, which leaves the live one
+    /// free to be sampled: a glow is tested against the depth the character settled, and the
+    /// soft-particle variant reads that same depth back.
+    fn particles(
+        &self,
+        gl: &glow::Context,
+        painter: &egui_glow::Painter,
+        frame: &Frame,
+        buffers: &deferred::Buffers,
+        size: (i32, i32),
+    ) -> Result<(), String> {
+        let mut held = frame.effects.lock().unwrap();
+        let (Some(into), Some(depth)) = (buffers.bare(), buffers.depth()) else {
+            return Ok(());
+        };
+        if held.is_empty() {
+            return Ok(());
+        }
+        buffers.cut(gl)?;
+        unsafe {
+            gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
+            gl.viewport(0, 0, size.0, size.1);
+        }
+        for (particles, effect) in held.iter_mut() {
+            effect.tested = true;
+            effect.depth = Some(depth);
+            effect.scene.size = (size.0 as f32, size.1 as f32);
+            particles.lock().unwrap().draw(gl, painter, effect);
+        }
+        unsafe {
+            gl.depth_func(glow::LESS);
+            gl.depth_mask(true);
+            gl.disable(glow::BLEND);
+            gl.disable(glow::DEPTH_TEST);
+        }
+        Ok(())
     }
 
     fn render(
@@ -907,6 +966,10 @@ impl Game {
             if let Some(reflection) = frame.reflection.as_ref() {
                 buffers.mirror(gl, reflection, &scene)?;
             }
+            // Over the composite and before the chain that spreads the bright end of it, which is
+            // where the game draws them: a glow behind the character is hidden by it, and one in
+            // front blooms with everything else.
+            self.particles(gl, painter, frame, buffers, size)?;
             if let Some(glare) = frame.glare.as_ref() {
                 buffers.source(gl)?;
                 buffers.glare(gl, glare, &scene)?;
@@ -982,7 +1045,7 @@ impl Game {
             // Tested against a copy of the depth rather than the depth itself: water reads the
             // depth back, and the live one is the framebuffer's own attachment.
             buffers.cut(gl)?;
-            let into = buffers.bare().ok_or("no lit frame")?;
+            let into = buffers.bare().ok_or("没有光照帧")?;
             let size = buffers.size();
             unsafe {
                 gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
@@ -1023,11 +1086,23 @@ impl Game {
                 let Some(mesh) = meshes.get(*at) else {
                     continue;
                 };
+                // Glass states its own blend. Its pass hands over what the frame behind is to be
+                // scaled by rather than what to mix into it, so blending that on coverage lays a lit
+                // card over the frame and the halo chain then spreads it.
+                if behind {
+                    unsafe {
+                        match surface.glass {
+                            Some(Glass::Mul) => gl.blend_func(glow::DST_COLOR, glow::ZERO),
+                            Some(Glass::Add) => gl.blend_func(glow::SRC_ALPHA, glow::ONE),
+                            None => gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA),
+                        }
+                    }
+                }
                 let held = surface
                     .shaded
                     .as_ref()
                     .and_then(|shaded| shaded.resolve.as_ref())
-                    .ok_or("no pass to resolve with")?;
+                    .ok_or("没有可用于解析的通道")?;
                 let program =
                     deferred::link(gl, &mut self.programs, (surface.material, false, LIT), held)?;
                 unsafe {
@@ -1118,7 +1193,7 @@ impl Game {
         // Tested against a copy of the depth rather than the depth itself: a surface here also
         // samples it, and the live one is the framebuffer's own attachment.
         buffers.cut(gl)?;
-        let into = buffers.bare().ok_or("no lit frame")?;
+        let into = buffers.bare().ok_or("没有光照帧")?;
         let size = buffers.size();
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
@@ -1189,8 +1264,8 @@ impl Game {
         buffers: &mut deferred::Buffers,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let shaded = surface.shaded.as_ref().ok_or("nothing to draw with")?;
-        let palette = *self.joints.get(at).ok_or("no joint palette")?;
+        let shaded = surface.shaded.as_ref().ok_or("没有可用于绘制的着色器")?;
+        let palette = *self.joints.get(at).ok_or("没有骨骼调色板")?;
         let layout = self.layout(gl)?;
         buffers.bind(gl, program, held, scene, &[])?;
         // Before anything is bound: making a texture binds it to whichever unit happens to be
@@ -1323,7 +1398,7 @@ type Supplied = (Vec<(u32, Layered)>, Vec<(Arc<str>, Layered)>, Option<Vec<u32>>
 fn supply(gl: &glow::Context, buffers: &mut deferred::Buffers, (arrays, stacks, types): Supplied) {
     for (id, held) in arrays {
         if let Err(why) = buffers.layered(gl, id, &held) {
-            log::error!("assets/mdl: texture array {id:#010x}: {why}");
+            log::error!("assets/mdl: 纹理数组 {id:#010x}：{why}");
         }
     }
     for (path, held) in stacks {
@@ -1334,7 +1409,7 @@ fn supply(gl: &glow::Context, buffers: &mut deferred::Buffers, (arrays, stacks, 
     if let Some(values) = types
         && let Err(why) = buffers.fill_types(gl, &values)
     {
-        log::error!("assets/mdl: shader types: {why}");
+        log::error!("assets/mdl: 着色器类型：{why}");
     }
 }
 

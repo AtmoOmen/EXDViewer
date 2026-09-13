@@ -537,6 +537,9 @@ impl From<i32> for Blend {
     }
 }
 
+/// The point sprite whose corners the engine sets into the screen for it.
+const POWDER: i32 = 1;
+
 /// A world axis, as `RBDT` names one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Axis {
@@ -575,6 +578,14 @@ impl Facing {
     /// what names none is left in the plane its own rotation puts it in.
     fn read(kind: i32, base: i32) -> Self {
         match (kind, base) {
+            // A powder naming no base at all is billed at the screen. Its own vertex shader never
+            // derives a basis from the view, but that settles nothing: it turns a corner inside the
+            // instance's world matrix, and the engine builds that matrix on the card's behalf, the
+            // same way `apricot_shape` is handed corners already in the world. Three sightings
+            // agree - a torch fire stands edge-on without this, a sparkle lying in the world reads
+            // as stretched sideways, and Elpis' lamp beam is a Windmill rather than a powder, so it
+            // keeps the plane its own angles put it in and goes on turning with its lamp.
+            (POWDER, 10) => Self::Screen,
             (10..=12, 0..=2 | 10) => Self::Still(Axis::Y),
             (_, 0) => Self::Still(Axis::X),
             (_, 1) => Self::Still(Axis::Y),
@@ -636,6 +647,10 @@ pub struct Shading {
     /// Whether this is drawn from a stream the viewer places in the world rather than from one of
     /// the effect's own models.
     pub sprite: bool,
+    /// `DpOf`, how far toward the eye the vertex shader pulls the fragment's own depth before it is
+    /// tested: `min(w, DpOf / w + z)`, so it holds a flame over the brazier it stands in rather
+    /// than letting the rim it touches cut it away.
+    pub depth_offset: f32,
 }
 
 /// What a model particle's rim ramp is written as, `FrC` against `ColB` and `ColE`. A file that
@@ -821,6 +836,17 @@ fn shading(block: &Block, lights: Option<Vec<(u32, u32)>>, sprite: bool) -> Shad
             integer(first, "TCAT").unwrap_or(1) as f32,
         ],
         sprite,
+        // Only where the file states the offset in the world it stands in. The other kind is a
+        // fixed step in clip depth, which is no distance at all and would carry a sprite far
+        // further forward than it asks for.
+        depth_offset: match integer(blocks, "DOTy") == Some(1) {
+            true => 0.0,
+            false => blocks
+                .iter()
+                .find(|held| held.name() == "DpOf")
+                .and_then(Block::f32)
+                .unwrap_or_default(),
+        },
     }
 }
 
@@ -923,6 +949,9 @@ struct Spawn {
     count: i32,
     delay: f32,
     pass: Pass,
+    /// `bOvr`/`OvrV`: the life this entry gives what it makes, in place of the life that particle
+    /// states for itself. Unset where the entry leaves the particle its own.
+    life: Option<f32>,
 }
 
 impl Spawn {
@@ -938,6 +967,8 @@ impl Spawn {
                 1 => Pass::Start,
                 _ => Pass::End,
             },
+            life: (integer(blocks, "bOvr").unwrap_or_default() != 0)
+                .then(|| integer(blocks, "OvrV").unwrap_or_default() as f32),
         })
     }
 
@@ -1111,6 +1142,10 @@ fn mesh(model: &Geometry) -> Mesh {
 
 /// One emitter running: a timeline started it, or a parent emitter did.
 struct Running {
+    /// Which of the effect's own runs this is, so a cycle does not start one that has not ended.
+    /// `None` where it is not one of them at all: an emitter one of them spawned, which nothing
+    /// about a cycle should hold back.
+    run: Option<usize>,
     def: usize,
     born: i32,
     until: i32,
@@ -1137,6 +1172,20 @@ pub struct State {
     pub frame: i32,
     running: Vec<Running>,
     particles: Vec<Live>,
+}
+
+impl State {
+    /// Stops every emitter, leaving whatever is already alive to carry on and die out on its own.
+    /// A firing whose command window has closed, or whose motion has looped round onto a fresh one,
+    /// is released rather than taken off screen: the game leaves its particles to finish.
+    pub fn release(&mut self) {
+        self.running.clear();
+    }
+
+    /// Whether a released run has anything left to draw.
+    pub fn spent(&self) -> bool {
+        self.particles.is_empty()
+    }
 }
 
 impl Default for State {
@@ -1249,15 +1298,22 @@ impl Effect {
     /// Steps to `frame`, replaying from the start where the state sits past it: a particle's
     /// position is the sum of every step it has taken, so there is no stepping backwards.
     pub fn seek(&self, state: &mut State, frame: i32) {
+        self.seek_cycling(state, frame, None);
+    }
+
+    /// The same, for a caller that wants the schedule run again every `period` frames rather than
+    /// once: what is already in the air carries across the seam, which wrapping the frame would
+    /// throw away.
+    pub fn seek_cycling(&self, state: &mut State, frame: i32, period: Option<i32>) {
         if frame < state.frame {
             *state = State::default();
         }
         while state.frame < frame {
-            self.step(state);
+            self.step(state, period);
         }
     }
 
-    fn step(&self, state: &mut State) {
+    fn step(&self, state: &mut State, period: Option<i32>) {
         let frame = state.frame + 1;
         state.frame = frame;
 
@@ -1273,12 +1329,24 @@ impl Effect {
             true
         });
 
-        for run in &self.runs {
-            if run.start == frame && state.running.len() < EMITTERS {
+        let cycle = match period.filter(|held| *held > 0) {
+            Some(period) => (frame - 1).rem_euclid(period) + 1,
+            None => frame,
+        };
+        for (at, run) in self.runs.iter().enumerate() {
+            // A run whose span outlasts the cycle is still going when its own start comes round
+            // again. Starting a second copy of it would stack one run on another and hand the new
+            // one an age of nought, which walks a long emitter track - a lamp's sweep - back to
+            // where it began every period instead of carrying on through it.
+            if run.start == cycle
+                && state.running.len() < EMITTERS
+                && !state.running.iter().any(|held| held.run == Some(at))
+            {
                 state.running.push(Running {
+                    run: Some(at),
                     def: run.emitter,
                     born: frame,
-                    until: run.until,
+                    until: frame + (run.until - run.start),
                     place: Place::NONE,
                     tint: Vec4::ONE,
                     since: f32::INFINITY,
@@ -1314,7 +1382,9 @@ impl Effect {
             let velocity = rotation(read(&def.heading, local)) * Vec3::Y * def.speed.at(local);
 
             for spawn in &def.particles {
-                let life = self.particles[spawn.target].life.unwrap_or(f32::INFINITY);
+                let life = spawn
+                    .life
+                    .unwrap_or_else(|| self.particles[spawn.target].life.unwrap_or(f32::INFINITY));
                 for _ in 0..spawn.made(burst, previous, local) {
                     if state.particles.len() >= PARTICLES {
                         break;
@@ -1340,6 +1410,7 @@ impl Effect {
                         break;
                     }
                     spawned.push(Running {
+                        run: None,
                         def: spawn.target,
                         born: frame,
                         until: self.emitters[spawn.target]
@@ -1447,7 +1518,7 @@ impl Effect {
         let mut state = State::default();
         let (mut low, mut high) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         for _ in 0..self.length.min(FITTED) {
-            self.step(&mut state);
+            self.step(&mut state, None);
             for live in &state.particles {
                 let def = &self.particles[live.def];
                 let age = (state.frame - live.born) as f32;

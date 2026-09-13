@@ -1,7 +1,7 @@
 {
   "name": "XIViewer",
   "short_name": "XIViewer",
-  "description": "Browse and inspect FFXIV internal data directly from your browser",
+  "description": "在浏览器中直接浏览并检查《最终幻想 XIV》的内部数据",
   "icons": [
     {
       "src": "/assets/icons/android-icon-36x36.png",

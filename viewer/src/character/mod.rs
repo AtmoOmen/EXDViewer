@@ -25,13 +25,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use egui::{
-    Align, CentralPanel, Color32, Layout, Popup, RectAlign, RichText, ScrollArea, TextEdit,
-    containers::panel::Panel,
+    Align, CentralPanel, CollapsingHeader, Color32, Layout, Popup, PopupCloseBehavior, RectAlign,
+    RichText, ScrollArea, TextEdit, containers::panel::Panel,
 };
 use glam::{Mat4, Vec3};
 use ironworks::excel::Language;
 
-use crate::assets::viewers::mdl;
+use crate::assets::viewers::{fpeb, mdl};
 use crate::backend::Backend;
 use crate::data::get_icon_path;
 use crate::data::listing::{Listed, Listing};
@@ -39,7 +39,7 @@ use crate::excel::provider::ExcelProvider;
 use crate::settings::{LANGUAGE, api_base};
 use crate::utils::{
     CollapsibleSidePanel, FuzzyMatcher, IconManager, ManagedIcon, Side, TrackedPromise,
-    icon_context_menu,
+    fetch_url_str, icon_context_menu,
 };
 
 /// The set every character is built from. The game holds one body mesh, `c0101b0001`, and stands
@@ -52,6 +52,9 @@ pub(super) const DEFORMERS: &str = "chara/xls/boneDeformer/human.pbd";
 /// How big a set's icon is drawn, and how far apart the grid sets them.
 const ICON: f32 = 40.0;
 const GAP: f32 = 4.0;
+/// How many rows an icon menu shows before it scrolls, so a long one (a hairstyle) does not push
+/// everything under it down the panel.
+const ICON_ROWS: usize = 3;
 
 /// How big a piece of equipment's icon is drawn beside its name, and how many of them a slot's
 /// picker shows at once.
@@ -71,6 +74,9 @@ const SKIN_COLOR: u32 = 8;
 const EYE_COLOR: u32 = 9;
 const HAIR_COLOR: u32 = 10;
 const FEATURES: u32 = 12;
+/// The top bit of the facial-features byte, which is on wherever a race's tattoo is: the game packs
+/// it beside the seven feature checks rather than offering a menu of its own.
+const LEGACY_TATTOO: u32 = 0x80;
 const TATTOO_COLOR: u32 = 13;
 const LIP_COLOR: u32 = 20;
 pub(super) const FACE_PAINT: u32 = 24;
@@ -120,8 +126,11 @@ const SWATCH: f32 = 18.0;
 /// Smallclothes, which is what everything else is worn over.
 const SMALLCLOTHES: Gear = Gear { set: 0, variant: 1 };
 
+/// The directory and letter a slot's models are filed under, as [`Slot::filed`] answers it.
+type Filed = (&'static str, char);
+
 /// A slot a character wears something in, as the file names abbreviate it. The five it is dressed
-/// in come first, in the order every sheet states them, and the five it is adorned with after.
+/// in come first, in the order every sheet states them, and what it is adorned with after.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
     Head,
@@ -134,20 +143,23 @@ pub enum Slot {
     Wrists,
     RingLeft,
     RingRight,
+    Facewear,
 }
 
 impl Slot {
     /// The five a body is dressed in.
     pub const GEAR: [Slot; 5] = [Self::Head, Self::Body, Self::Hands, Self::Legs, Self::Feet];
-    /// The five it is adorned with, which are filed apart from the gear and hide nothing of it.
-    pub const ADORNMENT: [Slot; 5] = [
+    /// What it is adorned with beyond its gear, which hides nothing of it. Every one but facewear
+    /// is filed apart from the gear as well; facewear is not, sharing the head's own listing.
+    pub const ADORNMENT: [Slot; 6] = [
         Self::Ears,
         Self::Neck,
         Self::Wrists,
         Self::RingLeft,
         Self::RingRight,
+        Self::Facewear,
     ];
-    pub const ALL: [Slot; 10] = [
+    pub const ALL: [Slot; 11] = [
         Self::Head,
         Self::Body,
         Self::Hands,
@@ -158,6 +170,7 @@ impl Slot {
         Self::Wrists,
         Self::RingLeft,
         Self::RingRight,
+        Self::Facewear,
     ];
     /// The slots a race has clothing of its own for, in the order `Race` states them.
     pub const RACIAL: [Slot; 4] = [Self::Body, Self::Hands, Self::Legs, Self::Feet];
@@ -174,12 +187,15 @@ impl Slot {
             Self::Wrists => "腕部",
             Self::RingLeft => "左戒指",
             Self::RingRight => "右戒指",
+            Self::Facewear => "面部装饰",
         }
     }
 
     fn suffix(self) -> &'static str {
         match self {
-            Self::Head => "met",
+            // Facewear shares the head's own suffix: the game resolves it through the same fixed
+            // entry of the suffix table `ResolveMdlPath` loads for a head set.
+            Self::Head | Self::Facewear => "met",
             Self::Body => "top",
             Self::Hands => "glv",
             Self::Legs => "dwn",
@@ -192,10 +208,20 @@ impl Slot {
         }
     }
 
-    /// Whether a set worn here is filed as an accessory rather than as equipment, which is both
-    /// the directory it sits in and the letter its models are named with.
+    /// Whether this is one of the pieces worn over the gear rather than the gear itself: it hides
+    /// nothing under it, has no attire default, and shows "None" rather than "Bare" where its
+    /// picker is empty.
     pub(super) fn adornment(self) -> bool {
         Self::ADORNMENT.contains(&self)
+    }
+
+    /// The directory and letter a worn set here is filed under. Facewear is the one adornment that
+    /// files as plain equipment rather than as an accessory.
+    pub(super) fn filed(self) -> Filed {
+        match self.adornment() && self != Self::Facewear {
+            true => ("accessory", 'a'),
+            false => ("equipment", 'e'),
+        }
     }
 }
 
@@ -216,10 +242,10 @@ impl Gear {
 }
 
 /// What a character wears, by slot.
-pub type Outfit = [Option<Gear>; 10];
+pub type Outfit = [Option<Gear>; 11];
 
 /// The model each slot of one set is worn as, where the code carries one at all.
-type Models = [Option<String>; 10];
+type Models = [Option<String>; 11];
 
 /// What the creator dresses a character in before anything is picked for them.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -260,7 +286,7 @@ pub struct CharacterBuilder {
     /// What the creator offers, and which of its races, clans and genders is being built.
     creator: menus::Creator,
     reading: Option<TrackedPromise<Result<menus::Creator>>>,
-    reading_pieces: Option<TrackedPromise<Result<[Vec<menus::Piece>; 10]>>>,
+    reading_pieces: Option<TrackedPromise<Result<[Vec<menus::Piece>; 11]>>>,
     race: u32,
     tribe: u32,
     female: bool,
@@ -284,10 +310,10 @@ pub struct CharacterBuilder {
     job: usize,
     /// What has been picked by hand for a slot, over whatever the attire puts there, and which
     /// slot's picker is open. Both index [`menus::Creator::pieces`].
-    chosen: [Option<usize>; 10],
+    chosen: [Option<usize>; 11],
     picking: Option<Slot>,
-    search: [String; 10],
-    matched: RefCell<[(Option<String>, Vec<usize>); 10]>,
+    search: [String; 11],
+    matched: RefCell<[(Option<String>, Vec<usize>); 11]>,
     matcher: FuzzyMatcher,
     /// What has been picked for each of the creator's menus, by the `Customize` it drives. A menu
     /// the map says nothing about is at its first choice, which is what the row's own defaults are.
@@ -303,9 +329,7 @@ pub struct CharacterBuilder {
     reading_dye_templates: Option<TrackedPromise<Result<mdl::DyeTemplates>>>,
     /// What has been picked to stain each slot with, one id per channel a modern item can carry.
     /// Zero is the unstained slot, matching a `.stm` template's own numbering.
-    stains: [[Option<u8>; 2]; 10],
-    /// Which slot's dye picker is open, and which of its two channels.
-    dyeing: Option<(Slot, u8)>,
+    stains: [[Option<u8>; 2]; 11],
     /// What each body differs from the one it is built on by, which is both what says where a
     /// borrowed model comes from and what shapes it onto the body wearing it.
     deformers: Option<Rc<mdl::Deformers>>,
@@ -321,6 +345,13 @@ pub struct CharacterBuilder {
     npc: Option<usize>,
     npc_search: String,
     npcs_matched: RefCell<(Option<String>, Vec<usize>)>,
+    /// The battle characters that are a body of their own, and which of them the character stands
+    /// as in place of anything the creator would have built.
+    beasts: Vec<npcs::Beast>,
+    reading_beasts: Option<TrackedPromise<Result<Vec<npcs::Beast>>>>,
+    beast: Option<usize>,
+    beast_search: String,
+    beasts_matched: RefCell<(Option<String>, Vec<usize>)>,
     /// The emotes the game names, and which of them is being played.
     emotes: Vec<emotes::Emote>,
     reading_emotes: Option<TrackedPromise<Result<Played>>>,
@@ -371,10 +402,14 @@ pub struct CharacterBuilder {
     /// against the code it was fetched for so a change of race asks again.
     atch: Option<(u16, Rc<Vec<u8>>)>,
     reading_atch: Option<TrackedPromise<Result<AtchRead>>>,
+    /// The eye-size table, which is one file for every body the game ships.
+    facial: Option<Rc<Vec<u8>>>,
+    reading_facial: Option<TrackedPromise<Result<Vec<u8>>>>,
     /// The models each set is worn as under the current code, by slot. A set number means one
-    /// thing as equipment and another as an adornment, so the two are kept apart. The picker asks
-    /// about every set it lists, and a directory listing is too dear to pay for one on every frame.
-    sets: RefCell<BTreeMap<(bool, u16), Models>>,
+    /// thing filed as equipment and another filed as an accessory, so the two are kept apart. The
+    /// picker asks about every set it lists, and a directory listing is too dear to pay for one on
+    /// every frame.
+    sets: RefCell<BTreeMap<(Filed, u16), Models>>,
     /// The files the model on screen was built from, so a pick that changes nothing costs nothing.
     worn: Vec<(String, u16)>,
     /// The stains each entry of `worn` is dressed in, in the same order: `[None; 2]` for the face,
@@ -422,7 +457,7 @@ impl Default for CharacterBuilder {
             hair: 1,
             attire: Attire::default(),
             job: 0,
-            chosen: [None; 10],
+            chosen: [None; 11],
             picking: None,
             search: Default::default(),
             matched: Default::default(),
@@ -434,8 +469,7 @@ impl Default for CharacterBuilder {
             reading_dyes: None,
             dye_templates: None,
             reading_dye_templates: None,
-            stains: [[None; 2]; 10],
-            dyeing: None,
+            stains: [[None; 2]; 11],
             deformers: None,
             reading_deformers: None,
             worn_over: None,
@@ -446,6 +480,11 @@ impl Default for CharacterBuilder {
             npc: None,
             npc_search: String::new(),
             npcs_matched: Default::default(),
+            beasts: Vec::new(),
+            reading_beasts: None,
+            beast: None,
+            beast_search: String::new(),
+            beasts_matched: Default::default(),
             emotes: Vec::new(),
             reading_emotes: None,
             poses: emotes::Poses::default(),
@@ -478,6 +517,8 @@ impl Default for CharacterBuilder {
             logged: Cell::new((false, None, None, false)),
             atch: None,
             reading_atch: None,
+            facial: None,
+            reading_facial: None,
             sets: RefCell::new(BTreeMap::new()),
             worn: Vec::new(),
             worn_stains: Vec::new(),
@@ -512,6 +553,10 @@ impl CharacterBuilder {
         self.reading_npcs = None;
         self.npc = None;
         self.npcs_matched.take();
+        self.beasts.clear();
+        self.reading_beasts = None;
+        self.beast = None;
+        self.beasts_matched.take();
         self.emotes.clear();
         self.poses = emotes::Poses::default();
         self.posture = emotes::Posture::default();
@@ -537,12 +582,14 @@ impl CharacterBuilder {
         self.glowed.take();
         self.atch = None;
         self.reading_atch = None;
+        self.facial = None;
+        self.reading_facial = None;
         self.stood = false;
         self.body.clear();
         self.faces.clear();
         self.hairs.clear();
         // What was picked by hand is where a piece sat in a list that is about to be read again.
-        self.chosen = [None; 10];
+        self.chosen = [None; 11];
         self.matched.take();
         self.sets.borrow_mut().clear();
         self.shaped.borrow_mut().clear();
@@ -624,6 +671,18 @@ impl CharacterBuilder {
         self.reading_npcs = Some(TrackedPromise::spawn_local(async move {
             npcs::read(&standing, language).await
         }));
+        let stood = backend.clone();
+        let paired = format!("{}/bnpc/", api_base(ctx));
+        self.reading_beasts = Some(TrackedPromise::spawn_local(async move {
+            let held: BTreeMap<u32, Vec<u32>> =
+                serde_json::from_str(&fetch_url_str(paired).await?)?;
+            // Only the most-sighted name of each, which is what the pairing is ordered by.
+            let named = held
+                .into_iter()
+                .filter_map(|(base, names)| Some((base, *names.first()?)))
+                .collect();
+            npcs::beasts(&stood, language, &named).await
+        }));
         let stanced = backend.clone();
         self.reading_stance = Some(TrackedPromise::spawn_local(async move {
             stance::Stance::read(&stanced, language).await
@@ -658,6 +717,16 @@ impl CharacterBuilder {
                 }
                 Ok(Err(why)) => log::warn!("角色：没有角色可登场：{why}"),
                 Err(promise) => self.reading_npcs = Some(promise),
+            }
+        }
+        if let Some(promise) = self.reading_beasts.take() {
+            match promise.try_take() {
+                Ok(Ok(read)) => {
+                    self.beasts = read;
+                    self.beasts_matched.take();
+                }
+                Ok(Err(why)) => log::warn!("角色：没有可登场的生物：{why}"),
+                Err(promise) => self.reading_beasts = Some(promise),
             }
         }
         if let Some(promise) = self.reading_stance.take() {
@@ -798,6 +867,22 @@ impl CharacterBuilder {
         // Checked every frame rather than folded into `!self.stood`: the code it settles on can
         // change more than once before that flag next goes false, and a fetch spawned for a code
         // already left behind must not be mistaken for the one now on screen.
+        if let Some(promise) = self.reading_facial.take() {
+            match promise.try_take() {
+                Ok(Ok(bytes)) => {
+                    log::info!("角色：眼型尺寸表已载入，共 {} 字节", bytes.len());
+                    self.facial = Some(Rc::new(bytes));
+                }
+                Ok(Err(why)) => log::warn!("角色：没有可读取的眼型尺寸：{why}"),
+                Err(promise) => self.reading_facial = Some(promise),
+            }
+        }
+        if self.facial.is_none() && self.reading_facial.is_none() {
+            let files = backend.files().clone();
+            let fetch = async move { anyhow::Ok(files.read(fpeb::PATH).await?) };
+            self.reading_facial = Some(TrackedPromise::spawn_local(fetch));
+        }
+
         let stale = self.atch.as_ref().is_none_or(|(held, _)| *held != self.code);
         if self.reading_atch.is_none() && stale {
             let files = backend.files().clone();
@@ -956,14 +1041,34 @@ impl CharacterBuilder {
         // Cheap enough to hand over on every frame: it walks the parts of one character and the
         // model keeps what it was already at, so nothing is rebuilt where nothing was picked.
         if let Some(Ok(model)) = &self.model {
-            let (customize, hidden, shapes, stature, bust) = self.made();
-            model.made(customize, hidden, shapes, stature, bust);
+            match self.beast.and_then(|at| self.beasts.get(at)) {
+                // A creature states its own size and is built out of no menu, so nothing the
+                // creator holds has anything to say about it.
+                Some(beast) => model.stands_at(beast.scale),
+                None => {
+                    let (customize, hidden, shapes, stature, bust) = self.made();
+                    model.made(customize, hidden, shapes, stature, bust);
+                }
+            }
             model.hinged(self.raised());
+            // Neither eye bone is animated by anything, so the table is the whole of what sizes
+            // them; a body, face or eye shape it says nothing about leaves them at rest.
+            let shape = self.choices.get(&fpeb::EYE_SHAPE).copied().unwrap_or_default();
+            model.eyed(
+                self.facial
+                    .as_ref()
+                    .and_then(|held| fpeb::scales(held, self.code, self.face, shape as u16))
+                    .unwrap_or([1.0; 2]),
+            );
             model.seated(self.mount_seat);
             model.dye(self.dye_templates.clone(), self.worn_stains.clone());
-            let carried = self.attachments();
+            // A weapon does not reach its back until the motion putting it there has run: the
+            // pack states no command to move it, so what keeps it in hand is that motion still
+            // playing. Drawing is the other way round, and takes it in hand at once.
+            let sheathing = model.acting().is_some_and(|name| name == stance::SHEATHE);
+            let carried = self.attachments(self.drawn || sheathing);
             model.glowing(self.effects(&carried));
-            model.carried(carried);
+            model.carried(carried, self.drawn);
             if let Some(stance) = self.stance.clone() {
                 model.blending(move |from, to| stance.fade(from, to));
             }
@@ -977,12 +1082,29 @@ impl CharacterBuilder {
     /// `bt_emp_emp`'s idle pack holds no animation at all, which is bare hands having no drawn
     /// pose to take.
     fn stand(&self, model: &mdl::Rendered) {
+        // A creature holds no weapon, so none of the stance machinery below has anything to say
+        // about it: it stands in the one resident pack its own kind names.
+        if let Some(beast) = self.beast.and_then(|at| self.beasts.get(at)) {
+            let mut stood = self.stood_in.borrow_mut();
+            if stood.as_ref().is_some_and(|stood| stood.held == beast.under) {
+                return;
+            }
+            if let Some(pack) = npcs::resident_pack(&beast.under) {
+                model.stand(&[(pack, stance::SHEATHED)], 0.0);
+            }
+            *stood = Some(Stood {
+                held: beast.under.clone(),
+                drawn: self.drawn,
+                told: Cell::new(false),
+            });
+            return;
+        }
         let Some(stance) = &self.stance else {
             return;
         };
-        // A body that has sat down holds the pose its seat names until it stands back up, which is
-        // what forgets this and asks for the idle again.
-        if self.posture != emotes::Posture::Standing {
+        // A body holding a pose of its own keeps it until it is put back on its feet, which is
+        // what forgets this and asks for the weapons' own idle again.
+        if self.resting().is_some_and(|pose| pose.settle.is_some()) {
             return;
         }
         let held = self.directory();
@@ -1041,21 +1163,41 @@ impl CharacterBuilder {
     /// the weapons in hand put it in, which is the only place a battle emote is filed at all, and
     /// then under the one every body shares. Both go through the table saying which body really
     /// holds a pack, since a class that ships none of its own reads another's.
-    /// The pack the body holds its seat's current pose out of, which is what an emote played
-    /// sitting down settles back into.
+    /// The pose the body rests in: which posture it is in, and where in that posture's own cycle
+    /// it stands.
+    fn resting(&self) -> Option<&emotes::Pose> {
+        self.poses.of(self.posture).get(self.pose)
+    }
+
+    /// The pack the body settles into, which is what an emote played out of that pose returns to.
     fn pose_pack(&self) -> Option<String> {
-        let key = self.poses.of(self.posture).get(self.pose)?;
+        let key = self.resting()?.settle.as_deref()?;
         Some(self.stance.as_ref()?.pack(self.code, stance::COMMON, key))
     }
 
-    /// Sits the body in the pose its seat and place in that seat's own cycle name, which is what
-    /// picking a seat or stepping through it is.
+    /// Takes the body into the pose its posture and place in that posture's own cycle name, by way
+    /// of the motion that leads into it rather than snapping to the pose itself.
     fn sit(&self, model: &mdl::Rendered) {
-        let Some(key) = self.poses.of(self.posture).get(self.pose) else {
+        let Some(pose) = self.resting() else {
             return;
         };
-        log::info!("角色：坐入 {key}");
-        model.play(&self.emote_packs(key), None);
+        let Some(settle) = pose.settle.as_deref() else {
+            // The idle a body on its feet rests in is its weapons' to name, so forgetting what it
+            // was standing in is what asks for that again.
+            self.stood_in.borrow_mut().take();
+            return;
+        };
+        let held = self.pose_pack();
+        match pose.start.as_deref() {
+            Some(start) => {
+                log::info!("角色：{start} 过渡到 {settle}");
+                model.play(&self.emote_packs(start), held.as_deref());
+            }
+            None => {
+                log::info!("角色：直接进入 {settle}");
+                model.play(&self.emote_packs(settle), None);
+            }
+        }
     }
 
     fn emote_packs(&self, key: &str) -> Vec<String> {
@@ -1074,7 +1216,7 @@ impl CharacterBuilder {
     /// Where each wielded weapon hangs this frame: the model it is worn as, the bone it hangs from
     /// and its own placement relative to that bone. Falls back to the plain hand null bone at no
     /// offset where the race's `.atch` file has not landed yet or names this weapon's job nothing.
-    fn attachments(&self) -> Vec<(String, String, Mat4)> {
+    fn attachments(&self, drawn: bool) -> Vec<(String, String, Mat4)> {
         let mut found = Vec::new();
         if let Some(main) = self.main_hand.and_then(|at| self.weapons_main.get(at)) {
             let atch = self
@@ -1085,11 +1227,11 @@ impl CharacterBuilder {
             // Logged once a stance, a wielded weapon or whether the atch file has landed actually
             // changes, rather than every frame the pose is recomputed: this is the bone and offset
             // a stance change moves a weapon to.
-            let key = (self.drawn, self.main_hand, self.off_hand, atch.is_some());
+            let key = (drawn, self.main_hand, self.off_hand, atch.is_some());
             let log = self.logged.get() != key;
             self.logged.set(key);
             let tag = |weapon: &weapons::Weapon| weapons::tag(&self.weapon_tags, weapon.set);
-            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, self.drawn, atch, log));
+            found.push(self.attach(main.weapon.model(), tag(&main.weapon), true, drawn, atch, log));
             let off = match main.covers_off_hand {
                 true => main.off_hand,
                 false => self
@@ -1098,7 +1240,7 @@ impl CharacterBuilder {
                     .map(|piece| piece.weapon),
             };
             if let Some(weapon) = off {
-                found.push(self.attach(weapon.model(), tag(&weapon), false, self.drawn, atch, log));
+                found.push(self.attach(weapon.model(), tag(&weapon), false, drawn, atch, log));
             }
         }
         // An emote's own prop hangs off the point its model set names, the same table a weapon
@@ -1132,13 +1274,12 @@ impl CharacterBuilder {
 
     /// The bone each drawn weapon's own effect plays from, for the ones whose `.imc` names one.
     /// The game only plays a weapon's effect in a battle stance, so nothing sheathed carries one.
-    fn effects(&self, carried: &[(String, String, Mat4)]) -> Vec<String> {
+    fn effects(&self, carried: &[(String, String, Mat4)]) -> Vec<(String, String)> {
         if !self.drawn {
             self.glowed.take();
             return Vec::new();
         }
-        let mut named = Vec::new();
-        let found = self
+        let found: Vec<(String, String)> = self
             .wielded()
             .into_iter()
             .filter_map(|weapon| {
@@ -1146,10 +1287,10 @@ impl CharacterBuilder {
                 let imc = mdl::imc_path(&model).and_then(|path| self.held.get(&path))?;
                 let path = weapons::vfx_path(&weapon, imc)?;
                 let (_, bone, _) = carried.iter().find(|(held, ..)| *held == model)?;
-                named.push(path);
-                Some(bone.clone())
+                Some((path, bone.clone()))
             })
             .collect();
+        let named: Vec<String> = found.iter().map(|(path, _)| path.clone()).collect();
         if *self.glowed.borrow() != named {
             for path in &named {
                 log::info!("角色：拔出的武器正在播放 {path}");
@@ -1170,7 +1311,7 @@ impl CharacterBuilder {
         atch: Option<&Rc<Vec<u8>>>,
         log: bool,
     ) -> (String, String, Mat4) {
-        let stance = if drawn { "drawn" } else { "sheathed" };
+        let stance = if drawn { "拔出" } else { "收起" };
         let placed = tag
             .zip(atch)
             .and_then(|(tag, bytes)| weapons::attach(bytes, tag, drawn, !main));
@@ -1233,7 +1374,7 @@ impl CharacterBuilder {
                 continue;
             };
             let held = sets
-                .get(&(slot.adornment(), gear.set))
+                .get(&(slot.filed(), gear.set))
                 .and_then(|found| found[slot as usize].as_ref())
                 .is_some_and(|path| self.held.contains_key(path));
             if held {
@@ -1299,9 +1440,9 @@ impl CharacterBuilder {
     /// What the character is dressed in: the attire, then anything picked by hand over it, then
     /// the slots those pieces cover themselves, which draw nothing at all rather than falling back
     /// to the body's own model. A slot picked for is never covered, since a pick is an instruction.
-    fn dressed(&self) -> (Outfit, [bool; 10]) {
+    fn dressed(&self) -> (Outfit, [bool; 11]) {
         let mut outfit = self.outfit();
-        let mut hidden = [false; 10];
+        let mut hidden = [false; 11];
         for slot in Slot::ALL {
             if let Some(piece) = self.picked(slot) {
                 outfit[slot as usize] = Some(piece.gear);
@@ -1376,6 +1517,12 @@ impl CharacterBuilder {
         listing: &Listing,
         deformers: &mdl::Deformers,
     ) -> Vec<(String, u16, [Option<u8>; 2])> {
+        if let Some(beast) = self.beast.and_then(|at| self.beasts.get(at)) {
+            return whole_body(listing, &beast.under, beast.variant)
+                .into_iter()
+                .map(|(path, variant)| (path, variant, [None, None]))
+                .collect();
+        }
         if self.body.is_empty() {
             return Vec::new();
         }
@@ -1395,7 +1542,7 @@ impl CharacterBuilder {
             .collect();
         for slot in Slot::ALL {
             let worn = outfit[slot as usize].and_then(|gear| {
-                self.worn_as(listing, deformers, slot.adornment(), gear.set)[slot as usize]
+                self.worn_as(listing, deformers, slot.filed(), gear.set)[slot as usize]
                     .clone()
                     .map(|path| (path, gear.variant, self.stains[slot as usize]))
             });
@@ -1453,13 +1600,7 @@ impl CharacterBuilder {
         let Some(mount) = self.mount.and_then(|at| self.mounts.get(at)) else {
             return Vec::new();
         };
-        let mut found = listing.under(&mount.under);
-        found.retain(|path| path.ends_with(".mdl"));
-        found.sort();
-        found
-            .into_iter()
-            .map(|path| (path, mount.variant))
-            .collect()
+        whole_body(listing, &mount.under, mount.variant)
     }
 
     /// Whether the body's own model for a slot still draws, which is what a piece worn over it
@@ -1480,14 +1621,14 @@ impl CharacterBuilder {
         &self,
         listing: &Listing,
         deformers: &mdl::Deformers,
-        adornment: bool,
+        filed: Filed,
         set: u16,
     ) -> Ref<'_, Models> {
-        if !self.sets.borrow().contains_key(&(adornment, set)) {
-            let found = equipment(listing, deformers, self.code, adornment, set);
-            self.sets.borrow_mut().insert((adornment, set), found);
+        if !self.sets.borrow().contains_key(&(filed, set)) {
+            let found = equipment(listing, deformers, self.code, filed, set);
+            self.sets.borrow_mut().insert((filed, set), found);
         }
-        Ref::map(self.sets.borrow(), |sets| &sets[&(adornment, set)])
+        Ref::map(self.sets.borrow(), |sets| &sets[&(filed, set)])
     }
 
     /// Puts what has arrived on screen, keeping the character that is already there where there is
@@ -1560,6 +1701,10 @@ impl CharacterBuilder {
     /// carry animation of their own: a child's is the one child body's, and a Highlander man's is
     /// the Midlander's.
     fn lineage(&self) -> Vec<String> {
+        // A creature is posed from packs under its own body, and is built on nothing else.
+        if let Some(beast) = self.beast.and_then(|at| self.beasts.get(at)) {
+            return npcs::body_code(&beast.under).into_iter().collect();
+        }
         let Some(deformers) = &self.deformers else {
             return Vec::new();
         };
@@ -1603,13 +1748,28 @@ impl CharacterBuilder {
                     .as_ref()
                     .is_some_and(|worn| worn.visored(gear.set))
             });
-        // Wrapped rather than run on: a name long enough to run past the panel's own width would
-        // otherwise take it and the view beside it with it. On its own line rather than beside the
-        // visor box, since a wrapped button's height is not known until it is laid out.
-        let button = egui::Button::selectable(open, format!("{}: {worn}", slot.name()))
-            .wrap()
-            .min_size(egui::vec2(ui.available_width(), 0.0));
-        if ui.add(button).clicked() {
+        // Offered on every slot rather than only where a worn piece's material states a dye row:
+        // that is not known until the material has been fetched, and swatches that appear once it
+        // has would move everything under it. Facewear carries no dye row at all, on any material
+        // any facewear item ships, so it gets no swatches to begin with.
+        let dyeable = slot != Slot::Facewear;
+        let reserve = match dyeable {
+            true => 2.0 * SWATCH + 2.0 * ui.spacing().item_spacing.x,
+            false => 0.0,
+        };
+        let mut clicked = false;
+        ui.horizontal(|ui| {
+            let button = egui::Button::selectable(open, format!("{}: {worn}", slot.name()))
+                .truncate()
+                .min_size(egui::vec2((ui.available_width() - reserve).max(0.0), 0.0));
+            clicked = ui.add(button).clicked();
+            if dyeable {
+                for channel in 0..2u8 {
+                    self.dye_swatch(ui, slot, channel);
+                }
+            }
+        });
+        if clicked {
             self.picking = (!open).then_some(slot);
             if let Some(slot) = self.picking {
                 log::info!("角色：正在选择 {}", slot.name());
@@ -1618,15 +1778,6 @@ impl CharacterBuilder {
         if visored {
             ui.checkbox(&mut self.visor, "面罩");
         }
-        // Offered on every slot rather than only where a worn piece's material states a dye row:
-        // that is not known until the material has been fetched, and a swatch that appears once it
-        // has would move everything under it.
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("染色").weak());
-            for channel in 0..2u8 {
-                self.dye_swatch(ui, slot, channel);
-            }
-        });
         if !open {
             return;
         }
@@ -1659,7 +1810,7 @@ impl CharacterBuilder {
                         let index = matched[row];
                         let piece = &self.creator.pieces[at][index];
                         let held = deformers.as_ref().is_none_or(|deformers| {
-                            self.worn_as(listing, deformers, slot.adornment(), piece.gear.set)[at]
+                            self.worn_as(listing, deformers, slot.filed(), piece.gear.set)[at]
                                 .is_some()
                         });
                         let suits = piece.suits(self.race, self.female);
@@ -1751,58 +1902,50 @@ impl CharacterBuilder {
             egui::StrokeKind::Inside,
         );
         let response = response.on_hover_text(dye.map_or("无染色", |dye| dye.name.as_str()));
-        let open = self.dyeing == Some((slot, channel));
-        if response.clicked() {
-            self.dyeing = (!open).then_some((slot, channel));
-        }
-        if !open {
-            return;
-        }
         let mut picked = None;
-        // `from_response` alone is always open, closed only by dropping the swatch or a cell's
-        // click below setting `self.dyeing` to `None`: nothing here closes it on an outside click.
-        Popup::from_response(&response)
+        const DYE_GAP: f32 = 1.0;
+        let popup_id = Popup::default_response_id(&response);
+        Popup::from_toggle_button_response(&response)
+            .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
             .align(RectAlign::BOTTOM_START)
             .show(|ui| {
-                ui.set_max_width(9.0 * (SWATCH + 4.0));
-                ScrollArea::vertical().max_height(10.0 * (SWATCH + 4.0)).show(ui, |ui| {
-                    egui::Grid::new(("character_dyes", at, channel))
-                        .spacing(egui::Vec2::splat(2.0))
-                        .show(ui, |ui| {
-                            let mut column = 0;
-                            let mut cell =
-                                |ui: &mut egui::Ui, color, metallic, name: &str, hit: Option<u8>| {
-                                    if column > 0 && column % 9 == 0 {
-                                        ui.end_row();
-                                    }
-                                    column += 1;
-                                    let (rect, response) = ui.allocate_exact_size(
-                                        egui::Vec2::splat(SWATCH),
-                                        egui::Sense::click(),
-                                    );
-                                    stains::paint(ui.painter(), rect, color, metallic);
-                                    if current == hit {
-                                        ui.painter().rect_stroke(
-                                            rect,
-                                            2.0,
-                                            ui.visuals().selection.stroke,
-                                            egui::StrokeKind::Inside,
-                                        );
-                                    }
-                                    if response.on_hover_text(name).clicked() {
-                                        picked = Some(hit);
-                                    }
-                                };
-                            cell(ui, Color32::TRANSPARENT, false, "无染色", None);
-                            for dye in &self.dyes {
-                                cell(ui, dye.color, dye.metallic, &dye.name, Some(dye.id));
-                            }
-                        });
+                ui.spacing_mut().item_spacing = egui::Vec2::splat(DYE_GAP);
+                ScrollArea::vertical().max_height(10.0 * (SWATCH + DYE_GAP)).show(ui, |ui| {
+                    let mut cell = |ui: &mut egui::Ui, color, metallic, name: &str, hit: Option<u8>| {
+                        let (rect, response) = ui.allocate_exact_size(
+                            egui::Vec2::splat(SWATCH),
+                            egui::Sense::click(),
+                        );
+                        stains::paint(ui.painter(), rect, color, metallic);
+                        if current == hit {
+                            ui.painter().rect_stroke(
+                                rect,
+                                2.0,
+                                ui.visuals().selection.stroke,
+                                egui::StrokeKind::Inside,
+                            );
+                        }
+                        if response.on_hover_text(name).clicked() {
+                            picked = Some(hit);
+                        }
+                    };
+                    // Each shelf its own row, exactly as wide as its own swatches: a `Grid` would
+                    // pad every row to the widest shelf's column count instead.
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| cell(ui, Color32::TRANSPARENT, false, "无染色", None));
+                        for shelf in self.dyes.chunk_by(|left, right| left.shade == right.shade) {
+                            ui.horizontal(|ui| {
+                                for dye in shelf {
+                                    cell(ui, dye.color, dye.metallic, &dye.name, Some(dye.id));
+                                }
+                            });
+                        }
+                    });
                 });
             });
         if let Some(hit) = picked {
             self.stains[at][usize::from(channel)] = hit;
-            self.dyeing = None;
+            Popup::close_id(ui.ctx(), popup_id);
         }
     }
 
@@ -1833,15 +1976,33 @@ impl CharacterBuilder {
         let mut picked = None;
         for (at, menu) in body.menus.iter().enumerate() {
             ui.add_space(8.0);
-            ui.label(RichText::new(&menu.name).strong());
+            let name = RichText::new(&menu.name).strong();
+            // A colour the character is not wearing has nothing to pick: what puts it on is the
+            // box beside it, or the paint the colour is for.
+            let worn = match menu.customize {
+                LIP_COLOR => self.ticked(LIPSTICK),
+                FACE_PAINT_COLOR => self.paint().is_some(),
+                TATTOO_COLOR => self.held(FEATURES) & LEGACY_TATTOO != 0,
+                _ => true,
+            };
+            // Lip colour keeps its heading unworn: the "Lipstick" checkbox under it is its own
+            // affordance to turn it on. Face paint and tattoo colour have no such box, so their
+            // heading goes with the grid rather than standing bare over nothing.
+            let headed = worn || menu.customize == LIP_COLOR;
+            if menu.kind != menus::Kind::Slider && headed {
+                ui.label(name.clone());
+            }
             let current = self.choice(menu);
             match menu.kind {
                 menus::Kind::Slider => {
                     let [low, high] = menu.range;
                     let mut held = current.clamp(low, high);
-                    if ui.add(egui::Slider::new(&mut held, low..=high)).changed() {
-                        picked = Some(Pick::Made(menu.customize, held));
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Slider::new(&mut held, low..=high)).changed() {
+                            picked = Some(Pick::Made(menu.customize, held));
+                        }
+                        ui.label(name);
+                    });
                 }
                 menus::Kind::List => {
                     ui.horizontal_wrapped(|ui| {
@@ -1899,56 +2060,93 @@ impl CharacterBuilder {
                             picked = Some(Pick::Made(LIPSTICK, u32::from(on)));
                         }
                     }
-                    // A colour the character is not wearing has nothing to pick: what puts it on
-                    // is the box beside it, or the paint the colour is for.
-                    let worn = match menu.customize {
-                        LIP_COLOR => self.ticked(LIPSTICK),
-                        FACE_PAINT_COLOR => self.paint().is_some(),
-                        _ => true,
-                    };
-                    if worn {
-                        // The half a colour belongs to is the top bit of its own index, so
-                        // switching halves is that bit and nothing else.
-                        let mut half = 0;
-                        if matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
-                            half = current / HALF;
-                            ui.horizontal(|ui| {
-                                for (at, name) in [(0, "深色"), (1, "浅色")] {
-                                    if ui.selectable_label(half == at, name).clicked() {
-                                        picked = Some(Pick::Made(
-                                            menu.customize,
-                                            current % HALF + at * HALF,
-                                        ));
-                                    }
+                    // The half a colour belongs to is the top bit of its own index, so switching
+                    // halves is that bit and nothing else.
+                    let mut half = 0;
+                    if worn && matches!(menu.customize, LIP_COLOR | FACE_PAINT_COLOR) {
+                        half = current / HALF;
+                        ui.horizontal(|ui| {
+                            for (at, name) in [(0, "深色"), (1, "浅色")] {
+                                if ui.selectable_label(half == at, name).clicked() {
+                                    picked = Some(Pick::Made(
+                                        menu.customize,
+                                        current % HALF + at * HALF,
+                                    ));
                                 }
-                            });
-                        }
-                        let offered = half * HALF..half * HALF + menu.count;
-                        if let Some(index) =
-                            colors(ui, ("character_colors", at), swatches, offered, current)
-                        {
-                            picked = Some(Pick::Made(menu.customize, index));
-                        }
+                            }
+                        });
                     }
                     // A second colour the creator only offers once its own box is ticked: a strand
-                    // is mixed between two hair colours, and an eye takes one each.
+                    // is mixed between two hair colours, and an eye takes one each. Shown beside
+                    // the first where there is room for both rather than under it.
                     let paired = match menu.customize {
                         HAIR_COLOR => Some((HIGHLIGHTS, HIGHLIGHT_COLOR, "高光", &palettes.highlights)),
                         EYE_COLOR => Some((ODD_EYES, LEFT_EYE_COLOR, "异色瞳", &palettes.eyes)),
                         _ => None,
                     };
-                    if let Some((box_of, color, name, second)) = paired {
+                    let grid_width = palette::COLUMNS as f32 * (SWATCH + 2.0);
+                    let side_by_side = worn
+                        && paired.is_some()
+                        && ui.available_width() >= 2.0 * grid_width + ui.spacing().item_spacing.x;
+                    if side_by_side {
+                        let (box_of, color, name, second) = paired.unwrap();
                         let mut on = self.ticked(box_of);
-                        if ui.checkbox(&mut on, name).changed() {
-                            picked = Some(Pick::Made(box_of, u32::from(on)));
-                        }
-                        if on {
-                            let held = self.held(color);
-                            let offered = 0..menu.count;
-                            if let Some(index) =
-                                colors(ui, ("character_second", at), second, offered, held)
-                            {
+                        let offered = half * HALF..half * HALF + menu.count;
+                        // A fixed height for both headers, so the left grid (no header of its own,
+                        // the menu's name already stands above both columns) starts on the same
+                        // line as the right one, whose header is this checkbox.
+                        let header = ui.spacing().interact_size.y;
+                        ui.columns(2, |columns| {
+                            // Nothing to draw here, only a blank row the same height as the
+                            // checkbox beside it.
+                            columns[0].horizontal(|ui| ui.set_min_height(header));
+                            if let Some(index) = colors(
+                                &mut columns[0],
+                                ("character_colors", at),
+                                swatches,
+                                offered,
+                                current,
+                            ) {
+                                picked = Some(Pick::Made(menu.customize, index));
+                            }
+                            columns[1].horizontal(|ui| {
+                                ui.set_min_height(header);
+                                if ui.checkbox(&mut on, name).changed() {
+                                    picked = Some(Pick::Made(box_of, u32::from(on)));
+                                }
+                            });
+                            if on && let Some(index) = colors(
+                                &mut columns[1],
+                                ("character_second", at),
+                                second,
+                                0..menu.count,
+                                self.held(color),
+                            ) {
                                 picked = Some(Pick::Made(color, index));
+                            }
+                        });
+                    } else {
+                        if worn {
+                            let offered = half * HALF..half * HALF + menu.count;
+                            if let Some(index) =
+                                colors(ui, ("character_colors", at), swatches, offered, current)
+                            {
+                                picked = Some(Pick::Made(menu.customize, index));
+                            }
+                        }
+                        if let Some((box_of, color, name, second)) = paired {
+                            let mut on = self.ticked(box_of);
+                            if ui.checkbox(&mut on, name).changed() {
+                                picked = Some(Pick::Made(box_of, u32::from(on)));
+                            }
+                            if on {
+                                let held = self.held(color);
+                                let offered = 0..menu.count;
+                                if let Some(index) =
+                                    colors(ui, ("character_second", at), second, offered, held)
+                                {
+                                    picked = Some(Pick::Made(color, index));
+                                }
                             }
                         }
                     }
@@ -1959,11 +2157,17 @@ impl CharacterBuilder {
                     let choices: Vec<Choice> = (0..menu.count)
                         .map(|index| self.choice_of(menu, index))
                         .collect();
-                    grid(ui, &format!("character_menu_{at}"), &choices, |ui, held| {
-                        chip(ui, backend, icons, held, u32::from(held.id) == current)
-                            .then_some(Pick::Choice(menu.customize, held.id))
-                    })
-                    .inspect(|choice| picked = Some(*choice));
+                    ScrollArea::vertical()
+                        .id_salt(("character_menu_scroll", menu.customize))
+                        .max_height((ICON + GAP) * ICON_ROWS as f32)
+                        .show(ui, |ui| {
+                            grid(ui, &format!("character_menu_{}", menu.customize), &choices, |ui, held| {
+                                chip(ui, backend, icons, held, u32::from(held.id) == current)
+                                    .then_some(Pick::Choice(menu.customize, held.id))
+                            })
+                        })
+                        .inner
+                        .inspect(|choice| picked = Some(*choice));
                 }
             }
         }
@@ -1973,13 +2177,9 @@ impl CharacterBuilder {
     /// The game's own characters, searched by name. Picking one is picking everything at once: it
     /// carries the whole of what the creator would have been left at, plus what it is wearing.
     fn npcs_ui(&mut self, ui: &mut egui::Ui) -> Option<Pick> {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("登场角色").strong());
-            if self.reading_npcs.is_some() {
-                ui.spinner();
-            }
-        });
+        if self.reading_npcs.is_some() {
+            ui.spinner();
+        }
         ui.add(
             TextEdit::singleline(&mut self.npc_search)
                 .hint_text("搜索")
@@ -2006,6 +2206,66 @@ impl CharacterBuilder {
                 }
             });
         picked
+    }
+
+    /// The creatures the game names, searched by name. Picking one stands the character as that
+    /// body outright: a monster is one whole model and a demihuman is several pieces of equipment,
+    /// so neither is anything the creator's own numbering could have built.
+    fn beasts_ui(&mut self, ui: &mut egui::Ui) -> Option<Pick> {
+        if self.reading_beasts.is_some() {
+            ui.spinner();
+        }
+        // Nothing in the game pairs a battle character with its name, so with the pairing
+        // unreachable there is no list to offer rather than a list that is merely empty.
+        if self.beasts.is_empty() && self.reading_beasts.is_none() && self.listing.is_some() {
+            ui.weak("没有可用的生物名称。");
+            return None;
+        }
+        ui.add(
+            TextEdit::singleline(&mut self.beast_search)
+                .hint_text("搜索")
+                .desired_width(f32::INFINITY),
+        );
+        let mut picked = None;
+        let query = self.beast_search.clone();
+        let matched = self.beasts_matching(&query);
+        let row = ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().button_padding.y * 2.0;
+        let step = row + ui.spacing().item_spacing.y;
+        ScrollArea::vertical()
+            .id_salt("character_beasts")
+            .max_height(step * SHOWN as f32)
+            .show_rows(ui, step, matched.len(), |ui, rows| {
+                for at in rows {
+                    let index = matched[at];
+                    let name = &self.beasts[index].name;
+                    let button = egui::Button::selectable(self.beast == Some(index), name.as_str())
+                        .truncate()
+                        .min_size(egui::vec2(ui.available_width(), row));
+                    if ui.add(button).on_hover_text(name).clicked() {
+                        picked = Some(Pick::Beast((self.beast != Some(index)).then_some(index)));
+                    }
+                }
+            });
+        picked
+    }
+
+    /// Which creatures a search names, kept the way a slot's own list is.
+    fn beasts_matching(&self, query: &str) -> Ref<'_, Vec<usize>> {
+        if self.beasts_matched.borrow().0.as_deref() != Some(query) {
+            let found = self.matcher.match_list_indirect(
+                (!query.is_empty()).then_some(query),
+                self.beasts
+                    .iter()
+                    .enumerate()
+                    .map(|(index, beast)| (index, beast.name.as_str())),
+                |beast| beast.1,
+            );
+            *self.beasts_matched.borrow_mut() = (
+                Some(query.to_owned()),
+                found.into_iter().map(|(index, _)| index).collect(),
+            );
+        }
+        Ref::map(self.beasts_matched.borrow(), |(_, rows)| rows)
     }
 
     /// Which characters a search names, kept the way a slot's own list is.
@@ -2036,13 +2296,9 @@ impl CharacterBuilder {
         backend: &Backend,
         icons: &IconManager,
     ) -> Option<Pick> {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("情感动作").strong());
-            if self.reading_emotes.is_some() {
-                ui.spinner();
-            }
-        });
+        if self.reading_emotes.is_some() {
+            ui.spinner();
+        }
         ui.add(
             TextEdit::singleline(&mut self.emote_search)
                 .hint_text("搜索")
@@ -2057,9 +2313,14 @@ impl CharacterBuilder {
             "character_emotes",
             &matched,
             self.emote,
+            // A rider can only play what the sheet names a partial for, since the mount holds its
+            // lower half; an emote that is nothing but a face is always its own to make.
             |index| {
                 let emote = &self.emotes[index];
-                (emote.name.as_str(), emote.icon)
+                let playable = self.mount.is_none()
+                    || emote.mounted().is_some()
+                    || emote.expression().is_some();
+                (emote.name.as_str(), emote.icon, playable)
             },
         )
         .map(Pick::Emote)
@@ -2074,13 +2335,9 @@ impl CharacterBuilder {
         backend: &Backend,
         icons: &IconManager,
     ) -> Option<Pick> {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("坐骑").strong());
-            if self.reading_mounts.is_some() {
-                ui.spinner();
-            }
-        });
+        if self.reading_mounts.is_some() {
+            ui.spinner();
+        }
         ui.add(
             TextEdit::singleline(&mut self.mount_search)
                 .hint_text("搜索")
@@ -2097,7 +2354,7 @@ impl CharacterBuilder {
             self.mount,
             |index| {
                 let mount = &self.mounts[index];
-                (mount.name.as_str(), mount.icon)
+                (mount.name.as_str(), mount.icon, true)
             },
         )
         .map(|index| Pick::Mount((self.mount != Some(index)).then_some(index)));
@@ -2121,7 +2378,7 @@ impl CharacterBuilder {
         let mut picked = None;
         ui.add_space(8.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Posture").strong());
+            ui.label(RichText::new("姿势").strong());
             for held in emotes::Posture::ALL {
                 if held != emotes::Posture::Standing && self.poses.of(held).is_empty() {
                     continue;
@@ -2137,7 +2394,7 @@ impl CharacterBuilder {
         let poses = self.poses.of(self.posture);
         if poses.len() > 1 {
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("Pose").strong());
+                ui.label(RichText::new("姿态").strong());
                 for at in 0..poses.len() {
                     if ui
                         .selectable_label(self.pose == at, (at + 1).to_string())
@@ -2154,14 +2411,8 @@ impl CharacterBuilder {
     /// Takes the body into or out of a seat. Sitting plays the pose it settles into; standing back
     /// up forgets what it was standing in, so the idle its weapons state names is asked for again.
     fn seated_changed(&self) {
-        let Some(Ok(model)) = &self.model else {
-            return;
-        };
-        match self.posture {
-            emotes::Posture::Standing => {
-                self.stood_in.borrow_mut().take();
-            }
-            _ => self.sit(model),
+        if let Some(Ok(model)) = &self.model {
+            self.sit(model);
         }
     }
 
@@ -2228,13 +2479,9 @@ impl CharacterBuilder {
         icons: &IconManager,
     ) -> Option<Pick> {
         let mut picked = None;
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new("武器").strong());
-            if self.reading_weapons.is_some() {
-                ui.spinner();
-            }
-        });
+        if self.reading_weapons.is_some() {
+            ui.spinner();
+        }
         ui.horizontal_wrapped(|ui| {
             for (drawn, name) in [(false, "收起"), (true, "拔出")] {
                 if ui.selectable_label(self.drawn == drawn, name).clicked() {
@@ -2259,7 +2506,7 @@ impl CharacterBuilder {
                 self.main_hand,
                 |index| {
                     let piece = &self.weapons_main[index];
-                    (piece.name.as_str(), piece.icon)
+                    (piece.name.as_str(), piece.icon, true)
                 },
             ) {
                 picked = Some(Pick::Weapon((self.main_hand != Some(index)).then_some(index)));
@@ -2289,7 +2536,7 @@ impl CharacterBuilder {
                 self.off_hand,
                 |index| {
                     let piece = &self.weapons_off[index];
-                    (piece.name.as_str(), piece.icon)
+                    (piece.name.as_str(), piece.icon, true)
                 },
             ) {
                 picked = Some(Pick::OffHand((self.off_hand != Some(index)).then_some(index)));
@@ -2409,97 +2656,112 @@ impl CharacterBuilder {
                 });
                 ScrollArea::vertical().show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    ui.label(RichText::new("种族").strong());
-                    for race in self.creator.races.keys() {
-                        if !self.creator.bodies.iter().any(|body| body.race == *race) {
-                            continue;
-                        }
-                        let name = menus::Creator::named(&self.creator.races, *race, self.female);
-                        if ui.selectable_label(self.race == *race, name).clicked() {
-                            picked = Some(Pick::Race(*race));
-                        }
-                    }
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("部族").strong());
-                    for body in &self.creator.bodies {
-                        if body.race != self.race || body.female != self.female {
-                            continue;
-                        }
-                        let name =
-                            menus::Creator::named(&self.creator.tribes, body.tribe, self.female);
-                        if ui
-                            .selectable_label(self.tribe == body.tribe, name)
-                            .clicked()
-                        {
-                            picked = Some(Pick::Tribe(body.tribe));
-                        }
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal_wrapped(|ui| {
-                        for (female, name) in [(false, "男"), (true, "女")] {
-                            if ui.selectable_label(self.female == female, name).clicked() {
-                                picked = Some(Pick::Gender(female));
+                    // Everything the creator drives goes quiet while the character stands as
+                    // a creature: a monster is not built out of a race, a clan or a face.
+                    if self.beast.is_none() {
+                        ui.label(RichText::new("种族").strong());
+                        for race in self.creator.races.keys() {
+                            if !self.creator.bodies.iter().any(|body| body.race == *race) {
+                                continue;
+                            }
+                            let name = menus::Creator::named(&self.creator.races, *race, self.female);
+                            if ui.selectable_label(self.race == *race, name).clicked() {
+                                picked = Some(Pick::Race(*race));
                             }
                         }
-                        // Only some races are built a child, and the rest would draw the adult
-                        // under a lit button.
-                        if self.builds_a_child()
-                            && ui.selectable_label(self.child, "儿童").clicked()
-                        {
-                            picked = Some(Pick::Child(!self.child));
-                        }
-                    });
-                    ui.add_space(8.0);
-                    ui.label(RichText::new("装扮").strong());
-                    ui.horizontal_wrapped(|ui| {
-                        for (attire, name) in [
-                            (Attire::Race, "种族"),
-                            (Attire::Job, "职业"),
-                            (Attire::Smallclothes, "内衣"),
-                            (Attire::Npc, "NPC"),
-                        ] {
-                            if ui.selectable_label(self.attire == attire, name).clicked() {
-                                picked = Some(Pick::Attire(attire));
-                            }
-                        }
-                    });
-                    if self.attire == Attire::Job {
-                        for (at, job) in self.creator.jobs.iter().enumerate() {
-                            if ui.selectable_label(self.job == at, &job.name).clicked() {
-                                picked = Some(Pick::Job(at));
-                            }
-                        }
-                    }
-                    if let Some(listing) = &listing {
                         ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("装备").strong());
-                            if self.reading_pieces.is_some() {
-                                ui.spinner();
+                        ui.label(RichText::new("部族").strong());
+                        for body in &self.creator.bodies {
+                            if body.race != self.race || body.female != self.female {
+                                continue;
+                            }
+                            let name =
+                                menus::Creator::named(&self.creator.tribes, body.tribe, self.female);
+                            if ui
+                                .selectable_label(self.tribe == body.tribe, name)
+                                .clicked()
+                            {
+                                picked = Some(Pick::Tribe(body.tribe));
+                            }
+                        }
+                        ui.add_space(8.0);
+                        ui.horizontal_wrapped(|ui| {
+                            for (female, name) in [(false, "男"), (true, "女")] {
+                                if ui.selectable_label(self.female == female, name).clicked() {
+                                    picked = Some(Pick::Gender(female));
+                                }
+                            }
+                            // Only some races are built a child, and the rest would draw the adult
+                            // under a lit button.
+                            if self.builds_a_child()
+                                && ui.selectable_label(self.child, "儿童").clicked()
+                            {
+                                picked = Some(Pick::Child(!self.child));
                             }
                         });
-                        for slot in Slot::GEAR {
-                            self.slot_ui(ui, backend, icons, listing, slot);
-                        }
                         ui.add_space(8.0);
-                        ui.label(RichText::new("饰品").strong());
-                        for slot in Slot::ADORNMENT {
-                            self.slot_ui(ui, backend, icons, listing, slot);
+                        ui.label(RichText::new("装扮").strong());
+                        ui.horizontal_wrapped(|ui| {
+                            for (attire, name) in [
+                                (Attire::Race, "种族"),
+                                (Attire::Job, "职业"),
+                                (Attire::Smallclothes, "内衣"),
+                                (Attire::Npc, "NPC"),
+                            ] {
+                                if ui.selectable_label(self.attire == attire, name).clicked() {
+                                    picked = Some(Pick::Attire(attire));
+                                }
+                            }
+                        });
+                        if self.attire == Attire::Job {
+                            for (at, job) in self.creator.jobs.iter().enumerate() {
+                                if ui.selectable_label(self.job == at, &job.name).clicked() {
+                                    picked = Some(Pick::Job(at));
+                                }
+                            }
                         }
+                        if let Some(listing) = &listing {
+                            ui.add_space(8.0);
+                            section(ui, "装备", |ui| {
+                                if self.reading_pieces.is_some() {
+                                    ui.spinner();
+                                }
+                                for slot in Slot::GEAR {
+                                    self.slot_ui(ui, backend, icons, listing, slot);
+                                }
+                                None
+                            });
+                            ui.add_space(8.0);
+                            section(ui, "饰品", |ui| {
+                                for slot in Slot::ADORNMENT {
+                                    self.slot_ui(ui, backend, icons, listing, slot);
+                                }
+                                None
+                            });
+                        }
+                        // Beside the weapon's own sheathed and drawn, since both say what the body is
+                        // doing rather than what it is wearing, and neither wants to sit under a list.
+                        self.posture_ui(ui)
+                            .inspect(|posture| picked = Some(*posture));
+                        ui.add_space(8.0);
+                        section(ui, "武器", |ui| self.weapons_ui(ui, backend, icons))
+                            .inspect(|pick| picked = Some(*pick));
+                        ui.add_space(8.0);
+                        section(ui, "外观", |ui| self.appearance(ui, backend, icons))
+                            .inspect(|made| picked = Some(*made));
                     }
-                    // Beside the weapon's own sheathed and drawn, since both say what the body is
-                    // doing rather than what it is wearing, and neither wants to sit under a list.
-                    self.posture_ui(ui)
-                        .inspect(|posture| picked = Some(*posture));
-                    self.weapons_ui(ui, backend, icons)
-                        .inspect(|pick| picked = Some(*pick));
-                    self.appearance(ui, backend, icons)
-                        .inspect(|made| picked = Some(*made));
-                    self.emotes_ui(ui, backend, icons)
+                    ui.add_space(8.0);
+                    section(ui, "情感动作", |ui| self.emotes_ui(ui, backend, icons))
                         .inspect(|emote| picked = Some(*emote));
-                    self.mounts_ui(ui, backend, icons)
+                    ui.add_space(8.0);
+                    section(ui, "坐骑", |ui| self.mounts_ui(ui, backend, icons))
                         .inspect(|mount| picked = Some(*mount));
-                    self.npcs_ui(ui).inspect(|npc| picked = Some(*npc));
+                    ui.add_space(8.0);
+                    section(ui, "生物", |ui| self.beasts_ui(ui))
+                        .inspect(|beast| picked = Some(*beast));
+                    ui.add_space(8.0);
+                    section(ui, "登场角色", |ui| self.npcs_ui(ui))
+                        .inspect(|npc| picked = Some(*npc));
                 });
                 picked
             })
@@ -2532,6 +2794,7 @@ impl CharacterBuilder {
             Some(Pick::Job(job)) => self.job = job,
             Some(Pick::Npc(npc)) => {
                 self.npc = Some(npc);
+                self.beast = None;
                 if let Some(held) = self.npcs.get(npc) {
                     self.race = held.race;
                     self.tribe = held.tribe;
@@ -2539,7 +2802,7 @@ impl CharacterBuilder {
                     self.child = held.child;
                     self.choices = held.choices.iter().copied().collect();
                     self.attire = Attire::Npc;
-                    self.chosen = [None; 10];
+                    self.chosen = [None; 11];
                     self.stains = held.stains;
                     self.stood = false;
                 }
@@ -2581,10 +2844,22 @@ impl CharacterBuilder {
             }
             Some(Pick::Mount(mount)) => {
                 self.mount = mount;
+                if mount.is_some() {
+                    self.beast = None;
+                }
                 self.mount_seat = 0;
                 // Nothing sits down on a mount: it states the seat it holds a rider in.
                 self.posture = emotes::Posture::Standing;
                 self.pose = 0;
+            }
+            Some(Pick::Beast(beast)) => {
+                self.beast = beast;
+                // A creature is drawn instead of the built body, so nothing the body was carrying
+                // is drawn either: leaving them picked would light a control nothing answers.
+                if beast.is_some() {
+                    self.mount = None;
+                    self.npc = None;
+                }
             }
             Some(Pick::Seat(seat)) => self.mount_seat = seat,
             Some(Pick::Weapon(weapon)) => self.main_hand = weapon,
@@ -2627,6 +2902,8 @@ enum Pick {
     /// Which of the mount's own seats to ride in.
     Seat(usize),
     Npc(usize),
+    /// A creature to stand as in place of a built body, or none to go back to the built one.
+    Beast(Option<usize>),
     /// A weapon to wield in the main hand, or none to go unarmed.
     Weapon(Option<usize>),
     /// A weapon to wield in the off hand, or none to leave it empty.
@@ -2877,17 +3154,14 @@ pub(super) fn equipment(
     listing: &Listing,
     deformers: &mdl::Deformers,
     code: u16,
-    adornment: bool,
+    filed: Filed,
     set: u16,
 ) -> Models {
-    let (kind, letter) = match adornment {
-        true => ("accessory", 'a'),
-        false => ("equipment", 'e'),
-    };
+    let (kind, letter) = filed;
     let under = format!("chara/{kind}/{letter}{set:04}/model");
     let held = listing.under(&under);
     Slot::ALL.map(|slot| {
-        if slot.adornment() != adornment {
+        if slot.filed() != filed {
             return None;
         }
         deformers.lineage(code).find_map(|code| {
@@ -2940,7 +3214,8 @@ pub(super) fn held(sets: &[Set], wanted: u16) -> Vec<String> {
 }
 
 /// A searched list to pick one row of, each drawn with the icon the game offers it under. The rows
-/// are the indices a search left, and what comes back is the one clicked.
+/// are the indices a search left, and what comes back is the one clicked. A row states its own
+/// name, icon and whether it can be taken at all, which is what grays out the rest.
 fn listed<'a>(
     ui: &mut egui::Ui,
     backend: &Backend,
@@ -2948,7 +3223,7 @@ fn listed<'a>(
     id: &str,
     rows: &[usize],
     chosen: Option<usize>,
-    held: impl Fn(usize) -> (&'a str, u32),
+    held: impl Fn(usize) -> (&'a str, u32, bool),
 ) -> Option<usize> {
     let mut picked = None;
     let step = PIECE + 2.0 * ui.spacing().button_padding.y + ui.spacing().item_spacing.y;
@@ -2958,7 +3233,7 @@ fn listed<'a>(
         .show_rows(ui, step, rows.len(), |ui, drawn| {
             for row in drawn {
                 let index = rows[row];
-                let (name, icon) = held(index);
+                let (name, icon, playable) = held(index);
                 let path = get_icon_path(backend.icons(), icon, false, Language::None);
                 let excel = backend.excel().clone();
                 let source = icons.get_or_insert_icon(&path, ui.ctx(), || {
@@ -2979,7 +3254,8 @@ fn listed<'a>(
                     ),
                     _ => egui::Button::new(name),
                 };
-                let response = ui.add(
+                let response = ui.add_enabled(
+                    playable,
                     button
                         .truncate()
                         .selected(chosen == Some(index))
@@ -3000,6 +3276,29 @@ fn listed<'a>(
             }
         });
     picked
+}
+
+/// A collapsing section that starts open, so nothing looks different until it is folded.
+/// Every model under one directory at one variant, in path order: a body drawn whole rather than
+/// worn a slot at a time, which is what a mount and a creature both are. The first file is what
+/// names the skeleton the rest are posed on.
+fn whole_body(listing: &Listing, under: &str, variant: u16) -> Vec<(String, u16)> {
+    let mut found = listing.under(under);
+    found.retain(|path| path.ends_with(".mdl"));
+    found.sort();
+    found.into_iter().map(|path| (path, variant)).collect()
+}
+
+fn section(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: impl FnOnce(&mut egui::Ui) -> Option<Pick>,
+) -> Option<Pick> {
+    CollapsingHeader::new(title)
+        .default_open(true)
+        .show(ui, body)
+        .body_returned
+        .flatten()
 }
 
 /// Sets to pick from, laid out as many to a row as the panel is wide enough for. Every cell is the

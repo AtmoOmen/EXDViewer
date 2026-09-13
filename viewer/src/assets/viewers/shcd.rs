@@ -109,12 +109,12 @@ pub fn ui(ui: &mut egui::Ui, file: &Rendered, bytes: &[u8]) {
 /// Beyond the raw file: the one shader's two readings. A `.shcd` never runs more than one, so
 /// there is nothing to zip and no pass to merge, unlike its `.shpk` sibling.
 pub fn export_choices<'a>(file: &'a Rendered, bytes: &'a [u8]) -> Vec<export::Choice<'a>> {
-    [(true, "hlsl", "HLSL"), (false, "asm", "Assembly")]
+    [(true, "hlsl", "HLSL"), (false, "asm", "汇编")]
         .into_iter()
         .map(|(hlsl_reading, extension, label)| {
             export::Choice::bytes(label, format!("shader.{extension}"), move || {
                 let (lines, _) = code::text(&file.shader, &file.naming, bytes, hlsl_reading)
-                    .ok_or_else(|| anyhow::anyhow!("no shader program in this blob"))?;
+                    .ok_or_else(|| anyhow::anyhow!("此数据块中没有着色器程序"))?;
                 Ok(lines.join("\n").into_bytes())
             })
         })
@@ -165,12 +165,12 @@ mod tests {
         assert_eq!(choices.len(), 2, "a .shcd offers HLSL and Assembly, nothing else");
 
         let target = match file.shader.stage {
-            "Vertex" => "vs_6_0",
-            "Pixel" => "ps_6_0",
-            "Geometry" => "gs_6_0",
-            "Hull" => "hs_6_0",
-            "Domain" => "ds_6_0",
-            "Compute" => "cs_6_0",
+            "顶点" => "vs_6_0",
+            "像素" => "ps_6_0",
+            "几何" => "gs_6_0",
+            "外壳" => "hs_6_0",
+            "域" => "ds_6_0",
+            "计算" => "cs_6_0",
             other => panic!("no dxc target for stage {other}"),
         };
         let (lines, _) = super::code::text(&file.shader, &file.naming, &bytes, true)

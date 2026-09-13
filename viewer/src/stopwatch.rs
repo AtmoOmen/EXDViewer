@@ -17,7 +17,7 @@ impl Stopwatch {
             name: name.into(),
             start: Instant::now(),
         };
-        log::debug!("{}: Start", ret.name);
+        log::debug!("{}: 开始", ret.name);
         ret
     }
 
@@ -84,12 +84,12 @@ impl WorkingRepeatedStopwatch {
     pub fn report(&self) {
         let count = self.count.load(Ordering::Relaxed);
         if count == 0 {
-            log::info!("{}: No recorded measurements", self.name);
+            log::info!("{}: 无测量记录", self.name);
         } else {
             let total_ns = self.duration_ns.load(Ordering::Relaxed);
             let avg_ns = total_ns / count as u64;
             log::info!(
-                "{}: {} measurements, total {:.4}ms, average {:.4}ms",
+                "{}: {} 次测量，总计 {:.4}ms，平均 {:.4}ms",
                 self.name,
                 count,
                 (total_ns as f64) / 1_000_000.0,

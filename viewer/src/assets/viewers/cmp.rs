@@ -20,22 +20,22 @@ const TRIBE: &str = "Tribe";
 
 /// The clans the color blocks run through, two blocks each for a male and a female character.
 const CLANS: [&str; 16] = [
-    "Midlander",
-    "Highlander",
-    "Wildwood",
-    "Duskwight",
-    "Plainsfolk",
-    "Dunesfolk",
-    "Seeker of the Sun",
-    "Keeper of the Moon",
-    "Seawolf",
-    "Hellsguard",
-    "Raen",
-    "Xaela",
-    "Helion",
-    "Lost",
-    "Rava",
-    "Veena",
+    "中原之民",
+    "高地之民",
+    "森林之民",
+    "黑影之民",
+    "平原之民",
+    "沙漠之民",
+    "逐日之民",
+    "护月之民",
+    "北洋之民",
+    "红焰之民",
+    "晨曦之民",
+    "暮晖之民",
+    "掠日之民",
+    "迷踪之民",
+    "密林之民",
+    "山林之民",
 ];
 
 const SCALES: [(&str, usize); 7] = [

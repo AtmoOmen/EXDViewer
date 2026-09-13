@@ -468,7 +468,7 @@ impl IconBrowser {
                             select(
                                 ui,
                                 Category::Localized,
-                                format!("Language icons ({})", thousands(localized)),
+                                format!("语言图标 ({})", thousands(localized)),
                             );
                         }
                     }

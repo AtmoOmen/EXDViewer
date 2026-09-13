@@ -13,7 +13,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
 
     let mut identity = Vec::new();
     if !file.scene().bg_path().is_empty() {
-        identity.push(("Assets", file.scene().bg_path().clone()));
+        identity.push(("资源", file.scene().bg_path().clone()));
     }
 
     Ok(Preview::Layers(Box::new(super::rendered(

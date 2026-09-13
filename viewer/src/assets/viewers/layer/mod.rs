@@ -96,19 +96,19 @@ fn files(scene: &Scene) -> Vec<(&'static str, String)> {
 }
 
 /// Width held for the header grid's name column. Fitted to the longest name currently in
-/// `HEADER_NAMES` ("sky visibility path"); longer names added later will truncate.
-const HEADER_NAME_WIDTH: f32 = 130.0;
+/// `HEADER_NAMES` ("光照剔除路径"); longer names added later will truncate.
+const HEADER_NAME_WIDTH: f32 = 110.0;
 
 /// What each slot of the scene header's general block is, where anything has established one. The
 /// blanks are real: nothing has identified them yet, and the viewer shows their bytes rather than
 /// pretending otherwise.
 const HEADER_NAMES: [&str; 24] = [
-    "flags",
-    "bg path",
-    "environment list",
-    "environments",
-    "sun tilt, degrees",
-    "sky visibility path",
+    "标志",
+    "背景路径",
+    "环境列表",
+    "环境",
+    "太阳倾角（度）",
+    "天空可见性路径",
     "",
     "",
     "",
@@ -116,7 +116,7 @@ const HEADER_NAMES: [&str; 24] = [
     "",
     "",
     "",
-    "light culling path",
+    "光照剔除路径",
     "",
     "",
     "",
@@ -447,18 +447,18 @@ fn payload(instance: &Instance) -> Rows {
             rows.text("注释（日文）", format!("{:#x}", marker.comment_jp_offset()));
         }
         InstanceData::HelperObject(helper) => {
-            rows.text("Stands for", format!("{:?}", helper.kind()));
+            rows.text("代表", format!("{:?}", helper.kind()));
             match helper.kind() {
-                HelperKind::BattleNpc => rows.row("Base", "BNpcBase", helper.base_id()),
-                _ => rows.row("Base", "ENpcBase", helper.base_id()),
+                HelperKind::BattleNpc => rows.row("基准", "BNpcBase", helper.base_id()),
+                _ => rows.row("基准", "ENpcBase", helper.base_id()),
             }
             if helper.object_id() != 0 {
-                rows.text("Object", helper.object_id().to_string());
+                rows.text("对象", helper.object_id().to_string());
             }
             if helper.kind() == HelperKind::Weapon {
                 let model = helper.weapon();
                 rows.text(
-                    "Weapon",
+                    "武器",
                     format!(
                         "{}, {}, {}",
                         model.skeleton_id(),
@@ -468,11 +468,11 @@ fn payload(instance: &Instance) -> Rows {
                 );
             }
             if helper.height() != 0 {
-                rows.text("Height", ((u32::from(helper.height()) - 1) * 25).to_string());
+                rows.text("高度", ((u32::from(helper.height()) - 1) * 25).to_string());
             }
             if let Some(placement) = helper.placement() {
-                rows.text("Stands at", axes(placement.transform().translation()));
-                rows.text("Placement flags", format!("{:#x}", placement.flags()));
+                rows.text("站立位置", axes(placement.transform().translation()));
+                rows.text("放置标志", format!("{:#x}", placement.flags()));
             }
             if let Some(nested) = helper.nested() {
                 rows.0.extend(payload(nested).0);

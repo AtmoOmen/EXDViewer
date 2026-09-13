@@ -22,6 +22,8 @@ pub struct WebFileProvider(Url);
 pub struct VersionInfo {
     pub latest: GameVersion,
     pub versions: Vec<GameVersion>,
+    #[serde(default)]
+    pub names: std::collections::BTreeMap<GameVersion, String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -58,12 +60,12 @@ impl WebFileProvider {
 
         let version = if let Some(v) = version {
             if !version_info.versions.contains(&v) {
-                anyhow::bail!("Version {v} is not available");
+                anyhow::bail!("版本 {v} 不可用");
             }
             v
         } else {
             log::info!(
-                "No version specified, using latest: {}",
+                "未指定版本, 使用最新版本: {}",
                 version_info.latest
             );
             version_info.latest
@@ -144,7 +146,7 @@ impl WebFileProvider {
             .map_err(|()| {
                 ironworks::Error::Invalid(
                     ironworks::ErrorValue::Other("URL".to_string()),
-                    "path parsing error".to_string(),
+                    "路径解析失败".to_string(),
                 )
             })?
             .push("file")
@@ -282,7 +284,11 @@ Ok(stream(fetch(self.file_url(path)?).await?))
         .await?;
         // A store that will not serve part of a file answers with the whole of it.
         if held.status != 206 || held.bytes.len() != span.len() {
-            anyhow::bail!("{path} answered {} of {} bytes", held.bytes.len(), span.len());
+            anyhow::bail!(
+                "{path} 仅返回 {} 字节, 需要 {} 字节",
+                held.bytes.len(),
+                span.len()
+            );
         }
         Ok(held.bytes)
     }

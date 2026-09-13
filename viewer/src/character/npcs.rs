@@ -110,6 +110,8 @@ const VARIANT: u32 = 18;
 const DEMIHUMAN: u8 = 2;
 const MONSTER: u8 = 3;
 
+/// The size a base stands at, which sits ahead of everything it links to.
+const BNPC_SCALE: u32 = 0;
 /// `BNpcBase`'s own links: the body, the customise array kept apart from it, and what it wears.
 const BNPC_MODEL_CHARA: u32 = 14;
 const BNPC_CUSTOMIZE: u32 = 16;
@@ -135,8 +137,10 @@ pub struct Npc {
     /// What each of the creator's menus was left at, by the `Customize` it drives.
     pub choices: Vec<(u32, u32)>,
     pub outfit: Outfit,
-    /// What each of `Slot::ALL` is dyed, one id per channel a modern item can carry.
-    pub stains: [[Option<u8>; 2]; 10],
+    /// What each of `Slot::ALL` is dyed, one id per channel a modern item can carry. `ENpcBase` and
+    /// `NpcEquip` state ten quads, not eleven: an NPC never wears facewear, so that slot is always
+    /// `None` here rather than read from anything.
+    pub stains: [[Option<u8>; 2]; 11],
 }
 
 /// What a character id builds.
@@ -181,9 +185,9 @@ fn choices(row: &ExcelRow<'_>, at: u32) -> Vec<(u32, u32)> {
 }
 
 /// What a row dresses each slot in, and what each is dyed.
-fn worn(row: &ExcelRow<'_>, held: &Wearing) -> (Outfit, [[Option<u8>; 2]; 10]) {
-    let mut outfit = [None; 10];
-    let mut stains = [[None; 2]; 10];
+fn worn(row: &ExcelRow<'_>, held: &Wearing) -> (Outfit, [[Option<u8>; 2]; 11]) {
+    let mut outfit = [None; 11];
+    let mut stains = [[None; 2]; 11];
     for slot in 0..10u32 {
         outfit[slot as usize] = row
             .read::<u32>(held.models + slot * 4)
@@ -210,8 +214,8 @@ fn human(row: &ExcelRow<'_>, at: u32, name: String) -> Option<Npc> {
         female: gender != 0,
         child: byte(BODY) == CHILD,
         choices: choices(row, at),
-        outfit: [None; 10],
-        stains: [[None; 2]; 10],
+        outfit: [None; 11],
+        stains: [[None; 2]; 11],
     })
 }
 
@@ -348,4 +352,139 @@ pub async fn read(backend: &Backend, language: Language) -> Result<Vec<Npc>> {
     found.sort_by(|left, right| left.name.cmp(&right.name));
     log::info!("角色：{} 个有名角色可登场", found.len());
     Ok(found)
+}
+
+/// One of the game's battle characters as far as standing as one goes: a body of its own, under a
+/// name no sheet of the game's pairs it with.
+#[derive(Clone)]
+pub struct Beast {
+    pub name: String,
+    pub under: String,
+    pub variant: u16,
+    /// The size the base states it stands at, which better than half of them state at all.
+    pub scale: f32,
+}
+
+/// Every battle character `named` pairs with a name and this resolves a body of its own for, in
+/// name order.
+///
+/// `BNpcBase` states no name at all, which is what `named` supplies from outside; a base it misses
+/// is left out rather than listed as a number. One whose `ModelChara` is a human is left out too:
+/// that is the creator's own numbering, which the human list already stands in for.
+pub async fn beasts(
+    backend: &Backend,
+    language: Language,
+    named: &BTreeMap<u32, u32>,
+) -> Result<Vec<Beast>> {
+    let excel = backend.excel();
+    let bases = excel.get_sheet("BNpcBase", language).await?;
+    let models = excel.get_sheet("ModelChara", language).await?;
+    let names = excel.get_sheet("BNpcName", language).await?;
+
+    let mut found = Vec::new();
+    for (base, name) in named {
+        let Ok(row) = bases.get_row(*base) else {
+            continue;
+        };
+        let chara = row.read::<u16>(BNPC_MODEL_CHARA).unwrap_or(0);
+        let Some((under, variant)) = models
+            .get_row(u32::from(chara))
+            .ok()
+            .filter(|_| chara != 0)
+            .and_then(|held| beast(&held))
+        else {
+            continue;
+        };
+        let name = names
+            .get_row(*name)
+            .ok()
+            .and_then(|held| held.read_string(SINGULAR).ok().map(|held| held.to_string()))
+            .unwrap_or_default();
+        if name.is_empty() {
+            continue;
+        }
+        found.push(Beast {
+            name,
+            under,
+            variant,
+            scale: stated_scale(row.read::<f32>(BNPC_SCALE).unwrap_or(0.0)),
+        });
+    }
+    let held =
+        |beast: &Beast| (beast.name.clone(), beast.under.clone(), beast.variant, beast.scale.to_bits());
+    found.sort_by_key(held);
+    // Several bases stand the very same creature, so the same name over the same body at the same
+    // variant is one entry: nothing about picking it could tell the two apart.
+    found.dedup_by_key(|beast| held(beast));
+    log::info!("角色：{} 个生物可登场", found.len());
+    Ok(found)
+}
+
+/// The body a beast's own files sit under, which is what names the packs it is posed from.
+pub fn body_code(under: &str) -> Option<String> {
+    under
+        .split('/')
+        .nth(2)
+        .filter(|held| !held.is_empty())
+        .map(str::to_owned)
+}
+
+/// The pack a creature stands in. A human's resident idle is filed under the weapon class it holds;
+/// a creature holds no weapon, so both kinds keep theirs under `bt_common` and name the file after
+/// the kind of body it is.
+pub fn resident_pack(under: &str) -> Option<String> {
+    let code = body_code(under)?;
+    let (tree, file) = match code.as_bytes().first()? {
+        b'm' => ("monster", "monster"),
+        b'd' => ("demihuman", "idle"),
+        _ => return None,
+    };
+    Some(format!(
+        "chara/{tree}/{code}/animation/a0001/bt_common/resident/{file}.pap"
+    ))
+}
+
+/// The size a base states it stands at. Nought is not a creature of no size: it is a row stating
+/// nothing, which the game draws at its model's own.
+pub fn stated_scale(scale: f32) -> f32 {
+    match scale > 0.0 {
+        true => scale,
+        false => 1.0,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn a_creature_stands_in_the_pack_its_own_kind_names() {
+        assert_eq!(
+            resident_pack("chara/monster/m0183/obj/body/b0006/model/").as_deref(),
+            Some("chara/monster/m0183/animation/a0001/bt_common/resident/monster.pap")
+        );
+        assert_eq!(
+            resident_pack("chara/demihuman/d1003/obj/equipment/e0001/model/").as_deref(),
+            Some("chara/demihuman/d1003/animation/a0001/bt_common/resident/idle.pap")
+        );
+    }
+
+    #[test]
+    fn a_base_stating_no_size_stands_at_its_models_own() {
+        assert_eq!(stated_scale(1.5), 1.5);
+        assert_eq!(stated_scale(0.0), 1.0);
+    }
+
+    #[test]
+    fn a_body_is_named_by_the_directory_its_own_files_sit_under() {
+        assert_eq!(
+            body_code("chara/monster/m0886/obj/body/b0001/model/"),
+            Some("m0886".to_owned())
+        );
+        // The set a demihuman wears is a directory of its own, and is not the body.
+        assert_eq!(
+            body_code("chara/demihuman/d1003/obj/equipment/e0001/model/"),
+            Some("d1003".to_owned())
+        );
+    }
 }

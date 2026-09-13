@@ -418,7 +418,7 @@ impl Renderer {
                         graveyard().lock().unwrap().extend(held.dead());
                     }
                 }
-                Err(why) => log::error!("assets/layer: model {at}: {why}"),
+                Err(why) => log::error!("assets/layer: 模型 {at}：{why}"),
             }
         }
         for (path, models) in std::mem::take(&mut self.pending_effects) {
@@ -434,33 +434,33 @@ impl Renderer {
                         graveyard().lock().unwrap().extend(stale.dead());
                     }
                 }
-                Err(why) => log::error!("assets/layer: grass {at}: {why}"),
+                Err(why) => log::error!("assets/layer: 草地 {at}：{why}"),
             }
         }
         for (id, held) in std::mem::take(&mut self.supplied) {
             if let Err(why) = self.buffers.layered(gl, id, &held) {
-                log::error!("assets/layer: texture {id:#x}: {why}");
+                log::error!("assets/layer: 纹理 {id:#x}：{why}");
             }
         }
         for (at, path, held) in std::mem::take(&mut self.overcast) {
             if let Err(why) = self.buffers.overcast(gl, at, &path, &held) {
-                log::error!("assets/layer: {path}: {why}");
+                log::error!("assets/layer: {path}：{why}");
             }
         }
         for (at, held) in std::mem::take(&mut self.starlit) {
             if let Err(why) = self.buffers.starlit(gl, at, &held) {
-                log::error!("assets/layer: star texture {at}: {why}");
+                log::error!("assets/layer: 星纹理 {at}：{why}");
             }
         }
         for (path, held) in std::mem::take(&mut self.stacks) {
             if let Err(why) = self.buffers.stack(gl, &path, &held) {
-                log::error!("assets/layer: {path}: {why}");
+                log::error!("assets/layer: {path}：{why}");
             }
         }
         if let Some(values) = self.types.take()
             && let Err(why) = self.buffers.fill_types(gl, &values)
         {
-            log::error!("assets/layer: shader types: {why}");
+            log::error!("assets/layer: 着色器类型：{why}");
         }
         // egui draws into whatever it bound before the callback, and that has to be bound again
         // whether or not the frame drew. Asking the painter rather than the context is what makes
@@ -672,7 +672,7 @@ impl Renderer {
                 ..scene.clone()
             };
             let offsets = self.windows(gl, frame, &sun, false)?;
-            let instances = self.shadow_instances.ok_or("no shadow instance buffer")?;
+            let instances = self.shadow_instances.ok_or("没有阴影实例缓冲区")?;
             unsafe {
                 let (column, row) = (
                     (split % program::ATLAS_COLUMNS) as i32,
@@ -804,7 +804,7 @@ impl Renderer {
         // Tested against a copy of the depth rather than the depth itself: a surface here also
         // samples it, and the live one is the framebuffer's own attachment.
         self.buffers.cut(gl)?;
-        let into = self.buffers.bare().ok_or("no lit frame")?;
+        let into = self.buffers.bare().ok_or("没有已光照帧")?;
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
@@ -965,7 +965,7 @@ impl Renderer {
         if frame.effects.is_empty() {
             return Ok(());
         }
-        let into = self.buffers.lit().ok_or("no lit frame")?;
+        let into = self.buffers.lit().ok_or("没有已光照帧")?;
         let size = self.buffers.size();
         // Refreshed here rather than relied on from `blended()`: a frame with no blended surface
         // never runs that pass, and this copy has to be standing regardless.
@@ -1039,7 +1039,7 @@ impl Renderer {
         self.leg(gl, painter, frame, scene, offsets, true, true)?;
         self.buffers.relight(gl, lighting, scene, &frame.lamps)?;
         self.buffers.cut(gl)?;
-        let into = self.buffers.bare().ok_or("no lit frame")?;
+        let into = self.buffers.bare().ok_or("没有已光照帧")?;
         unsafe {
             gl.bind_framebuffer(glow::FRAMEBUFFER, Some(into));
             gl.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
@@ -1071,7 +1071,7 @@ impl Renderer {
         filling: bool,
         fringe: bool,
     ) -> Result<(), String> {
-        let instances = self.instances.ok_or("no instance buffer")?;
+        let instances = self.instances.ok_or("没有实例缓冲区")?;
         for (batch, (offset, windows, window)) in frame.batches.iter().zip(offsets) {
             let meshes: Vec<i32> = match self
                 .models
@@ -1358,7 +1358,7 @@ impl Renderer {
                 ),
             };
             if let Err(why) = drawn {
-                log::error!("assets/layer: character: {why}");
+                log::error!("assets/layer: 角色：{why}");
             }
         }
     }
@@ -1379,7 +1379,7 @@ impl Renderer {
             ..frame.scene.clone()
         };
         let offsets = self.windows(gl, frame, &scene, true)?;
-        let instances = self.instances.ok_or("no instance buffer")?;
+        let instances = self.instances.ok_or("没有实例缓冲区")?;
         self.shadow(gl, painter, frame, &scene)?;
 
         for page in 0..self.buffers.pages() {

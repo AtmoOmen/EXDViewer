@@ -455,7 +455,7 @@ impl Build {
         if self.worn.is_empty() {
             self.dress(listing, &reference.deformers, &reference.worn_over);
             if self.worn.is_empty() {
-                self.failure = Some("nothing on disk under what it names".to_owned());
+                self.failure = Some("它指定的路径下没有任何文件".to_owned());
                 return;
             }
         }
@@ -520,7 +520,7 @@ impl Build {
     fn dress(&mut self, listing: &Listing, deformers: &mdl::Deformers, gating: &gating::Worn) {
         let npc = match &self.stands {
             Stands::Beast { under, variant } => {
-                self.lineage = monster_code(under).into_iter().collect();
+                self.lineage = npcs::body_code(under).into_iter().collect();
                 let mut found = listing.under(under);
                 found.retain(|path| path.ends_with(".mdl"));
                 found.sort();
@@ -581,7 +581,7 @@ impl Build {
         let mut arrived = super::Outfit::default();
         for slot in Slot::ALL {
             let held = npc.outfit[slot as usize].and_then(|gear| {
-                let path = equipment(listing, deformers, self.code, slot.adornment(), gear.set)
+                let path = equipment(listing, deformers, self.code, slot.filed(), gear.set)
                     [slot as usize]
                     .clone()?;
                 Some((path, gear))
@@ -677,26 +677,9 @@ impl Build {
     }
 }
 
-/// The body a beast's own files sit under, which is what names the packs it is posed from.
-fn monster_code(under: &str) -> Option<String> {
-    under.split('/').nth(2).filter(|held| !held.is_empty()).map(str::to_owned)
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
 
-    #[test]
-    fn a_body_is_named_by_the_directory_its_own_files_sit_under() {
-        assert_eq!(
-            monster_code("chara/monster/m0886/obj/body/b0001/model/"),
-            Some("m0886".to_owned())
-        );
-        // The set a demihuman wears is a directory of its own, and is not the body.
-        assert_eq!(
-            monster_code("chara/demihuman/d1003/obj/equipment/e0001/model/"),
-            Some("d1003".to_owned())
-        );
-    }
 
 }

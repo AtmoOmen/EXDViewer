@@ -107,7 +107,7 @@ impl TableContext {
                 .get(column_idx as usize)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Column index out of bounds: {} >= {}",
+                        "列索引超出范围: {} >= {}",
                         column_idx,
                         self.0.sheet_columns.len()
                     )
@@ -118,7 +118,7 @@ impl TableContext {
                 .get(column_idx as usize)
                 .ok_or_else(|| {
                     anyhow::anyhow!(
-                        "Column index out of bounds: {} >= {}",
+                        "列索引超出范围: {} >= {}",
                         column_idx,
                         self.0.sheet_columns.len()
                     )
@@ -133,7 +133,7 @@ impl TableContext {
             .copied()
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Column index out of bounds: {} >= {}",
+                    "列索引超出范围: {} >= {}",
                     column_idx,
                     self.0.column_ordering.len()
                 )
@@ -161,7 +161,7 @@ impl TableContext {
         let (columns, display_column_idx) = schema.and_then(|r| {
             if r.0.len() != self.0.sheet_columns.len() {
                 bail!(
-                    "Schema column count does not match sheet column count: {} != {}",
+                    "模式列数与表列数不一致: {} != {}",
                     r.0.len(),
                     self.0.sheet_columns.len()
                 )

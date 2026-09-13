@@ -26,7 +26,7 @@ impl SyncAccessFile {
             || value > u64::MAX as f64
         {
             return Err(JsErr::msg(format!(
-                "f64 {value:?} is not convertible to u64"
+                "f64 {value:?} 无法转换为 u64"
             )));
         }
         Ok(value.trunc() as u64)
@@ -35,7 +35,7 @@ impl SyncAccessFile {
     fn into_f64(value: u64) -> JsResult<f64> {
         if u64::BITS - value.leading_zeros() >= f64::MANTISSA_DIGITS {
             return Err(JsErr::msg(format!(
-                "u64 {value:?} is not convertible to f64"
+                "u64 {value:?} 无法转换为 f64"
             )));
         }
         Ok(value as f64)
@@ -62,7 +62,7 @@ impl Read for SyncAccessFile {
             .map_err(std::io::Error::other)
             .and_then(|array| {
                 array.copy_to(buf.get_mut(..(array.length() as usize)).ok_or(
-                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "buffer is too small"),
+                    std::io::Error::new(std::io::ErrorKind::InvalidInput, "缓冲区过小"),
                 )?);
                 Ok(array.length() as usize)
             })
@@ -85,7 +85,7 @@ impl Read for SyncAccessFile {
                     .get_mut(..(array.length() as usize))
                     .ok_or(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        "buffer is too small".to_string(),
+                        "缓冲区过小".to_string(),
                     ))?;
                 array.copy_to_uninit(data);
 
@@ -106,7 +106,7 @@ impl Read for SyncAccessFile {
         buf.push_str(std::str::from_utf8(&bytes).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "could not convert bytes to string",
+                "无法将字节转换为字符串",
             )
         })?);
         Ok(size)
@@ -127,7 +127,7 @@ impl Seek for SyncAccessFile {
                     .ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::InvalidInput,
-                            "offset would over/underflow",
+                            "偏移量会上溢或下溢",
                         )
                     })?;
             }
@@ -135,7 +135,7 @@ impl Seek for SyncAccessFile {
                 self.offset = self.offset.checked_add_signed(v).ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
-                        "offset would over/underflow",
+                        "偏移量会上溢或下溢",
                     )
                 })?;
             }

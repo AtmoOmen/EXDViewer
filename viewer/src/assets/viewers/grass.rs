@@ -50,6 +50,15 @@ fn axes(values: [f32; 3]) -> String {
     format!("{x:>8} {y:>8} {z:>8}")
 }
 
+/// The `h` / `m` / `l` a grid's file name ends in, spelled out.
+fn detail_name(detail: gzd::Detail) -> &'static str {
+    match detail {
+        gzd::Detail::High => "高",
+        gzd::Detail::Medium => "中",
+        gzd::Detail::Low => "低",
+    }
+}
+
 /// A `.gzd`, decoded and ready to draw.
 pub struct Zone {
     identity: Vec<(&'static str, String)>,
@@ -256,7 +265,7 @@ pub fn zone_ui(
         let (detail, at) = file.rows[index];
         let grid = file.file.grids(detail)[at];
         let cells = [
-            format!("{detail:?}"),
+            detail_name(detail).to_owned(),
             grid.cell().map(|it| it.to_string()).join(", "),
             axes(grid.center()),
             format!("{:.3}", grid.radius()),

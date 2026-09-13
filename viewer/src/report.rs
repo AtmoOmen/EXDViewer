@@ -266,8 +266,8 @@ async fn send(url: &str, paths: &[String]) -> anyhow::Result<()> {
     anyhow::ensure!(
         response.ok,
         "服务器对 {} 个路径返回了 {}",
-        response.status,
-        paths.len()
+        paths.len(),
+        response.status
     );
     Ok(())
 }

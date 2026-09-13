@@ -31,6 +31,15 @@ fn shown(value: spm::Value) -> String {
     }
 }
 
+/// How a column's cells are read.
+fn kind_name(kind: spm::Kind) -> &'static str {
+    match kind {
+        spm::Kind::Float => "浮点",
+        spm::Kind::Unsigned => "无符号整数",
+        spm::Kind::Name => "名称",
+    }
+}
+
 pub struct Rendered {
     identity: Vec<(&'static str, String)>,
     /// What each column is called and how wide it is drawn.
@@ -51,7 +60,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         .iter()
         .enumerate()
         .map(|(column, parameter)| {
-            let cells = [named(parameter.id()), format!("{:?}", parameter.kind())]
+            let cells = [named(parameter.id()), kind_name(parameter.kind()).to_owned()]
                 .into_iter()
                 .chain(
                     (0..file.rows().len())

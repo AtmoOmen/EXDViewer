@@ -158,7 +158,7 @@ impl SoundStage {
             *decode = match promise.try_take() {
                 Ok(Ok(decoded)) => Decode::Ready(Arc::new(decoded)),
                 Ok(Err(why)) => {
-                    log::warn!("assets/layer/scene: sound decode failed: {why}");
+                    log::warn!("assets/layer/scene: 声音解码失败：{why}");
                     Decode::Failed
                 }
                 Err(promise) => Decode::Fetching(promise),
@@ -213,7 +213,7 @@ impl SoundStage {
                         true => mixer.set_gain(&placement.key, gain),
                         false => {
                             if let Err(why) = mixer.play(placement.key, audio, gain) {
-                                log::warn!("assets/layer/scene: sound play failed: {why}");
+                                log::warn!("assets/layer/scene: 声音播放失败：{why}");
                             }
                         }
                     }
@@ -254,7 +254,7 @@ async fn fetch_decode(files: Rc<dyn FileProvider>, path: String) -> anyhow::Resu
     let entry = container
         .entries()
         .first()
-        .ok_or_else(|| anyhow::anyhow!("{path}: no audio streams"))?;
+        .ok_or_else(|| anyhow::anyhow!("{path}: 没有音频流"))?;
     audio::decode_data(entry.format(), entry.data())
 }
 

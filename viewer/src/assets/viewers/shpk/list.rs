@@ -69,7 +69,7 @@ pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8]) {
             stage = 0;
         }
         for (index, (name, count, size)) in package.stages.iter().enumerate() {
-            let label = format!("{name} ({count}, {})", Bytes(*size));
+            let label = format!("{} ({count}, {})", super::stage_label(name), Bytes(*size));
             if ui.selectable_label(stage == index + 1, label).clicked() {
                 stage = index + 1;
             }
@@ -252,8 +252,8 @@ pub fn ui(ui: &mut egui::Ui, package: &Rendered, bytes: &[u8]) {
                         flags.push_str(&format!("{value:<width$} ", width = width));
                     }
                     let label = format!(
-                        "#{index:<5} {:<7}{:>8} {:>3} 个绑定   {}",
-                        shader.stage,
+                        "#{index:<5} {:<5}{:>8} {:>3} 个绑定   {}",
+                        super::stage_label(shader.stage),
                         Bytes(shader.blob.len()).to_string(),
                         shader.bindings.len(),
                         flags.trim_end()
@@ -290,7 +290,7 @@ fn tooltip(ui: &mut egui::Ui, package: &Rendered, index: usize) {
         return;
     };
     ui.label(
-        RichText::new(format!("着色器 #{index}  {}", shader.stage))
+        RichText::new(format!("着色器 #{index}  {}", super::stage_label(shader.stage)))
             .monospace()
             .strong(),
     );

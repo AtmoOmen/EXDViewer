@@ -637,7 +637,7 @@ fn title_icons(&self, _path: &Path, params: &Params<'_, '_>) -> String {
                     let bar_left = ui.min_rect().left();
                     let bar_width = ui.available_width();
 
-ui.menu_button("程序", |ui| {
+                    ui.menu_button("程序", |ui| {
                         self.draw_account_menu(ui);
                         ui.separator();
                         if ui.button("配置").clicked() {
@@ -650,7 +650,7 @@ ui.menu_button("程序", |ui| {
                         }
                     });
 
-ui.menu_button("跳转", |ui| {
+                    ui.menu_button("跳转", |ui| {
                         let palette = match tab {
                             Tab::Sheets => {
                                 if shortcut::button(ui, "跳转到行…", GOTO_ROW).clicked() {
@@ -1450,7 +1450,7 @@ ui.menu_button("跳转", |ui| {
                             let context = table.context().clone();
                             let promise = export::menu(
                                 ui,
-                                "Export",
+                                "导出",
                                 None,
                                 self.export_promise.is_some(),
                                 vec![
@@ -1477,7 +1477,7 @@ ui.menu_button("跳转", |ui| {
                             if promise.is_some() {
                                 self.export_promise = promise;
                             }
-let filter_error = table.get_filter_error();
+                            let filter_error = table.get_filter_error();
 
                             let filter_resp = ui.add_sized(
                                 Vec2::new(ui.available_width(), 0.0),

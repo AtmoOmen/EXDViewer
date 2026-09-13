@@ -175,7 +175,7 @@ impl Particles {
         for batch in &frame.batches {
             let vertices = batch.vertices.len();
             if let Err(why) = self.batch(gl, painter, frame, batch, at) {
-                log::warn!("assets/avfx: particle {}: {why}", batch.def);
+                log::warn!("assets/avfx: 粒子 {}：{why}", batch.def);
             }
             at += vertices;
         }
@@ -206,7 +206,7 @@ impl Particles {
             true => frame.packages.shape.as_ref(),
             false => frame.packages.model.as_ref(),
         }
-        .ok_or("the package has not arrived")?;
+        .ok_or("着色器包尚未就绪")?;
 
         if let Entry::Vacant(slot) = self.programs.entry(batch.def) {
             let keys = [shading.keys.clone(), shading.lights.clone()].concat();
@@ -323,6 +323,7 @@ impl Particles {
         }
         let instance = Instance {
             calculate: batch.shading.calculate,
+            depth_offset: batch.shading.depth_offset,
             ..Instance::default()
         };
         self.bind(gl, batch.def, &frame.scene, &instance)?;
@@ -440,7 +441,7 @@ impl Particles {
     }
 
     fn upload(&mut self, gl: &glow::Context, meshes: Vec<Mesh>) -> Result<(), String> {
-        log::info!("assets/avfx: {} models on {:?}", meshes.len(), gl.version());
+        log::info!("assets/avfx: {} 个模型，运行于 {:?}", meshes.len(), gl.version());
         for mesh in &meshes {
             self.models.push(upload(gl, mesh)?);
         }

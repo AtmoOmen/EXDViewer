@@ -83,11 +83,11 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let mut shaders = Vec::with_capacity(package.shaders().len());
     for shader in package.shaders() {
         let stage = match shader.stage() {
-            Stage::Vertex => "顶点",
-            Stage::Pixel => "像素",
-            Stage::Hull => "外壳",
-            Stage::Domain => "域",
-            Stage::Geometry => "几何",
+            Stage::Vertex => "Vertex",
+            Stage::Pixel => "Pixel",
+            Stage::Hull => "Hull",
+            Stage::Domain => "Domain",
+            Stage::Geometry => "Geometry",
         };
         let size = usize::try_from(shader.blob_size()).unwrap_or(0);
         let start = package.blobs_offset() + usize::try_from(shader.blob_offset()).unwrap_or(0);
@@ -201,7 +201,7 @@ const HLSL: Reading = Reading {
 const ASSEMBLY: Reading = Reading {
     hlsl: false,
     extension: "asm",
-    label: "Assembly",
+    label: "汇编",
 };
 
 /// Beyond the raw file: every shader's chosen reading, zipped together where there is more than one
@@ -234,7 +234,7 @@ fn shaders_choice<'a>(
         true => format!("shader.{}", reading.extension),
         false => format!("shaders_{}.zip", reading.extension),
     };
-    export::Choice::bytes(format!("All shaders, {}", reading.label), file_name, move || {
+    export::Choice::bytes(format!("全部着色器，{}", reading.label), file_name, move || {
         let files: Vec<(String, Vec<u8>)> = package
             .shaders
             .iter()
@@ -252,7 +252,7 @@ fn shaders_choice<'a>(
                 .into_iter()
                 .next()
                 .map(|(_, data)| data)
-                .ok_or_else(|| anyhow::anyhow!("no shader program in this package")),
+                .ok_or_else(|| anyhow::anyhow!("此着色器包中没有着色器程序")),
             false => export::zip(&files),
         }
     })
@@ -265,6 +265,19 @@ struct MergeTarget {
     stage_name: &'static str,
     pass: u32,
     count: usize,
+}
+
+/// What a list shows for a stage of the pipeline. The game's own names are what the merge path
+/// matches on, so the translation happens where a name is drawn rather than where it is stored.
+pub(super) fn stage_label(stage: &str) -> &str {
+    match stage {
+        "Vertex" => "顶点",
+        "Pixel" => "像素",
+        "Hull" => "外壳",
+        "Domain" => "域",
+        "Geometry" => "几何",
+        _ => stage,
+    }
 }
 
 /// Where the shader list's two chip rows currently name exactly one stage and one pass with a
@@ -302,7 +315,7 @@ fn merged_choice<'a>(
 ) -> export::Choice<'a> {
     let file_name = format!("merged_{}.{}", target.stage_name, reading.extension);
     let (stage, pass) = (target.stage, target.pass);
-    export::Choice::bytes(format!("Merged pass, {}", reading.label), file_name, move || {
+    export::Choice::bytes(format!("合并通道，{}", reading.label), file_name, move || {
         let package = shpk::ShaderPackage::parse(bytes)?;
         let merged = shadermerge::pass(&package, bytes, stage, pass).map_err(anyhow::Error::from)?;
         let lines = match reading.hlsl {
@@ -311,7 +324,7 @@ fn merged_choice<'a>(
         };
         Ok(lines.join("\n").into_bytes())
     })
-    .hover(format!("{} shaders", target.count))
+    .hover(format!("{} 个着色器", target.count))
 }
 
 /// Everything about the package that is not a shader. It sits beside the code rather than above it,

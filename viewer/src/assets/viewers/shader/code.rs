@@ -73,7 +73,7 @@ pub fn ui(
         false => 0,
     };
     ui.horizontal(|ui| {
-ui.label(
+        ui.label(
             RichText::new(format!("{} 行", lines.len() - from))
                 .weak()
                 .small(),

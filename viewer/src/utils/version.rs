@@ -46,7 +46,7 @@ impl Version {
 
         let parts: Vec<&str> = version_string.split('.').collect();
         if parts.len() != 5 {
-            return Err(anyhow::anyhow!("Invalid version string: {version_string}"));
+            return Err(anyhow::anyhow!("无效的版本字符串: {version_string}"));
         }
 
         Ok(Self {

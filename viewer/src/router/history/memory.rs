@@ -40,7 +40,7 @@ impl History for MemoryHistory {
                     let position = Self::position(d);
                     if *position >= history_len {
                         log::warn!(
-                            "Position {position} is out of bounds for history length {history_len}"
+                            "位置 {position} 超出历史记录长度 {history_len} 的范围"
                         );
                         *position = history_len - 1;
                     }
@@ -67,7 +67,7 @@ impl History for MemoryHistory {
             let position = *Self::position(d);
             *Self::history(d)
                 .get_mut(position)
-                .ok_or_else(|| anyhow!("Invalid history position"))? = location;
+                .ok_or_else(|| anyhow!("历史记录位置无效"))? = location;
             Ok(())
         })
     }
@@ -76,7 +76,7 @@ impl History for MemoryHistory {
         self.ctx.data_mut(|d| {
             let position = Self::position(d);
             if *position == 0 {
-                bail!("Cannot go before first entry");
+                bail!("已到达第一条记录，无法后退");
             }
             *position -= 1;
             Ok(())
@@ -88,7 +88,7 @@ impl History for MemoryHistory {
             let history_len = Self::history(d).len();
             let position = Self::position(d);
             if *position >= history_len - 1 {
-                bail!("Cannot go past last entry");
+                bail!("已到达最后一条记录，无法前进");
             }
             *position += 1;
             Ok(())

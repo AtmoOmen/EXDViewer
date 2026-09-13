@@ -88,7 +88,7 @@ impl Schema {
         } else {
             for error in &errors {
                 log::error!(
-                    "Schema Error: {} at path {}",
+                    "模式错误: {} 位于路径 {}",
                     error.description,
                     error.location
                 );

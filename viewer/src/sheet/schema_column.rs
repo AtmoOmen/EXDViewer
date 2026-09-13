@@ -91,7 +91,7 @@ impl SchemaColumn {
                             *column_placeholder += 1;
                             ret
                         } else {
-                            bail!("Link field missing targets or condition: {field:?}");
+                            bail!("链接字段缺少 targets 或 condition: {field:?}");
                         }
                     }
                     FieldType::Array => unreachable!(),
@@ -110,7 +110,7 @@ impl SchemaColumn {
             if let SchemaColumnMeta::ConditionalLink { column_idx, .. } = column.meta() {
                 let Some(switch_name) = column_lookups.get(*column_idx as usize) else {
                     bail!(
-                        "Failed to find column lookup name for {}'s conditional link: {}",
+                        "找不到 {} 的条件链接所用的列查找名: {}",
                         column.name(),
                         *column_idx
                     );
@@ -124,7 +124,7 @@ impl SchemaColumn {
                     }
                 }) else {
                     bail!(
-                        "Failed to find column index for {}'s conditional link: {}",
+                        "找不到 {} 的条件链接所用的列索引: {}",
                         column.name(),
                         switch_name
                     );
@@ -258,7 +258,7 @@ impl SheetLink {
                     }
                 }
                 Some(Err(err)) => {
-                    log::error!("Failed to retrieve linked sheet: {err:?}");
+                    log::error!("读取链接的数据表失败: {err:?}");
                     None
                 }
             }

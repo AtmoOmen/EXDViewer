@@ -488,12 +488,12 @@ fn register_seek_handlers(seek: &SeekCell) -> Vec<Closure<dyn FnMut(MediaSession
 fn focus_token() -> Result<HtmlAudioElement> {
     let document = web_sys::window()
         .and_then(|window| window.document())
-        .ok_or_else(|| anyhow!("no document"))?;
+        .ok_or_else(|| anyhow!("没有 document"))?;
     let audio = document
         .create_element("audio")
         .map_err(js("create audio element"))?
         .dyn_into::<HtmlAudioElement>()
-        .map_err(|_| anyhow!("not an audio element"))?;
+        .map_err(|_| anyhow!("不是 audio 元素"))?;
     audio.set_src(&format!(
         "data:audio/wav;base64,{}",
         BASE64_STANDARD.encode(focus_token_wav())

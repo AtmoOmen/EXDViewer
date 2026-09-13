@@ -376,11 +376,9 @@ impl Program {
     /// declares no material keys, so a particle's own texture sets and lights are scene keys.
     pub fn build(bytes: &[u8], set: &[(u32, u32)], sprite: bool) -> Result<Self, String> {
         let package = ShaderPackage::parse(bytes).map_err(|why| why.to_string())?;
-        let (vs, ps) = resolve(&package, set).ok_or("these keys reach no node")?;
-        let (vertex, vs_blob) =
-            program(&package, bytes, vs).ok_or("no vertex shader in the blob")?;
-        let (fragment, ps_blob) =
-            program(&package, bytes, ps).ok_or("no pixel shader in the blob")?;
+        let (vs, ps) = resolve(&package, set).ok_or("这些键未匹配到节点")?;
+        let (vertex, vs_blob) = program(&package, bytes, vs).ok_or("blob 中没有顶点着色器")?;
+        let (fragment, ps_blob) = program(&package, bytes, ps).ok_or("blob 中没有像素着色器")?;
         let vs_names = names(&package, vs, vs_blob);
         let ps_names = names(&package, ps, ps_blob);
         let mut described = HashMap::new();

@@ -30,19 +30,19 @@ type Scalar = (&'static str, fn(&DyePack) -> String);
 /// The scalar fields the current file states, in the order it holds them.
 const SCALARS: [Scalar; 9] = [
     ("Scalar3", |dye| format!("{:.2}", dye.scalar3)),
-    ("Metal", |dye| format!("{:.2}", dye.metalness)),
-    ("Rough", |dye| format!("{:.2}", dye.roughness)),
-    ("Sheen", |dye| format!("{:.2}", dye.sheen_rate)),
-    ("Sheen tint", |dye| format!("{:.2}", dye.sheen_tint)),
-    ("Sheen ap.", |dye| format!("{:.2}", dye.sheen_aperture)),
-    ("Aniso", |dye| format!("{:.2}", dye.anisotropy)),
-    ("Sphere", |dye| dye.sphere_index.to_string()),
-    ("Sphere mask", |dye| format!("{:.2}", dye.sphere_mask)),
+    ("金属度", |dye| format!("{:.2}", dye.metalness)),
+    ("粗糙度", |dye| format!("{:.2}", dye.roughness)),
+    ("光泽", |dye| format!("{:.2}", dye.sheen_rate)),
+    ("光泽色调", |dye| format!("{:.2}", dye.sheen_tint)),
+    ("光泽孔径", |dye| format!("{:.2}", dye.sheen_aperture)),
+    ("各向异性", |dye| format!("{:.2}", dye.anisotropy)),
+    ("球体", |dye| dye.sphere_index.to_string()),
+    ("球体遮罩", |dye| format!("{:.2}", dye.sphere_mask)),
 ];
 
 /// The pre-Dawntrail pair, which Penumbra.GameData names Shininess and SpecularMask and which
 /// arrives in the first two fields of the row above.
-const LEGACY_SCALARS: [Scalar; 2] = [("Shininess", SCALARS[0].1), ("Specular mask", SCALARS[1].1)];
+const LEGACY_SCALARS: [Scalar; 2] = [("光泽度", SCALARS[0].1), ("镜面反射遮罩", SCALARS[1].1)];
 
 /// A staining template file, decoded and ready to draw.
 pub struct Rendered {

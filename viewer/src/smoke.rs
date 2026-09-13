@@ -101,7 +101,7 @@ impl<L: Log + 'static> CountingLogger<L> {
     }
 
     pub fn init(self) {
-        log::set_boxed_logger(Box::new(self)).expect("Failed to set logger");
+        log::set_boxed_logger(Box::new(self)).expect("设置日志器失败");
     }
 }
 
@@ -262,14 +262,11 @@ impl SmokeApp {
         let path = step.path().to_string();
 
         if self.reference.as_ref().is_some_and(|before| same(before, &image)) {
-            self.fail(format!(
-                "{path}: the frame after the click is identical to the one before it; the click \
-                 never landed on \"Game shaders\" or \"Scene\""
-            ));
+            self.fail(format!("{path}: 点击后的帧与点击前完全相同，点击未落在「游戏着色器」或「场景」上"));
             return;
         }
         if blank(&image) {
-            self.fail(format!("{path}: the shot after the click is a single flat color"));
+            self.fail(format!("{path}: 点击后的截图为单一纯色"));
             return;
         }
 
@@ -283,7 +280,7 @@ impl SmokeApp {
             image.height() as u32,
             image::ColorType::Rgba8,
         ) {
-            self.fail(format!("could not save screenshot for {path}: {e}"));
+            self.fail(format!("无法保存 {path} 的截图: {e}"));
             return;
         }
         self.outcomes.push(StepOutcome {
@@ -369,7 +366,7 @@ impl eframe::App for SmokeApp {
         if self.failure.is_none() && self.counters.error_count() > 0 {
             // The counting logger already printed it; failing here just stops the run instead of
             // idling out to the step timeout on top of the error that already doomed it.
-            self.failure = Some(format!("{} ERROR-level log(s)", self.counters.error_count()));
+            self.failure = Some(format!("{} 条 ERROR 级日志", self.counters.error_count()));
         }
 
         for event in ctx.input(|i| i.events.clone()) {
@@ -405,7 +402,7 @@ impl eframe::App for SmokeApp {
                 if self.counters.decoded() > *opened {
                     self.phase = Phase::Settling { at: Instant::now() };
                 } else if at.elapsed() > self.config.step_timeout {
-                    self.fail(format!("{} never decoded", step.path()));
+                    self.fail(format!("{} 始终未解码", step.path()));
                 }
             }
             Phase::Settling { at } => {
@@ -416,7 +413,7 @@ impl eframe::App for SmokeApp {
             }
             Phase::Referencing { at } => {
                 if at.elapsed() > self.config.step_timeout {
-                    self.fail(format!("{} never produced a reference shot", step.path()));
+                    self.fail(format!("{} 始终未产生参考截图", step.path()));
                 }
             }
             Phase::Clicked { at, played } => {
@@ -452,7 +449,7 @@ impl eframe::App for SmokeApp {
                         requested: true,
                     };
                 } else if at.elapsed() > self.config.step_timeout {
-                    self.fail(format!("{} never produced a screenshot", step.path()));
+                    self.fail(format!("{} 始终未产生截图", step.path()));
                 }
             }
         }

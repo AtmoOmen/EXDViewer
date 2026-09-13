@@ -47,7 +47,7 @@ impl GithubApi {
     /// For what only the server can answer, with no GitHub call to fall back to.
     pub async fn get_from_server<T: DeserializeOwned>(&self, route: &str) -> Result<T> {
         let Some(proxy) = &self.proxy else {
-            bail!("No API server is configured");
+            bail!("未配置 API 服务器");
         };
         server_json(&format!("{proxy}/github/{route}")).await
     }
@@ -83,9 +83,9 @@ async fn github_json<T: DeserializeOwned>(url: &str, token: Option<&str>) -> Res
 fn describe(response: &HttpResponse, authenticated: bool) -> String {
     if is_rate_limited(response) {
         return if authenticated {
-            "GitHub's API rate limit for this account is used up. Try again later.".to_string()
+            "此账号的 GitHub API 速率限制已用尽，请稍后重试。".to_string()
         } else {
-            "GitHub's API rate limit for your IP is used up. Sign in with GitHub (App menu) to raise it."
+            "当前 IP 的 GitHub API 速率限制已用尽。在「程序」菜单中用 GitHub 登录可提升速率限制。"
                 .to_string()
         };
     }
@@ -96,7 +96,7 @@ fn describe(response: &HttpResponse, authenticated: bool) -> String {
         .and_then(|json| json.get("message"))
         .and_then(serde_json::Value::as_str)
         .map_or_else(|| text.clone(), str::to_owned);
-    format!("GitHub API request failed ({}): {message}", response.status)
+    format!("GitHub API 请求失败（{}）：{message}", response.status)
 }
 
 fn is_rate_limited(response: &HttpResponse) -> bool {
@@ -133,8 +133,8 @@ mod tests {
             r#"{"message":"API rate limit exceeded for 1.2.3.4."}"#,
         );
         assert!(is_rate_limited(&limited));
-        assert!(describe(&limited, false).contains("Sign in with GitHub"));
-        assert!(!describe(&limited, true).contains("Sign in with GitHub"));
+        assert!(describe(&limited, false).contains("用 GitHub 登录"));
+        assert!(!describe(&limited, true).contains("用 GitHub 登录"));
 
         // GitHub says 429 with no header when it is the secondary limit talking.
         assert!(is_rate_limited(&response(
@@ -156,10 +156,10 @@ mod tests {
     #[test]
     fn a_plain_failure_shows_what_github_said() {
         let message = describe(&response(404, &[], r#"{"message":"Not Found"}"#), false);
-        assert_eq!(message, "GitHub API request failed (404): Not Found");
+        assert_eq!(message, "GitHub API 请求失败（404）：Not Found");
         assert_eq!(
             describe(&response(500, &[], "boom"), false),
-            "GitHub API request failed (500): boom"
+            "GitHub API 请求失败（500）：boom"
         );
     }
 }

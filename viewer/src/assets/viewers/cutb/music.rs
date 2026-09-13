@@ -48,7 +48,7 @@ pub async fn resolve(backend: Backend, language: Language, path: String) -> Resu
                 .get_row(*row_id)
                 .is_ok_and(|row| derive::cutscene_path(&text(row, stem)) == path)
         })
-        .ok_or_else(|| anyhow!("no Cutscene row names {path}"))?;
+        .ok_or_else(|| anyhow!("没有 Cutscene 行指向 {path}"))?;
 
     let quests = Fields::load(&backend, "Quest", language).await?;
     let id = quests.at("Id")?;

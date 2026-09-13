@@ -495,7 +495,7 @@ impl Build {
     fn clip(&mut self, index: usize, clip: &Clip) {
         let kind = format!("{:?}", clip.kind());
         self.row(2, format!("片段 {index}"), &kind).fields = vec![
-            ("Kind", kind.clone()),
+            ("类型", kind.clone()),
             ("整数", numbers(clip.integers())),
             (
                 "浮点数",
@@ -519,7 +519,7 @@ impl Build {
             );
             self.row(1, format!("发射器 {index}"), detail).fields = vec![
                 (
-                    "Kind",
+                    "类型",
                     format!("EVT {}", reference(integer(properties, "EVT"))),
                 ),
                 ("寿命", reference(integer(properties, "Life"))),
@@ -566,7 +566,7 @@ impl Build {
             // An effector carries no life of its own, where a particle and a binder both do.
             let life = integer(inner, "Life");
             let mut fields = vec![(
-                "Kind",
+                "类型",
                 format!("{kind} {}", reference(integer(inner, kind))),
             )];
             fields.extend(life.map(|life| ("寿命", life.to_string())));
@@ -1181,10 +1181,15 @@ fn facing(drawn: &sim::Drawn, eye: Vec3, right: Vec3, up: Vec3) -> (Vec3, Vec3) 
         )
     };
     match drawn.facing {
+        // Billed about the particle's own axis rather than about the camera's up: two captures of
+        // one emote hold the two lightsticks at opposite diagonals and each glow runs along its own
+        // stick, where a bill taken about the camera would stand both of them the same way up. The
+        // turn already carries every angle the file states, so there is no roll to lay over it.
         sim::Facing::Camera => {
+            let axis = (glam::Quat::from_array(drawn.turn) * Vec3::Y).normalize_or(Vec3::Y);
             let away = (eye - Vec3::from(drawn.center)).normalize_or(-Vec3::Z);
-            let across = up.cross(away).normalize_or(right);
-            spun(across, away.cross(across))
+            let across = axis.cross(away).normalize_or(right);
+            (across * scale.x, axis * scale.y)
         }
         // Standing upright is the whole of what this one asks for, so it takes no turn: a roll would
         // lean the quad off the axis it is billed about. Which of the two bills a sprite takes went
@@ -1250,14 +1255,22 @@ pub(crate) fn batches(
         .filter_map(|((def, shape, blend), mut held)| {
             held.sort_by(|(a, _), (b, _)| a.total_cmp(b));
             let mean = held.iter().map(|(depth, _)| depth).sum::<f32>() / held.len() as f32;
+            let shading = effect.shading(def)?;
             let mut vertices = Vec::new();
             let mut instances = Vec::new();
             for (_, drawn) in &held {
                 match shape {
                     sim::Shape::Sprite => {
                         let (across, down) = facing(drawn, eye, right, up);
+                        // `apricot_shape` states no per-instance buffer, so a sprite has nowhere to
+                        // carry the offset its file gives it and is moved toward the eye instead.
+                        // Never further than the file asks nor a step it could cross the eye on, so
+                        // it only ever wins against what it is already standing against.
+                        let center = Vec3::from(drawn.center);
+                        let span = eye - center;
+                        let step = shading.depth_offset.clamp(0.0, span.length() * 0.5);
                         gpu::quad(
-                            Vec3::from(drawn.center),
+                            center + span.normalize_or_zero() * step,
                             across,
                             down,
                             drawn.color,
@@ -1278,6 +1291,7 @@ pub(crate) fn batches(
                                 Vec3::from(drawn.center),
                             ),
                             color: Vec4::from(drawn.color),
+                            depth_offset: shading.depth_offset,
                             rim: drawn.rim,
                             uv: drawn.uv,
                             ..program::Instance::default()
@@ -1293,7 +1307,7 @@ pub(crate) fn batches(
                     textures: textures.to_vec(),
                     blend,
                     def,
-                    shading: effect.shading(def)?,
+                    shading,
                     vertices,
                     instances,
                 },
@@ -1335,8 +1349,8 @@ fn curve_ui(ui: &mut egui::Ui, curve: &Curve, position: usize, rate: f32) {
         .striped(true)
         .show(ui, |ui| {
             match curve.color {
-                true => headers(ui, &["帧", "时间", "Kind", "", "颜色"]),
-                false => headers(ui, &["帧", "时间", "Kind", "值"]),
+                true => headers(ui, &["帧", "时间", "类型", "", "颜色"]),
+                false => headers(ui, &["帧", "时间", "类型", "值"]),
             }
             for key in &curve.keys {
                 ui.label(RichText::new(key.time().to_string()).monospace());
@@ -1661,6 +1675,41 @@ mod tests {
         effect.drawn(&state)
     }
 
+    /// A run whose span outlasts the loop period is still going when its own start comes round
+    /// again. Starting a second copy of it stacks one run on another and hands the new one an age of
+    /// nought, which walks a long emitter track - a lamp's sweep - back to where it began every
+    /// period instead of carrying on through it.
+    #[test]
+    fn a_cycle_does_not_start_a_run_that_has_not_ended() {
+        // One particle a frame, immortal, over a span far longer than the period.
+        let effect = &playing(&[life(-1.0)], (1, 1000)).effect;
+        let count = |frame: i32, period: Option<i32>| {
+            let mut state = sim::State::default();
+            effect.seek_cycling(&mut state, frame, period);
+            effect.drawn(&state).len()
+        };
+        // Whatever the period, the run is the same single run it would be without one.
+        let whole = count(30, None);
+        assert_eq!(count(30, Some(10)), whole);
+        assert_eq!(count(30, Some(7)), whole);
+    }
+
+    /// A run short enough to have ended does start again on its cycle: that is what looping is, and
+    /// it is the half the guard above must not take away.
+    #[test]
+    fn a_cycle_starts_a_run_that_has_ended() {
+        // Three frames of an immortal particle, then nothing, over a ten-frame cycle.
+        let effect = &playing(&[life(-1.0)], (1, 3)).effect;
+        let count = |frame: i32, period: Option<i32>| {
+            let mut state = sim::State::default();
+            effect.seek_cycling(&mut state, frame, period);
+            effect.drawn(&state).len()
+        };
+        let once = count(25, None);
+        // Frames 1, 11 and 21 each start it again, so a cycled run has fired three times over.
+        assert_eq!(count(25, Some(10)), once * 3);
+    }
+
     #[test]
     fn an_emitter_runs_over_the_span_its_timeline_gives_it() {
         let effect = &playing(&[life(2.0)], (3, 6)).effect;
@@ -1858,8 +1907,10 @@ mod tests {
             .effect;
             at(effect, 0)[0].facing
         };
-        assert_eq!(unbased(1), sim::Facing::Still(sim::Axis::Z));
+        // A powder is the one kind the engine sets into the screen itself.
+        assert_eq!(unbased(1), sim::Facing::Screen);
         assert_eq!(unbased(2), sim::Facing::Still(sim::Axis::Z));
+        assert_eq!(unbased(5), sim::Facing::Still(sim::Axis::Z));
         assert_eq!(unbased(11), sim::Facing::Still(sim::Axis::Y));
         // The screen billboard is a base of its own, and still reads as one.
         let effect = &playing(

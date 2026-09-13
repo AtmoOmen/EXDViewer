@@ -54,11 +54,11 @@ pub struct PrWindow {
 impl PrWindow {
     pub fn open(&mut self, session: &mut GithubSession, modified_names: &[String]) {
         let title = match modified_names {
-            [one] => format!("更新 {one} 的 schema"),
-            many => format!("更新 {} 个 schema", many.len()),
+            [one] => format!("更新 {one} 的表定义"),
+            many => format!("更新 {} 个表定义", many.len()),
         };
         let body = format!(
-            "已更新 schema：\n{}",
+            "已更新表定义：\n{}",
             modified_names.iter().map(|n| format!("- {n}")).join("\n")
         );
         self.pr_outcome = None;
@@ -159,7 +159,7 @@ impl PrWindow {
 
                 if modified.is_empty() {
                     ui.add_space(8.0);
-                    ui.label("没有修改过的 schema 可提交。");
+                    ui.label("没有修改过的表定义可提交。");
                     return;
                 }
 
@@ -176,7 +176,7 @@ impl PrWindow {
 
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("变更的 schema").strong());
+                    ui.label(RichText::new("变更的表定义").strong());
                     ui.label(RichText::new(format!("({})", modified.len())).weak());
                 });
                 egui::Frame::group(ui.style())
@@ -328,10 +328,7 @@ impl PrWindow {
                                 None if invalid_count > 0 => {
                                     ui.colored_label(
                                         ui.visuals().warn_fg_color,
-                                        format!(
-                                            "先修复 {invalid_count} 个无效 schema{} 再提交。",
-                                            if invalid_count == 1 { "" } else { "s" }
-                                        ),
+                                        format!("先修复 {invalid_count} 个无效表定义再提交。"),
                                     );
                                 }
                                 None => {}

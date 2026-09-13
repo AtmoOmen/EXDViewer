@@ -12,7 +12,7 @@ pub fn read<R: Resource>(ironworks: &Ironworks<R>, path: &str) -> Result<Dynamic
     let texture = match ironworks.file::<tex::Texture>(path) {
         Ok(value) => value,
         Err(ironworks::Error::NotFound(a)) => Err(Error::NotFound(a))?,
-        other => other.context("read file")?,
+        other => other.context("读取文件")?,
     };
     decode(texture, path)
 }
@@ -73,7 +73,7 @@ pub fn decode_stack(texture: &tex::Texture, level: u8, path: &str) -> Result<Dyn
         tex::TextureKind::Unknown | tex::TextureKind::D1
     ) {
         anyhow::bail!(
-            "unsupported texture dimension {:?} for path {path}",
+            "路径 {path} 的纹理维度 {:?} 不受支持",
             texture.kind()
         );
     }
@@ -121,7 +121,7 @@ pub fn decode_stack(texture: &tex::Texture, level: u8, path: &str) -> Result<Dyn
         tex::Format::Bc7Unorm => bc(image_dds::ImageFormat::BC7RgbaUnorm)?,
 
         other => {
-            anyhow::bail!("unsupported texture format {other:?} for path {path}");
+            anyhow::bail!("路径 {path} 的纹理格式 {other:?} 不受支持");
         }
     };
 
@@ -197,7 +197,7 @@ fn read_alpha8(width: u16, height: u16, data: &[u8]) -> Result<DynamicImage> {
         .flat_map(|&value| [value; 4])
         .collect::<Vec<_>>();
     let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
-        .context("failed to build image buffer")?;
+        .context("创建图像缓冲区失败")?;
     Ok(DynamicImage::ImageRgba8(buffer))
 }
 
@@ -251,7 +251,7 @@ pub fn read_unorm16_precise(
     if channels == 1 {
         let pixels: Vec<u16> = data.chunks_exact(2).map(|t| texel(t)[0]).collect();
         let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
-            .context("failed to build image buffer")?;
+            .context("创建图像缓冲区失败")?;
         return Ok(DynamicImage::ImageLuma16(buffer));
     }
     let pixels: Vec<u16> = data
@@ -262,7 +262,7 @@ pub fn read_unorm16_precise(
         })
         .collect();
     let buffer = ImageBuffer::from_raw(width.into(), height.into(), pixels)
-        .context("failed to build image buffer")?;
+        .context("创建图像缓冲区失败")?;
     Ok(DynamicImage::ImageRgba16(buffer))
 }
 
@@ -403,7 +403,7 @@ fn read_texture_bc(
     // would panic rather than fail.
     anyhow::ensure!(stride > 0, "mipmap 层级 {level} 没有 {layers} 个图层");
 
-let mut pixels = Vec::with_capacity(data.len());
+    let mut pixels = Vec::with_capacity(data.len());
     for slice in data.chunks_exact(stride) {
         let surface = Surface {
             width: width.into(),
@@ -422,7 +422,7 @@ let mut pixels = Vec::with_capacity(data.len());
 
     let height = u32::from(height) * u32::from(texture.layers(level));
     let buffer = ImageBuffer::from_raw(width.into(), height, pixels)
-        .context("failed to build image buffer")?;
+        .context("创建图像缓冲区失败")?;
     Ok(DynamicImage::ImageRgba8(buffer))
 }
 
@@ -442,7 +442,7 @@ pub fn write(image: impl Into<DynamicImage>, format: ImageFormat) -> Result<Vec<
         let mut bytes = Cursor::new(vec![]);
         image
             .write_to(&mut bytes, format)
-            .context("failed to write output buffer")?;
+            .context("写入输出缓冲区失败")?;
 
         Ok(bytes.into_inner())
     }

@@ -224,7 +224,7 @@ impl Stage {
             *held = match promise.try_take() {
                 Ok(Ok((path, container))) => Held::Ready(path, container),
                 Ok(Err(why)) => {
-                    log::warn!("cutb: sound read failed: {why}");
+                    log::warn!("cutb: 声音读取失败：{why}");
                     self.missing += 1;
                     Held::Failed
                 }
@@ -267,7 +267,7 @@ impl Stage {
         if !self.decoded.contains_key(&slot) {
             let Some(entry) = container.entries().get(cue.entry) else {
                 log::warn!(
-                    "cutb: {path} holds {} entries, not {}",
+                    "cutb: {path} 有 {} 个条目，而非 {}",
                     container.entries().len(),
                     cue.entry + 1
                 );
@@ -279,7 +279,7 @@ impl Stage {
                     self.decoded.insert(slot.clone(), Arc::new(decoded));
                 }
                 Err(why) => {
-                    log::warn!("cutb: {path} entry {} did not decode: {why}", cue.entry);
+                    log::warn!("cutb: {path} 第 {} 个条目解码失败：{why}", cue.entry);
                     self.missing += 1;
                     return None;
                 }
@@ -290,12 +290,12 @@ impl Stage {
         let id = self.next;
         self.next += 1;
         if let Err(why) = mixer.play(id, audio.clone(), 1.0) {
-            log::warn!("cutb: {path} did not play: {why}");
+            log::warn!("cutb: {path} 播放失败：{why}");
             return None;
         }
         self.voices
             .push((id, time, cue.holds.unwrap_or_else(|| runs_for(&audio))));
-        log::info!("cutb: {} plays {path}#{} at frame {time:.0}", cue.label, cue.entry);
+        log::info!("cutb: {} 播放 {path}#{}，第 {time:.0} 帧", cue.label, cue.entry);
         Some(id)
     }
 }
@@ -318,7 +318,7 @@ async fn read(
             Err(why) => last = Some(anyhow::anyhow!("{path}: {why}")),
         }
     }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("a cue naming no file")))
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("cue 未指向任何文件")))
 }
 
 impl Drop for Stage {

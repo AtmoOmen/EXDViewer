@@ -32,6 +32,7 @@ use std::time::Instant;
 use web_time::Instant;
 
 use anyhow::Result;
+use egui::containers::menu::MenuButton;
 use egui::{Color32, RichText, ScrollArea, Sense, TextureHandle, TextureOptions};
 use glam::{Mat3, Mat4, Quat, Vec3, Vec4};
 use half::f16;
@@ -55,7 +56,7 @@ use super::Source;
 use crate::assets::deps::Deps;
 use crate::backend::Backend;
 use crate::data::DecodedTexture;
-use crate::utils::{TrackedPromise, export};
+use crate::utils::TrackedPromise;
 
 use mdl::material::Material;
 use mdl::program;
@@ -73,12 +74,12 @@ const DETAILS_ROW_WIDTH: f32 = 250.0;
 /// rather than limiting anything real.
 const DEPTH: u8 = 8;
 
-/// Longest edge a scene's textures are decoded to. Smaller than the model viewer's: a zone binds
-/// hundreds of materials rather than one model's handful, over the same connection.
-const TEXTURE_SIZE: u16 = 256;
+/// Longest edge a scene's textures are decoded to. A ground surface stands close enough to the
+/// camera that a quarter of its authored width is a smear where the game has grain.
+const TEXTURE_SIZE: u16 = 1024;
 
 /// Decoded texture bytes one scene may hold. Past it the rest of its surfaces draw untextured.
-const TEXTURE_BUDGET: usize = 128 << 20;
+const TEXTURE_BUDGET: usize = 512 << 20;
 
 /// Longest edge a grass color map is decoded to. Over the cap above, since a map holds its tiles
 /// side by side and a blade reads one of them.
@@ -111,10 +112,12 @@ const GET_NORMAL_MAP_PARALLAX: u32 = 0xd9fd_8a1c;
 const APPLY_ALPHA_CLIP: u32 = 0xdcfc_844e;
 const APPLY_ALPHA_CLIP_ON: u32 = 0x59c4_e6db;
 
-/// `ApplyDetailMap`, and the value that lays the tiled arrays over a surface. Left at the package's
-/// own default: the game picks this per material and we have no `g_SamplerDetailColorMap`/
-/// `g_SamplerDetailNormalMap` to feed it, so forcing it on tints every surface toward the grey
-/// stand-in instead of leaving it off like a material that never asked for it.
+/// `ApplyDetailMap`, and the value that lays the tiled arrays over a surface. Only `bg.shpk`
+/// declares `g_SamplerDetailColorMap`/`g_SamplerDetailNormalMap`, and every one of its materials
+/// states the layer and the two uv scales it would read them at: `w1d5_q4_cont1a` states
+/// `g_DetailID = 7`, `g_DetailNormalUvScale = 4` and `g_DetailColorUvScale = 4`. The package
+/// defaults the key off and no material states it, so leaving it there draws a cave wall as its own
+/// albedo and nothing finer however near the camera stands.
 const APPLY_DETAIL_MAP: u32 = 0x6313_fd87;
 const APPLY_DETAIL_MAP_ON: u32 = 0x7a3d_9efd;
 
@@ -146,6 +149,9 @@ fn engine_keys(package: &str, waving: bool) -> Vec<(u32, u32)> {
             false => GET_NORMAL_MAP_ON,
         },
     ));
+    if package.ends_with("/bg.shpk") {
+        keys.push((APPLY_DETAIL_MAP, APPLY_DETAIL_MAP_ON));
+    }
     if waving {
         keys.push((APPLY_WAVING_ANIM, APPLY_WAVING_ANIM_ON));
     }
@@ -174,6 +180,10 @@ const LEAST: Duration = Duration::from_millis(6);
 
 /// How far the eye moves before the instance buffers are written again.
 const STEP: f32 = 8.0;
+
+/// How far the eye may turn before what it sees is worked out again, as the cosine between the two
+/// headings: about four degrees.
+const TURNED: f32 = 0.9976;
 
 /// How large an instance has to look to be worth its highest detail level, and its middle one, as a
 /// fraction of the distance to it.
@@ -210,6 +220,8 @@ struct Layer {
     /// What the file says about whether it draws, which is what the picker starts at.
     visible: bool,
     festival: u16,
+    /// Which phase of that festival, where it states one. Nought stands for every phase of it.
+    phase: u16,
     shown: bool,
     placements: usize,
 }
@@ -456,6 +468,10 @@ struct Model {
     drawn: [bool; 3],
     /// Per detail level, the scene material each of its meshes uses.
     meshes: Vec<Vec<usize>>,
+    /// The box its own geometry fills, in its own space, unioned over every detail level read so
+    /// far. `None` until one has been: a model whose extent is not known yet is drawn rather than
+    /// culled, since culling it would look exactly like the bug this measures away.
+    bounds: Option<(Vec3, Vec3)>,
     /// Whether the wind may reach it, which its own header states.
     waving: bool,
     /// Whether the sun's pass draws it, which its own header states as well.
@@ -570,9 +586,15 @@ struct Light {
     kind: program::LampKind,
     /// Which way it throws, in world space.
     direction: Vec3,
-    /// The cosines its cone is full strength within and cut at.
+    /// How long a line light runs, which is the only thing its placement's scale states: measured
+    /// over 136,858 placed lights, a point is uniformly scaled 86,169 times in 86,233 and a spot
+    /// 31,242 in 31,249, while a line is scaled along its own x alone 16,374 times in 18,233.
+    length: f32,
+    /// The cosines its cone is full strength within and cut at, and of the coefficient it widens
+    /// by, which is what scales its clip box.
     inner: f32,
     cone: f32,
+    spread: f32,
     /// How the zone's own `.lcb` reaches this light: the instance at the top of the tree, then an
     /// index per shared group under it.
     key: (u32, [u8; 4]),
@@ -702,6 +724,18 @@ struct Placing {
     maps: Vec<String>,
     grids: Vec<Patch>,
     layer: usize,
+}
+
+/// Whether a festival's own layer stands, against the slots a place is standing under. A layer
+/// keyed to no festival always stands; one keyed to a phase stands only in that phase, and a slot
+/// naming the festival with no phase of its own stands for every phase of it.
+fn festive(festival: u16, phase: u16, under: &[(u16, u16)]) -> bool {
+    if festival == 0 {
+        return true;
+    }
+    under
+        .iter()
+        .any(|(id, held)| *id == festival && (*held == 0 || *held == phase))
 }
 
 /// One grid's blades at one auto layer, as the scene stood them up.
@@ -839,6 +873,9 @@ pub struct Scene {
     /// under. A shared group's own placements carry the id it was placed under as well, so hiding
     /// one takes the whole subtree with it.
     unplaced: BTreeSet<u32>,
+    /// The festivals the place is standing under, each an id and a phase. Empty is the everyday
+    /// zone, which is what a layer keyed to no festival draws under.
+    festivals: Vec<(u16, u16)>,
     /// Whether the last frame drawn was driven, for the side panel to grey its own camera controls
     /// against: [`Self::drive`] itself is forgotten the instant a frame reads it.
     driving: bool,
@@ -849,9 +886,9 @@ pub struct Scene {
     /// A preset being picked or written, since a file dialog answers a frame or more later. Held
     /// rather than forgotten: dropping a promise cancels the future behind it.
     picking: Option<TrackedPromise<Option<Vec<u8>>>>,
-    /// A preset pasted in whole, for a window nothing can open a file dialog over.
-    pasted: String,
     saving: Option<TrackedPromise<()>>,
+    /// Which way it looked then, so a turn re-culls what a step alone would not.
+    facing: Vec3,
     /// Where the eye stood when the instance buffers were last written.
     written: Vec3,
     dirty: bool,
@@ -1084,6 +1121,60 @@ fn detail(apparent: f32) -> u8 {
     }
 }
 
+/// The six planes of what a clip matrix sees, each as a normal and a distance, pointing inward. The
+/// depth pair is read for a clip range of nought to one, which is what the game's shaders want.
+fn planes(clip: Mat4) -> [Vec4; 6] {
+    let (x, y, z, w) = (clip.row(0), clip.row(1), clip.row(2), clip.row(3));
+    [w + x, w - x, w + y, w - y, z, w - z].map(|held| {
+        let length = held.truncate().length();
+        match length > 0.0 {
+            true => held / length,
+            false => held,
+        }
+    })
+}
+
+/// Whether a sphere falls wholly beyond one of them, which is what a frustum cull answers.
+/// The sphere a placement is culled by: the box its model states, carried into the world. `None`
+/// where the model has yet to arrive, which is what keeps an unread plate on screen rather than
+/// culling it by its origin alone.
+fn sphere_of(bounds: Option<(Vec3, Vec3)>, transform: &Mat4) -> Option<(Vec3, f32)> {
+    let (min, max) = bounds?;
+    Some((
+        transform.transform_point3((min + max) * 0.5),
+        (max - min).length() * 0.5 * widest(transform),
+    ))
+}
+
+/// How long a line light runs, which its placement states by scaling **x** and no other axis.
+/// Measured over 136,858 placed lights: a point is uniformly scaled 86,169 times in 86,233 and a
+/// spot 31,242 in 31,249, while a line is scaled along x alone 16,374 times in 18,233, at values
+/// like `(25, 1, 1)`. So the scale is a length handle rather than a direction.
+///
+/// It is **not** the axis the segment runs along. In `n5f1`, where the lamps read horizontal, every
+/// line light's local x points straight up (`|x.y| = 1.00`) and its local z lies flat
+/// (`|z.y| = 0.00`), so running the segment along the scaled axis stands every one of them on end.
+fn stretched(placement: &Mat4) -> f32 {
+    placement.transform_vector3(Vec3::X).length()
+}
+
+/// The most a transform stretches any one axis, which is what a radius in its own space grows by.
+/// The largest of the three rather than one of them: a placement is free to scale unevenly.
+fn widest(transform: &Mat4) -> f32 {
+    transform
+        .x_axis
+        .truncate()
+        .length()
+        .max(transform.y_axis.truncate().length())
+        .max(transform.z_axis.truncate().length())
+}
+
+fn outside(planes: &[Vec4; 6], center: Vec3, radius: f32) -> bool {
+    planes
+        .iter()
+        .any(|held| held.truncate().dot(center) + held.w < -radius)
+}
+
 /// A point the bulk of the placements sit around, and how far out that bulk reaches, from medians
 /// rather than extremes.
 fn bulk(points: &[Vec3]) -> (Vec3, f32) {
@@ -1165,9 +1256,9 @@ impl Scene {
             path: path.to_owned(),
             preset: preset::taken(path),
             picking: None,
-            pasted: String::new(),
             saving: None,
             written: Vec3::splat(f32::INFINITY),
+            facing: Vec3::ZERO,
             dirty: true,
             load: LOADED,
             speed: 1.0,
@@ -1248,6 +1339,7 @@ impl Scene {
             renderer: gpu::Renderer::new(),
             cast: Vec::new(),
             unplaced: BTreeSet::new(),
+            festivals: Vec::new(),
             placed: Vec::new(),
             casts: Vec::new(),
             motions: Vec::new(),
@@ -1320,6 +1412,20 @@ impl Scene {
 
     /// Which of the props a host placed are out of the frame, replacing whatever was out before.
     /// Called every frame the way [`Self::stand`] is.
+    /// Stands the place under a set of festivals, showing every layer one of them keys and hiding
+    /// the layers of the festivals it is no longer under. A layer keyed to no festival is left as
+    /// the user has it: it draws whatever is running.
+    fn stand_under(&mut self, festivals: Vec<(u16, u16)>) {
+        self.festivals = festivals;
+        for layer in &mut self.layers {
+            if layer.festival != 0 {
+                layer.shown =
+                    layer.visible && festive(layer.festival, layer.phase, &self.festivals);
+            }
+        }
+        self.dirty = true;
+    }
+
     pub fn hide(&mut self, unplaced: BTreeSet<u32>) {
         if self.unplaced != unplaced {
             self.unplaced = unplaced;
@@ -1345,6 +1451,7 @@ impl Scene {
             origin: None,
             visible: true,
             festival: 0,
+            phase: 0,
             shown: true,
             placements: 0,
         });
@@ -1563,6 +1670,7 @@ impl Scene {
                             origin: origin.map(str::to_owned),
                             visible: layer.visible(),
                             festival: layer.festival_id(),
+                            phase: layer.festival_phase_id(),
                             shown: layer.visible() && layer.festival_id() == 0,
                             placements: 0,
                         });
@@ -1688,11 +1796,31 @@ impl Scene {
                                 falloff: falloff(light.attenuation()),
                                 color,
                                 kind,
+                                // Every kind throws along its own z, a line included: its length is
+                                // a magnitude the placement scales x by, not an axis of its own.
                                 direction: here.transform_vector3(Vec3::Z).normalize_or_zero(),
+                                length: match kind {
+                                    program::LampKind::Line => stretched(&here),
+                                    _ => 0.0,
+                                },
                                 inner: half(light.spot_angle()),
                                 cone: half(
                                     light.spot_angle() + light.attenuation_cone_coefficient(),
                                 ),
+                                spread: match kind {
+                                    // The coefficient as the two cosines state it between them,
+                                    // rather than as the record writes it: the pair is what the
+                                    // light's own buffer is built from.
+                                    program::LampKind::Spot => {
+                                        let widen = 2.0
+                                            * (half(light.spot_angle()
+                                                + light.attenuation_cone_coefficient())
+                                            .acos()
+                                                - half(light.spot_angle()).acos());
+                                        widen.cos().max(0.0)
+                                    }
+                                    _ => 0.0,
+                                },
                                 key: reach(key, depth, instance.id()),
                                 glow,
                             });
@@ -1739,6 +1867,7 @@ impl Scene {
             return *at;
         }
         self.models.push(Model {
+            bounds: None,
             path: path.to_owned(),
             state: State::Wanted,
             drawn: [false; 3],
@@ -1794,6 +1923,7 @@ impl Scene {
             origin: Some(path.to_owned()),
             visible: true,
             festival: 0,
+            phase: 0,
             shown: true,
             placements: terrain.plates().len(),
         });
@@ -1883,6 +2013,7 @@ impl Scene {
             origin: Some(path.to_owned()),
             visible: true,
             festival: 0,
+            phase: 0,
             shown: true,
             placements: 0,
         });
@@ -2129,8 +2260,17 @@ impl Scene {
         )
     }
 
-    fn rebuild(&mut self) {
+    fn rebuild(&mut self, clip: Mat4) {
         let eye = self.camera.position;
+        let frustum = planes(clip);
+        // A caster standing outside the frame still throws its shadow into it, so one is kept where
+        // the sun could carry that shadow as far as the frustum. Nothing is kept for a sun that
+        // states no colour, which is what a roofed zone leaves behind.
+        let (toward, sunlight) = self.ambient.light();
+        let cast_span = match sunlight.max_element() > 0.0 {
+            true => toward.normalize_or_zero() * self.ambient.reach,
+            false => Vec3::ZERO,
+        };
         let mut placed: Vec<[Vec<program::Instance>; 3]> = (0..self.models.len())
             .map(|_| std::array::from_fn(|_| Vec::new()))
             .collect();
@@ -2149,6 +2289,18 @@ impl Scene {
             let span = (placement.center - eye).length() - placement.radius;
             if span > self.load || (placement.fade > 0.0 && span > placement.fade) {
                 continue;
+            }
+            // The instance's own origin is not where its geometry sits: a terrain plate is
+            // modelled far from it and a prop states no sphere at all, so both were culled by a
+            // point at the origin. A model whose own box has not arrived is not culled at all.
+            if let Some((center, radius)) = self.sphere(&placement) {
+                let shadowed = placement.casts
+                    && cast_span != Vec3::ZERO
+                    && (!outside(&frustum, center + cast_span, radius)
+                        || !outside(&frustum, center - cast_span, radius));
+                if outside(&frustum, center, radius) && !shadowed {
+                    continue;
+                }
             }
             let apparent = placement.radius / span.max(0.01);
             let model = &mut self.models[placement.model];
@@ -2187,6 +2339,7 @@ impl Scene {
             .collect();
         self.placed = placed;
         self.written = eye;
+        self.facing = self.camera.forward();
         self.dirty = false;
     }
 
@@ -2236,8 +2389,10 @@ impl Scene {
                     },
                     kind: light.kind,
                     direction: light.direction,
+                    length: light.length,
                     inner: light.inner,
                     cone: light.cone,
+                    spread: light.spread,
                 }
             })
             .collect()
@@ -2570,12 +2725,10 @@ impl Scene {
             // Relative to when the effect arrived, so its own timeline starts at zero there rather
             // than at the clock's zero. An unbounded one is left running past `length` rather than
             // wrapped back to it.
-            let elapsed = frame - *born;
-            let target = match parsed.bounded {
-                true => elapsed.rem_euclid(parsed.length.max(1)),
-                false => elapsed,
-            };
-            parsed.seek(live, target);
+            // Climbing rather than wrapped: the simulation runs the schedule again each period
+            // itself, where seeking backward here would throw away every particle still in the air.
+            let period = parsed.bounded.then(|| parsed.length.max(1));
+            parsed.seek_cycling(live, frame - *born, period);
         }
 
         // A firing runs once rather than over and over: the host says when it started, so it plays
@@ -2656,6 +2809,7 @@ impl Scene {
         self.load_effects(backend);
         self.load_effect_packages(backend);
         self.sound.poll(backend, self.camera.position);
+        self.ambient.stand_in(self.camera.position);
         self.ambient.poll(backend);
         self.expand(backend, until);
         if self.fitted == 0 && !self.placements.is_empty() {
@@ -2874,6 +3028,13 @@ impl Scene {
     }
 
     /// Reads one detail level of a model and hands its geometry to the card.
+    /// The sphere a placement is culled by: its model's own box carried into the world, widened to
+    /// whatever sphere the file itself states. `None` while the model has yet to arrive, which is
+    /// what keeps an unread plate on screen rather than culling it by its origin alone.
+    fn sphere(&self, placement: &Placement) -> Option<(Vec3, f32)> {
+        sphere_of(self.models[placement.model].bounds, &placement.transform)
+    }
+
     fn decode(&mut self, at: usize, bytes: Vec<u8>, level: u8) -> Result<()> {
         let path = self.models[at].path.clone();
         let container = ModelContainer::read(Cursor::new(bytes))?;
@@ -2906,6 +3067,12 @@ impl Scene {
         levels[level] = built;
         let mut meshes: Vec<Vec<usize>> = (0..3).map(|_| Vec::new()).collect();
         meshes[level] = used;
+        // The box the file itself states, which is the one the engine has. Measured over 3,000
+        // terrain plates it holds every vertex to within 0.25 units, the rest being the rounding a
+        // half-float position decodes with; `model_bounding_boxes` beside it is all zeroes for a
+        // third of them and is not a bound at all.
+        let (min, max) = model.bounds();
+        self.models[at].bounds = Some((Vec3::from(min), Vec3::from(max)));
         self.models[at].drawn = drawn;
         self.models[at].meshes = meshes;
         self.models[at].waving = model.waving();
@@ -3279,6 +3446,10 @@ impl Scene {
                 &[
                     (program::APPLY_ATTENUATION, value),
                     (program::LIGHT_CLIP, program::LIGHT_CLIP_ENABLE),
+                    (
+                        program::APPLY_CONE_ATTENUATION,
+                        program::APPLY_CONE_ATTENUATION_ENABLE,
+                    ),
                 ],
             )
         });
@@ -3530,7 +3701,7 @@ impl Scene {
             self.exposure = self.measure();
         }
         if self.sunlight.is_none() {
-            self.sunlight = self.effect(program::SUN, program::POST_VERTEX);
+            self.sunlight = self.effect(program::SUN, program::SUN_VERTEX);
         }
         if self.moonlight.is_none() {
             self.moonlight = self.effect(program::MOON, program::MOON_VERTEX);
@@ -3719,7 +3890,7 @@ impl Scene {
             // buffer through a pass whose vertices are lifted by its own waves, and the depth pass
             // leaves them where the file put them: every later test against it fails.
             let depth = match blended {
-                true => Err("a blending surface writes its own depth".into()),
+                true => Err("混合表面自行写入深度".into()),
                 false => program::Program::build(
                     package,
                     bytes,
@@ -4029,35 +4200,43 @@ impl Scene {
     /// any is.
     fn passes(&self) -> String {
         let held = self.renderer.lock().unwrap().drawn();
+        // A lamp kind whose own package is not in hand is drawn through the point one, which lights
+        // a cone or a line as a sphere: naming them here is what tells the two apart on screen.
+        let lit = |take: fn(&mdl::gpu::Lighting) -> bool| {
+            self.lighting.as_deref().is_some_and(take)
+        };
         let ran: Vec<&str> = [
-            (held.occlusion, "occlusion"),
-            (held.shadow, "shadow"),
-            (held.sky, "sky"),
-            (held.sun, "sun"),
-            (held.moon, "moon"),
-            (held.stars, "stars"),
-            (held.clouds[0], "band"),
-            (held.clouds[1], "sheet"),
-            (held.cloud_shadow, "cloud shadow"),
-            (held.fog, "fog"),
-            (held.reflection, "reflection"),
-            (held.water, "water mirror"),
-            (held.vignette, "vignette"),
+            (lit(|held| held.spot.is_some()), "聚光灯"),
+            (lit(|held| held.line.is_some()), "线光源"),
+            (lit(|held| held.plane.is_some()), "面光源"),
+            (held.occlusion, "环境光遮蔽"),
+            (held.shadow, "阴影"),
+            (held.sky, "天空"),
+            (held.sun, "太阳"),
+            (held.moon, "月亮"),
+            (held.stars, "星空"),
+            (held.clouds[0], "云带"),
+            (held.clouds[1], "云层"),
+            (held.cloud_shadow, "云阴影"),
+            (held.fog, "雾"),
+            (held.reflection, "反射"),
+            (held.water, "水面反射"),
+            (held.vignette, "暗角"),
             (
                 !(self.effects.is_empty() && self.fired.is_empty())
                     && self
                         .effect_files
                         .iter()
                         .any(|effect| matches!(effect.state, EffectState::Ready(..))),
-                "effects",
+                "特效",
             ),
         ]
         .into_iter()
         .filter_map(|(ran, name)| ran.then_some(name))
         .collect();
         match ran.is_empty() {
-            true => "none".to_owned(),
-            false => ran.join(", "),
+            true => "无".to_owned(),
+            false => ran.join("、"),
         }
     }
 
@@ -4137,7 +4316,9 @@ impl Scene {
         }
         // Scaled by how fast the camera is set to move, so raising the speed does not turn a
         // rebuild every few seconds into one every frame.
-        if (self.camera.position - self.written).length() > STEP * self.speed {
+        if (self.camera.position - self.written).length() > STEP * self.speed
+            || self.camera.forward().dot(self.facing) < TURNED
+        {
             self.dirty = true;
         }
         // A timeline states where its node stands rather than how far it has moved, so what a frame
@@ -4153,10 +4334,6 @@ impl Scene {
         if animated {
             self.dirty = true;
         }
-        if self.dirty {
-            self.rebuild();
-        }
-
         let eye = self.camera.position;
         // A drive's own forward/up are used directly rather than rebuilt from the yaw/pitch
         // `self.camera` stores them as: that round trip degenerates for a shot looking straight up
@@ -4194,6 +4371,10 @@ impl Scene {
             near,
             far,
         );
+        if self.dirty {
+            self.rebuild(projection * view);
+        }
+
 
         let mut batches = Vec::new();
         for (at, model) in self.models.iter().enumerate() {
@@ -4410,6 +4591,7 @@ impl Scene {
                 self.translated.keys().filter(|(_, waving)| !waving).count(),
                 self.materials.len()
             ),
+            lights: format!("{} of {}", self.lamps().len(), self.lights.len()),
             passes: self.passes(),
         });
     }
@@ -4667,6 +4849,9 @@ impl Scene {
         if let Some(time) = held.time {
             self.ambient.time = time;
         }
+        if !held.festivals.is_empty() {
+            self.stand_under(held.festivals.clone());
+        }
         if let Some(id) = held.weather
             && !self.ambient.stand_in_weather(id)
         {
@@ -4704,6 +4889,22 @@ impl Scene {
             arrived.extend(held.clone());
             self.picking = None;
         }
+        // A pasted preset stands this view wherever it was captured from, whether the paste is a
+        // plain Ctrl+V, the browser's clipboard answering "From clipboard", or `RequestPaste`
+        // coming back on native. Anything that does not open like a preset is somebody else's.
+        arrived.extend(ui.ctx().input(|input| {
+            input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Paste(text) => Some(text),
+                    _ => None,
+                })
+                .filter(|text| preset::looks_like(text))
+                .map(|text| text.clone().into_bytes())
+                .collect::<Vec<_>>()
+        }));
         for bytes in &arrived {
             match preset::Preset::read(bytes) {
                 Ok(held) => {
@@ -4725,81 +4926,89 @@ impl Scene {
         }
         ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
             section(ui, "视图");
-            // Pasted rather than picked, since a file dialog is the one way in that nothing outside
-            // the window can drive: a headless run positions the camera through here.
-            let pasted = ui.add(
-                egui::TextEdit::singleline(&mut self.pasted)
-                    .hint_text("粘贴一个 TitleEdit 预设")
-                    .desired_width(f32::INFINITY),
-            );
-            let mut load =
-                pasted.lost_focus() && ui.input(|held| held.key_pressed(egui::Key::Enter));
-            // Wrapped rather than run on: four buttons in one row is wider than the panel's own
-            // minimum, and a row that can't shrink pins the whole panel at its own width.
-            ui.horizontal_wrapped(|ui| {
-                if ui.button("导入预设").clicked() {
-                    self.picking = Some(TrackedPromise::spawn_local(async {
-                        let held = rfd::AsyncFileDialog::new()
-                            .set_title("导入 TitleEdit 预设")
-                            .add_filter("TitleEdit 预设", &["json"])
-                            .pick_file()
-                            .await?;
-                        Some(held.read().await)
-                    }));
-                }
-                load |= ui.button("加载粘贴内容").clicked();
-                if load {
-                    match preset::Preset::read(self.pasted.as_bytes()) {
-                        Ok(held) => {
-                            match held.level == self.path {
-                                true => self.stand_where(&held),
-                                false => {
-                                    *follow = Some(held.level.clone());
-                                    preset::hold(held);
-                                    return;
-                                }
-                            }
-                            self.preset = Some(held);
-                            changed = true;
+            ui.columns_const(|[c1, c2]| {
+                c1.vertical_centered_justified(|ui| {
+                    MenuButton::from_button(egui::Button::new("导入预设")).ui(ui, |ui| {
+                        if ui.button("从文件").clicked() {
+                            self.picking = Some(TrackedPromise::spawn_local(async {
+                                let held = rfd::AsyncFileDialog::new()
+                                    .set_title("导入 TitleEdit 预设")
+                                    .add_filter("TitleEdit 预设", &["json"])
+                                    .pick_file()
+                                    .await?;
+                                Some(held.read().await)
+                            }));
+                            ui.close();
                         }
-                        Err(why) => log::warn!("assets/layer: 这不是 TitleEdit 预设：{why}"),
+                        if ui.button("从剪贴板").clicked() {
+                            #[cfg(not(target_arch = "wasm32"))]
+                            ui.ctx()
+                                .send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                self.picking = Some(TrackedPromise::spawn_local(async {
+                                    let held = web_sys::window()?.navigator().clipboard();
+                                    let text =
+                                        wasm_bindgen_futures::JsFuture::from(held.read_text())
+                                            .await
+                                            .ok()?;
+                                    Some(text.as_string()?.into_bytes())
+                                }));
+                            }
+                            ui.close();
+                        }
+                    });
+                });
+                c2.vertical_centered_justified(|ui| {
+                    if self.saving.is_some() {
+                        ui.spinner();
                     }
-                }
-                let held = preset::Preset::of(
-                    &self.path,
-                    self.camera.position,
-                    self.camera.forward(),
-                    self.fov,
-                    self.ambient.weather_id(),
-                    self.ambient.time,
-                );
-                let file_name = format!("TE_{}.json", held.name);
-                let choices = match held.write() {
-                    Ok(text) => vec![
-                        export::Choice::bytes("导出预设", file_name, move || {
-                            Ok(text.into_bytes())
-                        })
-                        .title("导出 TitleEdit 预设")
-                        .filter("JSON", &["json"]),
-                    ],
-                    Err(why) => {
-                        log::error!("assets/layer: {why}");
-                        Vec::new()
-                    }
-                };
-                let promise =
-                    export::menu(ui, "导出预设", None, self.saving.is_some(), choices, egui::Vec2::ZERO);
-                if promise.is_some() {
-                    self.saving = promise;
-                }
-                // The same shape the plugin hands over its own clipboard, so a paste elsewhere
-                // reads it back.
-                if ui.button("复制预设").clicked() {
-                    match held.share() {
-                        Ok(text) => ui.ctx().copy_text(text),
-                        Err(why) => log::error!("assets/layer: {why}"),
-                    }
-                }
+                    ui.add_enabled_ui(self.saving.is_none(), |ui| {
+                        MenuButton::from_button(egui::Button::new("导出预设")).ui(ui, |ui| {
+                            let held = preset::Preset::of(
+                                &self.path,
+                                self.camera.position,
+                                self.camera.forward(),
+                                self.fov,
+                                self.ambient.weather_id(),
+                                self.ambient.time,
+                            );
+                            if ui.button("导出到文件").clicked() {
+                                match held.write() {
+                                    Ok(text) => {
+                                        let file_name = format!("TE_{}.json", held.name);
+                                        let ctx = ui.ctx().clone();
+                                        self.saving = Some(TrackedPromise::spawn_local(async move {
+                                            if let Some(file) = rfd::AsyncFileDialog::new()
+                                                .set_title("导出 TitleEdit 预设")
+                                                .set_file_name(&file_name)
+                                                .add_filter("JSON", &["json"])
+                                                .save_file()
+                                                .await
+                                            {
+                                                if let Err(why) = file.write(text.as_bytes()).await {
+                                                    log::error!("assets/layer: {why}");
+                                                }
+                                                ctx.request_repaint();
+                                            }
+                                        }));
+                                    }
+                                    Err(why) => log::error!("assets/layer: {why}"),
+                                }
+                                ui.close();
+                            }
+                            // The same shape the plugin hands over its own clipboard, so a paste
+                            // elsewhere reads it back.
+                            if ui.button("复制到剪贴板").clicked() {
+                                match held.share() {
+                                    Ok(text) => ui.ctx().copy_text(text),
+                                    Err(why) => log::error!("assets/layer: {why}"),
+                                }
+                                ui.close();
+                            }
+                        });
+                    });
+                });
             });
             if let Some(held) = &self.preset {
                 ui.label(RichText::new(format!("预设  {}", held.name)).weak());
@@ -4838,7 +5047,7 @@ impl Scene {
                         .changed();
                 }
             }
-let quality = self.look.quality;
+            let quality = self.look.quality;
             ui.checkbox(&mut self.look.occlude, "环境光遮蔽").on_hover_text(
                 "用游戏自带的 HDAO 为褶皱处着色，所有越过太阳的光线和合成权重都按它计算",
             );
@@ -5103,6 +5312,50 @@ let quality = self.look.quality;
                     changed = true;
                 }
             });
+            // Only where the zone keys a layer to one at all: most state none, and an empty control
+            // would sit under every layer list in the game.
+            let keyed: BTreeSet<(u16, u16)> = self
+                .layers
+                .iter()
+                .filter(|layer| layer.festival != 0)
+                .map(|layer| (layer.festival, layer.phase))
+                .collect();
+            if !keyed.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new("庆典").strong());
+                let mut wanted = self.festivals.clone();
+                ui.horizontal_wrapped(|ui| {
+                    if ui.selectable_label(wanted.is_empty(), "无").clicked() {
+                        wanted.clear();
+                    }
+                    for (festival, phase) in &keyed {
+                        let held = (*festival, *phase);
+                        let name = match phase {
+                            0 => format!("{festival}"),
+                            held => format!("{festival}.{held}"),
+                        };
+                        if ui
+                            .selectable_label(wanted.contains(&held), name)
+                            .on_hover_text(match phase {
+                                0 => format!("庆典 {festival}，全部阶段"),
+                                held => format!("庆典 {festival}，阶段 {held}"),
+                            })
+                            .clicked()
+                        {
+                            match wanted.iter().position(|at| *at == held) {
+                                Some(at) => {
+                                    wanted.remove(at);
+                                }
+                                None => wanted.push(held),
+                            }
+                        }
+                    }
+                });
+                if wanted != self.festivals {
+                    self.stand_under(wanted);
+                    changed = true;
+                }
+            }
             ui.add_space(4.0);
             // Truncated rather than run on: a zone's layer names are unbounded, and one long name
             // in an unwrapped checkbox pins the whole panel at its own width forever.
@@ -5110,7 +5363,10 @@ let quality = self.look.quality;
             for layer in &mut self.layers {
                 let mut label = format!("{} ({})", layer.name, layer.placements);
                 if layer.festival != 0 {
-                    label.push_str(&format!("  庆典 {}", layer.festival));
+                    label.push_str(&match layer.phase {
+                        0 => format!("  庆典 {}", layer.festival),
+                        held => format!("  庆典 {}.{held}", layer.festival),
+                    });
                 }
                 let mut hover = label.clone();
                 hover.push('\n');
@@ -5151,6 +5407,62 @@ pub fn ui(ui: &mut egui::Ui, scene: &mut Scene, backend: &Backend) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A plate modelled away from its origin is culled by where its geometry actually is, and the
+    /// sphere never shrinks below the one the file itself states.
+    #[test]
+    fn a_placement_is_culled_by_where_its_geometry_sits() {
+        let bounds = Some((Vec3::new(10.0, 0.0, -2.0), Vec3::new(14.0, 4.0, 2.0)));
+        let (center, radius) = sphere_of(bounds, &Mat4::IDENTITY).expect("a sphere");
+        assert_eq!(center, Vec3::new(12.0, 2.0, 0.0));
+        assert!((radius - Vec3::new(4.0, 4.0, 4.0).length() * 0.5).abs() < 1e-5);
+        // A placement that scales carries the box with it.
+        let (far, wider) = sphere_of(bounds, &Mat4::from_scale(Vec3::splat(3.0))).expect("a sphere");
+        assert_eq!(far, Vec3::new(36.0, 6.0, 0.0));
+        assert!((wider - radius * 3.0).abs() < 1e-4);
+        // A model that has not arrived is not culled at all.
+        assert!(sphere_of(None, &Mat4::IDENTITY).is_none());
+    }
+
+    /// A layer keyed to no festival always stands. One keyed to a phase stands only in that phase,
+    /// and a slot naming the festival without a phase of its own stands for every phase of it.
+    #[test]
+    fn a_festival_layer_stands_only_while_its_own_festival_runs() {
+        assert!(festive(0, 0, &[]));
+        assert!(festive(0, 0, &[(12, 1)]));
+        assert!(!festive(12, 0, &[]));
+        assert!(festive(12, 0, &[(12, 0)]));
+        // A phase the slot does not name is not the phase the layer wants.
+        assert!(!festive(12, 2, &[(12, 1)]));
+        assert!(festive(12, 2, &[(12, 2)]));
+        // A slot with no phase of its own stands for every phase.
+        assert!(festive(12, 7, &[(12, 0)]));
+        // Another festival running is not this one.
+        assert!(!festive(12, 1, &[(13, 1)]));
+    }
+
+    /// The placement's x scale is the line's length, and it is a magnitude rather than the axis the
+    /// segment runs along: a lamp whose local x points up still lies flat along its own z.
+    #[test]
+    fn a_line_takes_its_length_from_the_axis_its_placement_scales() {
+        assert_eq!(stretched(&Mat4::from_scale(Vec3::new(25.0, 1.0, 1.0))), 25.0);
+        assert_eq!(stretched(&Mat4::IDENTITY), 1.0);
+        // Turning the placement does not change how long the lamp is.
+        let turned = Mat4::from_rotation_z(std::f32::consts::FRAC_PI_2)
+            * Mat4::from_scale(Vec3::new(25.0, 1.0, 1.0));
+        assert!((stretched(&turned) - 25.0).abs() < 1e-4);
+    }
+
+    /// A radius in a model's own space grows by whichever axis its placement stretches most, not
+    /// by one of them: a placement is free to scale unevenly.
+    #[test]
+    fn a_sphere_grows_by_the_widest_axis_a_placement_scales() {
+        assert_eq!(widest(&Mat4::from_scale(Vec3::new(2.0, 5.0, 3.0))), 5.0);
+        assert_eq!(widest(&Mat4::IDENTITY), 1.0);
+        // A rotation is not a scale, however it turns the axes.
+        let turned = Mat4::from_rotation_y(0.7);
+        assert!((widest(&turned) - 1.0).abs() < 1e-6);
+    }
 
     /// The Euler order the files are read under. A pure yaw reduces to `Mat3::from_rotation_y`,
     /// which is what ring tests over the corpus settled; this pins the rest of it.
@@ -5245,5 +5557,25 @@ mod tests {
         assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [far, near].into_iter()), Some(1));
         assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [near, far].into_iter()), Some(1));
         assert_eq!(nearest(Vec3::ZERO, Vec3::NEG_Z, [].into_iter()), None);
+    }
+}
+
+#[cfg(test)]
+mod cull_test {
+    use super::{outside, planes};
+    use glam::{Mat4, Vec3};
+
+    /// A camera at the origin looking down negative z, the way `look_at_rh` leaves one.
+    #[test]
+    fn a_frustum_keeps_what_stands_in_front_of_it() {
+        let view = Mat4::look_at_rh(Vec3::ZERO, -Vec3::Z, Vec3::Y);
+        let projection = Mat4::perspective_rh(55.0_f32.to_radians(), 1.6, 0.2, 4000.0);
+        let held = planes(projection * view);
+        assert!(!outside(&held, Vec3::new(0.0, 0.0, -50.0), 1.0), "straight ahead");
+        assert!(!outside(&held, Vec3::new(0.0, 0.0, -1.0), 1.0), "close ahead");
+        assert!(outside(&held, Vec3::new(0.0, 0.0, 50.0), 1.0), "behind");
+        assert!(outside(&held, Vec3::new(5000.0, 0.0, -50.0), 1.0), "far off to the side");
+        // A sphere the eye sits inside is never culled, whichever way it is turned.
+        assert!(!outside(&held, Vec3::new(0.0, 0.0, 20.0), 100.0), "around the eye");
     }
 }

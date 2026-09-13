@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use glam::{Mat4, Vec3, Vec4};
 use ironworks::file::File as _;
-use ironworks::file::avfx::Avfx;
+use ironworks::file::avfx::{Avfx, Block};
 
 use super::super::avfx::{self, Shaders, Textures, gpu, program, sim};
 use crate::backend::Backend;
@@ -33,6 +33,18 @@ pub struct Fired {
     pub tint: Vec4,
 }
 
+/// One firing's own run of an effect: which file it came from, where it last stood and what it was
+/// last tinted by, and whether the timeline is still firing it. A run the timeline has stopped keeps
+/// stepping with its emitters shut off until its particles die out, so a command window closing or a
+/// motion looping round does not take a cloud of live particles off screen with it.
+struct Run {
+    path: String,
+    state: sim::State,
+    at: Mat4,
+    tint: Vec4,
+    firing: bool,
+}
+
 enum File {
     Fetching(TrackedPromise<Result<Vec<u8>>>),
     Ready(Box<Held>),
@@ -43,6 +55,51 @@ enum File {
 struct Held {
     effect: sim::Effect,
     particles: Arc<Mutex<gpu::Particles>>,
+    /// The bone each of the file's own binders hangs it from, for the binders whose id a capture
+    /// has actually pinned. Empty where none of them are known, which is most files.
+    bound: Vec<&'static str>,
+}
+
+/// Where a binder's own id hangs its effect. A file states a numeric id per binder and the client
+/// resolves it against a list of attachments the character carries, keyed by id rather than
+/// indexed; nothing here reads that list, so only the ids a game capture has placed are answered.
+///
+/// 77 and 78 are the two hands, off the Cheer On: Blue capture, which is what puts a light in each.
+/// 43 and 44 are the two eyes, off the Frighten capture: that file holds one emitter and two
+/// binders, so its two glows are its two bind points and nothing else.
+fn bound(id: i32) -> Option<&'static str> {
+    match id {
+        43 => Some("j_f_eye_l"),
+        44 => Some("j_f_eye_r"),
+        77 => Some("n_buki_r"),
+        78 => Some("n_buki_l"),
+        _ => None,
+    }
+}
+
+/// A binder states its bind point under `BPTP`/`BPID`, nested inside its own property tree.
+fn binders(file: &Avfx) -> Vec<&'static str> {
+    fn dig(block: &Block, name: &str, into: &mut Vec<i32>) {
+        if block.name().as_str() == name
+            && let Some(value) = block.i32()
+        {
+            into.push(value);
+        }
+        for held in block.blocks() {
+            dig(held, name, into);
+        }
+    }
+    file.binders()
+        .iter()
+        .filter_map(|binder| {
+            let (mut kind, mut id) = (Vec::new(), Vec::new());
+            dig(binder, "BPTP", &mut kind);
+            dig(binder, "BPID", &mut id);
+            // Kind 3 is the one that hangs off the character; 0 states no attachment at all.
+            (kind.first() == Some(&3)).then_some(())?;
+            bound(*id.first()?)
+        })
+        .collect()
 }
 
 /// A file on its way in or in hand, with the last poll it was fired on.
@@ -56,7 +113,7 @@ struct Kept {
 #[derive(Default)]
 pub struct Effects {
     files: HashMap<String, Kept>,
-    running: HashMap<u64, sim::State>,
+    running: HashMap<u64, Run>,
     textures: Textures,
     shaders: Shaders,
     /// Counts polls, so the least recently fired file is the one to give up.
@@ -64,6 +121,15 @@ pub struct Effects {
 }
 
 impl Effects {
+    /// The bones the file at `path` hangs itself from, where its own binders name any this knows.
+    /// Empty until the file has landed, and for every file whose ids are unpinned.
+    pub fn bound(&self, path: &str) -> &[&'static str] {
+        match self.files.get(path).map(|kept| &kept.file) {
+            Some(File::Ready(held)) => &held.bound,
+            _ => &[],
+        }
+    }
+
     /// Takes up whatever is firing this frame: asks for any file not in hand, steps each firing to
     /// where its own clock has reached, and forgets the ones no longer named.
     pub fn poll(&mut self, ctx: &egui::Context, backend: &Backend, fired: &[Fired]) {
@@ -122,8 +188,9 @@ impl Effects {
                     // Nothing reads the models again once they are on the card: a particle already
                     // carries the index it draws.
                     let models = std::mem::take(&mut effect.models);
-                    log::info!("assets/mdl: the emote fires {path}, {} frames", effect.length);
+                    log::info!("assets/mdl: 情感动作触发 {path}，共 {} 帧", effect.length);
                     File::Ready(Box::new(Held {
+                        bound: binders(&read),
                         effect,
                         particles: gpu::Particles::new(models),
                     }))
@@ -148,7 +215,9 @@ impl Effects {
 
         let rate = AVFX_FRAME_RATE.get(ctx);
         let Self { files, running, .. } = self;
-        running.retain(|id, _| fired.iter().any(|held| held.id == *id));
+        for run in running.values_mut() {
+            run.firing = false;
+        }
         for held in fired {
             let Some(File::Ready(file)) = files.get(&held.path).map(|kept| &kept.file) else {
                 continue;
@@ -157,17 +226,40 @@ impl Effects {
                 true => file.effect.length,
                 false => sim::LONGEST,
             };
+            let run = running.entry(held.id).or_insert_with(|| Run {
+                path: held.path.clone(),
+                state: sim::State::default(),
+                at: held.at,
+                tint: held.tint,
+                firing: true,
+            });
+            run.firing = true;
+            run.at = held.at;
+            run.tint = held.tint;
             let frame = (held.since * rate) as i32;
-            file.effect
-                .seek(running.entry(held.id).or_default(), frame.clamp(0, end));
+            file.effect.seek(&mut run.state, frame.clamp(0, end));
         }
+        // What the timeline has stopped firing: shut its emitters and run it on a frame at a time
+        // until nothing is left. The cap is the sim's own, so a file whose particles state no life
+        // at all cannot hold a run open for ever.
+        running.retain(|_, run| {
+            if run.firing {
+                return true;
+            }
+            let Some(File::Ready(file)) = files.get(&run.path).map(|kept| &kept.file) else {
+                return false;
+            };
+            run.state.release();
+            let next = run.state.frame + 1;
+            file.effect.seek(&mut run.state, next);
+            !run.state.spent() && run.state.frame < sim::LONGEST
+        });
     }
 
     /// What to draw this frame, one entry per file however many firings it has: a draw is the
     /// file's own programs and geometry, so every firing of one goes into a single stream.
     pub fn frames(
         &self,
-        fired: &[Fired],
         view: Mat4,
         projection: Mat4,
         size: (f32, f32),
@@ -183,21 +275,20 @@ impl Effects {
                     return None;
                 };
                 let bound = self.textures.bound(&file.effect.textures);
-                let drawn: Vec<sim::Drawn> = fired
-                    .iter()
+                // Every run of this file, not only the ones still being fired: one the timeline has
+                // stopped is drawn where it last stood until its own particles are gone.
+                let drawn: Vec<sim::Drawn> = self
+                    .running
+                    .values()
                     .filter(|held| held.path == *path)
-                    .filter_map(|held| {
-                        let state = self.running.get(&held.id)?;
+                    .flat_map(|held| {
                         let (scale, rotation, translation) = held.at.to_scale_rotation_translation();
                         let scale = scale.abs().max_element().max(0.001);
-                        Some(
-                            file.effect
-                                .drawn(state)
-                                .into_iter()
-                                .map(move |item| item.placed(rotation, translation, scale, held.tint)),
-                        )
+                        file.effect
+                            .drawn(&held.state)
+                            .into_iter()
+                            .map(move |item| item.placed(rotation, translation, scale, held.tint))
                     })
-                    .flatten()
                     .collect();
                 let batches = avfx::batches(&file.effect, drawn, &bound, view, eye, right, up);
                 (!batches.is_empty()).then(|| {
@@ -214,8 +305,8 @@ impl Effects {
                             },
                             batches,
                             packages: self.shaders.resolved(),
-                            // Drawn after the character has been composited, which leaves no depth
-                            // to test against and nothing to copy for the soft-particle variant.
+                            // Filled in by whoever draws these: the scene pass stands them on the
+                            // depth its own geometry left, and the standalone preview has none.
                             tested: false,
                             depth: None,
                         },
@@ -223,5 +314,23 @@ impl Effects {
                 })
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Only the ids two captures have actually placed are answered; everything else is left where
+    /// the command bound it rather than guessed at.
+    #[test]
+    fn only_a_pinned_bind_point_names_a_bone() {
+        assert_eq!(super::bound(77), Some("n_buki_r"));
+        assert_eq!(super::bound(78), Some("n_buki_l"));
+        assert_eq!(super::bound(43), Some("j_f_eye_l"));
+        assert_eq!(super::bound(44), Some("j_f_eye_r"));
+        // The corpus carries 5, 8-11, 16, 25-30, 32, 33, 42, 107 and 108 besides, and no capture
+        // places any of them.
+        for id in [0, 5, 16, 30, 42, 107, 108] {
+            assert_eq!(super::bound(id), None, "{id} is not pinned by anything");
+        }
     }
 }

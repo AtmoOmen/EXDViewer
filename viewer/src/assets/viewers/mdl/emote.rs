@@ -14,6 +14,7 @@
 //! duration against the Havok motion's, in seconds, that the same pack plays (330/11, 60/2,
 //! 145/4.8333, 690/23 all divide out to exactly 30).
 
+use crate::assets::viewers::skeleton::Laid;
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -62,13 +63,14 @@ fn prop_model(set: u16, base: u16) -> String {
     format!("chara/weapon/w{set:04}/obj/body/b{base:04}/model/w{set:04}b{base:04}.mdl")
 }
 
-/// The rig a prop is skinned to, filed beside its model.
-fn prop_skeleton(set: u16, base: u16) -> String {
+/// The rig a weapon is skinned to, filed beside its model. A prop is a weapon model, so a prop
+/// takes the same one.
+pub(super) fn weapon_skeleton(set: u16, base: u16) -> String {
     format!("chara/weapon/w{set:04}/skeleton/base/b{base:04}/skl_w{set:04}b{base:04}.sklb")
 }
 
-/// The pack a prop moves out of, which is the one every weapon of that set shares.
-fn prop_pack(set: u16) -> String {
+/// The pack a weapon moves out of, which is the one every weapon of that set shares.
+pub(super) fn weapon_pack(set: u16) -> String {
     format!("chara/weapon/w{set:04}/animation/a0001/wp_common/resident/weapon.pap")
 }
 
@@ -182,7 +184,7 @@ impl Events {
             .animations()
             .iter()
             .position(|animation| animation.name() == animation_name)
-            .ok_or_else(|| anyhow::anyhow!("{animation_name}: not in this pack"))?;
+            .ok_or_else(|| anyhow::anyhow!("{animation_name}: 不在此动画包中"))?;
         let timeline = Timeline::read(Cursor::new(pack.timelines()[index].clone()))?;
 
         let mut events = Self::default();
@@ -281,7 +283,7 @@ impl Events {
 /// A prop's own rig: the skeleton it is skinned to, and the pack that walks its bones through the
 /// emote. A prop that puts one thing in each hand is one model on this rig rather than two hung
 /// apart, so which hand each of its bones ends up in is the pack's to say, not the attach point's.
-struct Rigging {
+pub(super) struct Rigging {
     rig: Rig,
     /// Animation names, each with the motion it plays.
     named: Vec<(String, usize)>,
@@ -291,7 +293,7 @@ struct Rigging {
 }
 
 impl Rigging {
-    fn read(skeleton: &[u8], pack: &[u8]) -> anyhow::Result<Self> {
+    pub(super) fn read(skeleton: &[u8], pack: &[u8]) -> anyhow::Result<Self> {
         let held = SkeletonBinary::read(Cursor::new(skeleton.to_vec()))?.parse_skeleton()?;
         let rig = Rig::new(held.bones(), held.parent_indices(), held.reference_pose());
         let file = AnimationPack::read(Cursor::new(pack.to_vec()))?;
@@ -337,12 +339,23 @@ impl Rigging {
             })
     }
 
+    /// Which of the pack's animations is spelled exactly `name`.
+    pub(super) fn named(&self, name: &str) -> Option<usize> {
+        self.named.iter().position(|(held, _)| held == name)
+    }
+
+    /// How long one of them runs.
+    pub(super) fn duration(&self, motion: usize) -> Option<f32> {
+        let binding = self.bindings.get(self.named.get(motion)?.1)?;
+        Some(binding.motion().duration().max(f32::EPSILON))
+    }
+
     /// What each slot of the model's own bone table moves a vertex by, in the prop's own space.
-    fn joints(&self, motion: usize, table: &[String], time: f32) -> Option<Vec<Mat4>> {
+    pub(super) fn joints(&self, motion: usize, table: &[String], time: f32) -> Option<Vec<Mat4>> {
         let binding = self.bindings.get(self.named.get(motion)?.1)?;
         let mut locals = self.rig.reference().to_vec();
         self.rig
-            .lay(&mut locals, binding, self.rig.names(), None, time, 1.0);
+            .lay(&mut locals, binding, self.rig.names(), Laid { time, weight: 1.0, ..Laid::default() });
         let posed = self.rig.world(&locals);
         Some(
             table
@@ -457,7 +470,7 @@ impl Cue {
             match Mixer::new() {
                 Ok(mixer) => self.voices = Some(mixer),
                 Err(why) => {
-                    log::warn!("assets/mdl: no emote sound: {why}");
+                    log::warn!("assets/mdl: 情感动作音效不可用：{why}");
                     self.voices_failed = true;
                 }
             }
@@ -473,7 +486,7 @@ impl Cue {
                 Some(SoundFetch::Ready(decoded)) => {
                     let decoded = decoded.clone();
                     if let Err(why) = voices.play((id, loop_count), decoded, 1.0) {
-                        log::warn!("assets/mdl: emote sound play failed: {why}");
+                        log::warn!("assets/mdl: 情感动作音效播放失败：{why}");
                     }
                 }
                 Some(SoundFetch::Fetching(_) | SoundFetch::Failed) => {}
@@ -489,7 +502,7 @@ impl Cue {
                             let entry = container
                                 .entries()
                                 .first()
-                                .ok_or_else(|| anyhow::anyhow!("{wanted}: no audio streams"))?;
+                                .ok_or_else(|| anyhow::anyhow!("{wanted}: 无音频流"))?;
                             audio::decode_data(entry.format(), entry.data())
                         })),
                     );
@@ -506,7 +519,7 @@ impl Cue {
             *fetch = match promise.try_take() {
                 Ok(Ok(decoded)) => SoundFetch::Ready(Arc::new(decoded)),
                 Ok(Err(why)) => {
-                    log::warn!("assets/mdl: emote sound decode failed: {why}");
+                    log::warn!("assets/mdl: 情感动作音效解码失败：{why}");
                     SoundFetch::Failed
                 }
                 Err(promise) => SoundFetch::Fetching(promise),
@@ -524,7 +537,7 @@ impl Cue {
         };
         if self.rigged.as_ref().is_none_or(|(worn, _)| *worn != (set, base)) {
             let files = backend.files().clone();
-            let (skeleton, pack) = (prop_skeleton(set, base), prop_pack(set));
+            let (skeleton, pack) = (weapon_skeleton(set, base), weapon_pack(set));
             self.rigged = Some((
                 (set, base),
                 Rigged::Fetching(TrackedPromise::spawn_local(async move {
@@ -550,7 +563,7 @@ impl Cue {
             .and_then(|(skeleton, pack)| Rigging::read(skeleton, pack).ok())
             .and_then(|rigging| {
                 let at = rigging.motion(motion_key(motion), &code)?;
-                log::info!("assets/mdl: the prop plays {}", rigging.named[at].0);
+                log::info!("assets/mdl: 道具播放 {}", rigging.named[at].0);
                 Some(Rigged::Ready(rigging, at))
             });
         self.rigged = Some(((set, base), read.unwrap_or(Rigged::Failed)));
@@ -631,8 +644,8 @@ mod tests {
         assert_eq!((prop.set, prop.base), (1949, 1));
 
         let rigging = Rigging::read(
-            &read(&prop_skeleton(prop.set, prop.base)),
-            &read(&prop_pack(prop.set)),
+            &read(&weapon_skeleton(prop.set, prop.base)),
+            &read(&weapon_pack(prop.set)),
         )
         .expect("the prop's own rig");
         let motion = rigging
@@ -665,7 +678,7 @@ mod tests {
         let times = [0.0, 2.0, 5.0, 10.0, 16.0];
         for time in times {
             let mut locals = rig.reference().to_vec();
-            rig.lay(&mut locals, &bindings[0], rig.names(), None, time, 1.0);
+            rig.lay(&mut locals, &bindings[0], rig.names(), Laid { time, weight: 1.0, ..Laid::default() });
             let posed = rig.world(&locals);
             let held = posed[rig.bone("j_sebo_a").expect("the spine")].matrix();
             let joints = rigging.joints(motion, &table, time).expect("the prop's pose");
@@ -709,7 +722,7 @@ mod tests {
         for step in 0..=10 {
             let time = duration * step as f32 / 10.0;
             let mut locals = rig.reference().to_vec();
-            rig.lay(&mut locals, &bindings[0], rig.names(), None, time, 1.0);
+            rig.lay(&mut locals, &bindings[0], rig.names(), Laid { time, weight: 1.0, ..Laid::default() });
             let posed = rig.world(&locals);
             let at = |name: &str| {
                 posed[rig.bone(name).expect(name)]

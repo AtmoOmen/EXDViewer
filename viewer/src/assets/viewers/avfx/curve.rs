@@ -306,7 +306,7 @@ pub fn plot(ui: &mut egui::Ui, curve: &Curve, rate: f32) -> Option<(f32, f32)> {
             Stroke::new(1.0, ui.visuals().weak_text_color()),
         );
         let value = curve.sample(time);
-        let at = format!("frame {time:.0}  {}", seconds(time, rate));
+        let at = format!("帧 {time:.0}  {}", seconds(time, rate));
         response.on_hover_text(match curve.color {
             true => {
                 let [r, g, b] = value.map(|channel| (channel.clamp(0.0, 1.0) * 255.0) as u8);

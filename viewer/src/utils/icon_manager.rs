@@ -111,7 +111,7 @@ impl IconManagerImpl {
                 Ok(ImageSource::Texture(ret))
             }
             Err(e) => {
-                log::error!("Failed to load icon: {e:?}");
+                log::error!("加载图标失败: {e:?}");
                 Err(e.into())
             }
         }

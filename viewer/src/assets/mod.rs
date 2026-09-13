@@ -2072,6 +2072,9 @@ const EXTENSIONS: &[(&str, &str, Viewer)] = &[
     ("stm", "染色图", Viewer::Stm),
     ("cmp", "角色外观参数", Viewer::Cmp),
     ("plt", "PAP 加载表", Viewer::Raw),
+    ("wtd", "武器类型表", Viewer::Wtd),
+    ("fpeb", "面部参数编辑", Viewer::Fpeb),
+    ("waoe", "附着偏移列表", Viewer::Waoe),
     ("spm", "着色器参数映射", Viewer::Spm),
     ("dic", "词典", Viewer::Dic),
 ];

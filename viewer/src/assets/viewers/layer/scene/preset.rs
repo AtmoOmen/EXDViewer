@@ -180,6 +180,9 @@ pub struct Preset {
     pub weather: Option<u32>,
     /// Seconds since midnight, where the file states an offset.
     pub time: Option<f32>,
+    /// The festivals the place stands under, each an id and the phase of it, both nought where the
+    /// slot is empty. A zone shows a layer keyed to a festival only while that festival runs.
+    pub festivals: Vec<(u16, u16)>,
 }
 
 impl Preset {
@@ -213,6 +216,8 @@ impl Preset {
         Self {
             name: stem.trim_end_matches(".lvb").to_owned(),
             level: level.to_owned(),
+            // Written out rather than read in: this is the view the viewer states for the game.
+            festivals: Vec::new(),
             camera,
             toward: camera + forward.normalize_or_zero() * TOWARD,
             fov: Some(fov),
@@ -294,6 +299,12 @@ impl From<File> for Preset {
                 false => name,
             },
             level: format!("bg/{}.lvb", held.territory_path),
+            festivals: held
+                .festivals
+                .iter()
+                .filter(|held| held.id != 0)
+                .map(|held| (held.id, held.phase))
+                .collect(),
             camera,
             toward: camera + toward * TOWARD,
             // The plugin holds this in radians and its own slider stops at three, so a wider angle
@@ -314,6 +325,8 @@ impl From<Older> for Preset {
             name: held
                 .name
                 .unwrap_or_else(|| stem(&held.territory).to_owned()),
+            // The older shape carries no festival slots at all.
+            festivals: Vec::new(),
             // The plugin states the path without its extension, and the stem twice over: the
             // directory the level sits in and the file itself go by the same name.
             level: format!("bg/{}.lvb", held.territory),
@@ -348,6 +361,13 @@ fn offset(held: f32) -> u16 {
 }
 
 /// The JSON a marked preset carries, or the bytes themselves where they carry no marker.
+/// Whether a paste is worth reading as a preset at all, so one landing in a text field somewhere
+/// else is left alone rather than reported as a broken one.
+pub fn looks_like(text: &str) -> bool {
+    let held = text.trim();
+    held.starts_with('{') || MARKERS.iter().any(|marker| held.starts_with(marker))
+}
+
 fn unwrapped(bytes: &[u8]) -> Result<Cow<'_, [u8]>, String> {
     let held = str::from_utf8(bytes)
         .map(str::trim)

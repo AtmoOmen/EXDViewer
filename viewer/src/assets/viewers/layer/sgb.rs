@@ -12,9 +12,9 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let file = sgb::SharedGroupFile::read(Cursor::new(bytes.to_vec()))?;
     let scene = file.scene();
 
-    let mut identity = vec![("Assets", scene.bg_path().clone())];
+    let mut identity = vec![("资源", scene.bg_path().clone())];
     if !scene.environments().is_empty() {
-        identity.push(("Environments", scene.environments().len().to_string()));
+        identity.push(("环境", scene.environments().len().to_string()));
     }
 
     Ok(Preview::Layers(Box::new(super::rendered(

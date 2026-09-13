@@ -67,7 +67,7 @@ pub async fn request(
     body: Option<Vec<u8>>,
 ) -> anyhow::Result<HttpResponse> {
     let mut req = Request::get(url);
-    req.method = Method::parse(method).map_err(|e| anyhow::anyhow!("invalid HTTP method: {e}"))?;
+    req.method = Method::parse(method).map_err(|e| anyhow::anyhow!("HTTP 方法无效: {e}"))?;
     if let Some(body) = body {
         req.body = body;
     }
@@ -130,7 +130,7 @@ async fn get(url: impl ToString, range: Option<String>) -> anyhow::Result<HttpRe
 
     if !resp.ok {
         anyhow::bail!(
-            "Response not OK ({}{}{}): {}",
+            "响应异常 ({}{}{}): {}",
             resp.status,
             if resp.status_text.is_empty() { "" } else { " " },
             resp.status_text,

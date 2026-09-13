@@ -122,7 +122,7 @@ impl Worker for SqpackWorker {
     }
 
     fn update(&mut self, _scope: &WorkerScope<Self>, _msg: Self::Message) {
-        unimplemented!("Worker does not support messages");
+        unimplemented!("Worker 不支持消息");
     }
 
     fn received(&mut self, scope: &WorkerScope<Self>, msg: Self::Input, id: HandlerId) {

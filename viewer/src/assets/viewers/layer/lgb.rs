@@ -13,8 +13,8 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
     let group = file.group();
 
     let identity = vec![
-        ("Group", group.name().clone()),
-        ("Group ID", group.id().to_string()),
+        ("组", group.name().clone()),
+        ("组 ID", group.id().to_string()),
     ];
 
     Ok(Preview::Layers(Box::new(super::rendered(

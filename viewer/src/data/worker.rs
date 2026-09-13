@@ -80,7 +80,7 @@ impl FileProvider for WorkerFileProvider {
         if let WorkerResponse::DataPresence(result) =
             worker::transact(WorkerRequest::DataPresence(paths.clone())).await
         {
-            let presence = result.map_err(|e| anyhow::anyhow!("WorkerFileProvider: {e}"))?;
+            let presence = result.map_err(|e| anyhow::anyhow!("WorkerFileProvider：{e}"))?;
             Ok((paths, presence.0))
         } else {
             Err(anyhow::anyhow!(

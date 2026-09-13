@@ -24,6 +24,7 @@ pub(crate) mod material;
 mod noise;
 pub(super) mod program;
 mod skin;
+mod wield;
 
 pub use deform::{Deform, Deformers};
 pub use skin::motion_names;
@@ -186,6 +187,16 @@ struct Camera {
 }
 
 impl Camera {
+    /// The same framing about a body drawn at `stature`: a model twice the size its files state is
+    /// twice as far away and twice as high up, or the camera stands inside it.
+    fn scaled(self, stature: f32) -> Self {
+        Self {
+            distance: self.distance * stature,
+            target: self.target * stature,
+            ..self
+        }
+    }
+
     fn eye(&self) -> Vec3 {
         let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
         let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
@@ -514,7 +525,15 @@ pub struct Rendered {
     /// worn as: a weapon, carried at the placement its attach point states this frame.
     attachments: RefCell<Vec<Attachment>>,
     /// The bones a weapon's own effect would play from, for the weapons carrying one and drawn.
-    glowing: RefCell<Vec<String>>,
+    /// The effect a drawn weapon plays and the bone it hangs from, one pair a weapon, with the
+    /// clock it started running on.
+    glowing: RefCell<Vec<(String, String)>>,
+    /// The rig each carried weapon moves on, whether they are drawn, and the frame clock kept from
+    /// the poll so the pose can read it without a context of its own.
+    wield: RefCell<wield::Wield>,
+    wielded: std::cell::Cell<bool>,
+    wall: std::cell::Cell<f64>,
+    glowing_at: std::cell::Cell<Option<f64>>,
     /// The props, sound and vfx an emote's own timeline states, read against whatever the body is
     /// playing.
     emote: RefCell<emote::Cue>,
@@ -568,7 +587,6 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         rigid: false,
     }])?;
     model.chrome.set(Chrome::Asset);
-    model.shaded.set(false);
     Ok(Preview::Model(Box::new(model)))
 }
 
@@ -611,6 +629,10 @@ pub fn compose(parts: &[Source]) -> Result<Rendered> {
         dyed: Default::default(),
         attachments: Default::default(),
         glowing: Default::default(),
+        wield: Default::default(),
+        wielded: Default::default(),
+        wall: Default::default(),
+        glowing_at: Default::default(),
         emote: Default::default(),
         effects: Default::default(),
         fired: Default::default(),
@@ -995,7 +1017,7 @@ fn read_level(sources: &[(Worn<'_>, &ModelContainer)], lod: u8, attachments: usi
             Bytes(vertices * size_of::<Vertex>() + triangles * 6).to_string(),
         ),
     ];
-let mut left_out: Vec<&str> = skipped.iter().map(|kind| kind_name(*kind)).collect();
+    let mut left_out: Vec<&str> = skipped.iter().map(|kind| kind_name(*kind)).collect();
     if unbound != 0 {
         left_out.push("无材质");
     }
@@ -1380,7 +1402,7 @@ pub fn ui(ui: &mut egui::Ui, model: &Rendered, backend: &Backend) {
             }
         }
         if ui.button("重置视图").clicked() {
-            model.camera.set(level.home);
+            model.camera.set(level.home.scaled(model.stature.get()));
         }
         let (arrived, wanted) = model.arrived();
         if arrived < wanted {
@@ -1659,6 +1681,16 @@ impl Rendered {
             self.effects
                 .borrow_mut()
                 .poll(ctx, backend, &self.fired.borrow());
+            self.wall.set(ctx.input(|input| input.time));
+            let worn: Vec<(u16, u16)> = self
+                .attachments
+                .borrow()
+                .iter()
+                .filter_map(|held| wield::worn(&held.path))
+                .collect();
+            self.wield
+                .borrow_mut()
+                .poll(backend, &worn, self.wielded.get(), self.wall.get());
         }
         let mut slots = self.slots.borrow_mut();
         for (index, slot) in slots.iter_mut().enumerate() {
@@ -2220,11 +2252,26 @@ impl Rendered {
                     // A prop that ships a pack of its own is skinned to a rig of its own, walked
                     // by that pack and carried whole to the point it hangs from: that is what puts
                     // one of the two things it holds in each hand.
-                    pose.joints[index] = match self.animation.body_playing().and_then(|(_, _, time)| {
-                        self.emote
-                            .borrow()
-                            .joints(&attachment.path, &level.bones[index], time)
-                    }) {
+                    // A prop moves out of the emote's own timeline; a weapon moves out of the pack
+                    // its set ships, off the stance rather than off any motion the body plays.
+                    let moved = self
+                        .animation
+                        .body_playing()
+                        .and_then(|(_, _, time)| {
+                            self.emote
+                                .borrow()
+                                .joints(&attachment.path, &level.bones[index], time)
+                        })
+                        .or_else(|| {
+                            let (set, base) = wield::worn(&attachment.path)?;
+                            self.wield.borrow().joints(
+                                set,
+                                base,
+                                &level.bones[index],
+                                self.wall.get(),
+                            )
+                        });
+                    pose.joints[index] = match moved {
                         Some(joints) => joints.iter().map(|joint| carried * *joint).collect(),
                         None => vec![carried; level.bones[index].len()],
                     };
@@ -2305,6 +2352,7 @@ impl Rendered {
                     shaded: shaded.flatten(),
                     runs,
                     family: material.family(),
+                    glass: material.glass(),
                     normal: material.texture(Role::Normal).and_then(|path| bind(path)),
                     index: material.texture(Role::Index).and_then(|path| bind(path)),
                     mask: material.texture(Role::Mask).and_then(|path| bind(path)),
@@ -2341,8 +2389,8 @@ impl Rendered {
             camera.target += (right * -delta.x + Vec3::Y * delta.y) * scale;
         };
         let zoom = |camera: &mut Camera, scale: f32| {
-            camera.distance = (camera.distance * scale)
-                .clamp(level.home.distance * 0.02, level.home.distance * 20.0);
+            let home = level.home.distance * self.stature.get();
+            camera.distance = (camera.distance * scale).clamp(home * 0.02, home * 20.0);
         };
 
         // A second finger takes the gesture over: egui carries on reporting a primary drag through
@@ -2377,7 +2425,7 @@ impl Rendered {
         // no particles for one, only where and when it would draw.
         let mut markers = std::mem::take(&mut pose.skeleton);
         if let Some((names, ..)) = &rig {
-            for bone in self.glowing.borrow().iter() {
+            for (_, bone) in self.glowing.borrow().iter() {
                 let Some(&world) = names
                     .iter()
                     .position(|name| name == bone)
@@ -2399,28 +2447,87 @@ impl Rendered {
         }
         // Where each vfx the emote's own timeline is running stands this frame, which the next
         // poll steps and the callback below draws.
-        *self.fired.borrow_mut() = match (self.animation.body_playing(), &rig) {
+        let mut firing: Vec<effects::Fired> = match (self.animation.body_playing(), &rig) {
             (Some((_, _, time)), Some((names, ..))) => self
                 .emote
                 .borrow()
                 .firing(time)
-                .filter_map(|vfx| {
-                    let bone = names.iter().position(|name| *name == vfx.bone)?;
-                    Some(effects::Fired {
-                        id: vfx.id,
-                        path: vfx.path.to_owned(),
-                        at: *pose.world.get(bone)? * vfx.local,
-                        since: vfx.since,
-                        tint: Vec4::from(vfx.tint),
-                    })
+                .flat_map(|vfx| {
+                    let place = |bone: &str| {
+                        let at = names.iter().position(|name| *name == bone)?;
+                        Some(*pose.world.get(at)? * vfx.local)
+                    };
+                    // A file states its own bind points and the client hangs one instance off
+                    // each. Only the ids a capture has pinned are answered, and a bone this rig
+                    // cannot name answers nothing, so either way what is left is where the command
+                    // bound it rather than nothing at all.
+                    let bound: Vec<Mat4> = self
+                        .effects
+                        .borrow()
+                        .bound(vfx.path)
+                        .iter()
+                        .filter_map(|bone| place(bone))
+                        .collect();
+                    let placed = match bound.is_empty() {
+                        true => place(vfx.bone).into_iter().collect(),
+                        false => bound,
+                    };
+                    placed
+                        .into_iter()
+                        .enumerate()
+                        .map(|(at, world)| effects::Fired {
+                            id: vfx.id | (at as u64) << 16,
+                            path: vfx.path.to_owned(),
+                            at: world,
+                            since: vfx.since,
+                            tint: Vec4::from(vfx.tint),
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect(),
             _ => Vec::new(),
         };
+        // A drawn weapon's own effect, which runs for as long as it is drawn rather than off a
+        // timeline of its own: the clock starts over whenever the set of them changes, so putting a
+        // weapon away and taking it out again plays it from the beginning.
+        if let Some((names, ..)) = &rig {
+            let now = ui.input(|input| input.time);
+            let start = match self.glowing_at.get() {
+                Some(held) => held,
+                None => {
+                    self.glowing_at.set(Some(now));
+                    now
+                }
+            };
+            for (at, (path, bone)) in self.glowing.borrow().iter().enumerate() {
+                let Some(&world) = names
+                    .iter()
+                    .position(|name| name == bone)
+                    .and_then(|bone| pose.world.get(bone))
+                else {
+                    continue;
+                };
+                firing.push(effects::Fired {
+                    // Past anything an emote's own timeline can number, so the two never share a
+                    // running state.
+                    id: 1 << 48 | at as u64,
+                    path: path.clone(),
+                    at: world,
+                    since: (now - start) as f32,
+                    tint: Vec4::ONE,
+                });
+            }
+        }
+        *self.fired.borrow_mut() = firing;
         // Carried rather than written into the camera, so a motion that walks runs in place and the
         // user's own orbit, pan and zoom still mean what they did.
-        let focus = level.home.target + pose.drift;
-        let reach = level.radius + pose.stretch;
+        // The model is drawn at whatever size it states, so every world-space extent the frame is
+        // built from has to be the size it is actually drawn at rather than the size its files
+        // were modelled at. A body at twelve lit by a box built for one is dark everywhere the box
+        // does not reach, which is most of it.
+        let radius = level.radius * self.stature.get();
+        let focus = level.home.target * self.stature.get() + pose.drift;
+        let reach = radius + pose.stretch;
 
         let target = camera.target + pose.drift;
         let eye = camera.eye() + pose.drift;
@@ -2431,7 +2538,7 @@ impl Rendered {
         let near = (span - reach).max(reach * 0.005);
         // Past the light box's own far corner rather than past the model, since the volume a lamp
         // is drawn as is clipped by these planes whether or not anything depth tests against them.
-        let far = span + reach.max(level.radius * (1.0 + LAMP_SPAN * 2.0));
+        let far = span + reach.max(radius * (1.0 + LAMP_SPAN * 2.0));
         let projection = Mat4::perspective_rh_gl(FOV, rect.width() / rect.height(), near, far);
 
         // Fill and rim follow the camera; a fill weighted toward the eye is the whole of what keeps
@@ -2465,7 +2572,7 @@ impl Rendered {
         // A cell of about half the model's radius, snapped to a one, a two or a five. Only the model
         // says what scale to rule at, and a bare decade is a tenfold jump: it leaves a piece of
         // landscape standing in one cell or a character ruled into mush.
-        let cell = level.radius * 0.5;
+        let cell = level.radius * self.stature.get() * 0.5;
         let decade = 10f32.powf(cell.log10().floor());
         let step = decade
             * match cell / decade {
@@ -2500,11 +2607,11 @@ impl Rendered {
                 light: KEY,
                 lamp: program::Lamp {
                     placement: Mat4::from_translation(
-                        target + Vec3::new(0.0, level.radius, level.radius),
+                        target + Vec3::new(0.0, radius, radius),
                     ),
-                    min: Vec3::splat(-level.radius * LAMP_SPAN),
-                    max: Vec3::splat(level.radius * LAMP_SPAN),
-                    reach: level.radius * LAMP_SPAN,
+                    min: Vec3::splat(-radius * LAMP_SPAN),
+                    max: Vec3::splat(radius * LAMP_SPAN),
+                    reach: radius * LAMP_SPAN,
                     color: Vec3::splat(LAMP_FILL),
                     ..Default::default()
                 },
@@ -2544,6 +2651,18 @@ impl Rendered {
             joints: pose.joints,
             debug: self.debug.get(),
             grid,
+            // The emote's own particles, drawn inside the frame rather than over the widget: only
+            // there is the depth the character settled still attached to be tested against. On the
+            // game's own clip depth, since these are game shaders and the soft-particle variant
+            // rebuilds a world position out of that same depth buffer: handed a GL projection it
+            // reads every depth half a range out, puts the scene surface on top of the particle and
+            // discards it, so an effect vanishes wherever anything at all stands behind it.
+            effects: std::sync::Mutex::new(self.effects.borrow().frames(
+                view,
+                held,
+                (rect.width(), rect.height()),
+                eye,
+            )),
         };
 
         // Drawn with no depth test, which is what makes it an overlay rather than a rig buried in
@@ -2572,25 +2691,6 @@ impl Rendered {
             })),
         });
 
-        // The emote's own particles, over the frame the character was composited into: one callback
-        // per file, since a draw is that file's own programs and geometry.
-        for (particles, frame) in self.effects.borrow().frames(
-            &self.fired.borrow(),
-            view,
-            projection,
-            (rect.width(), rect.height()),
-            eye,
-        ) {
-            ui.painter().add(egui::PaintCallback {
-                rect,
-                callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
-                    particles
-                        .lock()
-                        .unwrap()
-                        .draw(painter.gl(), painter, &frame);
-                })),
-            });
-        }
     }
 
     /// How much of what the model needs has landed, against how much it asked for. A material names
@@ -2677,19 +2777,24 @@ impl Rendered {
     /// What the channel row offers: the translated shaders' own names for their targets, and the
     /// frame the composite resolves once the passes that make it have arrived.
     fn channels(&self) -> Vec<(usize, String)> {
-        let mut held: Vec<(usize, String)> = self
+        let named: Option<Vec<(usize, String)>> = self
             .translated
             .borrow()
             .values()
             .filter_map(|held| held.held.as_ref().ok())
             .find_map(|passes| passes.buffer.first())
-            .map(|buffer| buffer.names.iter().cloned().enumerate().collect())
-            .unwrap_or_default();
-        if !held.is_empty() && self.lighting.borrow().is_some() {
+            .map(|buffer| buffer.names.iter().cloned().enumerate().collect());
+        // A target named after the register it writes says nothing a channel view of the buffer
+        // does not say better, so the row offers the frame the lighting resolves and leaves the
+        // rest to the views the plain pass draws.
+        let mut held: Vec<(usize, String)> = named
+            .iter()
+            .flatten()
+            .filter(|(_, name)| !name.starts_with("SV_Target"))
+            .cloned()
+            .collect();
+        if named.is_some() && self.lighting.borrow().is_some() {
             held.push((gpu::LIT, "光照".to_owned()));
-            if self.look.get().reflect {
-                held.push((deferred::REFLECTED, "反射".to_owned()));
-            }
         }
         held
     }
@@ -3299,6 +3404,12 @@ impl Rendered {
         held
     }
 
+    /// The size a body stands at on its own, for one that is not built out of the creator's menus
+    /// and so has no customisation to set beside it.
+    pub fn stands_at(&self, stature: f32) {
+        self.stature.set(stature);
+    }
+
     pub fn made(
         &self,
         customize: program::Customize,
@@ -3370,7 +3481,8 @@ impl Rendered {
     /// Which pieces hang rigidly off a bone this frame rather than posing on the shared rig, each
     /// by the path it was worn as, the bone it hangs from, and its own placement relative to that
     /// bone. Replaces whatever was carried last frame outright: a weapon put away carries nothing.
-    pub fn carried(&self, pieces: Vec<(String, String, Mat4)>) {
+    pub fn carried(&self, pieces: Vec<(String, String, Mat4)>, drawn: bool) {
+        self.wielded.set(drawn);
         *self.attachments.borrow_mut() = pieces
             .into_iter()
             .map(|(path, bone, local)| Attachment { path, bone, local })
@@ -3407,8 +3519,11 @@ impl Rendered {
 
     /// Where each drawn weapon's own effect would play, by the bone it hangs from. The character
     /// scene runs no particles, so this marks the place the way an emote's own vfx is marked.
-    pub fn glowing(&self, bones: Vec<String>) {
-        *self.glowing.borrow_mut() = bones;
+    pub fn glowing(&self, effects: Vec<(String, String)>) {
+        if *self.glowing.borrow() != effects {
+            self.glowing_at.set(None);
+        }
+        *self.glowing.borrow_mut() = effects;
     }
 
     /// Stands the character in the first of `poses` its own pack actually holds, cross-fading out
@@ -3433,6 +3548,16 @@ impl Rendered {
     /// The motion the character is standing in, by the name its own pack gives it.
     pub fn standing(&self) -> Option<String> {
         self.animation.standing()
+    }
+
+    /// The motion laid over the pose the character is standing in, where one is still running.
+    pub fn acting(&self) -> Option<String> {
+        self.animation.acting()
+    }
+
+    /// What each eye-size bone is scaled by, which no clip ever states.
+    pub fn eyed(&self, eyes: [f32; 2]) {
+        self.animation.eyed(eyes);
     }
 
     /// Puts an expression on the character's face, which is what picking an emote that only makes
@@ -3502,7 +3627,7 @@ impl Rendered {
         // Getting on or off a mount is a whole second body coming and going rather than a change of
         // clothes, so the view is framed on what is there now.
         if rode.as_deref() != self.animation.rides() {
-            self.camera.set(self.level.borrow().home);
+            self.camera.set(self.level.borrow().home.scaled(self.stature.get()));
         }
         Ok(())
     }
@@ -3752,7 +3877,28 @@ impl Rendered {
 
 #[cfg(test)]
 mod tests {
-    use super::{Source, compose};
+    use glam::Vec3;
+
+    use super::{Camera, Source, compose};
+
+    /// A body drawn at twelve lit by a box built for one is dark everywhere the box does not reach,
+    /// and a camera framed for one stands inside it.
+    #[test]
+    fn a_scaled_body_is_framed_at_the_size_it_is_drawn() {
+        let home = Camera {
+            yaw: 0.5,
+            pitch: 0.25,
+            distance: 3.0,
+            target: Vec3::new(0.0, 1.0, 0.0),
+        };
+        let held = home.scaled(12.0);
+        assert_eq!(held.distance, 36.0);
+        assert_eq!(held.target, Vec3::new(0.0, 12.0, 0.0));
+        // The angles are the framing rather than the size, so they are left alone.
+        assert_eq!((held.yaw, held.pitch), (home.yaw, home.pitch));
+        let same = home.scaled(1.0);
+        assert_eq!((same.distance, same.target), (home.distance, home.target));
+    }
 
     /// `w5341b0001`'s `.imc` names material nought for the one variant it carries, which is the
     /// game stating that the weapon draws no material at all: worn at that variant it contributes

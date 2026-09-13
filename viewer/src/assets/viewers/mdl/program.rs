@@ -238,14 +238,14 @@ fn moon_softness(phase: f32) -> (f32, f32) {
 
 /// The eight phases Eorzea's calendar names a day under, four days wide apiece.
 const MOON_PHASE_NAME: [&str; 8] = [
-    "New Moon",
-    "Waxing Crescent",
-    "Waxing Half Moon",
-    "Waxing Gibbous",
-    "Full Moon",
-    "Waning Gibbous",
-    "Waning Half Moon",
-    "Waning Crescent",
+    "新月",
+    "娥眉月",
+    "上弦月",
+    "盈凸月",
+    "满月",
+    "亏凸月",
+    "下弦月",
+    "残月",
 ];
 
 /// What a day, `1..=32`, is called under that calendar.
@@ -564,14 +564,14 @@ pub const OCCLUSION_SCALE: i32 = 2;
 /// is `SSAO` and the place in this list: the four depth-only readings first, then the four that read
 /// the normal too, each set running the same taps as the other.
 pub const OCCLUDERS: [&str; 8] = [
-    "2 taps, depth",
-    "6 taps, depth",
-    "12 taps, depth",
-    "20 taps, depth",
-    "2 taps, depth and normal",
-    "6 taps, depth and normal",
-    "12 taps, depth and normal",
-    "20 taps, depth and normal",
+    "2 个采样点，仅深度",
+    "6 个采样点，仅深度",
+    "12 个采样点，仅深度",
+    "20 个采样点，仅深度",
+    "2 个采样点，深度与法线",
+    "6 个采样点，深度与法线",
+    "12 个采样点，深度与法线",
+    "20 个采样点，深度与法线",
 ];
 
 /// The buffers the exposure chain reads, and the frame, the measure and the table the passes read
@@ -634,6 +634,14 @@ pub const ATTENUATION: [u32; 3] = [0x2795_eaa4, 0xe79a_9e9b, 0x4495_a6b1];
 
 /// Whether a lamp's pass drops the pixels standing outside the box its zone clipped it to, which it
 /// reads out of `m_ClipMin` and `m_ClipMax` in the same units those are stated in.
+/// `ApplyConeAttenuation`, and the value that softens a spot's edge. A spot's package defaults it
+/// off, and off is a bare `discard` at the outer cosine: the cone meets the floor as a conic section
+/// with no falloff across it at all. The variant it selects works out
+/// `(dot(dir, toPixel) - cos(outer)) / (cos(inner) - cos(outer))`, which is the penumbra the two
+/// cosines were always written for.
+pub const APPLY_CONE_ATTENUATION: u32 = 0x52d2_1d34;
+pub const APPLY_CONE_ATTENUATION_ENABLE: u32 = 0xe106_8eed;
+
 pub const LIGHT_CLIP: u32 = 0x7db0_9695;
 pub const LIGHT_CLIP_ENABLE: u32 = 0x6f0e_2969;
 
@@ -743,6 +751,23 @@ out vec2 TEXCOORD;
 void main() {
 \tTEXCOORD = a_position.xy * 0.5 + 0.5;
 \tgl_Position = a_position;
+}
+";
+
+/// The sun's own. It covers the frame the way a post pass does, but stands at the **far plane** so a
+/// depth test keeps it behind everything already drawn rather than over the terrain in front of it.
+/// It cannot borrow the sky's: `Sun.shcd` reads `TEXCOORD` as a nought-to-one screen coordinate to
+/// sample `sGeometry` with, where the sky's hands clip space instead.
+pub const SUN_VERTEX: &str = "\
+#version 300 es
+
+layout(location = 0) in vec4 a_position;
+
+out vec2 TEXCOORD;
+
+void main() {
+\tTEXCOORD = a_position.xy * 0.5 + 0.5;
+\tgl_Position = vec4(a_position.xy, 1.0, 1.0);
 }
 ";
 
@@ -1066,6 +1091,28 @@ pub enum LampKind {
 /// One placed light, as `g_LightParam` reads it. The box is the one a zone's `.lcb` clips the light
 /// against: stated in the light's own space, in the same units the placement stands in, so it cuts
 /// the volume the light is drawn as without changing how far the light itself carries.
+/// What a lamp's pass reads where a spot keeps the cosine it is at full strength within. A line has
+/// no cone and reads the same lane as **the reciprocal of its own length**: its pass walks
+/// `direction * saturate(dot(direction, pixel - position) * lane)` to the nearest point on the
+/// segment, so nought there collapses the whole line onto one end of itself.
+pub fn full_within(kind: LampKind, inner: f32, length: f32) -> f32 {
+    match kind {
+        LampKind::Line => 1.0 / length.max(0.001),
+        _ => inner,
+    }
+}
+
+/// Where a line's segment starts, relative to the placement's own origin. The pass saturates the
+/// projection into nought-to-one, so the segment runs from the position it is handed along the
+/// direction; a placement states the line about its middle, so it starts half a length back.
+/// Nothing else has a segment, and reads the position as the point it throws from.
+pub fn runs_from(kind: LampKind, direction: Vec3, length: f32) -> Vec3 {
+    match kind {
+        LampKind::Line => direction * length * -0.5,
+        _ => Vec3::ZERO,
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Lamp {
     /// Takes the light's own space into the world, without scaling it.
@@ -1089,9 +1136,14 @@ pub struct Lamp {
     /// The cosine a spot is at full strength within. Nothing but a spot reads it, and a line reads
     /// the same lane as the reciprocal of its own length instead.
     pub inner: f32,
+    /// How long a line light runs. Nought for every other kind, which have no length to state.
+    pub length: f32,
     /// The cosine a spot's cone is cut at, which its own shader compares the direction to a pixel
     /// against. Nothing but a spot reads it.
     pub cone: f32,
+    /// The cosine of the coefficient its cone widens by, which is what its box is scaled along
+    /// before the clamp. Nought where the kind has no cone, and the box is left as it stands.
+    pub spread: f32,
 }
 
 impl Default for Lamp {
@@ -1105,9 +1157,11 @@ impl Default for Lamp {
             range: 1.0,
             color: Vec3::ONE,
             kind: LampKind::Point,
+            length: 0.0,
             direction: Vec3::Z,
             inner: 0.0,
             cone: 0.0,
+            spread: 0.0,
         }
     }
 }
@@ -1596,7 +1650,8 @@ pub struct Fog {
     pub color: Vec3,
     /// How opaque it ever gets, which is that color's own alpha.
     pub cap: f32,
-    /// How fast the opacity climbs past `start`, and the sky's share past `fade`.
+    /// How fast the opacity climbs past `start`, and how much of the sky the fog has taken up by
+    /// the far end of the table, which is what the ramp past `fade` is scaled to reach.
     pub rate: f32,
     pub blend: f32,
     pub start: f32,
@@ -1642,14 +1697,13 @@ impl Default for Fog {
 }
 
 impl Fog {
-    /// Where the table stops changing, which is the later of the two channels' own saturations. One
-    /// climbing at nothing never saturates and stands for nothing here.
+    /// Where the table stops: the later of where the opacity saturates and where the sky blend
+    /// sets off. A channel climbing at nothing stands for nothing here. The blend goes on climbing
+    /// past the end rather than saturating inside it, so its own reach is no bound on the table.
     pub fn far(&self) -> f32 {
-        let held = |from: f32, over: f32, rate: f32| (rate > 0.0).then(|| from + over / rate);
-        held(self.start, self.cap, self.rate)
-            .into_iter()
-            .chain(held(self.fade, 1.0, self.blend))
-            .fold(self.start, f32::max)
+        let saturates = (self.rate > 0.0).then(|| self.start + self.cap / self.rate);
+        let fades = (self.blend > 0.0).then_some(self.fade);
+        saturates.into_iter().chain(fades).fold(self.start, f32::max)
     }
 
     /// The table itself, two channels a texel: how opaque the fog is at that distance, and how far
@@ -1658,10 +1712,17 @@ impl Fog {
     pub fn table(&self) -> Vec<f32> {
         let last = FOG_TABLE as f32 - 1.0;
         let span = self.far() - self.start;
+        // The sky ramp is scaled to reach the share the file states exactly at the table's end
+        // rather than at a distance of its own: a fog that stops at 1,456 blends as much sky by
+        // then as one that runs to 8,000 does by there.
+        let sky = match self.far() > self.fade {
+            true => self.blend / (self.far() - self.fade),
+            false => 0.0,
+        };
         (0..FOG_TABLE)
             .flat_map(|at| {
                 let z = self.start + span * at as f32 / last;
-                let toward = ((z - self.fade) * self.blend).clamp(0.0, 1.0);
+                let toward = ((z - self.fade) * sky).clamp(0.0, 1.0);
                 [
                     ((z - self.start) * self.rate).clamp(0.0, self.cap),
                     toward * toward,
@@ -1796,6 +1857,13 @@ pub struct WindLayer {
     /// visible cycles across its own width, so the gust a player actually sees may run coarser
     /// than this by that same factor, and nothing states which the engine intends.
     pub wavelength: f32,
+}
+
+/// How far through its cycle a swaying object stands, which is also the clock `bguvscroll` scrolls a
+/// surface by: `TEXCOORD3 = m_WavingAnimTime * g_UVScrollTime + TEXCOORD`, two UV pairs at a rate
+/// each. The engine accumulates and **wraps at `2pi`** rather than letting the phase run away.
+pub fn waving_phase(clock: f32, offset: f32) -> f32 {
+    (clock * WAVING_RATE + offset).rem_euclid(std::f32::consts::TAU)
 }
 
 /// Radians of phase one sway runs a second. Read off `ffxiv_dx11.exe`: the bg renderer accumulates
@@ -2244,7 +2312,7 @@ impl Program {
         attachments: usize,
     ) -> Result<Self, String> {
         let pair = picks(package, material, set, pass, subview)
-            .ok_or("this material's keys reach no such pass")?;
+            .ok_or("此材质的键未匹配到任何通道")?;
         Self::assemble(
             package,
             bytes,
@@ -2279,7 +2347,7 @@ impl Program {
         set.extend_from_slice(keys);
         let technique = package.technique_subview()[0];
         let (vs, ps) = pair(&package, &[], &set, pass.id(), technique, SUB_VIEW_MAIN)
-            .ok_or("this package reaches no such pass")?;
+            .ok_or("该着色器包未匹配到任何通道")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
     }
 
@@ -2297,7 +2365,7 @@ impl Program {
             _ => package.technique_subview()[1],
         };
         let (vs, ps) = pair(&package, &[], &[], pass.id(), technique, subview)
-            .ok_or("the cloud package holds no such technique")?;
+            .ok_or("云着色器包没有该技术")?;
         Self::assemble(&package, bytes, (vs, ps), None, pass, 0, attachments)
     }
 
@@ -2311,8 +2379,8 @@ impl Program {
             let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
             let blob = bytes
                 .get(code.blob_offset()..code.blob_offset() + code.blob_size())
-                .ok_or("the shader's bytecode runs past the file")?;
-            let program = shex(blob).ok_or("no shader in the blob")?;
+                .ok_or("着色器的字节码超出文件末尾")?;
+            let program = shex(blob).ok_or("blob 中没有着色器")?;
             let mut names = hlsl::Names::default();
             for (resources, into) in [
                 (code.textures(), &mut names.textures),
@@ -2444,9 +2512,9 @@ impl Program {
         // The default node stands every blade still; only the AutoPlacement variant reads a wind.
         let set = [(APPLY_WAVING_ANIMATION, APPLY_WAVING_ANIMATION_AUTO_PLACEMENT)];
         let held = |technique| pair(&package, &[], &set, Pass::Buffer.id(), technique, subview);
-        let (vs, ps) = held(technique).ok_or("the grass package holds no default node")?;
+        let (vs, ps) = held(technique).ok_or("草着色器包没有默认节点")?;
         let ps = match normal {
-            true => held(GRASS_NORMAL).ok_or("the grass package holds no such technique")?.1,
+            true => held(GRASS_NORMAL).ok_or("草着色器包没有该技术")?.1,
             false => ps,
         };
         Self::assemble(
@@ -2481,8 +2549,8 @@ impl Program {
         let code = shcd::ShaderCode::parse(bytes).map_err(|why| why.to_string())?;
         let blob = bytes
             .get(code.blob_offset()..code.blob_offset() + code.blob_size())
-            .ok_or("the shader's bytecode runs past the file")?;
-        let fragment = shex(blob).ok_or("no shader in the blob")?;
+            .ok_or("着色器的字节码超出文件末尾")?;
+        let fragment = shex(blob).ok_or("blob 中没有着色器")?;
 
         let mut names = hlsl::Names::default();
         for (resources, into) in [
@@ -2579,8 +2647,8 @@ impl Program {
         let code = shcd::ShaderCode::parse(vertex).map_err(|why| why.to_string())?;
         let blob = vertex
             .get(code.blob_offset()..code.blob_offset() + code.blob_size())
-            .ok_or("the vertex shader's bytecode runs past the file")?;
-        let program = shex(blob).ok_or("no shader in the blob")?;
+            .ok_or("顶点着色器的字节码超出文件末尾")?;
+        let program = shex(blob).ok_or("blob 中没有着色器")?;
         let mut names = hlsl::Names::default();
         for resource in code.constants() {
             if let Some(name) = code.name(resource) {
@@ -2652,9 +2720,9 @@ impl Program {
         attachments: usize,
     ) -> Result<Self, String> {
         let (vertex, vs_blob) =
-            program(package, bytes, vs).ok_or("no vertex shader in the blob")?;
+            program(package, bytes, vs).ok_or("blob 中没有顶点着色器")?;
         let (fragment, ps_blob) =
-            program(package, bytes, ps).ok_or("no pixel shader in the blob")?;
+            program(package, bytes, ps).ok_or("blob 中没有像素着色器")?;
         let vs_names = names(package, vs, vs_blob);
         let ps_names = names(package, ps, ps_blob);
         let mut described = HashMap::new();
@@ -3870,12 +3938,15 @@ impl Buffer {
         // pixel, and the fade is off: the scale is cubed and clamped, so a constant one leaves it
         // alone, and a frame the game drew states the same `(0, 0, 1, 0.05)` - the floor never bites
         // against a ramp already at one. A lamp reads `z` as what its squared distance is taken into
-        // the ramp by, which is its reach, and `w` as what the falloff itself is divided by, which
-        // is the reciprocal of the range its record states. The two lanes below it are the cones a
-        // spot is cut between, and nothing else reads them.
+        // the ramp by, and `w` as what that ramp is scaled by against the distance itself: the
+        // pixel shader works out `saturate(ramp(d^2 * z) * w / d)`. A spot's own buffer in a frame
+        // the game drew reads `(cos(inner), cos(outer), 0.000196, 1.0)`, so `w` is **one** and the
+        // falloff is the ramp over the distance with nothing scaling it up. `y` is the cosine that
+        // package discards a spot against outright.
         let reach = lamp.reach.max(0.001);
+        let held = full_within(lamp.kind, lamp.inner, lamp.length);
         let (inner, cone) = match pass {
-            Pass::Lamp => (lamp.inner, lamp.cone),
+            Pass::Lamp => (held, lamp.cone),
             _ => (0.0, 0.0),
         };
         put(
@@ -3883,7 +3954,7 @@ impl Buffer {
             "m_Attenuation",
             match pass {
                 Pass::Composite | Pass::CompositeBlended => vec![0.0, 0.0, 1.0, 0.05],
-                _ => vec![inner, cone, 1.0 / (reach * reach), 1.0 / lamp.range],
+                _ => vec![inner, cone, 1.0 / (reach * reach), 1.0],
             },
         );
         put(light, "m_LightFadeValueStatic", vec![1.0]);
@@ -3896,10 +3967,11 @@ impl Buffer {
         // where the clamp alone would have put it.
         let volume = lamp.placement * Mat4::from_scale(Vec3::splat(reach));
         let (min, max) = (lamp.min / reach, lamp.max / reach);
+        let from = runs_from(lamp.kind, lamp.direction, lamp.length);
         put(
             light,
             "m_Position",
-            (view * lamp.placement * Vec3::ZERO.extend(1.0))
+            (view * (lamp.placement * Vec3::ZERO.extend(1.0) + from.extend(0.0)))
                 .to_array()
                 .to_vec(),
         );
@@ -3918,7 +3990,13 @@ impl Buffer {
             "m_PlaneInversMatrix",
             rows((view * lamp.placement).inverse(), 3),
         );
-        put(light, "m_ClipMin", min.extend(1.0).to_array().to_vec());
+        // A spot scales its box along itself by the cone it widens by, capped at the box's own
+        // depth; anything else leaves the box where the clamp alone puts it.
+        let along = match lamp.spread > 0.0 {
+            true => (max.z / lamp.spread).min(1.0),
+            false => 0.0,
+        };
+        put(light, "m_ClipMin", min.extend(along).to_array().to_vec());
         put(light, "m_ClipMax", max.to_array().to_vec());
         put(
             light,
@@ -3975,7 +4053,10 @@ impl Buffer {
                     let (x, z) = (instance.transform.w_axis.x, instance.transform.w_axis.z);
                     (x * 0.37 + z * 0.61).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU
                 });
-            put(at, "m_WavingAnimTime", &[scene.clock * WAVING_RATE + offset]);
+            // Wrapped where the engine wraps it. A sway would not care - a sine is periodic - but
+            // this lane is also the clock `bguvscroll` scrolls a surface by, and there an unwrapped
+            // phase walks the coordinate away without bound instead of cycling.
+            put(at, "m_WavingAnimTime", &[waving_phase(scene.clock, offset)]);
             put(at, "m_WavingAnimNoize", &[(offset / std::f32::consts::TAU).fract()]);
             // The blend is what carries the colour: the shading lerps from the material's own
             // emissive toward this one by it, so a colour written with the blend at nought never
@@ -4308,11 +4389,77 @@ mod test {
     use std::io::Cursor;
 
     use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
+
+    /// Every pass that draws the sky, the sun, the moon or the stars stands at the far plane, so a
+    /// depth test keeps it behind the terrain rather than over it. The sun read the ordinary post
+    /// quad, which sits at the near plane and passes `LEQUAL` against everything.
+    #[test]
+    fn every_celestial_pass_stands_at_the_far_plane() {
+        for (name, source) in [
+            ("sun", super::SUN_VERTEX),
+            ("sky", super::SKY_VERTEX),
+            ("moon", super::MOON_VERTEX),
+        ] {
+            assert!(
+                source.contains("1.0, 1.0);"),
+                "{name} does not hold its quad at the far plane"
+            );
+        }
+        // And the ordinary post quad deliberately does not: it is drawn with no depth test.
+        assert!(super::POST_VERTEX.contains("gl_Position = a_position;"));
+        // The sun still hands a nought-to-one coordinate, which is what it samples sGeometry with.
+        assert!(super::SUN_VERTEX.contains("a_position.xy * 0.5 + 0.5"));
+    }
+
+    /// The engine accumulates the sway phase and wraps it at `2pi`. A sine would not care, but the
+    /// same lane is the clock `bguvscroll` scrolls by, and an unwrapped phase walks that coordinate
+    /// away without bound instead of cycling.
+    #[test]
+    fn the_sway_phase_wraps_where_the_engine_wraps_it() {
+        use super::waving_phase;
+        let tau = std::f32::consts::TAU;
+        assert!((waving_phase(0.0, 0.0)).abs() < 1e-6);
+        assert!((waving_phase(1.0, 0.0) - 1.0).abs() < 1e-6);
+        // A clock long past one turn comes back inside it rather than running on.
+        let held = waving_phase(1000.0, 0.0);
+        assert!((0.0..tau).contains(&held), "{held} is outside one turn");
+        // The offset is where in its cycle the object starts, so it shifts the phase rather than
+        // being dropped: a stand of one plant leans as one because every blade carries the same one.
+        assert!((waving_phase(0.0, tau * 0.25) - tau * 0.25).abs() < 1e-4);
+        assert!((waving_phase(1.0, tau * 0.25) - (1.0 + tau * 0.25)).abs() < 1e-4);
+        assert!((0.0..tau).contains(&waving_phase(1000.0, tau * 0.75)));
+    }
+
+    /// A line's pass reads this lane as the reciprocal of its own length. Left at a spot's `inner`
+    /// it is nought, and `saturate(dot(...) * 0)` collapses the whole segment onto one end.
+    #[test]
+    fn a_line_states_the_reciprocal_of_its_length_where_a_spot_states_its_cone() {
+        use super::{LampKind, full_within};
+        assert_eq!(full_within(LampKind::Line, 0.0, 25.0), 1.0 / 25.0);
+        // Every other kind keeps the cone it was given.
+        assert_eq!(full_within(LampKind::Spot, 0.7, 25.0), 0.7);
+        assert_eq!(full_within(LampKind::Point, 0.0, 25.0), 0.0);
+        // A line of no length would divide by nought.
+        assert!(full_within(LampKind::Line, 0.0, 0.0).is_finite());
+    }
+
+    /// The segment runs from the position it is handed, so a line stated about its middle has to
+    /// start half a length back or it lights only the half in front of its origin.
+    #[test]
+    fn a_line_starts_half_its_length_before_its_own_origin() {
+        use super::{LampKind, runs_from};
+        let along = Vec3::X;
+        assert_eq!(runs_from(LampKind::Line, along, 10.0), Vec3::new(-5.0, 0.0, 0.0));
+        // Nothing else has a segment; its position is the point it throws from.
+        assert_eq!(runs_from(LampKind::Spot, along, 10.0), Vec3::ZERO);
+        assert_eq!(runs_from(LampKind::Point, along, 10.0), Vec3::ZERO);
+    }
     use ironworks::file::{File, spm::ShaderParameters};
 
     use super::{
         ADAPT_LUM_PARAM, ATLAS_COLUMNS, ATLAS_ROWS, Ambient, Buffer, CLOUD_SHADOW_MATRIX, Customize,
-        DECAL, DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FXAA_PARAM, Fog, HDAO_PARAM, INSTANCE,
+        DECAL, DIRECTIONAL_SHADOW_PARAM, Exposure, FOG_PARAM, FOG_TABLE, FXAA_PARAM, Fog, HDAO_PARAM,
+        INSTANCE,
         INSTANCING, JOINT, REFLECTION_PARAM, ROW, SETTLE, SHADER_TYPE, SHADOW_MAP, SPLITS,
         SUN_PARAM, WAVING, WIND_POWER_SCALE, Pass, Reflect, Scene, Sky, Volume, Wind, WindLayer,
         ambient, decal_field, encode, instance_fields, joints, moon_phase, moon_roll, moon_softness,
@@ -5279,5 +5426,53 @@ mod test {
         // A clock long enough to have wrapped stays inside the texture rather than drifting off it.
         let far = held(30.0 * 512.0 / 8.0 + 30.0);
         assert!((far[5] - (8.0 / 512.0)).abs() < 1e-3, "{}", far[5]);
+    }
+
+    /// Copperbell weather 2, against the buffers and the table the game itself drew there.
+    #[test]
+    fn fog_table_spans_what_the_game_states() {
+        let held = Fog {
+            color: Vec3::new(99.0, 124.0, 153.0) / 255.0,
+            cap: 1.0,
+            rate: 3.0 / 1000.0,
+            blend: 1.0,
+            start: 0.0,
+            fade: 1000.0,
+            ..Default::default()
+        };
+        // The sky blend sets off at the fade, past where the opacity has already capped, so the
+        // table runs out to it rather than to the nearer saturation.
+        assert_eq!(held.far(), 1000.0);
+        // What the pass reads a distance off the table with: the game wrote 0.000996 and 0.001953.
+        let texel = 1.0 / FOG_TABLE as f32;
+        let scale = (1.0 - texel) / (held.far() - held.start);
+        assert!((scale - 0.000_996_094).abs() < 5e-9, "{scale}");
+        assert!((texel * 0.5 - scale * held.start - 0.001_953_125).abs() < 5e-9);
+        // Its own table saturates at texel 85 and never blends toward the sky, as the game's did.
+        let table = held.table();
+        let opacity: Vec<f32> = table.iter().step_by(2).copied().collect();
+        assert_eq!(opacity.iter().position(|held| *held >= 1.0), Some(85));
+        assert!(table.iter().skip(1).step_by(2).all(|held| *held == 0.0));
+    }
+
+    /// Ishgard, against the table the game drew there: the sky ramp reaches the share the file
+    /// states by the far end however short the fog's own reach is.
+    #[test]
+    fn the_sky_ramp_fills_the_table_the_fog_spans() {
+        let held = Fog {
+            cap: 242.0 / 255.0,
+            rate: 0.3 / 1000.0,
+            blend: 1.0,
+            start: 150.0,
+            fade: 2000.0,
+            ..Default::default()
+        };
+        assert!((held.far() - 3313.0).abs() < 1.0, "{}", held.far());
+        let table = held.table();
+        let sky: Vec<f32> = table.iter().skip(1).step_by(2).copied().collect();
+        // Nothing before the fade, which stands about three fifths of the way along the table.
+        assert_eq!(sky.iter().position(|held| *held > 0.0), Some(150));
+        // And the whole of the sky by the last texel, not the twentieth of it a fixed rate gave.
+        assert!((sky[FOG_TABLE as usize - 1] - 1.0).abs() < 1e-3, "{}", sky[255]);
     }
 }

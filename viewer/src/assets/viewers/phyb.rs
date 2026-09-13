@@ -6,7 +6,7 @@ use std::io::Cursor;
 use anyhow::Result;
 use egui::{RichText, ScrollArea, vec2};
 use ironworks::file::File;
-use ironworks::file::phyb::{Chain, Collision, Name, Physics, Simulator};
+use ironworks::file::phyb::{Chain, ChainType, Collision, CollisionType, Name, Physics, Simulator};
 
 use super::{Preview, facts, headers, heading, section};
 use crate::assets::Bytes;
@@ -19,6 +19,25 @@ fn named(name: Name) -> String {
 
 fn axes(values: [f32; 3]) -> String {
     format!("{:.3}, {:.3}, {:.3}", values[0], values[1], values[2])
+}
+
+/// How a chain's nodes are spaced along it.
+fn chain_type_name(kind: ChainType) -> String {
+    match kind {
+        ChainType::Sphere => "球体".to_owned(),
+        ChainType::Capsule => "胶囊".to_owned(),
+        ChainType::Unknown(value) => format!("未知（{value}）"),
+    }
+}
+
+/// Which side of a collision shape its bones are kept on.
+fn collision_type_name(kind: CollisionType) -> String {
+    match kind {
+        CollisionType::Both => "双面".to_owned(),
+        CollisionType::Outside => "外侧".to_owned(),
+        CollisionType::Inside => "内侧".to_owned(),
+        CollisionType::Unknown(value) => format!("未知（{value}）"),
+    }
 }
 
 /// The switches a simulator declares, in flag order.
@@ -142,8 +161,8 @@ fn chain_ui(ui: &mut egui::Ui, simulator: usize, index: usize, chain: &Chain) {
     heading(
         ui,
         &format!(
-            "链 {index}：{:?}，{} 个节点",
-            chain.chain_type(),
+            "链 {index}：{}，{} 个节点",
+            chain_type_name(chain.chain_type()),
             chain.nodes().len()
         ),
     );
@@ -173,7 +192,7 @@ fn chain_ui(ui: &mut egui::Ui, simulator: usize, index: usize, chain: &Chain) {
                 .map(|collision| {
                     vec![
                         named(collision.name()),
-                        format!("{:?}", collision.collision_type()),
+                        collision_type_name(collision.collision_type()),
                     ]
                 })
                 .collect::<Vec<_>>(),
@@ -251,7 +270,7 @@ fn simulator_ui(ui: &mut egui::Ui, index: usize, simulator: &Simulator) {
                     .map(|collision| {
                         vec![
                             named(collision.name()),
-                            format!("{:?}", collision.collision_type()),
+                            collision_type_name(collision.collision_type()),
                         ]
                     })
                     .collect::<Vec<_>>(),

@@ -5,7 +5,7 @@ fn main() {
 
     eframe::WebLogger::init(log::LevelFilter::Debug).ok();
 
-    log::info!("Starting SqpackWorker");
+    log::info!("正在启动 SqpackWorker");
 
     SqpackWorker::registrar()
         .encoding::<PreservingCodec>()

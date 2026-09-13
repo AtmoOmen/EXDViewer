@@ -118,7 +118,7 @@ pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {
         identity.push(("UV 集", format!("{} (#{})", set.name(), set.index()), None));
     }
     for set in material.color_sets() {
-identity.push(("颜色集", format!("{} (#{})", set.name(), set.index()), None));
+    identity.push(("颜色集", format!("{} (#{})", set.name(), set.index()), None));
     }
     for key in material.shader_keys() {
         params.push(Param {

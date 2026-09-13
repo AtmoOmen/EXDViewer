@@ -20,6 +20,23 @@ use crate::backend::Backend;
 use crate::data::FileProviderExt;
 use crate::utils::{PromiseKind, TrackedPromise};
 
+/// The shape a placed sound is emitted over, spelled out rather than left to `Debug`.
+fn kind_name(kind: SoundEffectKind) -> &'static str {
+    match kind {
+        SoundEffectKind::Point => "点",
+        SoundEffectKind::PointDirectional => "定向点",
+        SoundEffectKind::Line => "线",
+        SoundEffectKind::PolyLine => "折线",
+        SoundEffectKind::Surface => "面",
+        SoundEffectKind::BoardObstruction => "板状遮挡",
+        SoundEffectKind::BoxObstruction => "盒状遮挡",
+        SoundEffectKind::PolyLineObstruction => "折线遮挡",
+        SoundEffectKind::PolygonObstruction => "多边形遮挡",
+        SoundEffectKind::LineExtController => "线延伸控制器",
+        SoundEffectKind::Polygon => "多边形",
+    }
+}
+
 struct Placement {
     kind: SoundEffectKind,
     asset_path: String,
@@ -217,7 +234,7 @@ impl Sounds {
         if ui.button(glyph).clicked() {
             self.toggle(index, backend);
         }
-        ui.label(format!("{kind:?}"));
+        ui.label(kind_name(kind));
         // Plain, unwrapped: a `.truncate()` or `.wrap()` label reports its desired width as
         // whatever the column already is, so it can never grow one and would lock the column at
         // whatever the first frame happened to offer.

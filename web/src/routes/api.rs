@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::Write,
+    io::{Read, Write},
     sync::{Arc, LazyLock, Mutex},
     time::{Duration, Instant},
 };
@@ -20,7 +20,7 @@ use actix_web::{
     web::{self, Bytes},
 };
 use actix_web_lab::header::{CacheControl, CacheDirective};
-use flate2::{Compression, write::GzEncoder};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use xiv_core::file::{slug::Slug, version::GameVersion};
@@ -53,6 +53,7 @@ pub fn service() -> impl HttpServiceFactory {
         .service(post_report)
         .service(get_global_paths)
         .service(get_songs)
+        .service(get_bnpc)
         .service(get_versions_repo)
         .service(get_latest_repo)
         .service(get_file_repo)
@@ -481,7 +482,12 @@ async fn get_versions_repo(
 
 async fn serve_versions(data: &MessageQueue, target: Target) -> Result<HttpResponse> {
     match data.versions_for(target).await {
-        Some(info) => Ok(HttpResponse::Ok().json(info)),
+        Some(mut info) => {
+            if let Target::Region(region) = target {
+                crate::data::label_versions(&mut info, region).await;
+            }
+            Ok(HttpResponse::Ok().json(info))
+        }
         None => Err(ErrorBadRequest("No version info available")),
     }
 }
@@ -785,6 +791,128 @@ async fn build_songs(sheet: &str) -> anyhow::Result<String> {
     Ok(serde_json::to_string(&Value::Object(songs))?)
 }
 
+/// BNpc base -> crowdsourced name ids, distilled from FFXIVGachaSpreadsheet's pairing dumps.
+const BNPC_DATA: &str = "https://raw.githubusercontent.com/Infiziert90/FFXIVGachaSpreadsheet/master/website/static/data/";
+const BNPC_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+/// Held gzipped, which is what nearly every caller wants and a fraction of the size.
+type BnpcCache = Mutex<Option<(Instant, Bytes)>>;
+static BNPC_CACHE: LazyLock<BnpcCache> = LazyLock::new(|| Mutex::new(None));
+
+#[derive(Deserialize)]
+struct BnpcSimple {
+    #[serde(rename = "Base")]
+    base: u32,
+    #[serde(rename = "Names")]
+    names: Vec<u32>,
+}
+
+#[derive(Deserialize)]
+struct BnpcSighting {
+    #[serde(rename = "Base")]
+    base: u32,
+    #[serde(rename = "Name")]
+    name: u32,
+    #[serde(rename = "Records")]
+    records: u64,
+}
+
+#[derive(Deserialize)]
+struct BnpcPairings {
+    #[serde(rename = "BnpcPairings")]
+    pairings: HashMap<String, BnpcSighting>,
+}
+
+#[get("/bnpc/")]
+async fn get_bnpc(request: HttpRequest) -> Result<HttpResponse> {
+    let body = bnpc().await?;
+
+    let mut response = HttpResponse::Ok();
+    response
+        .content_type("application/json")
+        .insert_header(CacheControl(vec![
+            CacheDirective::Public,
+            CacheDirective::MaxAge(BNPC_TTL.as_secs() as u32),
+        ]))
+        .insert_header((header::VARY, "Accept-Encoding"));
+
+    if accepts(&request, "gzip") {
+        return Ok(response
+            .insert_header((header::CONTENT_ENCODING, "gzip"))
+            .body(body));
+    }
+    let mut plain = Vec::new();
+    GzDecoder::new(&body[..])
+        .read_to_end(&mut plain)
+        .map_err(ErrorInternalServerError)?;
+    Ok(response.body(plain))
+}
+
+/// The distilled map, rebuilt when it ages out. A refresh that fails is served stale rather than
+/// passed on: last night's names beat none.
+async fn bnpc() -> Result<Bytes> {
+    let known = BNPC_CACHE.lock().unwrap().clone();
+    if let Some((fetched, body)) = &known
+        && fetched.elapsed() < BNPC_TTL
+    {
+        return Ok(body.clone());
+    }
+    match build_bnpc().await {
+        Ok(body) => {
+            *BNPC_CACHE.lock().unwrap() = Some((Instant::now(), body.clone()));
+            Ok(body)
+        }
+        Err(error) => match known {
+            Some((_, stale)) => {
+                log::warn!("Serving stale BNpc names: {error}");
+                Ok(stale)
+            }
+            None => Err(ErrorInternalServerError(error)),
+        },
+    }
+}
+
+async fn build_bnpc() -> anyhow::Result<Bytes> {
+    let client = reqwest::Client::new();
+    let simple: Vec<BnpcSimple> = client
+        .get(format!("{BNPC_DATA}BnpcPairsSimple.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let seen: BnpcPairings = client
+        .get(format!("{BNPC_DATA}BnpcPairsV2.json"))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    let json = distil(simple, seen)?;
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(json.as_bytes())?;
+    Ok(Bytes::from(encoder.finish()?))
+}
+
+fn distil(simple: Vec<BnpcSimple>, seen: BnpcPairings) -> anyhow::Result<String> {
+    let mut sightings: HashMap<(u32, u32), u64> = HashMap::new();
+    for held in seen.pairings.into_values() {
+        *sightings.entry((held.base, held.name)).or_default() += held.records;
+    }
+
+    // A base wearing several names is only ambiguous on paper: the one sighted most is the one it
+    // goes by, so the caller can take the head of the list and ignore the tail.
+    let mut bases = Map::new();
+    for BnpcSimple { base, mut names } in simple {
+        names.sort_by_key(|&name| {
+            std::cmp::Reverse(sightings.get(&(base, name)).copied().unwrap_or(0))
+        });
+        bases.insert(base.to_string(), Value::from(names));
+    }
+
+    Ok(serde_json::to_string(&Value::Object(bases))?)
+}
+
 fn log_error<B: MessageBody + 'static>(
     is_client: bool,
     res: ServiceResponse<B>,
@@ -837,6 +965,53 @@ mod tests {
 
     use super::*;
     use crate::{config::Report, paths::PathIndex};
+
+    #[actix_web::test]
+    async fn a_base_takes_the_name_it_was_sighted_under_most() {
+        let simple = vec![
+            BnpcSimple {
+                base: 7,
+                names: vec![20, 9, 44],
+            },
+            // Shares name 20 with base 7, and far more sightings of it, so a count keyed by name
+            // alone would drag base 7's ranking around.
+            BnpcSimple {
+                base: 8,
+                names: vec![20],
+            },
+        ];
+        let seen = BnpcPairings {
+            pairings: HashMap::from([
+                (
+                    "a".to_owned(),
+                    BnpcSighting {
+                        base: 7,
+                        name: 20,
+                        records: 3,
+                    },
+                ),
+                (
+                    "b".to_owned(),
+                    BnpcSighting {
+                        base: 7,
+                        name: 9,
+                        records: 100,
+                    },
+                ),
+                (
+                    "c".to_owned(),
+                    BnpcSighting {
+                        base: 8,
+                        name: 20,
+                        records: 500,
+                    },
+                ),
+            ]),
+        };
+
+        // 44 was never sighted, so it sorts behind both.
+        assert_eq!(distil(simple, seen).unwrap(), r#"{"7":[9,20,44],"8":[20]}"#);
+    }
 
     fn collector() -> web::Data<Collector> {
         web::Data::new(Collector::new(

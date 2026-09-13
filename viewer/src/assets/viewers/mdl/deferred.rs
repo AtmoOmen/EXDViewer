@@ -1246,8 +1246,8 @@ impl Buffers {
         }
         let texture = self
             .channel(at)
-            .ok_or_else(|| format!("the frame has no buffer {at}"))?;
-        let depth = self.depth.ok_or("no depth buffer")?;
+            .ok_or_else(|| format!("帧中没有缓冲区 {at}"))?;
+        let depth = self.depth.ok_or("没有深度缓冲区")?;
         let program = self.presenter(gl)?;
         let layout = self.screen(gl)?;
         unsafe {
@@ -1281,7 +1281,7 @@ impl Buffers {
     pub fn read(&self, gl: &glow::Context, at: usize) -> Result<Vec<f32>, String> {
         let texture = self
             .channel(at)
-            .ok_or_else(|| format!("the frame has no buffer {at}"))?;
+            .ok_or_else(|| format!("帧中没有缓冲区 {at}"))?;
         let count = (self.size.0 * self.size.1 * 4) as usize;
         unsafe {
             let held = gl.create_framebuffer()?;
@@ -1334,7 +1334,7 @@ impl Buffers {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
             gl.delete_framebuffer(held);
             match incomplete.or((why != glow::NO_ERROR).then_some(why)) {
-                Some(why) => Err(format!("buffer {at} would not read back: {why:#x}")),
+                Some(why) => Err(format!("缓冲区 {at} 无法回读：{why:#x}")),
                 None => Ok(values),
             }
         }
@@ -1496,7 +1496,7 @@ impl Buffers {
                 );
                 let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
                 if status != glow::FRAMEBUFFER_COMPLETE {
-                    return Err(format!("the G-buffer would not complete: {status:#x}"));
+                    return Err(format!("G-buffer 不完整：{status:#x}"));
                 }
                 self.frames.push(held);
             }
@@ -1699,8 +1699,8 @@ impl Buffers {
     /// the read framebuffer rather than blitted: the draw that follows writes the frame this was
     /// copied from, and a texture being written cannot also be sampled.
     pub fn keep(&self, gl: &glow::Context) -> Result<(), String> {
-        let (frame, _) = self.lit.ok_or("no lit frame")?;
-        let held = self.resolved.ok_or("no resolved frame")?;
+        let (frame, _) = self.lit.ok_or("没有光照帧")?;
+        let held = self.resolved.ok_or("没有解析后的帧")?;
         unsafe {
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(frame));
             gl.read_buffer(glow::COLOR_ATTACHMENT0);
@@ -1717,8 +1717,8 @@ impl Buffers {
     /// Keeps what the glare chain spreads, which the game does the moment the sky has drawn and
     /// nothing else has. Halved on the way, the way the game's own copy is.
     pub fn source(&self, gl: &glow::Context) -> Result<(), String> {
-        let (frame, _) = self.lit.ok_or("no lit frame")?;
-        let (into, _) = self.sourced.ok_or("no glare source")?;
+        let (frame, _) = self.lit.ok_or("没有光照帧")?;
+        let (into, _) = self.sourced.ok_or("没有泛光源缓冲区")?;
         blit(gl, frame, into, self.size, self.halved());
         Ok(())
     }
@@ -1735,14 +1735,14 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         let table = held
             .textures
             .iter()
             .find(|texture| texture.name == program::POST_TABLE)
             .and_then(|texture| self.supplied(texture.kind, GRADING.0))
-            .ok_or("the grading table has not arrived")?;
-        let source = self.resolved.ok_or("no resolved frame")?;
+            .ok_or("调色表尚未到达")?;
+        let source = self.resolved.ok_or("没有解析后的帧")?;
         let layout = self.screen(gl)?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
@@ -1793,7 +1793,7 @@ impl Buffers {
                 program::POST_TABLE => table,
                 name => {
                     return Err(format!(
-                        "the grading pass reads {name}, which nothing fills"
+                        "调色通道读取 {name}，但没有任何内容填充它"
                     ));
                 }
             };
@@ -1826,9 +1826,9 @@ impl Buffers {
         held: &Occlusion,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (scaled, _) = self.scaled.ok_or("no scaled depth")?;
-        let (gathered, _) = self.gathered.ok_or("no gathered depth")?;
-        let (occluded, _) = self.occluded.ok_or("no occlusion")?;
+        let (scaled, _) = self.scaled.ok_or("没有缩放后的深度")?;
+        let (gathered, _) = self.gathered.ok_or("没有汇聚后的深度")?;
+        let (occluded, _) = self.occluded.ok_or("没有环境光遮蔽")?;
         let size = self.fraction();
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
@@ -1872,8 +1872,8 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (into, _) = self.mask.ok_or("no shadow mask")?;
-        let (from, _) = self.lit.ok_or("no lit frame")?;
+        let (into, _) = self.mask.ok_or("没有阴影遮罩")?;
+        let (from, _) = self.lit.ok_or("没有光照帧")?;
         unsafe {
             // Ahead of the copy: a blit is one of the few things the scissor still reaches.
             gl.disable(glow::SCISSOR_TEST);
@@ -1947,7 +1947,7 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::CULL_FACE);
@@ -1983,7 +1983,7 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         if program::sun_at(scene).is_none() {
             return Ok(());
         }
@@ -2013,7 +2013,7 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         let Some(disc) = program::moon_disc(scene).filter(|_| scene.sky.moonlight.w > 0.0) else {
             return Ok(());
         };
@@ -2059,7 +2059,7 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         let Some(texture) = self
             .sheets
             .get(at)
@@ -2270,7 +2270,7 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         let Some((_, sky)) = self.overhead else {
             return Ok(());
         };
@@ -2367,10 +2367,10 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let into = self.bare.ok_or("no lit frame")?;
-        let (from, _) = self.lit.ok_or("no lit frame")?;
-        let depth = self.depth.ok_or("no depth")?;
-        let (_, sky) = self.overhead.ok_or("no sky plane")?;
+        let into = self.bare.ok_or("没有光照帧")?;
+        let (from, _) = self.lit.ok_or("没有光照帧")?;
+        let depth = self.depth.ok_or("没有深度")?;
+        let (_, sky) = self.overhead.ok_or("没有天空平面")?;
         let table = self.table(gl, scene.fog)?;
         unsafe {
             // Ahead of the copy: a blit is one of the few things the scissor still reaches.
@@ -2560,12 +2560,12 @@ impl Buffers {
         held: &Exposure,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, frame) = self.lit.ok_or("no lit frame")?;
-        let source = self.resolved.ok_or("no resolved frame")?;
-        let pair = self.adapted.ok_or("no adaptation")?;
-        let (into, curve) = self.curve.ok_or("no tone curve")?;
+        let (lit, frame) = self.lit.ok_or("没有光照帧")?;
+        let source = self.resolved.ok_or("没有解析后的帧")?;
+        let pair = self.adapted.ok_or("没有适应结果")?;
+        let (into, curve) = self.curve.ok_or("没有色调曲线")?;
         let levels = self.luminance.clone();
-        let last = levels.len().checked_sub(1).ok_or("no measure")?;
+        let last = levels.len().checked_sub(1).ok_or("没有亮度测量结果")?;
         self.readback(gl);
         // The exposure the passes are run under is the chain's own rather than the caller's: it is
         // what the card answered, and only this side of the graph knows it.
@@ -2680,10 +2680,10 @@ impl Buffers {
         held: &Glare,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
-        let (_, source) = self.sourced.ok_or("no glare source")?;
-        let [(bright, kept), (merged, halo)] = self.glared.ok_or("no glare buffers")?;
-        let [(first, swept), (second, spread)] = self.reached.ok_or("no glare buffers")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
+        let (_, source) = self.sourced.ok_or("没有泛光源缓冲区")?;
+        let [(bright, kept), (merged, halo)] = self.glared.ok_or("没有泛光缓冲区")?;
+        let [(first, swept), (second, spread)] = self.reached.ok_or("没有泛光缓冲区")?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
@@ -2815,7 +2815,7 @@ impl Buffers {
                 );
                 let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
                 if status != glow::FRAMEBUFFER_COMPLETE {
-                    return Err(format!("water's reflection would not complete: {status:#x}"));
+                    return Err(format!("水面反射不完整：{status:#x}"));
                 }
             }
             frames.push(held);
@@ -2841,7 +2841,7 @@ impl Buffers {
         scene: &program::Scene,
     ) -> Result<Watering, String> {
         self.hierarchy(gl, scene)?;
-        let frame = self.resolved.ok_or("no resolved frame")?;
+        let frame = self.resolved.ok_or("没有解析后的帧")?;
         let depth = self.mirrors(gl)?.depth.0;
         let held = self.waters(gl)?;
         let (into, size) = (held.sharp.0, held.size);
@@ -3006,7 +3006,7 @@ impl Buffers {
                 held
             }
         };
-        let depth = self.depth.ok_or("no depth buffer")?;
+        let depth = self.depth.ok_or("没有深度缓冲区")?;
         let layout = self.screen(gl)?;
         let (near, far) = scene.planes();
         let frame = self.size;
@@ -3089,7 +3089,7 @@ impl Buffers {
         held: &Reflection,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         self.keep(gl)?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
@@ -3099,7 +3099,7 @@ impl Buffers {
             gl.depth_mask(false);
         }
         self.hierarchy(gl, scene)?;
-        let frame = self.resolved.ok_or("no resolved frame")?;
+        let frame = self.resolved.ok_or("没有解析后的帧")?;
         let mirrors = self.mirrors(gl)?;
         let size = mirrors.size;
         let levels = mirrors.chain[0].1.len();
@@ -3239,8 +3239,8 @@ impl Buffers {
         held: &Smoothing,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
-        let (into, smoothed) = self.smoothed.ok_or("no smoothed frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
+        let (into, smoothed) = self.smoothed.ok_or("没有抗锯齿后的帧")?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
@@ -3266,7 +3266,7 @@ impl Buffers {
         held: &std::sync::Arc<program::Program>,
         scene: &program::Scene,
     ) -> Result<(), String> {
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.disable(glow::DEPTH_TEST);
@@ -3296,6 +3296,12 @@ impl Buffers {
         self.cutoff
     }
 
+    /// The depth the frame's own geometry left, for a pass that samples it back while drawing
+    /// through the framebuffer standing on the copy.
+    pub fn depth(&self) -> Option<glow::Texture> {
+        self.depth
+    }
+
     /// The live frame the composite resolved into, standing on the depth itself: sun, moon and an
     /// effect's own glow all draw here, since none of them sample it back.
     pub fn lit(&self) -> Option<glow::Framebuffer> {
@@ -3304,8 +3310,8 @@ impl Buffers {
 
     /// Refreshes that copy from what the frame currently holds.
     pub fn cut(&self, gl: &glow::Context) -> Result<(), String> {
-        let (frame, _) = self.lit.ok_or("no lit frame")?;
-        let into = self.bare.ok_or("no lit frame")?;
+        let (frame, _) = self.lit.ok_or("没有光照帧")?;
+        let into = self.bare.ok_or("没有光照帧")?;
         unsafe {
             gl.disable(glow::SCISSOR_TEST);
             gl.bind_framebuffer(glow::READ_FRAMEBUFFER, Some(frame));
@@ -3415,13 +3421,13 @@ impl Buffers {
 
     /// What one of its lighting passes reads.
     fn sheering(&self) -> Result<Sheered, String> {
-        let held = self.sheer.as_ref().ok_or("no transparency buffer")?;
+        let held = self.sheer.as_ref().ok_or("没有半透明缓冲区")?;
         Ok(Sheered {
             color: held
                 .color
                 .as_slice()
                 .try_into()
-                .map_err(|_| "the transparency buffer is short a channel")?,
+                .map_err(|_| "半透明缓冲区少一个通道")?,
             depth: held.depth,
             position: held.position.1,
         })
@@ -3431,9 +3437,9 @@ impl Buffers {
     /// opaque passes drew is hidden by them and one in front of it settles a depth of its own.
     pub fn sheer(&mut self, gl: &glow::Context) -> Result<(), String> {
         self.sheered(gl)?;
-        let from = *self.frames.first().ok_or("no G-buffer")?;
+        let from = *self.frames.first().ok_or("没有 G-buffer")?;
         let (width, height) = self.size;
-        let into = self.sheer.as_ref().ok_or("no transparency buffer")?.frame;
+        let into = self.sheer.as_ref().ok_or("没有半透明缓冲区")?.frame;
         let attachments: Vec<u32> = (0..SHEER)
             .map(|at| glow::COLOR_ATTACHMENT0 + at as u32)
             .collect();
@@ -3488,10 +3494,10 @@ impl Buffers {
         let position = self
             .sheer
             .as_ref()
-            .ok_or("no transparency buffer")?
+            .ok_or("没有半透明缓冲区")?
             .position
             .0;
-        let (light, _) = self.light.ok_or("no light buffer")?;
+        let (light, _) = self.light.ok_or("没有光照缓冲区")?;
         let mut held = program::Scene {
             sheer: true,
             ..scene.clone()
@@ -3928,7 +3934,7 @@ impl Buffers {
                 .color
                 .get(at)
                 .copied()
-                .ok_or_else(|| format!("the G-buffer has no channel {at}"));
+                .ok_or_else(|| format!("G-buffer 没有通道 {at}"));
         }
         if let Some(held) = self.supplied(program::Kind::Plane, id) {
             return Ok(held);
@@ -3951,23 +3957,23 @@ impl Buffers {
             return Ok(*held);
         }
         Ok(match id {
-            DEPTH | DEPTH_PLANE => self.depth.ok_or("no depth buffer")?,
+            DEPTH | DEPTH_PLANE => self.depth.ok_or("没有深度缓冲区")?,
             NORMAL_PLANE => self
                 .color
                 .get(NORMAL_CHANNEL)
                 .copied()
-                .ok_or("the G-buffer has no normal channel")?,
-            VIEW_POSITION | WATER_VIEW_POSITION => self.position.ok_or("no view position")?.1,
-            LIGHT_DIFFUSE => self.light.ok_or("no light buffer")?.1[0],
-            LIGHT_SPECULAR => self.light.ok_or("no light buffer")?.1[1],
-            FINAL_COLOR | INPUT | REFRACTION => self.resolved.ok_or("no resolved frame")?,
-            DEPTH_NORMAL_Z => self.scaled.ok_or("no scaled depth")?.1,
-            GATHER_DEPTH => self.gathered.ok_or("no gathered depth")?.1[0],
-            GATHER_NORMAL_Z => self.gathered.ok_or("no gathered depth")?.1[1],
-            OCCLUSION if self.occluding => self.occluded.ok_or("no occlusion")?.1,
-            SHADOW_DEPTH => self.shadow.ok_or("no shadow map")?.1,
+                .ok_or("G-buffer 没有法线通道")?,
+            VIEW_POSITION | WATER_VIEW_POSITION => self.position.ok_or("没有视图位置")?.1,
+            LIGHT_DIFFUSE => self.light.ok_or("没有光照缓冲区")?.1[0],
+            LIGHT_SPECULAR => self.light.ok_or("没有光照缓冲区")?.1[1],
+            FINAL_COLOR | INPUT | REFRACTION => self.resolved.ok_or("没有解析后的帧")?,
+            DEPTH_NORMAL_Z => self.scaled.ok_or("没有缩放后的深度")?.1,
+            GATHER_DEPTH => self.gathered.ok_or("没有汇聚后的深度")?.1[0],
+            GATHER_NORMAL_Z => self.gathered.ok_or("没有汇聚后的深度")?.1[1],
+            OCCLUSION if self.occluding => self.occluded.ok_or("没有环境光遮蔽")?.1,
+            SHADOW_DEPTH => self.shadow.ok_or("没有阴影贴图")?.1,
             SUBSURFACE_KERNEL => self.subsurface(gl)?,
-            SHADOW_MASK if self.shadowing => self.mask.ok_or("no shadow mask")?.1,
+            SHADOW_MASK if self.shadowing => self.mask.ok_or("没有阴影遮罩")?.1,
             // White rather than the flat grey every other unfilled sampler answers with: grey here
             // is half the frame in shadow, which is a plausible-looking wrong answer. The last of
             // them is squared and taken from one, where grey would throw three quarters of the
@@ -4094,7 +4100,7 @@ impl Buffers {
                         _ => None,
                     }
                     .ok_or_else(|| {
-                        format!("the exposure chain reads {}, which nothing fills", texture.name)
+                        format!("曝光链读取 {}，但没有任何内容填充它", texture.name)
                     })?,
                     Over::Scattering(held) if texture.id == LIGHT_DIFFUSE => held,
                     // The transparent packing carries no motion, so its fourth target holds what
@@ -4115,7 +4121,7 @@ impl Buffers {
                     Over::Blurring(_, held) if texture.id == INPUT => held,
                     Over::Glaring(_, held) => match texture.name.as_str() {
                         program::POST_INPUT => held.input,
-                        program::POST_MERGE => held.merge.ok_or("no glare to merge")?,
+                        program::POST_MERGE => held.merge.ok_or("没有可合并的泛光")?,
                         _ => self.engine(gl, texture.id)?,
                     },
                     Over::Mooning(held) if texture.name == program::SKY_SAMPLER => held.sky,
@@ -4278,9 +4284,9 @@ impl Buffers {
             cloud_shadow: self.clouding,
             ..Drawn::default()
         };
-        let (position, _) = self.position.ok_or("no view position")?;
-        let (light, _) = self.light.ok_or("no light buffer")?;
-        let (lit, _) = self.lit.ok_or("no lit frame")?;
+        let (position, _) = self.position.ok_or("没有视图位置")?;
+        let (light, _) = self.light.ok_or("没有光照缓冲区")?;
+        let (lit, _) = self.lit.ok_or("没有光照帧")?;
         self.toned = false;
         self.covered = false;
         self.reflect(gl, &scene.ambient)?;
@@ -4692,7 +4698,7 @@ fn pyramid(
             );
             let status = gl.check_framebuffer_status(glow::FRAMEBUFFER);
             if status != glow::FRAMEBUFFER_COMPLETE {
-                return Err(format!("a level of the graph would not complete: {status:#x}"));
+                return Err(format!("图中某一级不完整：{status:#x}"));
             }
             frames.push(held);
         }
@@ -4729,7 +4735,7 @@ fn frame_of(
         match status == glow::FRAMEBUFFER_COMPLETE {
             true => Ok(held),
             false => Err(format!(
-                "a buffer of the graph would not complete: {status:#x}"
+                "图中某个缓冲区不完整：{status:#x}"
             )),
         }
     }
@@ -4989,11 +4995,174 @@ fn flat(gl: &glow::Context, target: u32, value: &[u8; 4]) -> Result<glow::Textur
     }
 }
 
+/// How many texture units the fragment stage may read, asked for once. WebGL2 guarantees only 16
+/// where desktop GL usually offers 32, and the game's own character shaders read past that.
+static MAX_TEXTURE_UNITS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+fn max_texture_units(gl: &glow::Context) -> usize {
+    *MAX_TEXTURE_UNITS.get_or_init(|| unsafe {
+        gl.get_parameter_i32(glow::MAX_TEXTURE_IMAGE_UNITS).max(0) as usize
+    })
+}
+
+/// The samplers a fragment source declares, which is what the driver counts at link time. Counted
+/// off the source rather than the pair's resource list, since only one of the two stages is being
+/// weighed and a texture read through more than one sampler is declared once per sampler.
+fn fragment_samplers(source: &str) -> usize {
+    source
+        .lines()
+        .filter(|line| {
+            let line = line.trim_start();
+            line.starts_with("uniform ") && line.contains("sampler")
+        })
+        .count()
+}
+
+/// Samplers nothing in this viewer ever binds a texture to. Swept 2026-09-06 over the 108,911
+/// materials in the install (26 distinct sampler ids between them) and over every id `deferred`
+/// itself supplies: none of these is reachable from either, so `absent()`'s flat stand-in is the
+/// whole of what they read. Shedding one is what the frame already draws, one texture unit cheaper.
+const NEVER_BOUND: [&str; 8] = [
+    "g_SamplerAuraTexture",
+    "g_SamplerAuraTexture1",
+    "g_SamplerAuraTexture2",
+    "g_SamplerDissolveTexture",
+    "g_SamplerDissolveTexture1",
+    "g_SamplerDepthWithWater",
+    "g_SkySampler",
+    "g_SamplerWaveletNoise",
+];
+
+/// Shed only once the list above is not enough. A cube falls back to the reflection texture rather
+/// than to the flat stand-in, so replacing it with a constant is a real loss, not a rewrite.
+const LAST_RESORT: [&str; 1] = ["g_SamplerReflectionArray"];
+
+/// The sampling calls whose value a constant can stand for. `textureSize` is deliberately absent:
+/// it answers a dimension rather than a texel, so a sampler read through one is never shed.
+const SAMPLING: [&str; 5] = [
+    "texture",
+    "textureLod",
+    "textureGrad",
+    "texelFetch",
+    "textureGather",
+];
+
+/// What the flat stand-in `absent()` binds reads back as, which is what a shed sampler stands for.
+fn stand_in_value(declaration: &str) -> &'static str {
+    match declaration.contains("usampler") {
+        true => "uvec4(128u, 128u, 128u, 255u)",
+        false => "vec4(0.5019608, 0.5019608, 0.5019608, 1.0)",
+    }
+}
+
+/// Whether `at` starts an identifier token rather than falling inside a longer one.
+fn token_at(source: &str, at: usize, name: &str) -> bool {
+    let ident = |held: Option<char>| held.is_some_and(|held| held.is_alphanumeric() || held == '_');
+    !ident(source[..at].chars().next_back()) && !ident(source[at + name.len()..].chars().next())
+}
+
+/// One sampler removed: its declaration dropped and every read of it replaced by the constant the
+/// stand-in it is bound to reads back as. `None` where any read is in a shape this does not
+/// recognise, so a form it has never seen keeps the sampler rather than emitting GLSL that will not
+/// compile.
+fn without(source: &str, name: &str) -> Option<String> {
+    let mut out = String::with_capacity(source.len());
+    let mut value = None;
+    for line in source.lines() {
+        let held = line.trim_start();
+        if held.starts_with("uniform ") && held.contains("sampler") && held.contains(name) {
+            // `g_SamplerAuraTexture` is a prefix of `g_SamplerAuraTexture1`, so the declaration has
+            // to name this sampler and not merely start with it.
+            let Some(at) = held.find(name) else { continue };
+            if !token_at(held, at, name) {
+                out.push_str(line);
+                out.push('\n');
+                continue;
+            }
+            value = Some(stand_in_value(held));
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    let value = value?;
+
+    let mut held = out;
+    while let Some(at) = held
+        .match_indices(name)
+        .find(|(at, _)| token_at(&held, *at, name))
+        .map(|(at, _)| at)
+    {
+        // Back over the '(' and the call it belongs to, which is the whole expression the constant
+        // stands for.
+        let before = held[..at].trim_end();
+        let open = before.strip_suffix('(')?;
+        let call = open.trim_end();
+        let start = call.len() - call.chars().rev().take_while(|held| held.is_alphanumeric()).count();
+        if !SAMPLING.contains(&&call[start..]) {
+            return None;
+        }
+        let mut depth = 0usize;
+        let mut end = None;
+        for (offset, held) in held[open.len()..].char_indices() {
+            match held {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(open.len() + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        held.replace_range(start..end?, value);
+    }
+    Some(held)
+}
+
+/// The source with as few samplers shed as clears the ceiling, and unchanged where it already
+/// fits. Sheds only what nothing binds before reaching for the cube, so a pass that fits without
+/// losing anything loses nothing.
+fn shed(source: &str, ceiling: usize) -> String {
+    let mut held = source.to_owned();
+    for name in NEVER_BOUND.iter().chain(LAST_RESORT.iter()) {
+        if ceiling == 0 || fragment_samplers(&held) <= ceiling {
+            break;
+        }
+        if let Some(shorter) = without(&held, name) {
+            held = shorter;
+        }
+    }
+    held
+}
+
 pub fn build_pair(
     gl: &glow::Context,
     vertex: &str,
     fragment: &str,
 ) -> Result<glow::Program, String> {
+    // Answered before compiling rather than after linking: the driver's own message names the limit
+    // but not the shader, and a doomed pair costs a compile of both stages to find out.
+    let ceiling = max_texture_units(gl);
+    // Over the ceiling, the pass still runs: the samplers nothing ever binds a texture to read the
+    // flat stand-in and nothing else, so standing that constant in their place draws the same frame
+    // a unit cheaper. Only a pass still over budget after that is refused.
+    let shed_source;
+    let fragment = match ceiling > 0 && fragment_samplers(fragment) > ceiling {
+        true => {
+            shed_source = shed(fragment, ceiling);
+            shed_source.as_str()
+        }
+        false => fragment,
+    };
+    let wanted = fragment_samplers(fragment);
+    if ceiling > 0 && wanted > ceiling {
+        return Err(format!(
+            "像素着色器读取 {wanted} 个纹理，而此设备只提供 {ceiling} 个"
+        ));
+    }
     unsafe {
         let program = gl.create_program()?;
         let mut built = Vec::new();
@@ -5012,13 +5181,13 @@ pub fn build_pair(
                 }
                 gl.delete_program(program);
                 let name = match stage {
-                    glow::VERTEX_SHADER => "vertex",
-                    _ => "fragment",
+                    glow::VERTEX_SHADER => "顶点",
+                    _ => "像素",
                 };
                 // Some implementations reject a shader with no diagnostic at all.
                 return Err(match why.trim().is_empty() {
-                    true => format!("{name} shader would not compile"),
-                    false => format!("{name}: {why}"),
+                    true => format!("{name}着色器编译失败"),
+                    false => format!("{name}着色器：{why}"),
                 });
             }
             gl.attach_shader(program, shader);
@@ -5033,7 +5202,7 @@ pub fn build_pair(
             let why = gl.get_program_info_log(program);
             gl.delete_program(program);
             return Err(match why.trim().is_empty() {
-                true => "program would not link".to_owned(),
+                true => "程序链接失败".to_owned(),
                 false => why,
             });
         }
@@ -5043,6 +5212,81 @@ pub fn build_pair(
 
 #[cfg(test)]
 mod test {
+    /// A sampler nothing binds reads the flat stand-in and nothing else, so the constant that
+    /// stand-in reads back as draws the same frame.
+    #[test]
+    fn shedding_an_unbound_sampler_leaves_what_it_read_behind() {
+        let source = "uniform sampler2D g_SamplerNormal;\n\
+             uniform sampler2D g_SamplerAuraTexture;\n\
+             void main() { vec4 a = texture(g_SamplerAuraTexture, v_uv); }\n";
+        let held = super::without(source, "g_SamplerAuraTexture").expect("shed");
+        assert!(!held.contains("g_SamplerAuraTexture"));
+        assert!(held.contains("vec4 a = vec4(0.5019608, 0.5019608, 0.5019608, 1.0);"));
+        // The sampler beside it is untouched.
+        assert!(held.contains("uniform sampler2D g_SamplerNormal;"));
+    }
+
+    /// The declaration has to name the sampler rather than merely begin with it, or shedding
+    /// `g_SamplerAuraTexture` takes `g_SamplerAuraTexture1` down with it.
+    #[test]
+    fn a_longer_name_is_not_shed_by_a_shorter_one() {
+        let source = "uniform sampler2D g_SamplerAuraTexture1;\n\
+             void main() { vec4 a = texture(g_SamplerAuraTexture1, v_uv); }\n";
+        assert!(super::without(source, "g_SamplerAuraTexture").is_none());
+    }
+
+    /// `textureSize` answers a dimension, not a texel, so a constant cannot stand for it and the
+    /// sampler is kept instead of emitting GLSL that would not compile.
+    #[test]
+    fn a_read_in_a_shape_this_does_not_know_keeps_its_sampler() {
+        let source = "uniform sampler2D g_SkySampler;\n\
+             void main() { vec2 a = vec2(textureSize(g_SkySampler, 0)); }\n";
+        assert!(super::without(source, "g_SkySampler").is_none());
+    }
+
+    /// Nothing is shed while the pass already fits, and only as much as the ceiling needs.
+    #[test]
+    fn a_pass_that_fits_shed_nothing_and_one_over_sheds_one() {
+        let two = "uniform sampler2D g_SamplerAuraTexture;\n\
+             uniform sampler2D g_SamplerAuraTexture1;\n\
+             void main() { vec4 a = texture(g_SamplerAuraTexture, v) + texture(g_SamplerAuraTexture1, v); }\n";
+        assert_eq!(super::shed(two, 2), two);
+        let held = super::shed(two, 1);
+        assert_eq!(super::fragment_samplers(&held), 1);
+        assert!(held.contains("g_SamplerAuraTexture1"));
+    }
+
+    /// The cube is shed last: it falls back to the reflection texture rather than to the flat
+    /// stand-in, so losing it costs something the rest do not.
+    #[test]
+    fn the_reflection_cube_is_the_last_one_shed() {
+        let source = "uniform samplerCube g_SamplerReflectionArray;\n\
+             uniform sampler2D g_SamplerAuraTexture;\n\
+             void main() { vec4 a = texture(g_SamplerReflectionArray, v) + texture(g_SamplerAuraTexture, v); }\n";
+        let held = super::shed(source, 1);
+        assert!(held.contains("g_SamplerReflectionArray"));
+        assert!(!held.contains("g_SamplerAuraTexture"));
+    }
+
+    /// An unsigned sampler reads back unsigned, and standing a float constant in its place is a
+    /// type error rather than a shed.
+    #[test]
+    fn an_unsigned_sampler_stands_in_as_unsigned() {
+        let source = "uniform usampler2D g_SamplerAuraTexture;\n\
+             void main() { uvec4 a = texture(g_SamplerAuraTexture, v); }\n";
+        let held = super::without(source, "g_SamplerAuraTexture").expect("shed");
+        assert!(held.contains("uvec4 a = uvec4(128u, 128u, 128u, 255u);"));
+    }
+
+    /// Only the fragment stage is weighed, and a texture read through two samplers is declared
+    /// twice, so the count comes off the source rather than off the pair's resource list.
+    #[test]
+    fn a_fragment_source_states_how_many_textures_it_reads() {
+        let source = "#version 300 es\n             precision highp float;\n             uniform sampler2D g_SamplerNormal;\n             uniform highp sampler2D g_SamplerIndex;\n             uniform usampler2D g_SamplerTable;\n             uniform samplerCube g_SamplerEnv;\n             uniform vec4 g_Params[4];\n             // uniform sampler2D commented_out;\n             void main() {}\n";
+        assert_eq!(super::fragment_samplers(source), 4);
+        assert_eq!(super::fragment_samplers("void main() {}"), 0);
+    }
+
     use super::{BAND, ENGINE, SHEET, STAR_FACES, STAR_GRID, band, dome, sheet, strip};
 
     /// The id the file the shadow softening dithers by is bound under. Nothing in the table says

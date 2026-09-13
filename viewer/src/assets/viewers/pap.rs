@@ -1,6 +1,7 @@
 //! `.pap` animation packs: the motions one skeleton can play, the timeline driving each, and the
 //! motions themselves played back on the skeleton the pack is built for.
 
+use crate::assets::viewers::skeleton::Laid;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -84,8 +85,11 @@ fn model(kind: ModelType, id: u16) -> String {
 
 fn model_type(kind: ModelType) -> String {
     match kind {
+        ModelType::Human => "人类".to_owned(),
+        ModelType::Monster => "魔物".to_owned(),
+        ModelType::DemiHuman => "亚人".to_owned(),
+        ModelType::Weapon => "武器".to_owned(),
         ModelType::Unknown(value) => format!("未知（{value}）"),
-        named => format!("{named:?}"),
     }
 }
 
@@ -394,9 +398,11 @@ impl Rendered {
                         &mut locals,
                         binding,
                         loaded.rig.names(),
-                        None,
-                        self.play.time.get(),
-                        1.0,
+                        Laid {
+                            time: self.play.time.get(),
+                            weight: 1.0,
+                            ..Laid::default()
+                        },
                     );
                     let world = loaded.rig.world(&locals);
                     loaded.view.replace(loaded.rig.batches(&world, None));

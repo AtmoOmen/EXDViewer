@@ -174,12 +174,12 @@ impl SheetTable {
             table.show(ui, self);
         });
 
-if let Some(icon_id) = self.modal_image {
+        if let Some(icon_id) = self.modal_image {
             let global = self.context.global();
             let (excel, icon_mgr) = (global.backend().excel().clone(), global.icon_manager());
             let path = get_icon_path(global.backend().icons(), icon_id, true, global.language());
             let icon = icon_mgr.get_or_insert_icon(&path, ui.ctx(), || {
-                log::debug!("Hires icon not found in cache: {icon_id}");
+                log::debug!("缓存中未找到高清图标: {icon_id}");
                 let excel = excel.clone();
                 let path = path.clone();
                 TrackedPromise::spawn_local(async move { excel.get_icon(&path).await })
@@ -391,8 +391,8 @@ if let Some(icon_id) = self.modal_image {
                     }
 
                     if promise_token.get() {
-                        log::info!("Filter cancelled");
-                        return Err(anyhow::anyhow!("Filter cancelled"));
+                        log::info!("筛选已取消");
+                        return Err(anyhow::anyhow!("筛选已取消"));
                     }
 
                     let now = Instant::now();
@@ -403,7 +403,7 @@ if let Some(icon_id) = self.modal_image {
                     }
                 }
 
-                log::info!("Filter completed after {iters} yields");
+                log::info!("筛选在 {iters} 次让出后完成");
 
                 Ok(())
             }

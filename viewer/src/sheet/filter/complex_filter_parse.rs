@@ -22,7 +22,7 @@ impl FromStr for ComplexFilter {
         let pairs = PestFilter::parse(Rule::filter, s).map_err(|e| e.to_string())?;
         let pair = pairs
             .exactly_one()
-            .map_err(|_| "Expected exactly one filter expression".to_string())?;
+            .map_err(|_| "筛选表达式只能有一个".to_string())?;
         parse_filter(pair)
     }
 }
@@ -32,7 +32,7 @@ fn parse_filter(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
     let (inner, eoi) = pair
         .into_inner()
         .collect_tuple()
-        .ok_or_else(|| "Expected exactly one expression inside filter".to_string())?;
+        .ok_or_else(|| "筛选表达式内只能有一个子表达式".to_string())?;
     assert_eq!(eoi.as_rule(), Rule::EOI);
     parse_or_expr(inner)
 }
@@ -74,12 +74,12 @@ fn parse_and_expr(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
 fn parse_not_expr(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
     assert_eq!(pair.as_rule(), Rule::not_expr);
     let mut inner = pair.into_inner();
-    let first = inner.next().ok_or("Empty not_expr")?;
+    let first = inner.next().ok_or("not_expr 为空")?;
     match first.as_rule() {
         Rule::not => {
             let next = inner
                 .exactly_one()
-                .map_err(|_| "Expected exactly one expression after NOT")?;
+                .map_err(|_| "NOT 之后只能有一个表达式")?;
             let expr = parse_not_expr(next)?;
             Ok(if let ComplexFilter::Not(inner) = expr {
                 // Double negation, just return the inner expression
@@ -90,7 +90,7 @@ fn parse_not_expr(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
         }
         Rule::primary => {
             if inner.count() != 0 {
-                return Err("Unexpected extra tokens in not_expr".to_string());
+                return Err("not_expr 中存在多余的记号".to_string());
             }
             parse_primary(first)
         }
@@ -101,7 +101,7 @@ fn parse_not_expr(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
 fn parse_primary(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
     assert_eq!(pair.as_rule(), Rule::primary);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
-        "Expected exactly one expression inside primary (either paren_expr or simple_filter)"
+        "primary 内只能有一个表达式 (paren_expr 或 simple_filter)"
             .to_string()
     })?;
     match inner.as_rule() {
@@ -116,7 +116,7 @@ fn parse_paren_expr(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
     let (lparen, or_expr, rparen) = pair
         .into_inner()
         .collect_tuple()
-        .ok_or_else(|| "Expected exactly three tokens in paren_expr".to_string())?;
+        .ok_or_else(|| "paren_expr 中只能有三个记号".to_string())?;
     assert_eq!(lparen.as_rule(), Rule::LPAREN);
     assert_eq!(rparen.as_rule(), Rule::RPAREN);
     parse_or_expr(or_expr)
@@ -127,15 +127,15 @@ fn parse_simple_filter(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
     let mut inner = pair.into_inner();
     let key_pair = inner
         .next()
-        .ok_or("Expected a key in simple_filter".to_string())?;
+        .ok_or("simple_filter 中缺少键")?;
     let next = inner
         .next()
-        .ok_or("Expected a not or comparator in simple_filter".to_string())?;
+        .ok_or("simple_filter 中缺少 not 或比较符")?;
     let (is_negated, comparator) = match next.as_rule() {
         Rule::not => {
             let comparator_pair = inner
                 .next()
-                .ok_or("Expected a comparator after NOT in simple_filter".to_string())?;
+                .ok_or("simple_filter 中 NOT 之后缺少比较符")?;
             (true, comparator_pair)
         }
         Rule::comparator => (false, next),
@@ -157,7 +157,7 @@ fn parse_simple_filter(pair: Pair<'_, Rule>) -> Result<ComplexFilter, String> {
 fn parse_key(pair: Pair<'_, Rule>, is_strict: bool) -> Result<FilterKey, String> {
     assert_eq!(pair.as_rule(), Rule::key);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
-        "Expected exactly one token inside key (either row_id or column)".to_string()
+        "key 内只能有一个记号 (row_id 或 column)".to_string()
     })?;
     match inner.as_rule() {
         Rule::row_id => Ok(FilterKey::RowId),
@@ -175,16 +175,16 @@ fn parse_comparator(pair: Pair<'_, Rule>) -> Result<(FilterValue, bool), String>
 
     let a = pairs
         .next()
-        .ok_or_else(|| "Expected at least two tokens in comparator".to_string())?;
+        .ok_or_else(|| "comparator 中至少需要两个记号".to_string())?;
     let b = pairs
         .next()
-        .ok_or_else(|| "Expected at least two tokens in comparator".to_string())?;
+        .ok_or_else(|| "comparator 中至少需要两个记号".to_string())?;
     let c = pairs.next(); // optional
 
     let (op, is_strict, value) = match (a.as_rule(), b.as_rule(), c.as_ref().map(|p| p.as_rule())) {
         (_, Rule::STRICT_KEY, Some(_)) => (a, true, c.unwrap()),
         (_, _, None) => (a, false, b),
-        _ => return Err("Invalid comparator format".to_string()),
+        _ => return Err("比较符格式无效".to_string()),
     };
 
     let value = match op.as_rule() {
@@ -199,7 +199,7 @@ fn parse_comparator(pair: Pair<'_, Rule>) -> Result<(FilterValue, bool), String>
             let ret = parse_range_value(value)?;
             match ret {
                 FilterRange::Between(a, b) if a > b => {
-                    return Err(format!("Invalid range: start {a} is greater than end {b}"));
+                    return Err(format!("范围无效: 起点 {a} 大于终点 {b}"));
                 }
                 FilterRange::Between(a, b) if a == b => FilterValue::Equals(Either::Right(a)),
                 _ => FilterValue::Range(ret),
@@ -221,7 +221,7 @@ fn parse_comparator(pair: Pair<'_, Rule>) -> Result<(FilterValue, bool), String>
 fn parse_strnum_value(pair: Pair<'_, Rule>) -> Result<Either<String, i128>, String> {
     assert_eq!(pair.as_rule(), Rule::strnum_value);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
-        "Expected exactly one token inside strnum_value (either number or string_value)".to_string()
+        "strnum_value 内只能有一个记号 (number 或 string_value)".to_string()
     })?;
     match inner.as_rule() {
         Rule::number => Ok(Either::Right(parse_number(inner)?)),
@@ -233,7 +233,7 @@ fn parse_strnum_value(pair: Pair<'_, Rule>) -> Result<Either<String, i128>, Stri
 fn parse_string_value(pair: Pair<'_, Rule>) -> Result<String, String> {
     assert_eq!(pair.as_rule(), Rule::string_value);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
-        "Expected exactly one token inside string_value (either quoted_string or bare_string)"
+        "string_value 内只能有一个记号 (quoted_string 或 bare_string)"
             .to_string()
     })?;
     match inner.as_rule() {
@@ -246,14 +246,14 @@ fn parse_string_value(pair: Pair<'_, Rule>) -> Result<String, String> {
 fn parse_regex_value(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
     assert_eq!(pair.as_rule(), Rule::regex_value);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
-        "Expected exactly one token inside regex_value (either regex or string_value)".to_string()
+        "regex_value 内只能有一个记号 (regex 或 string_value)".to_string()
     })?;
     match inner.as_rule() {
         Rule::regex => parse_regex(inner),
         Rule::string_value => {
             let s = parse_string_value(inner)?;
             let regex =
-                Regex::new(&s).map_err(|e| format!("Failed to compile regex from string: {e}"))?;
+                Regex::new(&s).map_err(|e| format!("无法由字符串编译正则表达式: {e}"))?;
             Ok(RegexWrapper::new(regex, String::new()))
         }
         _ => unreachable!("Unexpected rule in regex_value: {:?}", inner.as_rule()),
@@ -263,7 +263,7 @@ fn parse_regex_value(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
 fn parse_range_value(pair: Pair<'_, Rule>) -> Result<FilterRange, String> {
     assert_eq!(pair.as_rule(), Rule::range_value);
     let inner = pair.into_inner().exactly_one().map_err(|_| {
-        "Expected exactly one token inside range_value (either range or number_value)".to_string()
+        "range_value 内只能有一个记号 (range 或 number_value)".to_string()
     })?;
     match inner.as_rule() {
         Rule::range => parse_range(inner),
@@ -280,7 +280,7 @@ fn parse_number_value(pair: Pair<'_, Rule>) -> Result<i128, String> {
     let inner = pair
         .into_inner()
         .exactly_one()
-        .map_err(|_| "Expected exactly one token inside range_value (number_value)".to_string())?;
+        .map_err(|_| "number_value 内只能有一个记号".to_string())?;
     assert_eq!(inner.as_rule(), Rule::number);
     parse_number(inner)
 }
@@ -288,7 +288,7 @@ fn parse_number_value(pair: Pair<'_, Rule>) -> Result<i128, String> {
 fn parse_quoted_string(pair: Pair<'_, Rule>) -> Result<String, String> {
     assert_eq!(pair.as_rule(), Rule::quoted_string);
     let (quote, charseq) = pair.into_inner().collect_tuple().ok_or_else(|| {
-        "Expected exactly two tokens inside quoted_string (quote and charseq)".to_string()
+        "quoted_string 中只能有两个记号 (quote 与 charseq)".to_string()
     })?;
     assert_eq!(quote.as_rule(), Rule::QUOTE);
     assert_eq!(charseq.as_rule(), Rule::quoted_charseq);
@@ -303,7 +303,7 @@ fn parse_bare_string(pair: Pair<'_, Rule>) -> &'_ str {
 fn parse_regex(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
     assert_eq!(pair.as_rule(), Rule::regex);
     let (slash, str_value, flags) = pair.into_inner().collect_tuple().ok_or_else(|| {
-        "Expected exactly three tokens inside regex (slash, string_value, flags)".to_string()
+        "regex 中只能有三个记号 (slash、string_value、flags)".to_string()
     })?;
 
     assert_eq!(slash.as_rule(), Rule::REGEX_SEPARATOR);
@@ -337,13 +337,13 @@ fn parse_regex(pair: Pair<'_, Rule>) -> Result<RegexWrapper, String> {
                 // regex_lite treats this as a no-op
             }
             other => {
-                return Err(format!("Invalid regex flag: {other}"));
+                return Err(format!("正则标志无效: {other}"));
             }
         }
     }
     let regex = regex_builder
         .build()
-        .map_err(|e| format!("Failed to build regex: {e}"))?;
+        .map_err(|e| format!("构建正则表达式失败: {e}"))?;
     Ok(RegexWrapper::new(regex, flags_str.to_string()))
 }
 
@@ -352,7 +352,7 @@ fn parse_number(pair: Pair<'_, Rule>) -> Result<i128, String> {
     let num_str = pair.as_str();
     num_str
         .parse::<i128>()
-        .map_err(|e| format!("Failed to parse number '{num_str}': {e}"))
+        .map_err(|e| format!("解析数字 '{num_str}' 失败: {e}"))
 }
 
 fn parse_range(pair: Pair<'_, Rule>) -> Result<FilterRange, String> {
@@ -361,10 +361,10 @@ fn parse_range(pair: Pair<'_, Rule>) -> Result<FilterRange, String> {
     let mut pairs = pair.into_inner();
     let a = pairs
         .next()
-        .ok_or_else(|| "Expected at least two tokens in range".to_string())?;
+        .ok_or_else(|| "range 中至少需要两个记号".to_string())?;
     let b = pairs
         .next()
-        .ok_or_else(|| "Expected at least two tokens in range".to_string())?;
+        .ok_or_else(|| "range 中至少需要两个记号".to_string())?;
     let c = pairs.next(); // optional
 
     match (a.as_rule(), b.as_rule(), c.as_ref().map(|p| p.as_rule())) {
@@ -381,7 +381,7 @@ fn parse_range(pair: Pair<'_, Rule>) -> Result<FilterRange, String> {
             let start = parse_number(a)?;
             Ok(FilterRange::AtLeast(start))
         }
-        _ => Err("Invalid range format".to_string()),
+        _ => Err("范围格式无效".to_string()),
     }
 }
 
@@ -400,11 +400,11 @@ fn unquote_string(s: &str) -> Result<String, String> {
                     'r' => result.push('\r'),
                     't' => result.push('\t'),
                     other => {
-                        return Err(format!("Invalid escape sequence: \\{other}"));
+                        return Err(format!("转义序列无效: \\{other}"));
                     }
                 }
             } else {
-                return Err("Trailing backslash in string".to_string());
+                return Err("字符串以反斜杠结尾".to_string());
             }
         } else {
             result.push(c);

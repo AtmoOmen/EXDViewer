@@ -29,13 +29,13 @@ impl ColorTheme {
 
     pub fn name(&self) -> &'static str {
         match self {
-            ColorTheme::System => "💻 System",
+            ColorTheme::System => "💻 跟随系统",
             ColorTheme::Mocha => "🌿 Mocha",
             ColorTheme::Macchiato => "🌺 Macchiato",
             ColorTheme::Frappe => "🌱 Frappé",
             ColorTheme::Latte => "🌻 Latte",
-            ColorTheme::OriginalDark => "🌙 Dark (classic)",
-            ColorTheme::OriginalLight => "☀ Light (classic)",
+            ColorTheme::OriginalDark => "🌙 深色（经典）",
+            ColorTheme::OriginalLight => "☀ 浅色（经典）",
         }
     }
 

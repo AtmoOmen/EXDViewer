@@ -88,9 +88,9 @@ impl WebProvider {
         repo: &str,
     ) -> anyhow::Result<Vec<GithubSchemaBranch>> {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
-            return Err(anyhow::anyhow!("Invalid GitHub repository format"));
+            return Err(anyhow::anyhow!("GitHub 仓库格式无效"));
         }
-let branches: Vec<GithubBranch> = api
+        let branches: Vec<GithubBranch> = api
             .get(
                 &format!("{owner}/{repo}/branches/"),
                 &format!("{API}/repos/{owner}/{repo}/branches?per_page=100"),
@@ -123,9 +123,9 @@ let branches: Vec<GithubBranch> = api
         repo: &str,
     ) -> anyhow::Result<Vec<GithubSchemaBranch>> {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
-            return Err(anyhow::anyhow!("Invalid GitHub repository format"));
+            return Err(anyhow::anyhow!("GitHub 仓库格式无效"));
         }
-let pulls: Vec<GithubPullRequest> = api
+        let pulls: Vec<GithubPullRequest> = api
             .get(
                 &format!("{owner}/{repo}/pulls/"),
                 &format!("{API}/repos/{owner}/{repo}/pulls?per_page=100"),
@@ -154,14 +154,14 @@ let pulls: Vec<GithubPullRequest> = api
         number: u32,
     ) -> anyhow::Result<Vec<String>> {
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
-            return Err(anyhow::anyhow!("Invalid GitHub repository format"));
+            return Err(anyhow::anyhow!("GitHub 仓库格式无效"));
         }
 
         const PER_PAGE: usize = 100;
         let mut ret = Vec::new();
         let mut page = 1u32;
         loop {
-let files: Vec<GithubPullRequestFile> = api
+            let files: Vec<GithubPullRequestFile> = api
                 .get(
                     &format!("{owner}/{repo}/pulls/{number}/files/?page={page}"),
                     &format!(
@@ -194,7 +194,7 @@ let files: Vec<GithubPullRequestFile> = api
     ) -> anyhow::Result<HashMap<String, String>> {
         let (owner, repo, branch) = location.source();
         if !Self::is_valid_github_name(owner) || !Self::is_valid_github_name(repo) {
-            return Err(anyhow::anyhow!("Invalid GitHub repository format"));
+            return Err(anyhow::anyhow!("GitHub 仓库格式无效"));
         }
         api.get_from_server(&format!("{owner}/{repo}/schemas/{branch}/"))
             .await
@@ -228,7 +228,7 @@ impl SchemaProvider for WebProvider {
     }
 
     async fn save_schema(&self, _name: &str, _text: &str) -> anyhow::Result<()> {
-        unreachable!("Saving schemas is not supported by this provider");
+        unreachable!("此提供程序不支持保存模式");
     }
 }
 

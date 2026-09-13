@@ -53,7 +53,7 @@ impl Directory {
         self.files
             .get(path.as_ref())
             .cloned()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "file not found"))
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "文件不存在"))
     }
 }
 
@@ -88,12 +88,12 @@ impl DynamicDirectory {
         while let Some(entry) = entries.next().await {
             let entry = entry?
                 .dyn_into::<FileSystemHandle>()
-                .map_err(|_| JsErr::msg("entry is not a FileSystemHandle"))?;
+                .map_err(|_| JsErr::msg("条目不是 FileSystemHandle"))?;
             match entry.kind() {
                 FileSystemHandleKind::File => {
                     let file_handle = entry
                         .dyn_into::<FileSystemFileHandle>()
-                        .map_err(|_| JsErr::msg("entry is not a FileSystemFileHandle"))?;
+                        .map_err(|_| JsErr::msg("条目不是 FileSystemFileHandle"))?;
                     let key = path.join(file_handle.name());
                     if let Entry::Vacant(e) = files.entry(key) {
                         verify_permission(self.mode, &file_handle).await?;
@@ -103,7 +103,7 @@ impl DynamicDirectory {
                 FileSystemHandleKind::Directory if self.recurse => {
                     let sub_dir = entry
                         .dyn_into::<FileSystemDirectoryHandle>()
-                        .map_err(|_| JsErr::msg("entry is not a FileSystemDirectoryHandle"))?;
+                        .map_err(|_| JsErr::msg("条目不是 FileSystemDirectoryHandle"))?;
                     async {
                         let sub_dir_path = path.join(sub_dir.name());
                         self.fill_map(files, mapper, sub_dir, sub_dir_path).await
@@ -113,7 +113,7 @@ impl DynamicDirectory {
                 }
                 FileSystemHandleKind::Directory => {}
                 _ => {
-                    return Err(JsErr::msg("entry is not a FileSystemHandle"));
+                    return Err(JsErr::msg("条目不是 FileSystemHandle"));
                 }
             }
         }
@@ -157,9 +157,9 @@ impl DynamicDirectory {
                             .await?;
                     current_dir = entry
                         .dyn_into::<FileSystemDirectoryHandle>()
-                        .map_err(|_| JsErr::msg("entry is not a FileSystemDirectoryHandle"))?;
+                        .map_err(|_| JsErr::msg("条目不是 FileSystemDirectoryHandle"))?;
                 }
-                _ => return Err(JsErr::msg("invalid path component")),
+                _ => return Err(JsErr::msg("路径分段无效")),
             }
         }
 
@@ -168,9 +168,9 @@ impl DynamicDirectory {
                 JsFuture::from(current_dir.get_file_handle(&filename.to_string_lossy())).await?;
             entry
                 .dyn_into::<FileSystemFileHandle>()
-                .map_err(|_| JsErr::msg("entry is not a FileSystemFileHandle"))
+                .map_err(|_| JsErr::msg("条目不是 FileSystemFileHandle"))
         } else {
-            Err(JsErr::msg("invalid file path"))
+            Err(JsErr::msg("文件路径无效"))
         }
     }
 }
@@ -179,7 +179,7 @@ pub async fn get_file_blob(handle: FileSystemFileHandle) -> JsResult<File> {
     JsFuture::from(handle.get_file())
         .await?
         .dyn_into::<File>()
-        .map_err(|_| JsErr::msg("entry is not a File"))
+        .map_err(|_| JsErr::msg("条目不是 File"))
 }
 
 pub async fn get_file_writer(
@@ -188,7 +188,7 @@ pub async fn get_file_writer(
     JsFuture::from(handle.create_writable())
         .await?
         .dyn_into::<FileSystemWritableFileStream>()
-        .map_err(|_| JsErr::msg("entry is not a FileSystemWritableFileStream"))
+        .map_err(|_| JsErr::msg("条目不是 FileSystemWritableFileStream"))
 }
 
 pub async fn get_file_str(handle: FileSystemFileHandle) -> JsResult<String> {
@@ -196,7 +196,7 @@ pub async fn get_file_str(handle: FileSystemFileHandle) -> JsResult<String> {
     JsFuture::from(file.text())
         .await?
         .as_string()
-        .ok_or_else(|| JsErr::msg("file text is not a string"))
+        .ok_or_else(|| JsErr::msg("文件文本不是字符串"))
 }
 
 pub async fn set_file_str(handle: FileSystemFileHandle, content: &str) -> JsResult<()> {
@@ -222,18 +222,18 @@ pub async fn verify_permission(
     perms.set_mode(mode);
     let perm = JsFuture::from(handle.query_permission_with_descriptor(&perms)).await?;
     let perm = PermissionState::from_js_value(&perm)
-        .ok_or_else(|| JsErr::msg("permission is not a PermissionState"))?;
+        .ok_or_else(|| JsErr::msg("权限不是 PermissionState"))?;
     if perm == PermissionState::Granted {
         return Ok(());
     }
     let perm = JsFuture::from(handle.request_permission_with_descriptor(&perms)).await?;
     let perm = PermissionState::from_js_value(&perm)
-        .ok_or_else(|| JsErr::msg("permission is not a PermissionState"))?;
+        .ok_or_else(|| JsErr::msg("权限不是 PermissionState"))?;
     if perm == PermissionState::Granted {
         return Ok(());
     }
     Err(JsErr::msg(format!(
-        "permission denied access to file (request for {} was {perm:?})",
+        "{} 的权限请求被拒绝 (请求结果为 {perm:?})",
         handle.name()
     )))
 }

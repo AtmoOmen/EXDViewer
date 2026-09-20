@@ -13,8 +13,9 @@ use crate::{
         base::BaseSheet,
         provider::{ExcelProvider, ExcelSheet},
     },
-    schema::provider::SchemaProvider,
-    settings::BackendConfig,
+    github::GithubApi,
+    schema::{provider::SchemaProvider, web::WebProvider},
+    settings::{BackendConfig, GithubSchemaLocation, SchemaLocation},
     sheet::{
         CellValue, CompiledFilterInput, ComplexFilter, FilterInput, GlobalContext, MatchOptions,
         SchemaColumn, SchemaColumnMeta, TableContext,
@@ -770,25 +771,47 @@ fn schema_references(schema: &ExdSchema) -> Vec<serde_json::Value> {
     references
 }
 
-async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -> McpResponse {
-    if let Some(references) =
-        RELATION_INDEX.with(|cache| cache.borrow().as_ref()?.get(target_sheet).cloned())
-    {
-        return McpResponse::Success(
-            serde_json::json!({
-                "target_sheet": target_sheet,
-                "count": references.len(),
-                "references": references
-            })
-            .to_string(),
-        );
+fn extend_referencing_index(
+    index: &mut HashMap<String, Vec<serde_json::Value>>,
+    sheet_name: &str,
+    schema: &ExdSchema,
+) {
+    for reference in schema_references(schema) {
+        let Some(target) = reference["target"].as_str() else {
+            continue;
+        };
+        index
+            .entry(target.to_owned())
+            .or_default()
+            .push(serde_json::json!({"sheet": sheet_name, "reference": reference}));
     }
+}
 
+/// Every schema at the configured ref in one response, so the sheets here do not each pay the
+/// round trip the server already paid once.
+async fn referencing_index_from_bundle(
+    api: &GithubApi,
+    location: &GithubSchemaLocation,
+) -> anyhow::Result<HashMap<String, Vec<serde_json::Value>>> {
+    let bundled = WebProvider::fetch_github_schemas(api, location).await?;
+    let mut index: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    for (sheet_name, text) in bundled {
+        if let Ok(Ok(schema)) = ExdSchema::from_str(&text) {
+            extend_referencing_index(&mut index, &sheet_name, &schema);
+        }
+    }
+    Ok(index)
+}
+
+async fn referencing_index_from_sheets(
+    backend: &Backend,
+) -> HashMap<String, Vec<serde_json::Value>> {
     let sheet_names = backend
         .excel()
         .get_entries()
-        .keys()
-        .cloned()
+        .iter()
+        .filter(|(_, id)| **id >= 0)
+        .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     let mut schemas = stream::iter(sheet_names)
         .map(|sheet_name| async move {
@@ -804,16 +827,48 @@ async fn process_get_referencing_sheets(backend: &Backend, target_sheet: &str) -
         let Some(schema) = schema else {
             continue;
         };
-        for reference in schema_references(&schema) {
-            let Some(target) = reference["target"].as_str() else {
-                continue;
-            };
-            index
-                .entry(target.to_owned())
-                .or_default()
-                .push(serde_json::json!({"sheet": sheet_name, "reference": reference}));
+        extend_referencing_index(&mut index, &sheet_name, &schema);
+    }
+    index
+}
+
+async fn build_referencing_index(
+    backend: &Backend,
+    config: &BackendConfig,
+) -> anyhow::Result<HashMap<String, Vec<serde_json::Value>>> {
+    match &config.schema {
+        SchemaLocation::Github(location) => {
+            let api = GithubApi::new(&config.api_url, None);
+            referencing_index_from_bundle(&api, location).await
+        }
+        SchemaLocation::Local(_) | SchemaLocation::Web(_) => {
+            Ok(referencing_index_from_sheets(backend).await)
         }
     }
+}
+
+async fn process_get_referencing_sheets(
+    backend: &Backend,
+    config: &BackendConfig,
+    target_sheet: &str,
+) -> McpResponse {
+    if let Some(references) =
+        RELATION_INDEX.with(|cache| cache.borrow().as_ref()?.get(target_sheet).cloned())
+    {
+        return McpResponse::Success(
+            serde_json::json!({
+                "target_sheet": target_sheet,
+                "count": references.len(),
+                "references": references
+            })
+            .to_string(),
+        );
+    }
+
+    let mut index = match build_referencing_index(backend, config).await {
+        Ok(index) => index,
+        Err(error) => return McpResponse::Error(format!("{error}")),
+    };
     for references in index.values_mut() {
         references.sort_unstable_by(|a, b| a["sheet"].as_str().cmp(&b["sheet"].as_str()));
     }
@@ -1423,7 +1478,11 @@ async fn process_save_schema(backend: &Backend, name: &str, text: &str) -> McpRe
     }
 }
 
-async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
+async fn dispatch_request(
+    backend: &Backend,
+    config: &BackendConfig,
+    req: McpRequest,
+) -> McpResponse {
     match req {
         McpRequest::ReadAsset {
             path,
@@ -1584,7 +1643,7 @@ async fn dispatch_request(backend: &Backend, req: McpRequest) -> McpResponse {
         }
         McpRequest::ValidateSchema { text } => McpResponse::Success(process_validate_schema(&text)),
         McpRequest::GetReferencingSheets { target_sheet } => {
-            process_get_referencing_sheets(backend, &target_sheet).await
+            process_get_referencing_sheets(backend, config, &target_sheet).await
         }
         McpRequest::ResolveLink {
             name,
@@ -1653,7 +1712,7 @@ pub fn start(config: BackendConfig) -> McpHandle {
                 .build()
                 .expect("Failed to build tokio runtime for MCP worker");
 
-            let backend = match rt.block_on(Backend::new(worker_config)) {
+            let backend = match rt.block_on(Backend::new(worker_config.clone())) {
                 Ok(backend) => backend,
                 Err(e) => {
                     log::error!("MCP backend 初始化失败: {e}");
@@ -1671,11 +1730,12 @@ pub fn start(config: BackendConfig) -> McpHandle {
                                 break;
                             };
                             let backend = backend.clone();
+                            let config = worker_config.clone();
                             tokio::task::spawn_local(async move {
                                 let mut resp_tx = resp_tx;
                                 tokio::select! {
                                     () = resp_tx.closed() => {}
-                                    response = dispatch_request(&backend, req) => {
+                                    response = dispatch_request(&backend, &config, req) => {
                                         let _ = resp_tx.send(response);
                                     }
                                 }

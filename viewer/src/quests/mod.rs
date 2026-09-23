@@ -728,7 +728,7 @@ impl QuestBrowser {
         CollapsibleSidePanel::new("quest_info", Side::Right)
             .collapsed_width(0.0)
             .min_width(INFO_MIN_WIDTH)
-            .max_width(INFO_WIDTH)
+            .default_width(INFO_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;

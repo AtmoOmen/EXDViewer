@@ -530,7 +530,7 @@ impl MusicPlayer {
         let mut nav = std::mem::take(&mut self.nav);
         CollapsibleSidePanel::new("music_list", Side::Left)
             .min_width(LIST_MIN_WIDTH)
-            .max_width(LIST_WIDTH)
+            .default_width(LIST_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;

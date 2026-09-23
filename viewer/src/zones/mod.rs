@@ -347,7 +347,7 @@ impl ZoneBrowser {
         let mut nav = std::mem::take(&mut self.nav);
         CollapsibleSidePanel::new("zone_list", Side::Left)
             .min_width(LIST_MIN_WIDTH)
-            .max_width(LIST_WIDTH)
+            .default_width(LIST_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;
@@ -474,7 +474,7 @@ impl ZoneBrowser {
         {
             CollapsibleSidePanel::new("zone_info", Side::Right)
                 .min_width(DETAILS_MIN_WIDTH)
-                .max_width(DETAILS_WIDTH)
+                .default_width(DETAILS_WIDTH)
                 .show(ui, |ui, is_open| {
                     if !is_open {
                         return;

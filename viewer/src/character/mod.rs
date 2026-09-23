@@ -2638,7 +2638,7 @@ impl CharacterBuilder {
         let listing = self.listing.clone();
         let picked = CollapsibleSidePanel::new("character_pick", Side::Left)
             .min_width(PANEL_MIN_WIDTH)
-            .max_width(PANEL_WIDTH)
+            .default_width(PANEL_WIDTH)
             .show(ui, |ui, is_open| {
                 let mut picked = None;
                 if !is_open {

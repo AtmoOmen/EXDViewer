@@ -1011,7 +1011,7 @@ fn title_icons(&self, _path: &Path, params: &Params<'_, '_>) -> String {
         let mut nav = std::mem::take(&mut self.sheet_nav);
         CollapsibleSidePanel::new("sheet_list", Side::Left)
             .min_width(SHEET_LIST_MIN_WIDTH)
-            .max_width(SHEET_LIST_WIDTH)
+            .default_width(SHEET_LIST_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;

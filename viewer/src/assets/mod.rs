@@ -46,12 +46,12 @@ const MAX_RESULTS: usize = 500;
 const EXISTS_DELAY: Duration = Duration::from_millis(250);
 /// Width the extension menu is held to.
 const EXTENSION_MENU_WIDTH: f32 = 50.0;
-/// Widest the tree panel may stand.
+/// Width the tree panel opens at.
 const TREE_WIDTH: f32 = 360.0;
 /// Narrowest the tree panel can go before its own header (tree toggle, mode and extension menus,
 /// clear button) no longer fits.
 const TREE_MIN_WIDTH: f32 = 200.0;
-/// Widest the details panel beside a preview may stand.
+/// Width the details panel beside a preview opens at.
 pub(crate) const DETAILS_WIDTH: f32 = 400.0;
 const DETAILS_MIN_WIDTH: f32 = 200.0;
 const SEARCH_ID: &str = "asset_search";
@@ -1098,7 +1098,7 @@ impl AssetBrowser {
         let mut nav = std::mem::take(&mut self.nav);
         CollapsibleSidePanel::new("asset_tree", Side::Left)
             .min_width(TREE_MIN_WIDTH)
-            .max_width(TREE_WIDTH)
+            .default_width(TREE_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;
@@ -1772,7 +1772,7 @@ impl AssetBrowser {
                 let mut change = None;
                 CollapsibleSidePanel::new("asset_info", Side::Right)
                     .min_width(DETAILS_MIN_WIDTH)
-                    .max_width(DETAILS_WIDTH)
+                    .default_width(DETAILS_WIDTH)
                     .show(ui, |ui, is_open| {
                         if !is_open {
                             return;

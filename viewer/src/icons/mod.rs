@@ -330,7 +330,7 @@ impl IconBrowser {
     fn side_panel(&mut self, ui: &mut egui::Ui, backend: &Backend) {
         CollapsibleSidePanel::new("icon_tree", Side::Left)
             .min_width(TREE_MIN_WIDTH)
-            .max_width(TREE_WIDTH)
+            .default_width(TREE_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;
@@ -756,7 +756,7 @@ impl IconBrowser {
         CollapsibleSidePanel::new("icon_info", Side::Right)
             .collapsed_width(0.0)
             .min_width(DETAILS_MIN_WIDTH)
-            .max_width(DETAILS_WIDTH)
+            .default_width(DETAILS_WIDTH)
             .show(ui, |ui, is_open| {
                 if !is_open {
                     return;

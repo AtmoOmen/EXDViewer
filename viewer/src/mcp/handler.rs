@@ -9,6 +9,7 @@ use rmcp::{
 };
 use tokio::sync::oneshot;
 
+use crate::assets::SearchMode;
 use crate::settings::BackendConfig;
 
 use super::{ColumnSelector, McpChannel, McpRequest, McpResponse, RowFormat};
@@ -39,6 +40,24 @@ impl From<McpLanguage> for Language {
             McpLanguage::ChineseTraditional => Self::ChineseTraditional,
             McpLanguage::Korean => Self::Korean,
             McpLanguage::TaiwanChinese => Self::TaiwanChinese,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PathMatchMode {
+    Fuzzy,
+    Strict,
+    Regex,
+}
+
+impl From<PathMatchMode> for SearchMode {
+    fn from(value: PathMatchMode) -> Self {
+        match value {
+            PathMatchMode::Fuzzy => Self::Fuzzy,
+            PathMatchMode::Strict => Self::Strict,
+            PathMatchMode::Regex => Self::Regex,
         }
     }
 }
@@ -246,6 +265,21 @@ pub struct DecodeTextureParams {
     pub path: String,
     /// 输出图像最长边, 默认 1024, 服务端最多 2048
     pub max_dim: Option<u16>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FindUldUsingTextureParams {
+    /// 材质纹理路径, 例如 ui/uld/Achievement.tex
+    pub texture_path: String,
+    /// 对返回的界面布局路径做筛选, 支持 ext: 后缀与含 / 的字面匹配, 例如 "ext:uld ui/uld/"
+    pub query: Option<String>,
+    /// fuzzy 模糊、strict 包含、regex 正则, 默认 fuzzy
+    pub match_mode: Option<PathMatchMode>,
+    /// 匹配结果偏移量, 默认 0
+    pub offset: Option<usize>,
+    /// 返回界面布局数量上限, 省略时返回全部
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -474,6 +508,29 @@ impl McpHandler {
             Content::text(metadata.to_string()),
             Content::image(png, "image/png"),
         ]))
+    }
+
+    #[tool(
+        description = "输入材质 (.tex) 路径, 遍历全部界面布局 (.uld) 并返回引用该材质的布局路径; query 对返回路径做筛选, limit 省略时返回全部"
+    )]
+    async fn find_uld_using_texture(
+        &self,
+        Parameters(params): Parameters<FindUldUsingTextureParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::FindUldUsingTexture {
+                    api_base: self.config.api_url.clone(),
+                    texture_path: params.texture_path,
+                    query: params.query,
+                    match_mode: params.match_mode.unwrap_or(PathMatchMode::Fuzzy).into(),
+                    offset: params.offset.unwrap_or(0),
+                    limit: params.limit,
+                },
+                Self::asset_index_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
     #[tool(description = "列出所有可用的游戏数据表，支持模糊搜索、分页和杂项表开关")]
@@ -771,7 +828,7 @@ impl McpHandler {
 }
 
 #[tool_handler(
-    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表、模式和游戏资源访问能力。资源路径搜索使用 list_asset_paths，读取原始字节使用 read_asset 或 read_asset_by_hash，结构化解析使用 inspect_asset 或 inspect_asset_by_hash，查看纹理使用 decode_texture；不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；宽表使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时使用 detailed"
+    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表、模式和游戏资源访问能力。资源路径搜索使用 list_asset_paths，读取原始字节使用 read_asset 或 read_asset_by_hash，结构化解析使用 inspect_asset 或 inspect_asset_by_hash，查看纹理使用 decode_texture，按材质反查引用它的界面布局使用 find_uld_using_texture；不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；宽表使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时使用 detailed"
 )]
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerInfo {
@@ -780,7 +837,7 @@ impl ServerHandler for McpHandler {
             .with_instructions(
                 "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表和游戏资源工具。\
                  数据表流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
-                 资源流程：list_asset_paths 搜索路径 -> read_asset 分页读取字节、inspect_asset 结构化解析或 decode_texture 查看纹理；未命名资源使用对应的 by_hash 工具。\
+                 资源流程：list_asset_paths 搜索路径 -> read_asset 分页读取字节、inspect_asset 结构化解析或 decode_texture 查看纹理；未命名资源使用对应的 by_hash 工具；按材质反查引用它的界面布局用 find_uld_using_texture。\
                  search_cells 只做普通文本搜索, 不接收 DSL；query_rows 处理 filter。"
                     .to_string(),
             )

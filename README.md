@@ -68,6 +68,7 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | `inspect_asset` | 按路径结构化解析资源并返回完整数据 |
 | `inspect_asset_by_hash` | 结构化解析未命名哈希资源 |
 | `decode_texture` | 将 TEX 纹理解码为尺寸受限的 PNG 图像内容 |
+| `find_uld_using_texture` | 按材质路径反查引用了它的界面布局（ULD）路径 |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
 | `get_sheet_schema` | 获取表的模式定义（列名、类型、描述、关系映射），可附带原始 YAML 与表元信息 |
 | `get_game_version` | 获取数据与模式来源版本信息 |
@@ -90,6 +91,8 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 `query_rows` 与 `get_row` 默认使用 `compact` 格式，将列定义放在响应顶层，行只返回值数组。对宽表应传入 `columns`，元素可为从 0 开始的列索引或 schema 列名。只有需要 SeString 原始字节、类型细节等信息时才传入 `format: "detailed"`
 
 带普通筛选的 `query_rows` 默认在取得当前页和下一页存在性后停止扫描，此时 `matched_rows` 为 `null`。传入 `count_total: true` 可获得精确匹配总数。链接列默认按行 ID 筛选，传入 `resolve_links: true` 才会等待并使用目标行显示字段
+
+`find_uld_using_texture` 接收材质路径，遍历本安装全部界面布局并返回引用了该材质的布局路径。`query` 与资源浏览器同语法，支持 `ext:` 后缀过滤和含 `/` 的字面匹配，`match_mode` 选 `fuzzy`、`strict` 或 `regex`，`limit` 省略时返回全部匹配。首次调用会读取并解析全部布局，之后的查询在内存里完成
 
 目前 MCP 服务器仅限桌面版，WASM 平台暂不支持。
 

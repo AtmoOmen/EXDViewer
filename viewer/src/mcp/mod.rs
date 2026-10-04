@@ -8,6 +8,7 @@ use std::{
 
 use crate::schema::Schema as ExdSchema;
 use crate::{
+    assets::SearchMode,
     backend::Backend,
     excel::{
         base::BaseSheet,
@@ -89,6 +90,14 @@ pub enum McpRequest {
         path: String,
         max_dim: u16,
     },
+    FindUldUsingTexture {
+        api_base: String,
+        texture_path: String,
+        query: Option<String>,
+        match_mode: SearchMode,
+        offset: usize,
+        limit: Option<usize>,
+    },
     ListSheets {
         query: Option<String>,
         include_misc: bool,
@@ -165,6 +174,7 @@ impl McpRequest {
             Self::InspectAsset { .. } => "inspect_asset",
             Self::InspectAssetByHash { .. } => "inspect_asset_by_hash",
             Self::DecodeTexture { .. } => "decode_texture",
+            Self::FindUldUsingTexture { .. } => "find_uld_using_texture",
             Self::ListSheets { .. } => "list_sheets",
             Self::GetSheetSchema { .. } => "get_sheet_schema",
             Self::SearchCells { .. } => "search_cells",
@@ -1553,6 +1563,29 @@ async fn dispatch_request(
         }
         McpRequest::DecodeTexture { path, max_dim } => {
             match assets::decode_texture(backend, &path, max_dim).await {
+                Ok(result) => McpResponse::Success(result),
+                Err(error) => McpResponse::Error(format!("{error}")),
+            }
+        }
+        McpRequest::FindUldUsingTexture {
+            api_base,
+            texture_path,
+            query,
+            match_mode,
+            offset,
+            limit,
+        } => {
+            match assets::find_uld_using_texture(
+                backend,
+                &api_base,
+                &texture_path,
+                query.as_deref(),
+                match_mode,
+                offset,
+                limit,
+            )
+            .await
+            {
                 Ok(result) => McpResponse::Success(result),
                 Err(error) => McpResponse::Error(format!("{error}")),
             }

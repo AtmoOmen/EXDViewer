@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::num::NonZeroU32;
 use std::rc::Rc;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -552,8 +553,8 @@ enum Load<T: Send + 'static, R = T> {
 }
 
 /// How the text of a query is matched against a path.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SearchMode {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchMode {
     Fuzzy,
     Strict,
     Regex,
@@ -580,7 +581,7 @@ impl SearchMode {
 }
 
 /// What a query matches with, compiled once when the scan starts.
-enum Match {
+pub(crate) enum Match {
     /// Every name the filters left, which is what `ext:stm` on its own has to mean. The fuzzy
     /// matcher scores nothing against an empty pattern, so it cannot answer that itself.
     All,
@@ -591,11 +592,26 @@ enum Match {
     Invalid(String),
 }
 
+impl Match {
+    /// What a path scores against this, or `None` where it does not match at all. The extension
+    /// filter is not part of this: callers test a name against `Query::accepts` first, which is
+    /// the cheapest test of the two.
+    pub(crate) fn score(&self, matcher: &FuzzyMatcher, path: &str) -> Option<u32> {
+        match self {
+            Self::All => Some(0),
+            Self::Fuzzy(pattern) => matcher.score_one(pattern, path).map(NonZeroU32::get),
+            Self::Contains(needle) => contains_ignore_ascii_case(path, needle).then_some(0),
+            Self::Regex(regex) => regex.is_match(path).then_some(0),
+            Self::Invalid(_) => None,
+        }
+    }
+}
+
 /// Compile the query text, which is what the sweep then holds rather than the text itself.
 ///
 /// Only a fuzzy query takes a `/` to mean the path: the other two modes are already spelled against
 /// whole paths, and a regex is full of separators that mean nothing of the sort.
-fn matching(mode: SearchMode, query: &Query) -> Match {
+pub(crate) fn matching(mode: SearchMode, query: &Query) -> Match {
     if query.text.is_empty() {
         return Match::All;
     }
@@ -618,8 +634,8 @@ fn matching(mode: SearchMode, query: &Query) -> Match {
 
 struct Scan {
     matching: Match,
-    /// The suffix a name has to end with, `.` included, or empty for no extension filter.
-    suffix: String,
+    /// The query the sweep is matching with, which carries its own extension filter.
+    query: Query,
     cursor: usize,
     hits: Vec<(u32, String)>,
     /// Everything that matched, which outruns `hits` once the cap is reached.
@@ -652,7 +668,7 @@ enum Revealed {
 }
 
 /// What a typed query asks for, once its filter terms have been read off the front.
-struct Query {
+pub(crate) struct Query {
     /// What is left to match on, which is empty when the query was nothing but filters.
     text: String,
     /// The suffix a name has to end with, `.` included, or empty for no extension filter.
@@ -661,12 +677,22 @@ struct Query {
     literal: bool,
 }
 
+impl Query {
+    /// Whether a name clears the extension filter. Compared as bytes because folding the case of
+    /// every one of a million-odd names would allocate more than the rest of a sweep put together;
+    /// a path is ASCII.
+    pub(crate) fn accepts(&self, name: &str) -> bool {
+        let tail = name.len().checked_sub(self.suffix.len());
+        tail.is_some_and(|at| name.as_bytes()[at..].eq_ignore_ascii_case(self.suffix.as_bytes()))
+    }
+}
+
 /// Read the filter terms out of a query, leaving the rest to match on.
 ///
 /// `ext:` is spelled the way the Everything search box spells it, and a query carrying a `/` is
 /// taken to be part of a path rather than a fuzzy fragment, which is the same rule: nobody types a
 /// separator into a fuzzy search, and typing `exd/` should leave that folder alone on screen.
-fn parse_query(search: &str) -> Query {
+pub(crate) fn parse_query(search: &str) -> Query {
     let mut suffix = String::new();
     let mut rest = Vec::new();
     for term in search.split_whitespace() {
@@ -1496,18 +1522,19 @@ impl AssetBrowser {
         let mode = self.mode;
         let scan = self.scan.get_or_insert_with(|| {
             let query = parse_query(&self.search);
+            let direct = direct_path(&query.text, |root| {
+                loaded
+                    .roots
+                    .iter()
+                    .any(|&node| &*loaded.nodes[node].segment == root)
+            });
             Scan {
                 matching: matching(mode, &query),
-                suffix: query.suffix,
+                query,
                 cursor: 0,
                 hits: Vec::new(),
                 matched: 0,
-                direct: direct_path(&query.text, |root| {
-                    loaded
-                        .roots
-                        .iter()
-                        .any(|&node| &*loaded.nodes[node].segment == root)
-                }),
+                direct,
                 exists: Load::Idle,
                 typed: Instant::now(),
             }
@@ -1561,28 +1588,11 @@ impl AssetBrowser {
             for name in loaded.decode(dir) {
                 // Cheapest test first: an extension rules a name out without building its path or
                 // scoring it, which is what keeps an extension-only sweep of the whole list quick.
-                // Compared as bytes because folding the case of every one of a million-odd names
-                // would allocate more than the rest of the sweep put together; a path is ASCII.
-                let tail = name.len().checked_sub(scan.suffix.len());
-                if !tail.is_some_and(|at| {
-                    name.as_bytes()[at..].eq_ignore_ascii_case(scan.suffix.as_bytes())
-                }) {
+                if !scan.query.accepts(&name) {
                     continue;
                 }
                 let path = format!("{dir_path}/{name}");
-                let score = match &scan.matching {
-                    Match::All => Some(0),
-                    Match::Fuzzy(pattern) => self
-                        .matcher
-                        .score_one(pattern, &path)
-                        .map(|score| score.get()),
-                    Match::Contains(needle) => {
-                        contains_ignore_ascii_case(&path, needle).then_some(0)
-                    }
-                    Match::Regex(regex) => regex.is_match(&path).then_some(0),
-                    Match::Invalid(_) => None,
-                };
-                if let Some(score) = score {
+                if let Some(score) = scan.matching.score(&self.matcher, &path) {
                     scan.matched += 1;
                     scan.hits.push((score, path));
                 }

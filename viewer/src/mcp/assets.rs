@@ -1,18 +1,25 @@
-use std::{cell::RefCell, io::Cursor};
+use std::{cell::RefCell, io::Cursor, num::NonZeroUsize};
 
 use base64::{Engine, prelude::BASE64_STANDARD};
+use futures_util::{StreamExt, stream};
 use image::GenericImageView;
 use ironworks::file::{File, layer, uld};
 use pathlist::{PathList, Presence};
 
-use crate::{assets::magic, backend::Backend};
+use crate::{
+    assets::{Match, SearchMode, magic, matching, parse_query},
+    backend::Backend,
+    utils::FuzzyMatcher,
+};
 
 const MAX_BYTES: usize = 64 * 1024;
 const DEFAULT_BYTES: usize = 4 * 1024;
 const MAX_ITEMS: usize = 500;
+const ULD_SUFFIX: &str = ".uld";
 
 thread_local! {
     static PATH_INDEX_CACHE: RefCell<Option<PathIndexCache>> = const { RefCell::new(None) };
+    static ULD_TEXTURE_INDEX: RefCell<Option<UldTextureIndex>> = const { RefCell::new(None) };
 }
 
 struct PathIndexCache {
@@ -304,6 +311,150 @@ pub async fn list_paths(
         })
         .to_string()
     }))
+}
+
+/// Every texture the interface layouts reference, so a material can be looked up without walking
+/// the layouts again.
+struct UldTextureIndex {
+    api_url: String,
+    layouts: Vec<UldTextures>,
+    parsed: usize,
+    failed: usize,
+}
+
+struct UldTextures {
+    path: String,
+    /// Folded to lowercase here, so a lookup compares it against a folded input directly.
+    textures: Vec<String>,
+}
+
+async fn load_uld_texture_index(backend: &Backend, api_url: &str) -> anyhow::Result<()> {
+    let cached = ULD_TEXTURE_INDEX.with(|cache| {
+        cache
+            .borrow()
+            .as_ref()
+            .is_some_and(|cached| cached.api_url == api_url)
+    });
+    if cached {
+        return Ok(());
+    }
+
+    load_path_cache(backend, api_url).await?;
+    let paths = PATH_INDEX_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        let cache = cache.as_ref().expect("path index initialized");
+        cache
+            .entries
+            .iter()
+            .filter(|entry| entry.present && entry.lowercase_path.ends_with(ULD_SUFFIX))
+            .map(|entry| entry.path.clone())
+            .collect::<Vec<_>>()
+    });
+
+    // One layout in flight per core: each read is a hop to the pool, and they have to overlap for a
+    // batch of them to cost less than the sum of their waits.
+    let files = backend.files().clone();
+    let read = stream::iter(paths)
+        .map(|path| {
+            let files = files.clone();
+            async move {
+                let bytes = files.read(&path).await?;
+                let layout = uld::UiLayout::read(Cursor::new(bytes))
+                    .map_err(|error| anyhow::anyhow!("{path}: {error}"))?;
+                let textures = layout
+                    .textures()
+                    .iter()
+                    .map(|texture| texture.path().to_ascii_lowercase())
+                    .collect();
+                anyhow::Ok(UldTextures { path, textures })
+            }
+        })
+        .buffer_unordered(std::thread::available_parallelism().map_or(4, NonZeroUsize::get))
+        .collect::<Vec<anyhow::Result<UldTextures>>>()
+        .await;
+
+    let mut layouts = Vec::with_capacity(read.len());
+    let mut failed = 0;
+    for result in read {
+        match result {
+            Ok(layout) => layouts.push(layout),
+            Err(error) => {
+                failed += 1;
+                log::warn!("界面布局读取失败: {error}");
+            }
+        }
+    }
+    layouts.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let parsed = layouts.len();
+    ULD_TEXTURE_INDEX.with(|cache| {
+        cache.replace(Some(UldTextureIndex {
+            api_url: api_url.to_owned(),
+            layouts,
+            parsed,
+            failed,
+        }));
+    });
+    Ok(())
+}
+
+pub async fn find_uld_using_texture(
+    backend: &Backend,
+    api_base: &str,
+    texture_path: &str,
+    query: Option<&str>,
+    match_mode: SearchMode,
+    offset: usize,
+    limit: Option<usize>,
+) -> anyhow::Result<String> {
+    let api_url = api_base.trim_end_matches('/').to_owned();
+    load_uld_texture_index(backend, &api_url).await?;
+
+    let texture = texture_path
+        .trim()
+        .trim_start_matches('/')
+        .to_ascii_lowercase();
+    if texture.is_empty() {
+        anyhow::bail!("材质路径为空");
+    }
+    let query = parse_query(query.unwrap_or_default());
+    let pattern = matching(match_mode, &query);
+    if let Match::Invalid(reason) = &pattern {
+        anyhow::bail!("筛选表达式无效: {reason}");
+    }
+    let matcher = FuzzyMatcher::new();
+
+    let (parsed, failed, matched) = ULD_TEXTURE_INDEX.with(|cache| {
+        let cache = cache.borrow();
+        let index = cache.as_ref().expect("uld texture index initialized");
+        let matched = index
+            .layouts
+            .iter()
+            .filter(|layout| layout.textures.iter().any(|held| held == &texture))
+            .map(|layout| layout.path.as_str())
+            .filter(|path| query.accepts(path) && pattern.score(&matcher, path).is_some())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        (index.parsed, index.failed, matched)
+    });
+
+    let total = matched.len();
+    let page = matched
+        .iter()
+        .skip(offset)
+        .take(limit.unwrap_or(total))
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "texture_path": texture_path,
+        "layouts_parsed": parsed,
+        "layouts_failed": failed,
+        "matched": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset.saturating_add(page.len()) < total,
+        "uld_paths": page
+    })
+    .to_string())
 }
 
 fn resource_json(

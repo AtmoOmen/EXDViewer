@@ -395,4 +395,44 @@ impl TableContext {
     ) -> anyhow::Result<CompiledFilterInput> {
         self.0.filter_cache.compile(input, options)
     }
+
+    /// 该行里命中筛选条件的列偏移索引, 升序去重。逐列回查每一处 `KeyEquals`, 因此由 `and`
+    /// 组合的条件报告两侧各自命中的列, 而不是只报告整体的真假。
+    pub fn matched_columns(
+        &self,
+        row: &ExcelRow<'_>,
+        filter: &CompiledFilterInput,
+    ) -> anyhow::Result<Vec<usize>> {
+        let Some(complex) = filter.input() else {
+            return Ok(Vec::new());
+        };
+        let mut pairs = Vec::new();
+        complex.filter.key_equals(&mut pairs);
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let options = *filter.options();
+        let mut matched: Vec<usize> = Vec::new();
+        for (key_idx, value) in pairs {
+            let Some(
+                CompiledFilterKey::Column(indices, _)
+                | CompiledFilterKey::RowIdOrColumn(indices),
+            ) = complex.lookup.get(key_idx as usize)
+            else {
+                continue;
+            };
+            for (offset_idx, _) in indices.iter().enumerate() {
+                if matched.contains(&offset_idx) {
+                    continue;
+                }
+                let cell = self.cell_by_offset(*row, offset_idx as u32)?.read(false)?;
+                if self.0.filter_cache.match_cell(&cell, &value, options) {
+                    matched.push(offset_idx);
+                }
+            }
+        }
+        matched.sort_unstable();
+        Ok(matched)
+    }
 }

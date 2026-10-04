@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine, prelude::BASE64_STANDARD};
 use crate::schema::Schema as ExdSchema;
 use crate::{
     assets::SearchMode,
@@ -25,12 +26,16 @@ use crate::{
 };
 use futures_util::{StreamExt, stream};
 use handler::McpHandler;
+use image::{ImageFormat, RgbaImage};
 use ironworks::excel::Language;
 use lru::LruCache;
 use tokio::sync::{mpsc, oneshot};
 
 mod assets;
+mod export;
 mod handler;
+mod icons;
+mod render;
 #[cfg(test)]
 mod tests;
 
@@ -76,8 +81,10 @@ pub enum McpRequest {
         limit: usize,
     },
     InspectAsset {
+        api_base: String,
         path: String,
         max_items: usize,
+        output: Option<String>,
     },
     InspectAssetByHash {
         repository: u8,
@@ -86,9 +93,24 @@ pub enum McpRequest {
         split: bool,
         max_items: usize,
     },
-    DecodeTexture {
+    RenderAsset {
         path: String,
-        max_dim: u16,
+        max_dim: u32,
+        text: Option<String>,
+        yaw: Option<f32>,
+        pitch: Option<f32>,
+        distance: Option<f32>,
+        zoom: f32,
+    },
+    ExportAsset {
+        api_base: String,
+        paths: Vec<String>,
+        query: Option<String>,
+        match_mode: SearchMode,
+        stream: Option<usize>,
+        limit: usize,
+        output: String,
+        max_dim: u32,
     },
     FindUldUsingTexture {
         api_base: String,
@@ -108,24 +130,27 @@ pub enum McpRequest {
         name: String,
         include_raw: bool,
     },
-    SearchCells {
-        name: String,
-        query: String,
-        columns: Option<Vec<ColumnSelector>>,
-        row_offset: usize,
-        max_rows: Option<usize>,
-        max_results: usize,
-        language: Language,
-    },
     QueryRows {
         name: String,
         filter: Option<String>,
         columns: Option<Vec<ColumnSelector>>,
         offset: usize,
         limit: usize,
+        row_offset: usize,
+        max_rows: Option<usize>,
         count_total: bool,
         resolve_links: bool,
+        matched_columns: bool,
         format: RowFormat,
+        language: Language,
+    },
+    ExportSheet {
+        name: String,
+        filter: Option<String>,
+        columns: Option<Vec<ColumnSelector>>,
+        resolve_links: bool,
+        limit: Option<usize>,
+        output: String,
         language: Language,
     },
     GetRow {
@@ -151,16 +176,20 @@ pub enum McpRequest {
         format: RowFormat,
         language: Language,
     },
-    DecodeSeString {
-        name: String,
-        row_id: u32,
-        subrow_id: u16,
-        column: ColumnSelector,
-        language: Language,
+    ListIconSets {
+        query: Option<String>,
     },
-    SaveSchema {
-        name: String,
-        text: String,
+    GetIconSet {
+        set: String,
+        page_size: usize,
+        start_page: usize,
+        end_page: Option<usize>,
+    },
+    GetIcon {
+        icon_id: u32,
+        hires: bool,
+        max_dim: u32,
+        language: Language,
     },
 }
 
@@ -173,18 +202,20 @@ impl McpRequest {
             Self::ListAssetPaths { .. } => "list_asset_paths",
             Self::InspectAsset { .. } => "inspect_asset",
             Self::InspectAssetByHash { .. } => "inspect_asset_by_hash",
-            Self::DecodeTexture { .. } => "decode_texture",
+            Self::RenderAsset { .. } => "render_asset",
+            Self::ExportAsset { .. } => "export_asset",
             Self::FindUldUsingTexture { .. } => "find_uld_using_texture",
             Self::ListSheets { .. } => "list_sheets",
             Self::GetSheetSchema { .. } => "get_sheet_schema",
-            Self::SearchCells { .. } => "search_cells",
             Self::QueryRows { .. } => "query_rows",
+            Self::ExportSheet { .. } => "export_sheet",
             Self::GetRow { .. } => "get_row",
             Self::ValidateSchema { .. } => "validate_schema",
             Self::GetReferencingSheets { .. } => "get_referencing_sheets",
             Self::ResolveLink { .. } => "resolve_link",
-            Self::DecodeSeString { .. } => "decode_se_string",
-            Self::SaveSchema { .. } => "save_schema",
+            Self::ListIconSets { .. } => "list_icon_sets",
+            Self::GetIconSet { .. } => "get_icon_set",
+            Self::GetIcon { .. } => "get_icon",
         }
     }
 }
@@ -269,27 +300,6 @@ async fn load_schema_snapshot(backend: &Backend, name: &str) -> anyhow::Result<S
         cache.put(name.to_owned(), snapshot.clone());
     });
     Ok(snapshot)
-}
-
-fn invalidate_schema_snapshot(name: &str) {
-    with_schema_cache(|cache| {
-        cache.pop(name);
-    });
-    TABLE_CACHE.with(|cell| {
-        let mut cache_ref = cell.borrow_mut();
-        let Some(cache) = cache_ref.as_mut() else {
-            return;
-        };
-        let keys = cache
-            .iter()
-            .filter(|((sheet_name, _), _)| sheet_name == name)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            cache.pop(&key);
-        }
-    });
-    RELATION_INDEX.with(|cache| cache.borrow_mut().take());
 }
 
 fn schema_column_type_name(meta: &SchemaColumnMeta) -> &'static str {
@@ -634,45 +644,6 @@ fn process_validate_schema(text: &str) -> String {
     }
 }
 
-fn process_get_icon_paths(icon_id: u32) -> String {
-    let path = crate::data::get_icon_path(None, icon_id, false, Language::None);
-    let hires_path = crate::data::get_icon_path(None, icon_id, true, Language::None);
-    serde_json::json!({"icon_id": icon_id, "tex_path": path, "hires_tex_path": hires_path})
-        .to_string()
-}
-
-fn process_decompose_model_id(model_id: &str, weapon: Option<bool>) -> McpResponse {
-    match model_id.parse::<u64>() {
-        Ok(value) if !weapon.unwrap_or(value > u64::from(u32::MAX)) => {
-            let Ok(value) = u32::try_from(value) else {
-                return McpResponse::Error("32 位装备 ModelId 超出范围".into());
-            };
-            McpResponse::Success(
-                serde_json::json!({
-                    "kind": "model",
-                    "raw": value,
-                    "model": (value & 0xFFFF) as u16,
-                    "variant": ((value >> 16) & 0xFF) as u8,
-                    "stain": ((value >> 24) & 0xFF) as u8
-                })
-                .to_string(),
-            )
-        }
-        Ok(value) => McpResponse::Success(
-            serde_json::json!({
-                "kind": "weapon",
-                "raw": value,
-                "skeleton": (value & 0xFFFF) as u16,
-                "model": ((value >> 16) & 0xFFFF) as u16,
-                "variant": ((value >> 32) & 0xFFFF) as u16,
-                "stain": ((value >> 48) & 0xFFFF) as u16
-            })
-            .to_string(),
-        ),
-        Err(e) => McpResponse::Error(format!("无法解析: {e}")),
-    }
-}
-
 async fn process_get_sheet_schema(
     backend: &Backend,
     name: &str,
@@ -895,14 +866,38 @@ async fn process_get_referencing_sheets(
     )
 }
 
+/// 命中筛选条件的列, 按列索引、列名与它在文件里的存储偏移给出。
+fn matched_columns_json(
+    table: &TableContext,
+    row: &crate::excel::provider::ExcelRow<'_>,
+    filter: &CompiledFilterInput,
+) -> anyhow::Result<serde_json::Value> {
+    let hits = table.matched_columns(row, filter)?;
+    let mut columns = Vec::with_capacity(hits.len());
+    for offset in hits {
+        let Ok((schema, column)) = table.get_column_by_offset(offset as u32) else {
+            continue;
+        };
+        columns.push(serde_json::json!({
+            "index": offset,
+            "name": schema.name(),
+            "storage_offset": column.offset()
+        }));
+    }
+    Ok(serde_json::Value::Array(columns))
+}
+
 struct QueryRowsOptions<'a> {
     name: &'a str,
     filter: Option<&'a str>,
     columns: Option<&'a [ColumnSelector]>,
     offset: usize,
     limit: usize,
+    row_offset: usize,
+    max_rows: Option<usize>,
     count_total: bool,
     resolve_links: bool,
+    matched_columns: bool,
     format: RowFormat,
     language: Language,
 }
@@ -914,8 +909,11 @@ async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) ->
         columns: column_selectors,
         offset,
         limit,
+        row_offset,
+        max_rows,
         count_total,
         resolve_links,
+        matched_columns,
         format,
         language: lang,
     } = options;
@@ -961,7 +959,11 @@ async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) ->
         let fuzzy = compiled_filter.input().is_some_and(|input| input.has_fuzzy);
         if fuzzy {
             let mut matched = Vec::new();
-            for (sequence, (row_id, subrow_id)) in row_locations(&sheet).enumerate() {
+            for (sequence, (row_id, subrow_id)) in row_locations(&sheet)
+                .skip(row_offset)
+                .take(max_rows.unwrap_or(usize::MAX))
+                .enumerate()
+            {
                 if sequence % 256 == 0 {
                     tokio::task::yield_now().await;
                 }
@@ -1026,12 +1028,22 @@ async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) ->
                 if let Some(score) = score {
                     row_obj.insert("match_score".into(), serde_json::json!(score.get()));
                 }
+                if matched_columns {
+                    match matched_columns_json(&table_context, &row, compiled_filter) {
+                        Ok(hits) => row_obj.insert("matched_columns".into(), hits),
+                        Err(e) => return McpResponse::Error(format!("{e}")),
+                    };
+                }
                 rows.push(serde_json::Value::Object(row_obj));
             }
         } else {
             let mut match_count = 0;
             let mut found_more = false;
-            for (sequence, (row_id, subrow_id)) in row_locations(&sheet).enumerate() {
+            for (sequence, (row_id, subrow_id)) in row_locations(&sheet)
+                .skip(row_offset)
+                .take(max_rows.unwrap_or(usize::MAX))
+                .enumerate()
+            {
                 if sequence % 256 == 0 {
                     tokio::task::yield_now().await;
                 }
@@ -1069,6 +1081,14 @@ async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) ->
                         Err(e) => return McpResponse::Error(format!("{e}")),
                     };
                     row_obj.insert("row_index".into(), serde_json::json!(sequence));
+                    if matched_columns {
+                        match matched_columns_json(&table_context, &row, compiled_filter) {
+                            Ok(hits) => {
+                                row_obj.insert("matched_columns".into(), hits);
+                            }
+                            Err(e) => return McpResponse::Error(format!("{e}")),
+                        }
+                    }
                     rows.push(serde_json::Value::Object(row_obj));
                 } else if !count_total && match_count >= offset.saturating_add(page_limit) {
                     found_more = true;
@@ -1083,6 +1103,8 @@ async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) ->
         matched_rows = Some(total_rows);
         has_more = offset.saturating_add(page_limit) < total_rows;
         for (sequence, (row_id, subrow_id)) in row_locations(&sheet)
+            .skip(row_offset)
+            .take(max_rows.unwrap_or(usize::MAX))
             .enumerate()
             .skip(offset)
             .take(page_limit)
@@ -1109,6 +1131,8 @@ async fn process_query_rows(backend: &Backend, options: QueryRowsOptions<'_>) ->
             "filter": filter,
             "offset": offset,
             "limit": page_limit,
+            "row_offset": row_offset,
+            "max_rows": max_rows,
             "total_rows": total_rows,
             "matched_rows": matched_rows,
             "has_more": has_more,
@@ -1162,114 +1186,6 @@ async fn process_get_row(
             "format": match format { RowFormat::Compact => "compact", RowFormat::Detailed => "detailed" },
             "columns": columns_to_json(&columns, table_context.display_column_idx()),
             "values": values
-        })
-        .to_string(),
-    )
-}
-
-struct SearchCellsOptions<'a> {
-    name: &'a str,
-    query: &'a str,
-    columns: Option<&'a [ColumnSelector]>,
-    row_offset: usize,
-    max_rows: Option<usize>,
-    max_results: usize,
-    language: Language,
-}
-
-async fn process_search_cells(backend: &Backend, options: SearchCellsOptions<'_>) -> McpResponse {
-    let SearchCellsOptions {
-        name,
-        query,
-        columns: column_selectors,
-        row_offset,
-        max_rows,
-        max_results,
-        language: lang,
-    } = options;
-    if query.trim().is_empty() {
-        return McpResponse::Error("query 不能为空".into());
-    }
-    let excel = backend.excel();
-    let sheet = match excel.get_sheet(name, lang).await {
-        Ok(s) => s,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
-        Ok(ctx) => ctx,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-
-    let columns = match select_columns(&table_context, column_selectors) {
-        Ok(columns) => columns,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-    let ql = query.to_lowercase();
-    let result_limit = max_results.min(500);
-    let mut results = Vec::with_capacity(result_limit);
-    let mut scanned_rows = 0;
-    let mut truncated = false;
-    let display_idx = table_context.display_column_idx();
-
-    'rows: for (sequence, (row_id, subrow_id)) in row_locations(&sheet)
-        .skip(row_offset)
-        .take(max_rows.unwrap_or(usize::MAX))
-        .enumerate()
-    {
-        if sequence % 256 == 0 {
-            tokio::task::yield_now().await;
-        }
-        scanned_rows += 1;
-        let row = match get_row_at(&sheet, row_id, subrow_id) {
-            Ok(row) => row,
-            Err(_) => continue,
-        };
-
-        for column in &columns {
-            if column.sheet.kind() != ironworks::file::exh::ColumnKind::String {
-                continue;
-            }
-            if let Ok(s) = row.read_string(u32::from(column.sheet.offset())) {
-                let value = s.to_string();
-                if value.to_lowercase().contains(&ql) {
-                    if results.len() >= result_limit {
-                        truncated = true;
-                        break 'rows;
-                    }
-                    let mut item = serde_json::Map::new();
-                    item.insert("row_id".into(), serde_json::json!(row_id));
-                    item.insert("subrow_id".into(), serde_json::json!(subrow_id));
-                    item.insert("column_index".into(), serde_json::json!(column.index));
-                    item.insert(
-                        "column_offset".into(),
-                        serde_json::json!(column.sheet.offset()),
-                    );
-                    item.insert(
-                        "column_name".into(),
-                        serde_json::json!(column.schema.name()),
-                    );
-                    item.insert("value".into(), serde_json::json!(value));
-                    if display_idx == Some(column.index as u32) {
-                        item.insert("is_display".into(), serde_json::json!(true));
-                    }
-                    results.push(serde_json::Value::Object(item));
-                }
-            }
-        }
-    }
-
-    McpResponse::Success(
-        serde_json::json!({
-            "sheet": name,
-            "query": query,
-            "language": format!("{lang:?}"),
-            "count": results.len(),
-            "scanned_rows": scanned_rows,
-            "row_offset": row_offset,
-            "max_rows": max_rows,
-            "limit": result_limit,
-            "truncated": truncated,
-            "matches": results
         })
         .to_string(),
     )
@@ -1407,85 +1323,179 @@ async fn process_resolve_link(backend: &Backend, options: ResolveLinkOptions<'_>
     ))
 }
 
-async fn process_decode_se_string(
-    backend: &Backend,
-    name: &str,
-    row_id: u32,
-    subrow_id: u16,
-    column_selector: &ColumnSelector,
-    lang: Language,
-) -> McpResponse {
-    let excel = backend.excel();
-    let sheet = match excel.get_sheet(name, lang).await {
-        Ok(s) => s,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-    let table_context = match build_table_context(backend, name, sheet.clone(), lang).await {
-        Ok(ctx) => ctx,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-    let row = match sheet.get_subrow(row_id, subrow_id) {
-        Ok(r) => r,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-
-    let columns = match select_columns(&table_context, Some(std::slice::from_ref(column_selector)))
-    {
-        Ok(columns) => columns,
-        Err(e) => return McpResponse::Error(format!("{e}")),
-    };
-    let column = &columns[0];
-    if column.sheet.kind() != ironworks::file::exh::ColumnKind::String {
-        return McpResponse::Error(format!(
-            "列 {} 的类型为 {:?}, 不是 String, 无法解码 SeString",
-            column.index,
-            column.sheet.kind()
-        ));
+/// 把画好的位图编成 PNG, 与元数据一起交出去; 图片走 base64, 由工具层拆成一份图像内容。
+fn image_response(image: RgbaImage, mut metadata: serde_json::Value) -> McpResponse {
+    let mut png = std::io::Cursor::new(Vec::new());
+    if let Err(error) = image::DynamicImage::ImageRgba8(image).write_to(&mut png, ImageFormat::Png) {
+        return McpResponse::Error(format!("PNG 编码失败: {error}"));
     }
-    let value = match row.read_string(u32::from(column.sheet.offset())) {
-        Ok(value) => value,
-        Err(e) => return McpResponse::Error(format!("{e}")),
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert(
+            "image_base64".into(),
+            serde_json::json!(BASE64_STANDARD.encode(png.into_inner())),
+        );
+    }
+    McpResponse::Success(metadata.to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_render_asset(
+    backend: &Backend,
+    path: &str,
+    max_dim: u32,
+    text: Option<&str>,
+    yaw: Option<f32>,
+    pitch: Option<f32>,
+    distance: Option<f32>,
+    zoom: f32,
+) -> McpResponse {
+    // 观察角度显式给出时才让字体所在的平面转过来, 否则字是正对着看的。
+    let tilt = (yaw.is_some() || pitch.is_some())
+        .then(|| (yaw.unwrap_or(0.0).to_radians(), pitch.unwrap_or(0.0).to_radians()));
+    let options = render::Options {
+        max_dim,
+        text: text.map(str::to_owned),
+        camera: render::Camera {
+            yaw: yaw.unwrap_or(0.0).to_radians(),
+            pitch: pitch.unwrap_or(8.6).to_radians(),
+            distance,
+            zoom,
+            tilt,
+        },
     };
-    let raw_text = value.to_string();
-    let raw_bytes = value.as_bytes();
+    match render::render(backend, path, &options).await {
+        Ok(rendered) => image_response(
+            rendered.image,
+            serde_json::json!({
+                "path": path,
+                "viewer": rendered.viewer.label(),
+                "max_dim": max_dim,
+                "text": text
+            }),
+        ),
+        Err(error) => McpResponse::Error(format!("{error}")),
+    }
+}
 
-    use base64::{Engine, prelude::BASE64_STANDARD};
-    let base64 = BASE64_STANDARD.encode(raw_bytes);
-    let hex = raw_bytes
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+async fn process_get_icon(
+    backend: &Backend,
+    config: &BackendConfig,
+    icon_id: u32,
+    hires: bool,
+    max_dim: u32,
+    language: Language,
+) -> McpResponse {
+    let (low_res, high_res, localized, has_hires) = icons::paths(backend, icon_id, language);
+    let wanted = match hires {
+        true => high_res.clone(),
+        false => low_res.clone(),
+    };
+    let texture = match backend
+        .files()
+        .read_texture(&wanted, Some(max_dim.min(u32::from(u16::MAX)) as u16))
+        .await
+    {
+        Ok(decoded) => decoded,
+        Err(error) => return McpResponse::Error(format!("{wanted}: {error}")),
+    };
 
-    McpResponse::Success(
+    let (uses, total_uses) = match icons::refs(backend, config).await {
+        Ok(refs) => {
+            let all = refs.uses(icon_id);
+            let total = all.len();
+            let page = all
+                .iter()
+                .take(icons::MAX_USES)
+                .map(|held| {
+                    serde_json::json!({
+                        "sheet": refs.sheet_name(held.sheet),
+                        "row_id": held.row,
+                        "subrow_id": held.subrow
+                    })
+                })
+                .collect::<Vec<_>>();
+            (page, total)
+        }
+        Err(error) => return McpResponse::Error(format!("{error}")),
+    };
+    let truncated = total_uses > uses.len();
+    image_response(
+        texture.image,
         serde_json::json!({
-            "sheet": name,
-            "row_id": row_id,
-            "subrow_id": subrow_id,
-            "column_offset": column.sheet.offset(),
-            "column_index": column.index,
-            "column_name": column.schema.name(),
-            "raw_text": raw_text,
-            "bytes_base64": base64,
-            "bytes_hex": hex,
-            "byte_count": raw_bytes.len()
-        })
-        .to_string(),
+            "icon_id": icon_id,
+            "tex_path": low_res,
+            "hires_tex_path": high_res,
+            "used_path": wanted,
+            "hires": has_hires,
+            "localized": localized,
+            "requested_hires": hires,
+            "source_width": texture.source[0],
+            "source_height": texture.source[1],
+            "use_count": total_uses,
+            "uses_truncated": truncated,
+            "uses": uses
+        }),
     )
 }
 
-async fn process_save_schema(backend: &Backend, name: &str, text: &str) -> McpResponse {
-    let schema_provider = backend.schema();
-    if !schema_provider.can_save_schemas() {
-        return McpResponse::Error("当前模式提供者不支持保存".into());
+async fn process_list_icon_sets(
+    backend: &Backend,
+    config: &BackendConfig,
+    query: Option<&str>,
+) -> McpResponse {
+    match icons::list_sets(backend, config, query).await {
+        Ok(sets) => McpResponse::Success(
+            serde_json::json!({
+                "count": sets.len(),
+                "sets": sets
+                    .iter()
+                    .map(|set| serde_json::json!({
+                        "name": set.name,
+                        "kind": set.kind,
+                        "count": set.count
+                    }))
+                    .collect::<Vec<_>>()
+            })
+            .to_string(),
+        ),
+        Err(error) => McpResponse::Error(format!("{error}")),
     }
-    match schema_provider.save_schema(name, text).await {
-        Ok(()) => {
-            invalidate_schema_snapshot(name);
-            McpResponse::Success(serde_json::json!({"saved": true, "name": name}).to_string())
-        }
-        Err(e) => McpResponse::Error(format!("{e}")),
-    }
+}
+
+async fn process_get_icon_set(
+    backend: &Backend,
+    config: &BackendConfig,
+    set: &str,
+    page_size: usize,
+    start_page: usize,
+    end_page: Option<usize>,
+) -> McpResponse {
+    let (ids, kind) = match icons::set_ids(backend, config, set).await {
+        Ok(found) => found,
+        Err(error) => return McpResponse::Error(format!("{error}")),
+    };
+    let page_size = page_size.clamp(1, icons::MAX_PAGE);
+    let total = ids.len();
+    let page_count = total.div_ceil(page_size).max(1);
+    let start_page = start_page.max(1);
+    let end_page = end_page.unwrap_or(start_page).max(start_page);
+    let from = (start_page - 1).saturating_mul(page_size);
+    let to = end_page.saturating_mul(page_size).min(total);
+    let slice = if from >= total { &[][..] } else { &ids[from..to] };
+    McpResponse::Success(
+        serde_json::json!({
+            "set": set,
+            "kind": kind,
+            "total": total,
+            "page_size": page_size,
+            "page_count": page_count,
+            "start_page": start_page,
+            "end_page": end_page,
+            "count": slice.len(),
+            "ids": slice
+        })
+        .to_string(),
+    )
 }
 
 async fn dispatch_request(
@@ -1542,12 +1552,24 @@ async fn dispatch_request(
                 Err(error) => McpResponse::Error(format!("{error}")),
             }
         }
-        McpRequest::InspectAsset { path, max_items } => {
-            match assets::inspect_path(backend, &path, max_items).await {
+        McpRequest::InspectAsset {
+            api_base,
+            path,
+            max_items,
+            output,
+        } => match output {
+            Some(output) => {
+                match export::inspect_to_folder(backend, &path, &api_base, &output, max_items).await
+                {
+                    Ok(result) => McpResponse::Success(result),
+                    Err(error) => McpResponse::Error(format!("{error}")),
+                }
+            }
+            None => match assets::inspect_path(backend, &path, max_items).await {
                 Ok(result) => McpResponse::Success(result),
                 Err(error) => McpResponse::Error(format!("{error}")),
-            }
-        }
+            },
+        },
         McpRequest::InspectAssetByHash {
             repository,
             category,
@@ -1561,8 +1583,52 @@ async fn dispatch_request(
                 Err(error) => McpResponse::Error(format!("{error}")),
             }
         }
-        McpRequest::DecodeTexture { path, max_dim } => {
-            match assets::decode_texture(backend, &path, max_dim).await {
+        McpRequest::RenderAsset {
+            path,
+            max_dim,
+            text,
+            yaw,
+            pitch,
+            distance,
+            zoom,
+        } => {
+            process_render_asset(
+                backend,
+                &path,
+                max_dim,
+                text.as_deref(),
+                yaw,
+                pitch,
+                distance,
+                zoom,
+            )
+            .await
+        }
+        McpRequest::ExportAsset {
+            api_base,
+            paths,
+            query,
+            match_mode,
+            stream,
+            limit,
+            output,
+            max_dim,
+        } => {
+            match export::export_assets(
+                backend,
+                export::AssetExport {
+                    paths,
+                    query: query.as_deref(),
+                    match_mode,
+                    api_base: &api_base,
+                    stream,
+                    limit,
+                    output: &output,
+                    max_dim,
+                },
+            )
+            .await
+            {
                 Ok(result) => McpResponse::Success(result),
                 Err(error) => McpResponse::Error(format!("{error}")),
             }
@@ -1605,37 +1671,17 @@ async fn dispatch_request(
         McpRequest::GetSheetSchema { name, include_raw } => {
             process_get_sheet_schema(backend, &name, include_raw).await
         }
-        McpRequest::SearchCells {
-            name,
-            query,
-            columns,
-            row_offset,
-            max_rows,
-            max_results,
-            language,
-        } => {
-            process_search_cells(
-                backend,
-                SearchCellsOptions {
-                    name: &name,
-                    query: &query,
-                    columns: columns.as_deref(),
-                    row_offset,
-                    max_rows,
-                    max_results,
-                    language,
-                },
-            )
-            .await
-        }
         McpRequest::QueryRows {
             name,
             filter,
             columns,
             offset,
             limit,
+            row_offset,
+            max_rows,
             count_total,
             resolve_links,
+            matched_columns,
             format,
             language,
         } => {
@@ -1647,13 +1693,43 @@ async fn dispatch_request(
                     columns: columns.as_deref(),
                     offset,
                     limit,
+                    row_offset,
+                    max_rows,
                     count_total,
                     resolve_links,
+                    matched_columns,
                     format,
                     language,
                 },
             )
             .await
+        }
+        McpRequest::ExportSheet {
+            name,
+            filter,
+            columns,
+            resolve_links,
+            limit,
+            output,
+            language,
+        } => {
+            match export::export_sheet(
+                backend,
+                export::SheetExport {
+                    name: &name,
+                    filter: filter.as_deref(),
+                    columns: columns.as_deref(),
+                    resolve_links,
+                    limit,
+                    output: &output,
+                    language,
+                },
+            )
+            .await
+            {
+                Ok(result) => McpResponse::Success(result),
+                Err(error) => McpResponse::Error(format!("{error}")),
+            }
         }
         McpRequest::GetRow {
             name,
@@ -1701,14 +1777,21 @@ async fn dispatch_request(
             )
             .await
         }
-        McpRequest::DecodeSeString {
-            name,
-            row_id,
-            subrow_id,
-            column,
+        McpRequest::ListIconSets { query } => {
+            process_list_icon_sets(backend, config, query.as_deref()).await
+        }
+        McpRequest::GetIconSet {
+            set,
+            page_size,
+            start_page,
+            end_page,
+        } => process_get_icon_set(backend, config, &set, page_size, start_page, end_page).await,
+        McpRequest::GetIcon {
+            icon_id,
+            hires,
+            max_dim,
             language,
-        } => process_decode_se_string(backend, &name, row_id, subrow_id, &column, language).await,
-        McpRequest::SaveSchema { name, text } => process_save_schema(backend, &name, &text).await,
+        } => process_get_icon(backend, config, icon_id, hires, max_dim, language).await,
     }
 }
 

@@ -1131,6 +1131,43 @@ pub(super) fn build(
     Ok((vertices, indices))
 }
 
+/// 一个网格里渲染用得上的那几路顶点数据。
+pub(crate) struct Geometry {
+    pub(crate) positions: Vec<[f32; 3]>,
+    pub(crate) normals: Vec<[f32; 3]>,
+    pub(crate) uvs: Vec<[f32; 2]>,
+    pub(crate) indices: Vec<u16>,
+}
+
+/// 按细节等级读出模型里每个可绘制网格的几何, 不经过 GPU。顶点属性的交错读取与查看器
+/// 用的是同一条路径, 区别只在这里把结果留在内存里而不是上传。
+pub(crate) fn geometry(bytes: &[u8], lod: u8) -> Result<Vec<Geometry>> {
+    let container = ModelContainer::read(Cursor::new(bytes.to_vec()))?;
+    let model = container.model(detail(lod));
+    let mut meshes = Vec::new();
+    for mesh in model.meshes() {
+        if !draws(&mesh) {
+            continue;
+        }
+        let (Ok(attributes), Ok(indices)) = (mesh.attributes(), mesh.indices()) else {
+            continue;
+        };
+        let Ok((vertices, indices)) = build(&attributes, indices) else {
+            continue;
+        };
+        meshes.push(Geometry {
+            positions: vertices.iter().map(|vertex| vertex.position).collect(),
+            normals: vertices.iter().map(|vertex| vertex.normal).collect(),
+            uvs: vertices
+                .iter()
+                .map(|vertex| [vertex.uv[0], vertex.uv[1]])
+                .collect(),
+            indices,
+        });
+    }
+    Ok(meshes)
+}
+
 fn values(held: Option<&ironworks::file::mdl::VertexAttribute>) -> Option<&VertexValues> {
     Some(&held?.values)
 }

@@ -65,24 +65,24 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 | `check_asset_paths` | 批量检查资源路径是否存在 |
 | `read_asset` | 按路径分页读取资源原始字节和格式识别结果 |
 | `read_asset_by_hash` | 按仓库、分类和索引哈希分页读取未命名资源 |
-| `inspect_asset` | 按路径结构化解析资源并返回完整数据 |
+| `inspect_asset` | 按路径结构化解析资源并返回完整数据；路径给文件夹时逐一遍历，配合 `output` 把结果写进指定文件夹 |
 | `inspect_asset_by_hash` | 结构化解析未命名哈希资源 |
-| `decode_texture` | 将 TEX 纹理解码为尺寸受限的 PNG 图像内容 |
+| `render_asset` | 把纹理、图像、模型、界面布局、字体、图标字体渲染成可直接查看的 PNG 图像内容 |
+| `export_asset` | 批量导出资源：TEX 同时导出 PNG，SCD 同时导出 WAV，其余原样落盘 |
 | `find_uld_using_texture` | 按材质路径反查引用了它的界面布局（ULD）路径 |
 | `list_sheets` | 列出数据表，支持模糊搜索、分页、杂项表开关 |
 | `get_sheet_schema` | 获取表的模式定义（列名、类型、描述、关系映射），可附带原始 YAML 与表元信息 |
 | `get_game_version` | 获取数据与模式来源版本信息 |
 | `validate_filter` | 检查过滤 DSL 语法 |
 | `validate_schema` | 验证模式 YAML |
-| `get_icon_paths` | 图标 ID 转普通和高分辨率纹理路径 |
-| `decompose_model_id` | 拆解装备模型 ID 或武器模型 ID |
-| `search_cells` | 在限定列和行范围内搜索字符串单元格（纯文本，不支持 DSL） |
-| `query_rows` | 行级分页查询，支持复杂过滤 DSL、列选择和按请求语言读取 |
+| `query_rows` | 行级分页查询，支持复杂过滤 DSL、扫描窗口、列选择、命中列报告与按请求语言读取 |
+| `export_sheet` | 把数据表导出为 CSV，可只导出筛选命中的行与选中的列 |
 | `get_row` | 按 ID 精确获取单行数据，支持列选择和详细原始数据模式 |
 | `get_referencing_sheets` | 查询引用目标表的字段、链接和条件链接 |
 | `resolve_link` | 按 schema 解析链接列并返回目标行，支持条件链接和目标列选择 |
-| `decode_se_string` | 解码 SeString 单元格 |
-| `save_schema` | 保存模式 YAML |
+| `list_icon_sets` | 列出图标集合：每个引用图标的数据表算一个集合，另有其他图标、语言图标与全部图标 |
+| `get_icon_set` | 取一个集合内的图标 ID，可指定单页数量与返回页范围 |
+| `get_icon` | 按 ID 取回图标的图像、纹理路径，以及哪些表的哪些行在引用它 |
 
 资源原始字节工具默认返回 4096 字节，单次最多返回 65536 字节；响应中的 `next_offset` 可直接用于读取下一段。结构化解析工具通过 `max_items` 控制集合返回规模，默认 100，最多 500，并在 `truncated` 中标记被截断的集合
 
@@ -91,6 +91,18 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 `query_rows` 与 `get_row` 默认使用 `compact` 格式，将列定义放在响应顶层，行只返回值数组。对宽表应传入 `columns`，元素可为从 0 开始的列索引或 schema 列名。只有需要 SeString 原始字节、类型细节等信息时才传入 `format: "detailed"`
 
 带普通筛选的 `query_rows` 默认在取得当前页和下一页存在性后停止扫描，此时 `matched_rows` 为 `null`。传入 `count_total: true` 可获得精确匹配总数。链接列默认按行 ID 筛选，传入 `resolve_links: true` 才会等待并使用目标行显示字段
+
+搜索某段文字用 `query_rows` 的 `* *= "关键词"`，只搜指定列写成 `Name *= "关键词"`。`row_offset` 与 `max_rows` 把扫描限定在一段行内，传入 `matched_columns: true` 会在每行附上命中筛选条件的列（列索引、列名与存储偏移）
+
+`export_sheet` 省略 `filter` 导出全表，给了就只导出命中的行，`columns` 选取要写出的列。`output` 以 `.csv` 结尾当作文件名，否则当作目录并以表名命名。CSV 逐行落盘，因此全表导出不会把整张表先攒在内存里
+
+`export_asset` 用 `paths` 精确点名，或用 `query` 按路径筛选语法批量匹配，两者可以一起给。`match_mode` 选 `fuzzy`、`strict` 或 `regex`。输出目录下沿用游戏路径本身的层级；`.tex` 按 `max_dim` 转成 PNG，`.scd` 用 `stream` 指定导出第几条音频流，省略时导出前 64 条可解码的流。单个资源失败只记进 `failed`，不影响其余
+
+`render_asset` 覆盖纹理、图像、模型、界面布局、字体与图标字体。`max_dim` 限制输出最长边，也是画布上限：纹理、布局与字形数量都不受这次渲染控制，所以尺寸会在分配之前收进这个框里。渲染字体时 `text` 指定要排的字，省略就把字形铺成网格；模型可用 `camera` 给方位角、俯仰角、距离与缩放，字体与图标也会在显式给出角度时按同一视角摆成有透视的一块平面。模型超过 15 万面时自动取更粗的细节等级
+
+图标工具分三步：`list_icon_sets` 列出集合与各自的图标数，`get_icon_set` 按 `page_size` 与 `start_page`／`end_page` 取集合内的 ID，`get_icon` 给出单个图标的图像、普通与高分辨率纹理路径、语言与 `_hr1` 标记，以及引用它的行（最多 200 处）
+
+图标集合来自把所有表的行过一遍的反查结果，首次调用要读完全部表定义与行，之后的调用走缓存。`inspect_asset` 的文件夹模式一次最多处理 200 个资源，`truncated` 会标出是否还有未处理的
 
 `find_uld_using_texture` 接收材质路径，遍历本安装全部界面布局并返回引用了该材质的布局路径。`query` 与资源浏览器同语法，支持 `ext:` 后缀过滤和含 `/` 的字面匹配，`match_mode` 选 `fuzzy`、`strict` 或 `regex`，`limit` 省略时返回全部匹配。首次调用会读取并解析全部布局，之后的查询在内存里完成
 

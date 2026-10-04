@@ -66,31 +66,31 @@ const MAX_TILES: f32 = 4096.0;
 
 /// A rectangle of a texture, resolved to the file it lives in.
 #[derive(Clone)]
-struct Sprite {
+pub(crate) struct Sprite {
     /// `None` when the part names a texture its own layout does not declare.
-    texture: Option<String>,
-    x: u16,
-    y: u16,
-    width: u16,
-    height: u16,
+    pub(crate) texture: Option<String>,
+    pub(crate) x: u16,
+    pub(crate) y: u16,
+    pub(crate) width: u16,
+    pub(crate) height: u16,
 }
 
 /// One sprite painted into one rectangle of the canvas. A plain image is a single piece; a
 /// nine-grid is up to nine, each with its own source rectangle and often its own texture.
-struct Piece {
-    sprite: Sprite,
-    dest: Rect,
+pub(crate) struct Piece {
+    pub(crate) sprite: Sprite,
+    pub(crate) dest: Rect,
     /// Whether the sprite repeats to fill `dest` rather than stretching to it.
-    tile: bool,
+    pub(crate) tile: bool,
 }
 
 /// One node's worth of painting, positioned in the widget's own coordinates.
-struct DrawItem {
-    pieces: Vec<Piece>,
-    tint: Color32,
+pub(crate) struct DrawItem {
+    pub(crate) pieces: Vec<Piece>,
+    pub(crate) tint: Color32,
     /// The node's own box. A resource or collision node paints nothing but still occupies this,
     /// which is what the inspector outlines and picks against.
-    bounds: Rect,
+    pub(crate) bounds: Rect,
     /// Which [`NodeRow`] this came from, so a pick can name the node it hit.
     row: usize,
 }
@@ -140,20 +140,20 @@ struct TextRef {
     color: Option<Color32>,
 }
 
-struct WidgetRow {
-    id: u32,
+pub(crate) struct WidgetRow {
+    pub(crate) id: u32,
     summary: String,
     nodes: Vec<NodeRow>,
-    items: Vec<DrawItem>,
+    pub(crate) items: Vec<DrawItem>,
     /// Size of the composed layout, in its own coordinates.
-    extent: Vec2,
+    pub(crate) extent: Vec2,
 }
 
 /// A layout, decoded and ready to draw.
 pub struct Rendered {
     textures: Vec<TextureRow>,
     part_lists: Vec<PartListRow>,
-    widgets: Vec<WidgetRow>,
+    pub(crate) widgets: Vec<WidgetRow>,
     identity: Vec<(&'static str, String)>,
     /// Timeline id, animations, label sets, and total key groups across the animations.
     timelines: Vec<(u32, usize, usize, usize)>,

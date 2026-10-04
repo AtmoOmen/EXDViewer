@@ -23,23 +23,23 @@ const CONTROLLERS: [(&str, &str); 6] = [
 
 /// The icon sheet, decoded and ready to draw.
 pub struct Rendered {
-    icons: Vec<Icon>,
+    pub(crate) icons: Vec<Icon>,
     /// Every controller's sheet, by the name the picker shows.
-    sheets: Vec<(&'static str, String)>,
+    pub(crate) sheets: Vec<(&'static str, String)>,
     /// The largest icon, which every cell of the grid is sized to.
-    largest: Vec2,
+    pub(crate) largest: Vec2,
     identity: Vec<(&'static str, String)>,
     /// Which controller's sheet is being drawn, kept per file the way the layout viewer keeps its
     /// selection.
     choice: egui::Id,
 }
 
-struct Icon {
-    id: u16,
-    source: Rect,
-    size: Vec2,
+pub(crate) struct Icon {
+    pub(crate) id: u16,
+    pub(crate) source: Rect,
+    pub(crate) size: Vec2,
     /// The icon actually drawn, where this one is only a name for another.
-    redirect: u16,
+    pub(crate) redirect: u16,
 }
 
 pub fn decode(path: &str, bytes: &[u8]) -> Result<Preview> {

@@ -1,4 +1,4 @@
-mod refs;
+pub(crate) mod refs;
 
 use std::{cell::Cell, collections::HashSet, rc::Rc};
 

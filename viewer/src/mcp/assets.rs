@@ -167,25 +167,6 @@ pub async fn inspect_hash(
     inspect(&path, &bytes, max_items)
 }
 
-pub async fn decode_texture(backend: &Backend, path: &str, max_dim: u16) -> anyhow::Result<String> {
-    let max_dim = max_dim.clamp(1, 2048);
-    let decoded = backend.files().read_texture(path, Some(max_dim)).await?;
-    let width = decoded.image.width();
-    let height = decoded.image.height();
-    let mut png = Cursor::new(Vec::new());
-    image::DynamicImage::ImageRgba8(decoded.image).write_to(&mut png, image::ImageFormat::Png)?;
-    Ok(serde_json::json!({
-        "path": path,
-        "source_width": decoded.source[0],
-        "source_height": decoded.source[1],
-        "width": width,
-        "height": height,
-        "max_dim": max_dim,
-        "png_base64": BASE64_STANDARD.encode(png.into_inner())
-    })
-    .to_string())
-}
-
 pub async fn exists_many(backend: &Backend, paths: &[String]) -> anyhow::Result<String> {
     if paths.len() > MAX_ITEMS {
         anyhow::bail!("一次最多检查 {MAX_ITEMS} 个路径");
@@ -1817,6 +1798,58 @@ fn inspect_tmb(bytes: &[u8], max_items: usize) -> anyhow::Result<serde_json::Val
     }))
 }
 
+/// 按路径筛选语法匹配已安装的资源路径, 用于批量导出。
+pub async fn match_paths(
+    backend: &Backend,
+    api_base: &str,
+    query: &str,
+    mode: SearchMode,
+    limit: usize,
+) -> anyhow::Result<Vec<String>> {
+    load_path_cache(backend, api_base).await?;
+    let query = parse_query(query);
+    let pattern = matching(mode, &query);
+    if let Match::Invalid(reason) = &pattern {
+        anyhow::bail!("筛选表达式无效: {reason}");
+    }
+    let matcher = FuzzyMatcher::new();
+    Ok(PATH_INDEX_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        let cache = cache.as_ref().expect("path index initialized");
+        cache
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.present
+                    && query.accepts(&entry.lowercase_path)
+                    && pattern.score(&matcher, &entry.lowercase_path).is_some()
+            })
+            .take(limit)
+            .map(|entry| entry.path.clone())
+            .collect()
+    }))
+}
+
+/// 一个文件夹下这一版安装真正带的全部资源路径。
+pub async fn under_folder(
+    backend: &Backend,
+    api_base: &str,
+    prefix: &str,
+) -> anyhow::Result<Vec<String>> {
+    load_path_cache(backend, api_base).await?;
+    let below = format!("{}/", prefix.trim_end_matches('/').to_ascii_lowercase());
+    Ok(PATH_INDEX_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        let cache = cache.as_ref().expect("path index initialized");
+        cache
+            .entries
+            .iter()
+            .filter(|entry| entry.present && entry.lowercase_path.starts_with(&below))
+            .map(|entry| entry.path.clone())
+            .collect()
+    }))
+}
+
 pub fn inspect(path: &str, bytes: &[u8], max_items: usize) -> anyhow::Result<String> {
     let max_items = max_items.min(MAX_ITEMS);
     let format = magic::sniff(bytes);
@@ -1842,11 +1875,28 @@ pub fn inspect(path: &str, bytes: &[u8], max_items: usize) -> anyhow::Result<Str
         })),
         _ => Ok(serde_json::Value::Null),
     }?;
-    Ok(serde_json::json!({
+    // 这几种资源的本来面目是给人看的图, 结构化数据只是它的骨架, 所以顺带说明怎么拿到图。
+    let renderable = matches!(
+        viewer,
+        Some(
+            crate::assets::viewers::Viewer::Texture
+                | crate::assets::viewers::Viewer::Image
+                | crate::assets::viewers::Viewer::Model
+                | crate::assets::viewers::Viewer::Uld
+                | crate::assets::viewers::Viewer::Font
+                | crate::assets::viewers::Viewer::Icons
+        )
+    );
+
+    let mut result = serde_json::json!({
         "path": path,
         "size": bytes.len(),
         "format": label.map(|label| serde_json::json!({"label": label, "viewer": viewer.map(|viewer| viewer.label())})).unwrap_or(serde_json::Value::Null),
         "details": details
-    })
-    .to_string())
+    });
+    if renderable {
+        result["render_hint"] =
+            serde_json::json!("该资源可用 render_asset 渲染为可直接查看的图片");
+    }
+    Ok(result.to_string())
 }

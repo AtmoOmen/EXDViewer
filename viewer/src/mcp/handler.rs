@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 use crate::assets::SearchMode;
 use crate::settings::BackendConfig;
 
-use super::{ColumnSelector, McpChannel, McpRequest, McpResponse, RowFormat};
+use super::{ColumnSelector, McpChannel, McpRequest, McpResponse, RowFormat, render};
 
 #[derive(Clone, Copy, Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -87,8 +87,7 @@ pub struct ValidateFilterParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SaveSchemaParams {
-    pub name: String,
+pub struct ValidateSchemaParams {
     pub text: String,
 }
 
@@ -117,29 +116,11 @@ pub struct GetRowParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct SearchCellsParams {
-    /// 精确表名, 不确定时使用 list_sheets.query
-    pub name: String,
-    /// 必填关键词, 这是普通文本搜索, 不是筛选 DSL
-    pub query: String,
-    /// 只搜索这些列, 可使用列索引或 schema 列名, 默认搜索所有字符串列
-    pub columns: Option<Vec<ColumnSelector>>,
-    /// 从第几个物理行或子行开始扫描, 默认 0
-    pub row_offset: Option<usize>,
-    /// 最多扫描多少行, 默认不限制
-    pub max_rows: Option<usize>,
-    /// 最大返回单元格命中数, 默认 50
-    pub max_results: Option<usize>,
-    /// 数据语言, 默认 chinese_simplified
-    pub language: Option<McpLanguage>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct QueryRowsParams {
     /// 精确表名, 不确定时使用 list_sheets.query
     pub name: String,
-    /// 复杂筛选 DSL, 例如 `# = 42`, `Name *= "Potion"`, `Level >= 50 AND Name not *= Test`
+    /// 复杂筛选 DSL, 例如 `# = 42`, `Name *= "Potion"`, `Level >= 50 AND Name not *= Test`。
+    /// 搜索某段文字用 `* *= "关键词"`, 只搜指定列用 `Name *= "关键词"`
     pub filter: Option<String>,
     /// 返回列, 可使用从 0 开始的列索引或 schema 列名, 默认返回全部列
     pub columns: Option<Vec<ColumnSelector>>,
@@ -147,12 +128,37 @@ pub struct QueryRowsParams {
     pub offset: Option<usize>,
     /// 返回匹配行数, 默认 50, 服务端会限制最大值
     pub limit: Option<usize>,
+    /// 从第几个物理行或子行开始扫描, 默认 0
+    pub row_offset: Option<usize>,
+    /// 最多扫描多少行, 默认不限制
+    pub max_rows: Option<usize>,
     /// 是否为获得精确 matched_rows 而扫描全部结果, 默认 false
     pub count_total: Option<bool>,
     /// 筛选链接列时是否解析目标行显示字段, 默认 false
     pub resolve_links: Option<bool>,
+    /// 是否在每行上报告命中筛选条件的列, 默认 false
+    pub matched_columns: Option<bool>,
     /// compact 只返回值, detailed 返回完整类型与原始数据, 默认 compact
     pub format: Option<RowFormat>,
+    /// 数据语言, 默认 chinese_simplified
+    pub language: Option<McpLanguage>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExportSheetParams {
+    /// 精确表名, 不确定时使用 list_sheets.query
+    pub name: String,
+    /// 复杂筛选 DSL, 省略时导出全表
+    pub filter: Option<String>,
+    /// 导出列, 可使用从 0 开始的列索引或 schema 列名, 默认全部列
+    pub columns: Option<Vec<ColumnSelector>>,
+    /// 筛选链接列时是否解析目标行显示字段, 默认 false
+    pub resolve_links: Option<bool>,
+    /// 最多导出多少行, 省略时不限制
+    pub limit: Option<usize>,
+    /// 输出位置: 以 .csv 结尾当文件名, 否则当目录并在其中以表名命名
+    pub output: String,
     /// 数据语言, 默认 chinese_simplified
     pub language: Option<McpLanguage>,
 }
@@ -169,31 +175,6 @@ pub struct ResolveLinkParams {
     pub target_columns: Option<Vec<ColumnSelector>>,
     pub format: Option<RowFormat>,
     pub language: Option<McpLanguage>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DecodeSeStringParams {
-    pub name: String,
-    pub row_id: u32,
-    pub subrow_id: Option<u16>,
-    /// 字符串列索引或 schema 列名
-    pub column: ColumnSelector,
-    pub language: Option<McpLanguage>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct GetIconPathsParams {
-    pub icon_id: u32,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct DecomposeModelIdParams {
-    pub model_id: String,
-    /// true 按 64 位武器模型解析, false 按 32 位装备模型解析, 默认按数值宽度推断
-    pub weapon: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -243,9 +224,12 @@ pub struct ListAssetPathsParams {
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InspectAssetParams {
+    /// 资源路径, 也可以是一个文件夹路径, 此时对其下的每个资源逐一解析
     pub path: String,
     /// 每个解析集合最多返回多少项, 默认 100
     pub max_items: Option<usize>,
+    /// 给定文件夹时, 结构化数据直接写进该文件夹下的新文件里, 而不是返回
+    pub output: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -261,14 +245,6 @@ pub struct InspectAssetByHashParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-pub struct DecodeTextureParams {
-    pub path: String,
-    /// 输出图像最长边, 默认 1024, 服务端最多 2048
-    pub max_dim: Option<u16>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct FindUldUsingTextureParams {
     /// 材质纹理路径, 例如 ui/uld/Achievement.tex
     pub texture_path: String,
@@ -280,6 +256,83 @@ pub struct FindUldUsingTextureParams {
     pub offset: Option<usize>,
     /// 返回界面布局数量上限, 省略时返回全部
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ExportAssetParams {
+    /// 要精确导出的资源路径, 可给多个
+    pub paths: Option<Vec<String>>,
+    /// 按路径筛选语法批量匹配, 支持 ext: 后缀与含 / 的字面匹配, 例如 "ext:tex ui/icon/"
+    pub query: Option<String>,
+    /// fuzzy 模糊、strict 包含、regex 正则, 默认 fuzzy
+    pub match_mode: Option<PathMatchMode>,
+    /// .scd 里要导出的音频流序号, 省略时导出全部可解码的流
+    pub stream: Option<usize>,
+    /// 本次最多导出多少个资源, 默认 100
+    pub limit: Option<usize>,
+    /// 输出目录, 其中沿用游戏路径本身的层级
+    pub output: String,
+    /// .tex 转 PNG 时的最长边, 默认 1024
+    pub max_dim: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ListIconSetsParams {
+    /// 按集合名筛选, 默认返回全部集合
+    pub query: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetIconSetParams {
+    /// 集合名: 数据表名, 或 other 其他图标、localized 语言图标、all 全部图标
+    pub set: String,
+    /// 一页返回多少个图标 ID, 默认 100, 服务端最多 2000
+    pub page_size: Option<usize>,
+    /// 起始页, 从 1 开始, 默认 1
+    pub start_page: Option<usize>,
+    /// 结束页, 省略时与起始页相同
+    pub end_page: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GetIconParams {
+    pub icon_id: u32,
+    /// 是否取高分辨率纹理, 默认 true
+    pub hires: Option<bool>,
+    /// 输出图像最长边, 默认 512, 服务端最多 2048
+    pub max_dim: Option<u16>,
+    /// 数据语言, 决定取哪一份语言专有纹理, 默认 chinese_simplified
+    pub language: Option<McpLanguage>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenderCameraParams {
+    /// 水平方位角, 单位度, 默认 0
+    pub yaw: Option<f32>,
+    /// 俯仰角, 单位度, 默认 8.6
+    pub pitch: Option<f32>,
+    /// 相机到模型中心的距离, 省略时按模型大小自动取
+    pub distance: Option<f32>,
+    /// 画面缩放, 同时用作字体与布局的字号倍数, 默认 1
+    pub zoom: Option<f32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RenderAssetParams {
+    /// 要渲染的资源路径
+    pub path: String,
+    /// 输出图像最长边, 默认 1024, 服务端最多 4096
+    pub max_dim: Option<u32>,
+    /// 渲染字体时要排的字, 省略时把字体里的字形铺成网格
+    pub text: Option<String>,
+    /// 观察角度、距离与缩放
+    pub camera: Option<RenderCameraParams>,
 }
 
 #[derive(Clone)]
@@ -352,6 +405,32 @@ impl McpHandler {
             McpResponse::Success(text) => Ok(text),
             McpResponse::Error(error) => Err(McpError::internal_error(error, None)),
         }
+    }
+
+    /// 一条带图片的响应: 元数据留在文本里, PNG 单独作为一份图像内容交出去。
+    fn with_image(result: String) -> Result<CallToolResult, McpError> {
+        let mut metadata: serde_json::Value = serde_json::from_str(&result)
+            .map_err(|error| McpError::internal_error(format!("图像响应解析失败: {error}"), None))?;
+        let png = metadata["image_base64"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| McpError::internal_error("图像响应缺少 PNG 数据", None))?;
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("image_base64");
+        }
+        Ok(CallToolResult::success(vec![
+            Content::text(metadata.to_string()),
+            Content::image(png, "image/png"),
+        ]))
+    }
+
+    #[cfg(test)]
+    pub(super) fn tool_names(&self) -> Vec<String> {
+        self.tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect()
     }
 }
 
@@ -441,7 +520,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "识别并结构化解析资源, 返回各格式的完整数据"
+        description = "识别并结构化解析资源, 返回各格式的完整数据。纹理、图像、模型、界面布局、字体与图标字体还能用 render_asset 直接渲染成图片查看; 传入文件夹路径时, 可配合 output 把每个资源的结构化数据写成文件"
     )]
     async fn inspect_asset(
         &self,
@@ -450,10 +529,12 @@ impl McpHandler {
         let result = self
             .call(
                 McpRequest::InspectAsset {
+                    api_base: self.config.api_url.clone(),
                     path: params.path,
                     max_items: params.max_items.unwrap_or(100),
+                    output: params.output,
                 },
-                Self::heavy_timeout(),
+                Self::asset_index_timeout(),
             )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
@@ -480,34 +561,32 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "将游戏 TEX 纹理解码为尺寸受限的 PNG 图像, 同时返回源尺寸和输出尺寸")]
-    async fn decode_texture(
+    #[tool(
+        description = "把纹理、图像、模型、界面布局、字体或图标字体渲染成可直接查看的 PNG 图; 字体可传入要排的文字, 模型可传入观察角度、距离与缩放"
+    )]
+    async fn render_asset(
         &self,
-        Parameters(params): Parameters<DecodeTextureParams>,
+        Parameters(params): Parameters<RenderAssetParams>,
     ) -> Result<CallToolResult, McpError> {
+        let camera = params.camera.unwrap_or_default();
         let result = self
             .call(
-                McpRequest::DecodeTexture {
+                McpRequest::RenderAsset {
                     path: params.path,
-                    max_dim: params.max_dim.unwrap_or(1024),
+                    max_dim: params
+                        .max_dim
+                        .unwrap_or(1024)
+                        .clamp(16, render::MAX_DIM),
+                    text: params.text,
+                    yaw: camera.yaw,
+                    pitch: camera.pitch,
+                    distance: camera.distance,
+                    zoom: camera.zoom.unwrap_or(1.0),
                 },
-                Self::heavy_timeout(),
+                Self::asset_index_timeout(),
             )
             .await?;
-        let mut metadata: serde_json::Value = serde_json::from_str(&result).map_err(|error| {
-            McpError::internal_error(format!("纹理响应解析失败: {error}"), None)
-        })?;
-        let png = metadata["png_base64"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| McpError::internal_error("纹理响应缺少 PNG 数据", None))?;
-        if let Some(object) = metadata.as_object_mut() {
-            object.remove("png_base64");
-        }
-        Ok(CallToolResult::success(vec![
-            Content::text(metadata.to_string()),
-            Content::image(png, "image/png"),
-        ]))
+        Self::with_image(result)
     }
 
     #[tool(
@@ -526,6 +605,31 @@ impl McpHandler {
                     match_mode: params.match_mode.unwrap_or(PathMatchMode::Fuzzy).into(),
                     offset: params.offset.unwrap_or(0),
                     limit: params.limit,
+                },
+                Self::asset_index_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        description = "批量导出资源: 给 paths 精确指定, 或用 query 按路径筛选语法批量匹配。.tex 同时导出为 .png, .scd 同时导出为 .wav, 其余原样落盘"
+    )]
+    async fn export_asset(
+        &self,
+        Parameters(params): Parameters<ExportAssetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::ExportAsset {
+                    api_base: self.config.api_url.clone(),
+                    paths: params.paths.unwrap_or_default(),
+                    query: params.query,
+                    match_mode: params.match_mode.unwrap_or(PathMatchMode::Fuzzy).into(),
+                    stream: params.stream,
+                    limit: params.limit.unwrap_or(100),
+                    output: params.output,
+                    max_dim: params.max_dim.unwrap_or(1024).clamp(16, render::MAX_DIM),
                 },
                 Self::asset_index_timeout(),
             )
@@ -552,7 +656,9 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "获取指定表的结构化模式定义（列名、类型、描述、关系映射与表元信息）, 可附带原始 YAML")]
+    #[tool(
+        description = "获取指定表的结构化模式定义（列名、类型、描述、关系映射与表元信息）, 可附带原始 YAML"
+    )]
     async fn get_sheet_schema(
         &self,
         Parameters(params): Parameters<GetSheetSchemaParams>,
@@ -633,7 +739,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "校验复杂筛选 DSL 表达式语法。构造 query_rows 的 filter 前先用它检查, 不能用于搜索数据"
+        description = "校验复杂筛选 DSL 表达式语法。构造 query_rows 或 export_sheet 的 filter 前先用它检查, 不能用于搜索数据"
     )]
     async fn validate_filter(
         &self,
@@ -646,7 +752,7 @@ impl McpHandler {
     #[tool(description = "校验模式 YAML 文本是否符合 EXDSchema JSON Schema 规范")]
     async fn validate_schema(
         &self,
-        Parameters(params): Parameters<SaveSchemaParams>,
+        Parameters(params): Parameters<ValidateSchemaParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
@@ -657,53 +763,8 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "按图标 ID 获取普通和高分辨率纹理路径")]
-    async fn get_icon_paths(
-        &self,
-        Parameters(params): Parameters<GetIconPathsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = super::process_get_icon_paths(params.icon_id);
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(description = "分解 32 位装备 ModelId 或 64 位武器 ModelId 的各组件")]
-    async fn decompose_model_id(
-        &self,
-        Parameters(params): Parameters<DecomposeModelIdParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = match super::process_decompose_model_id(&params.model_id, params.weapon) {
-            McpResponse::Success(result) => result,
-            McpResponse::Error(error) => return Err(McpError::invalid_params(error, None)),
-        };
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
     #[tool(
-        description = "在指定表中搜索包含指定文本的字符串单元格。只接受 query 关键词, 不接受 filter DSL；需要行级条件筛选请用 query_rows"
-    )]
-    async fn search_cells(
-        &self,
-        Parameters(params): Parameters<SearchCellsParams>,
-    ) -> Result<CallToolResult, McpError> {
-        let result = self
-            .call(
-                McpRequest::SearchCells {
-                    name: params.name,
-                    query: params.query,
-                    columns: params.columns,
-                    row_offset: params.row_offset.unwrap_or(0),
-                    max_rows: params.max_rows,
-                    max_results: params.max_results.unwrap_or(50),
-                    language: self.language(params.language),
-                },
-                Self::heavy_timeout(),
-            )
-            .await?;
-        Ok(CallToolResult::success(vec![Content::text(result)]))
-    }
-
-    #[tool(
-        description = "按行或子行分页查询表数据。需要复杂筛选 DSL 时传 filter；普通关键词搜单元格请用 search_cells；已知 row_id 请用 get_row"
+        description = "按行或子行分页查询表数据。复杂筛选 DSL 传 filter, 搜索某段文字用 `* *= \"关键词\"`; 已知 row_id 请用 get_row"
     )]
     async fn query_rows(
         &self,
@@ -717,8 +778,11 @@ impl McpHandler {
                     columns: params.columns,
                     offset: params.offset.unwrap_or(0),
                     limit: params.limit.unwrap_or(50),
+                    row_offset: params.row_offset.unwrap_or(0),
+                    max_rows: params.max_rows,
                     count_total: params.count_total.unwrap_or(false),
                     resolve_links: params.resolve_links.unwrap_or(false),
+                    matched_columns: params.matched_columns.unwrap_or(false),
                     format: params.format.unwrap_or_default(),
                     language: self.language(params.language),
                 },
@@ -728,8 +792,30 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
+    #[tool(description = "把数据表导出为 .csv, 默认导出全表, 也可按复杂筛选 DSL 只导出指定的行与列")]
+    async fn export_sheet(
+        &self,
+        Parameters(params): Parameters<ExportSheetParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::ExportSheet {
+                    name: params.name,
+                    filter: params.filter,
+                    columns: params.columns,
+                    resolve_links: params.resolve_links.unwrap_or(false),
+                    limit: params.limit,
+                    output: params.output,
+                    language: self.language(params.language),
+                },
+                Self::heavy_timeout(),
+            )
+            .await?;
+        Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
     #[tool(
-        description = "按表名和行 ID/子行 ID 精确获取单行。已知 row_id 时用这个；模糊找行请先用 query_rows 或 search_cells"
+        description = "按表名和行 ID/子行 ID 精确获取单行。已知 row_id 时用这个；模糊找行请先用 query_rows"
     )]
     async fn get_row(
         &self,
@@ -789,46 +875,69 @@ impl McpHandler {
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "解码指定单元格的 SeString 文本")]
-    async fn decode_se_string(
+    #[tool(
+        description = "列出全部图标集合: 每个引用图标的数据表算一个集合, 另外还有 other 其他图标、localized 语言图标与 all 全部图标。可用 query 按集合名筛选"
+    )]
+    async fn list_icon_sets(
         &self,
-        Parameters(params): Parameters<DecodeSeStringParams>,
+        Parameters(params): Parameters<ListIconSetsParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
-                McpRequest::DecodeSeString {
-                    name: params.name,
-                    row_id: params.row_id,
-                    subrow_id: params.subrow_id.unwrap_or(0),
-                    column: params.column,
-                    language: self.language(params.language),
+                McpRequest::ListIconSets {
+                    query: params.query,
                 },
-                Self::medium_timeout(),
+                Self::asset_index_timeout(),
             )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
 
-    #[tool(description = "保存模式的 YAML 文本")]
-    async fn save_schema(
+    #[tool(
+        description = "查看一个图标集合: 返回集合内图标总数与图标 ID, 支持分页, 一页默认 100 个 ID"
+    )]
+    async fn get_icon_set(
         &self,
-        Parameters(params): Parameters<SaveSchemaParams>,
+        Parameters(params): Parameters<GetIconSetParams>,
     ) -> Result<CallToolResult, McpError> {
         let result = self
             .call(
-                McpRequest::SaveSchema {
-                    name: params.name,
-                    text: params.text,
+                McpRequest::GetIconSet {
+                    set: params.set,
+                    page_size: params.page_size.unwrap_or(100),
+                    start_page: params.start_page.unwrap_or(1),
+                    end_page: params.end_page,
                 },
-                Self::heavy_timeout(),
+                Self::asset_index_timeout(),
             )
             .await?;
         Ok(CallToolResult::success(vec![Content::text(result)]))
+    }
+
+    #[tool(
+        description = "按图标 ID 取回图标: 一次给出可直接查看的图片、纹理路径, 以及哪些数据表的哪些行在使用它"
+    )]
+    async fn get_icon(
+        &self,
+        Parameters(params): Parameters<GetIconParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let result = self
+            .call(
+                McpRequest::GetIcon {
+                    icon_id: params.icon_id,
+                    hires: params.hires.unwrap_or(true),
+                    max_dim: params.max_dim.unwrap_or(512).clamp(1, 2048) as u32,
+                    language: self.language(params.language),
+                },
+                Self::asset_index_timeout(),
+            )
+            .await?;
+        Self::with_image(result)
     }
 }
 
 #[tool_handler(
-    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表、模式和游戏资源访问能力。资源路径搜索使用 list_asset_paths，读取原始字节使用 read_asset 或 read_asset_by_hash，结构化解析使用 inspect_asset 或 inspect_asset_by_hash，查看纹理使用 decode_texture，按材质反查引用它的界面布局使用 find_uld_using_texture；不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter；普通文本搜单元格用 search_cells.query；已知 row_id 后用 get_row 精确取行；宽表使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时使用 detailed"
+    instructions = "EXDViewer MCP server，提供 FFXIV 游戏数据表、模式和游戏资源访问能力。资源路径搜索使用 list_asset_paths，读取原始字节使用 read_asset 或 read_asset_by_hash，结构化解析使用 inspect_asset 或 inspect_asset_by_hash，把纹理、图像、模型、布局、字体与图标字体画成图片使用 render_asset，批量导出资源使用 export_asset，按材质反查引用它的界面布局使用 find_uld_using_texture；不确定表名使用 list_sheets.query；构造筛选前先用 get_sheet_schema 看字段名；行级条件筛选用 query_rows.filter，搜索某段文字用 `* *= \"关键词\"`；已知 row_id 后用 get_row 精确取行；整表或筛选结果落盘使用 export_sheet；图标集合用 list_icon_sets 与 get_icon_set，单个图标的图片、路径与使用位置用 get_icon；宽表使用 columns 限制返回列；默认 compact 输出，需要字符串原始字节等完整信息时使用 detailed"
 )]
 impl ServerHandler for McpHandler {
     fn get_info(&self) -> ServerInfo {
@@ -836,9 +945,9 @@ impl ServerHandler for McpHandler {
             .with_server_info(rmcp::model::Implementation::from_build_env())
             .with_instructions(
                 "EXDViewer MCP 服务器，提供 FFXIV 游戏数据表和游戏资源工具。\
-                 数据表流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行。\
-                 资源流程：list_asset_paths 搜索路径 -> read_asset 分页读取字节、inspect_asset 结构化解析或 decode_texture 查看纹理；未命名资源使用对应的 by_hash 工具；按材质反查引用它的界面布局用 find_uld_using_texture。\
-                 search_cells 只做普通文本搜索, 不接收 DSL；query_rows 处理 filter。"
+                 数据表流程：list_sheets 查询表名 -> get_sheet_schema 看字段 -> validate_filter 检查 DSL -> query_rows 执行行级筛选 -> get_row 精确取行；导出用 export_sheet。\
+                 资源流程：list_asset_paths 搜索路径 -> read_asset 分页读取字节、inspect_asset 结构化解析或 render_asset 渲染成图片；未命名资源使用对应的 by_hash 工具；批量导出用 export_asset；按材质反查引用它的界面布局用 find_uld_using_texture。\
+                 图标流程：list_icon_sets 查看集合 -> get_icon_set 取集合内的 ID -> get_icon 取单个图标的图片、纹理路径与使用位置。"
                     .to_string(),
             )
     }

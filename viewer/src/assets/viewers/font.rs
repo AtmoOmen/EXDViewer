@@ -32,32 +32,32 @@ const BLOCKS: [(&str, u32, u32); 12] = [
 ];
 
 /// One glyph, resolved to the sheet it is cut from.
-struct GlyphCell {
-    character: char,
+pub(crate) struct GlyphCell {
+    pub(crate) character: char,
     /// Index into [`BLOCKS`], or its length for a character in none of them.
     block: usize,
     /// Which font texture and channel hold it.
-    file: u16,
-    channel: u16,
-    source: Rect,
-    size: Vec2,
+    pub(crate) file: u16,
+    pub(crate) channel: u16,
+    pub(crate) source: Rect,
+    pub(crate) size: Vec2,
     /// Where the glyph sits below the top of its line.
-    offset_y: f32,
-    advance: f32,
+    pub(crate) offset_y: f32,
+    pub(crate) advance: f32,
 }
 
 /// A font, decoded and ready to draw.
 pub struct Rendered {
     /// Where the glyph sheets live, by the index a glyph names.
-    sheets: Vec<String>,
+    pub(crate) sheets: Vec<String>,
     /// Which of them the glyphs actually cut from, since a font can skip one.
     used: Vec<u16>,
-    glyphs: Vec<GlyphCell>,
+    pub(crate) glyphs: Vec<GlyphCell>,
     /// The sample line, as indices into `glyphs`.
     sample: Vec<usize>,
     /// The blocks this font actually carries, and how many glyphs each holds.
     blocks: Vec<(usize, usize)>,
-    line_height: f32,
+    pub(crate) line_height: f32,
     identity: Vec<(&'static str, String)>,
     /// Which blocks are on show, kept per file the way the icon sheet keeps its controller.
     shown: egui::Id,

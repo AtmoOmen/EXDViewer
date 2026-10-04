@@ -3,21 +3,68 @@ use serde_json::json;
 
 use crate::sheet::CellValue;
 
-use super::{
-    handler::{QueryRowsParams, SearchCellsParams},
-    process_validate_filter,
-};
+use super::{handler::QueryRowsParams, process_validate_filter};
+
+/// 工具集本身也是交付的一部分: 移除的不得再出现, 新增的必须都在。
+#[test]
+fn tool_router_holds_exactly_the_published_tools() {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let handler = super::handler::McpHandler::new(
+        tx,
+        crate::settings::BackendConfig {
+            api_url: String::new(),
+            location: crate::settings::InstallLocation::Web(crate::settings::Region::Global, None),
+            schema: crate::settings::SchemaLocation::Web(String::new()),
+        },
+        ironworks::excel::Language::ChineseSimplified,
+    );
+
+    let mut names = handler.tool_names();
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "check_asset_paths",
+            "export_asset",
+            "export_sheet",
+            "find_uld_using_texture",
+            "get_game_version",
+            "get_icon",
+            "get_icon_set",
+            "get_referencing_sheets",
+            "get_row",
+            "get_sheet_schema",
+            "health_check",
+            "inspect_asset",
+            "inspect_asset_by_hash",
+            "list_asset_paths",
+            "list_icon_sets",
+            "list_sheets",
+            "query_rows",
+            "read_asset",
+            "read_asset_by_hash",
+            "render_asset",
+            "resolve_link",
+            "validate_filter",
+            "validate_schema",
+        ]
+    );
+}
 
 #[test]
-fn search_cells_params_reject_filter_field() {
-    let err = serde_json::from_value::<SearchCellsParams>(json!({
+fn query_rows_params_accept_scan_window_and_matched_columns() {
+    let params = serde_json::from_value::<QueryRowsParams>(json!({
         "name": "Item",
-        "query": "Potion",
-        "filter": "Name *= Potion"
+        "filter": "Name *= Potion",
+        "row_offset": 10,
+        "max_rows": 200,
+        "matched_columns": true
     }))
-    .unwrap_err();
+    .unwrap();
 
-    assert!(err.to_string().contains("unknown field"));
+    assert_eq!(params.row_offset, Some(10));
+    assert_eq!(params.max_rows, Some(200));
+    assert_eq!(params.matched_columns, Some(true));
 }
 
 #[test]
@@ -344,3 +391,4 @@ fn inspect_structures_a_uld_layout() {
     assert_eq!(value["details"]["truncated"]["components"], false);
     assert_eq!(value["details"]["truncated"]["timelines"], false);
 }
+

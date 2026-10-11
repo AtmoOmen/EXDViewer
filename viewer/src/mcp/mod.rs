@@ -1795,6 +1795,9 @@ async fn dispatch_request(
     }
 }
 
+/// The loopback port the HTTP transport serves on.
+pub const MCP_PORT: u16 = 3001;
+
 pub struct McpHandle {
     shutdown: tokio_util::sync::CancellationToken,
     server_join: Option<std::thread::JoinHandle<()>>,
@@ -1813,13 +1816,15 @@ impl Drop for McpHandle {
     }
 }
 
-pub fn start(config: BackendConfig) -> McpHandle {
-    let shutdown = tokio_util::sync::CancellationToken::new();
+/// Build the backend and answer requests off the channel. Every transport shares this, because the
+/// backend is `!Send` and has to live on a thread of its own either way.
+fn spawn_worker(
+    config: BackendConfig,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> (McpChannel, std::thread::JoinHandle<()>) {
     let (request_tx, mut request_rx) =
         mpsc::channel::<(McpRequest, oneshot::Sender<McpResponse>)>(64);
 
-    let worker_shutdown = shutdown.clone();
-    let worker_config = config.clone();
     let worker_join = std::thread::Builder::new()
         .name("mcp-worker".into())
         .spawn(move || {
@@ -1828,7 +1833,7 @@ pub fn start(config: BackendConfig) -> McpHandle {
                 .build()
                 .expect("Failed to build tokio runtime for MCP worker");
 
-            let backend = match rt.block_on(Backend::new(worker_config.clone())) {
+            let backend = match rt.block_on(Backend::new(config.clone())) {
                 Ok(backend) => backend,
                 Err(e) => {
                     log::error!("MCP backend 初始化失败: {e}");
@@ -1840,13 +1845,13 @@ pub fn start(config: BackendConfig) -> McpHandle {
             local.block_on(&rt, async move {
                 loop {
                     tokio::select! {
-                        () = worker_shutdown.cancelled() => break,
+                        () = shutdown.cancelled() => break,
                         request = request_rx.recv() => {
                             let Some((req, resp_tx)) = request else {
                                 break;
                             };
                             let backend = backend.clone();
-                            let config = worker_config.clone();
+                            let config = config.clone();
                             tokio::task::spawn_local(async move {
                                 let mut resp_tx = resp_tx;
                                 tokio::select! {
@@ -1862,6 +1867,48 @@ pub fn start(config: BackendConfig) -> McpHandle {
             });
         })
         .expect("Failed to spawn MCP worker thread");
+
+    (request_tx, worker_join)
+}
+
+/// The settings the desktop app persisted, read without opening a window. `None` when the app has
+/// never been set up, or when the file it writes cannot be read.
+pub fn load_saved_config() -> Option<BackendConfig> {
+    let text = std::fs::read_to_string(crate::settings::persistence_file()?).ok()?;
+    let store: HashMap<String, String> = ron::from_str(&text).ok()?;
+    let memory: egui::Memory = ron::from_str(store.get("egui")?).ok()?;
+
+    let ctx = egui::Context::default();
+    ctx.memory_mut(|current| *current = memory);
+    crate::settings::migrate_backend_config(&ctx);
+    crate::settings::BACKEND_CONFIG.try_get(&ctx).flatten()
+}
+
+/// Serve MCP over stdin/stdout, for a client that launches this process on demand.
+pub fn serve_stdio(config: BackendConfig) -> anyhow::Result<()> {
+    use rmcp::ServiceExt as _;
+
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (request_tx, worker_join) = spawn_worker(config.clone(), shutdown.clone());
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = rt.block_on(async move {
+        let handler = McpHandler::new(request_tx, config, Language::ChineseSimplified);
+        let service = handler.serve(rmcp::transport::io::stdio()).await?;
+        service.waiting().await?;
+        Ok::<(), anyhow::Error>(())
+    });
+
+    shutdown.cancel();
+    let _ = worker_join.join();
+    result
+}
+
+pub fn start(config: BackendConfig) -> McpHandle {
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let (request_tx, worker_join) = spawn_worker(config.clone(), shutdown.clone());
 
     let server_shutdown = shutdown.clone();
     let server_join = std::thread::Builder::new()
@@ -1892,14 +1939,14 @@ pub fn start(config: BackendConfig) -> McpHandle {
 
                 let router = axum::Router::new().nest_service("/mcp", service);
 
-                let listener = match tokio::net::TcpListener::bind("127.0.0.1:3001").await {
+                let listener = match tokio::net::TcpListener::bind(("127.0.0.1", MCP_PORT)).await {
                     Ok(listener) => listener,
                     Err(e) => {
-                        log::error!("MCP 服务器无法监听 127.0.0.1:3001: {e}");
+                        log::error!("MCP 服务器无法监听 127.0.0.1:{MCP_PORT}: {e}");
                         return;
                     }
                 };
-                log::info!("MCP 服务器已启动 http://127.0.0.1:3001/mcp");
+                log::info!("MCP 服务器已启动 http://127.0.0.1:{MCP_PORT}/mcp");
 
                 let shutdown_ct = ct.clone();
                 let server =

@@ -59,6 +59,13 @@ pub use app::App;
 use shadow_rs::shadow;
 
 pub const IS_WEB: bool = cfg!(target_arch = "wasm32");
+// Must match the `.desktop` file's basename: Wayland has no client-side window-icon protocol in
+// general use, so compositors resolve the taskbar/launcher icon by matching this app_id against an
+// installed .desktop entry. Kept equal to the `run_native` app name below (not reverse-DNS)
+// because eframe derives the persistence directory from this same string when it is set; anything
+// else would silently move existing users' saved window state to a new folder. A headless run
+// reads the same directory to find the settings the window saved.
+pub const APP_ID: &str = "XIViewer";
 pub const APP_VERSION: &str = env!("EXDVIEWER_VERSION");
 pub const SCHEMA_REPO_URL: &str = "https://github.com/xivdev/EXDSchema";
 pub const REPO_URL: &str = "https://github.com/AtmoOmen/EXDViewer";

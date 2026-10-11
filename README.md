@@ -54,7 +54,33 @@ docker run -p 8080:80 ghcr.io/atmoomen/exdviewer-web:main
 
 ## MCP（Model Context Protocol）支持
 
-EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 等）直接查询 FFXIV 游戏数据。启动桌面版后，MCP 服务器会在 `http://127.0.0.1:3001/mcp` 自动运行。
+EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 等）直接查询 FFXIV 游戏数据。它既能跟着桌面版一起跑，也能不打开桌面版单独跑。
+
+### 运行方式
+
+两种方式共用同一份设置（游戏目录、表定义来源等），所以**先至少打开一次桌面版并完成设置**，之后都能用：
+
+| 方式 | 怎么起 | 说明 |
+|---|---|---|
+| 桌面版 | 打开桌面版 | 随程序自动运行，监听 `http://127.0.0.1:3001/mcp`，关掉程序就停 |
+| stdio | `viewer --mcp-stdio` | 无窗口，由 AI 客户端按需拉起，用完自动退出，平时不占后台进程 |
+
+`--mcp-stdio` 在没有配置过时会提示先打开一次桌面版。它只在启动时读一次设置，所以之后在桌面版里改了游戏目录或表定义来源，需要重启这个进程才会生效。
+
+让 AI 客户端自己拉起进程，在客户端配置里写：
+
+```json
+{
+  "mcpServers": {
+    "exdviewer": {
+      "command": "C:\\path\\to\\viewer.exe",
+      "args": ["--mcp-stdio"]
+    }
+  }
+}
+```
+
+Windows 的分发产物是 `xiviewer-win-x64.exe` / `xiviewer-win-arm64.exe`，Velopack 安装后一般位于 `%LOCALAPPDATA%\EXDViewer\current\viewer.exe`；Linux 与 macOS 对应 `xiviewer-linux-*`、`xiviewer-osx-*`。
 
 ### 可用工具
 
@@ -106,7 +132,7 @@ EXDViewer 内置了 MCP 服务器，允许 AI 工具（如 Claude Code、Cursor 
 
 `find_uld_using_texture` 接收材质路径，遍历本安装全部界面布局并返回引用了该材质的布局路径。`query` 与资源浏览器同语法，支持 `ext:` 后缀过滤和含 `/` 的字面匹配，`match_mode` 选 `fuzzy`、`strict` 或 `regex`，`limit` 省略时返回全部匹配。首次调用会读取并解析全部布局，之后的查询在内存里完成
 
-目前 MCP 服务器仅限桌面版，WASM 平台暂不支持。
+目前 MCP 服务器仅限桌面版（含上面的无窗口方式），WASM 平台暂不支持。
 
 ## 从源码构建
 

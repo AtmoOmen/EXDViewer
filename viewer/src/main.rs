@@ -13,15 +13,9 @@ mod combined_log;
 mod shortcuts;
 
 use combined_log::CombinedLogger;
-use viewer::App;
-
-// Must match the `.desktop` file's basename: Wayland has no client-side window-icon protocol in
-// general use, so compositors resolve the taskbar/launcher icon by matching this app_id against an
-// installed .desktop entry. Kept equal to the `run_native` app name below (not reverse-DNS)
-// because eframe derives the persistence directory from this same string when it is set; anything
-// else would silently move existing users' saved window state to a new folder.
 #[cfg(not(target_arch = "wasm32"))]
-const APP_ID: &str = "XIViewer";
+use viewer::APP_ID;
+use viewer::App;
 
 /// `viewer --smoke <sqpack-path> <out-dir> <step> [<step> ...]`, where a step is `model:<path>` or
 /// `scene:<path>`. See `smoke/native.sh`.
@@ -56,25 +50,32 @@ fn smoke_config(mut args: std::iter::Skip<std::env::Args>) -> viewer::smoke::Con
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);
-    if args.next().as_deref() == Some("--smoke") {
-        let config = smoke_config(args);
-        let (logger, counters) = viewer::smoke::CountingLogger::new(
-            env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).build(),
-        );
-        logger.init();
-        log::set_max_level(log::LevelFilter::Info);
-        let smoke_options = eframe::NativeOptions {
-            depth_buffer: 24,
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([config.width as f32, config.height as f32])
-                .with_visible(false),
-            ..Default::default()
-        };
-        return eframe::run_native(
-            "XIViewer (smoke)",
-            smoke_options,
-            Box::new(|cc| Ok(Box::new(viewer::smoke::SmokeApp::new(cc, config, counters)))),
-        );
+    match args.next().as_deref() {
+        Some("--smoke") => {
+            let config = smoke_config(args);
+            let (logger, counters) = viewer::smoke::CountingLogger::new(
+                env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info"))
+                    .build(),
+            );
+            logger.init();
+            log::set_max_level(log::LevelFilter::Info);
+            let smoke_options = eframe::NativeOptions {
+                depth_buffer: 24,
+                viewport: egui::ViewportBuilder::default()
+                    .with_inner_size([config.width as f32, config.height as f32])
+                    .with_visible(false),
+                ..Default::default()
+            };
+            return eframe::run_native(
+                "XIViewer (smoke)",
+                smoke_options,
+                Box::new(|cc| Ok(Box::new(viewer::smoke::SmokeApp::new(cc, config, counters)))),
+            );
+        }
+        // Serve MCP on stdin/stdout with no window, so a client that launches this process can
+        // read the game data without the desktop app being open.
+        Some("--mcp-stdio") => run_mcp(),
+        _ => {}
     }
 
     velopack::VelopackApp::build().run();
@@ -107,6 +108,27 @@ fn main() -> eframe::Result {
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
+}
+
+/// `viewer --mcp-stdio` serves MCP on stdin/stdout with no window. The process ends once the
+/// client that launched it closes the stream.
+#[cfg(not(target_arch = "wasm32"))]
+fn run_mcp() -> ! {
+    env_logger::Builder::from_env(env_logger::Env::new().default_filter_or("info")).init();
+    log::set_max_level(log::LevelFilter::Info);
+
+    let Some(config) = viewer::mcp::load_saved_config() else {
+        eprintln!("找不到已保存的设置: 请先打开一次 XIViewer 完成设置, 之后即可无窗口运行 MCP");
+        std::process::exit(1);
+    };
+
+    match viewer::mcp::serve_stdio(config) {
+        Ok(()) => std::process::exit(0),
+        Err(error) => {
+            eprintln!("MCP 服务退出: {error:#}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[cfg(windows)]

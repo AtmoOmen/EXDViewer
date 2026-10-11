@@ -545,6 +545,27 @@ impl LegacyBackendConfig {
     }
 }
 
+/// The `app.ron` eframe persists state to. Mirrors the `persistence_path` the Windows binary
+/// sets and the app id eframe falls back to elsewhere, so a headless run reads exactly what the
+/// window wrote.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn persistence_file() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        Some(
+            std::env::var_os("APPDATA")
+                .map(std::path::PathBuf::from)?
+                .join("EXDViewer")
+                .join("data")
+                .join("app.ron"),
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        eframe::storage_dir(crate::APP_ID).map(|directory| directory.join("app.ron"))
+    }
+}
+
 /// Move configurations written with egui's type-dependent key to `StableDKey`.
 pub fn migrate_backend_config(ctx: &egui::Context) {
     if BACKEND_CONFIG
